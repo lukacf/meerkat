@@ -3064,7 +3064,7 @@ impl SessionRuntime {
     pub async fn enqueue_workgraph_attention_continuation(
         self: &Arc<Self>,
         session_id: &SessionId,
-        binding_id: meerkat::WorkAttentionBindingId,
+        request: meerkat::AttentionBindingRequest,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
         use meerkat_runtime::identifiers::IdempotencyKey;
         use meerkat_runtime::input::{
@@ -3072,12 +3072,9 @@ impl SessionRuntime {
         };
 
         let service = self.workgraph_service();
+        let binding_id = request.binding_id.clone();
         let binding = service
-            .attention_binding(meerkat::AttentionBindingRequest {
-                binding_id: binding_id.clone(),
-                realm_id: None,
-                namespace: None,
-            })
+            .attention_binding(request.clone())
             .await
             .map_err(workgraph_error_to_rpc)?;
         match &binding.attention.target {
@@ -3107,8 +3104,8 @@ impl SessionRuntime {
         let projection = service
             .attention_projection(meerkat::AttentionProjectionRequest {
                 binding_id: binding_id.clone(),
-                realm_id: None,
-                namespace: None,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
             })
             .await
             .map_err(workgraph_error_to_rpc)?
@@ -3155,15 +3152,12 @@ impl SessionRuntime {
 
     pub async fn enqueue_workgraph_attention_binding_continuation(
         self: &Arc<Self>,
-        binding_id: meerkat::WorkAttentionBindingId,
+        request: meerkat::AttentionBindingRequest,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        let binding_id = request.binding_id.clone();
         let binding = self
             .workgraph_service()
-            .attention_binding(meerkat::AttentionBindingRequest {
-                binding_id: binding_id.clone(),
-                realm_id: None,
-                namespace: None,
-            })
+            .attention_binding(request.clone())
             .await
             .map_err(workgraph_error_to_rpc)?;
         let session_id = match binding.attention.target {
@@ -3179,7 +3173,7 @@ impl SessionRuntime {
                 });
             }
         };
-        self.enqueue_workgraph_attention_continuation(&session_id, binding_id)
+        self.enqueue_workgraph_attention_continuation(&session_id, request)
             .await
     }
 
@@ -11371,7 +11365,7 @@ mod tests {
             .workgraph_service()
             .create_goal(meerkat::GoalCreateRequest {
                 realm_id: None,
-                namespace: None,
+                namespace: Some(meerkat::WorkNamespace::new("scoped-goals").expect("namespace")),
                 title: "Keep pursuing the goal".to_string(),
                 description: Some("Injected as bounded WorkGraph attention context.".to_string()),
                 target: meerkat::GoalAttentionTarget::Session {
@@ -11386,7 +11380,11 @@ mod tests {
             .expect("create workgraph goal");
 
         let outcome = runtime
-            .enqueue_workgraph_attention_binding_continuation(goal.attention.binding_id)
+            .enqueue_workgraph_attention_binding_continuation(meerkat::AttentionBindingRequest {
+                binding_id: goal.attention.binding_id,
+                realm_id: None,
+                namespace: Some(meerkat::WorkNamespace::new("scoped-goals").expect("namespace")),
+            })
             .await
             .expect("enqueue attention continuation");
         assert!(

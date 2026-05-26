@@ -175,18 +175,24 @@ async fn goal_create_is_atomic_and_attention_status_is_service_owned() {
         .expect("goal status");
     assert_eq!(status.item.id, goal.item.id);
 
+    let paused_until = Utc
+        .with_ymd_and_hms(2026, 5, 26, 12, 30, 0)
+        .single()
+        .expect("valid timestamp");
     let paused = service
         .pause_attention(AttentionPauseRequest {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: Some("realm-a".to_string()),
             namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
-            until: None,
+            until: Some(paused_until),
         })
         .await
         .expect("pause attention");
     assert_eq!(
         paused.attention.status,
-        WorkAttentionStatus::Paused { until: None }
+        WorkAttentionStatus::Paused {
+            until: Some(paused_until)
+        }
     );
 
     let listed = service

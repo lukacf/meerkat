@@ -552,11 +552,34 @@ fn attention_matches_filter(binding: &WorkAttentionBinding, filter: &AttentionLi
         return false;
     }
     if let Some(status) = &filter.status
-        && &binding.status != status
+        && !attention_status_matches_filter(&binding.status, status)
     {
         return false;
     }
     true
+}
+
+fn attention_status_matches_filter(
+    actual: &crate::types::WorkAttentionStatus,
+    filter: &crate::types::WorkAttentionStatus,
+) -> bool {
+    use crate::types::WorkAttentionStatus;
+
+    match (actual, filter) {
+        (WorkAttentionStatus::Active, WorkAttentionStatus::Active)
+        | (WorkAttentionStatus::Superseded, WorkAttentionStatus::Superseded)
+        | (WorkAttentionStatus::Stopped, WorkAttentionStatus::Stopped) => true,
+        (WorkAttentionStatus::Paused { .. }, WorkAttentionStatus::Paused { until: None }) => true,
+        (
+            WorkAttentionStatus::Paused {
+                until: Some(actual_until),
+            },
+            WorkAttentionStatus::Paused {
+                until: Some(filter_until),
+            },
+        ) => actual_until == filter_until,
+        _ => false,
+    }
 }
 
 fn event_matches_filter(event: &WorkGraphEvent, filter: &WorkGraphEventFilter) -> bool {

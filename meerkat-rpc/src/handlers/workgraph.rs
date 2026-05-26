@@ -196,7 +196,7 @@ pub async fn handle_attention_continue(
         Err(response) => return response.with_id(id),
     };
     match runtime
-        .enqueue_workgraph_attention_binding_continuation(request.binding_id)
+        .enqueue_workgraph_attention_binding_continuation(request)
         .await
         .and_then(|outcome| {
             to_wire_accept_result(outcome).map_err(|message| crate::protocol::RpcError {

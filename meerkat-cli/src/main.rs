@@ -2007,6 +2007,8 @@ enum WorkGraphCommands {
         #[arg(long)]
         namespace: Option<String>,
         #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
         kind: String,
         #[arg(long)]
         id: String,
@@ -6146,6 +6148,7 @@ async fn handle_workgraph_command(
         WorkGraphCommands::GoalConfirm {
             binding_id,
             namespace,
+            principal,
             kind,
             id,
             label,
@@ -6163,7 +6166,9 @@ async fn handle_workgraph_command(
                         label,
                         summary,
                     },
-                    principal: None,
+                    principal: principal
+                        .map(meerkat::WorkOwnerKey::principal)
+                        .transpose()?,
                 })
                 .await?;
             print_workgraph_goal_result(&result.item, &result.attention, json)
@@ -15033,6 +15038,26 @@ default_model = "gemma"
                 command: WorkGraphCommands::Snapshot { json, .. },
             } => assert!(json),
             _ => unreachable!("expected workgraph snapshot command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "workgraph",
+            "goal-confirm",
+            "binding-1",
+            "--principal",
+            "user",
+            "--kind",
+            "principal_confirmation",
+            "--id",
+            "approval-1",
+        ])
+        .expect("workgraph goal-confirm principal should parse");
+        match cli.command {
+            Commands::WorkGraph {
+                command: WorkGraphCommands::GoalConfirm { principal, .. },
+            } => assert_eq!(principal.as_deref(), Some("user")),
+            _ => unreachable!("expected workgraph goal-confirm command"),
         }
     }
 

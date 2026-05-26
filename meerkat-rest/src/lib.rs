@@ -4727,7 +4727,7 @@ async fn workgraph_attention_continue(
     State(state): State<AppState>,
     Json(request): Json<meerkat::AttentionBindingRequest>,
 ) -> Result<Json<meerkat::AttentionContinueResult>, ApiError> {
-    let (session_id, input) = workgraph_attention_continuation_input(&state, request.binding_id)
+    let (session_id, input) = workgraph_attention_continuation_input(&state, request)
         .await
         .map_err(workgraph_error_to_api)?;
     ensure_rest_session_runtime_executor(&state, &session_id).await;
@@ -4743,15 +4743,12 @@ async fn workgraph_attention_continue(
 
 async fn workgraph_attention_continuation_input(
     state: &AppState,
-    binding_id: meerkat::WorkAttentionBindingId,
+    request: meerkat::AttentionBindingRequest,
 ) -> Result<(SessionId, meerkat_runtime::Input), meerkat::WorkGraphError> {
+    let binding_id = request.binding_id.clone();
     let binding = state
         .workgraph_service
-        .attention_binding(meerkat::AttentionBindingRequest {
-            binding_id: binding_id.clone(),
-            realm_id: None,
-            namespace: None,
-        })
+        .attention_binding(request.clone())
         .await?;
     let session_id = match binding.attention.target {
         meerkat::WorkAttentionTarget::Session { session_id } => session_id,
@@ -4766,8 +4763,8 @@ async fn workgraph_attention_continuation_input(
         .workgraph_service
         .attention_projection(meerkat::AttentionProjectionRequest {
             binding_id: binding_id.clone(),
-            realm_id: None,
-            namespace: None,
+            realm_id: request.realm_id,
+            namespace: request.namespace,
         })
         .await?
         .projection;
@@ -9602,6 +9599,47 @@ mod tests {
             })
             .await
             .expect("seed other WorkGraph item");
+        let scoped_namespace = meerkat::WorkNamespace::new("scoped-goals").unwrap();
+        let scoped_session_id =
+            meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000107").unwrap();
+        let scoped_goal = state
+            .workgraph_service
+            .create_goal(meerkat::GoalCreateRequest {
+                realm_id: None,
+                namespace: Some(scoped_namespace.clone()),
+                title: "continue scoped attention".to_string(),
+                description: None,
+                target: meerkat::GoalAttentionTarget::Session {
+                    session_id: scoped_session_id.clone(),
+                },
+                mode: meerkat::WorkAttentionMode::Pursue,
+                completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: meerkat::AttentionDelegatedAuthority::RequestClosure,
+                projection_policy: meerkat::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("seed scoped WorkGraph goal");
+        workgraph_attention_continuation_input(
+            &state,
+            meerkat::AttentionBindingRequest {
+                binding_id: scoped_goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            },
+        )
+        .await
+        .expect_err("scoped binding should not resolve without its namespace");
+        let (target_session_id, _input) = workgraph_attention_continuation_input(
+            &state,
+            meerkat::AttentionBindingRequest {
+                binding_id: scoped_goal.attention.binding_id,
+                realm_id: None,
+                namespace: Some(scoped_namespace),
+            },
+        )
+        .await
+        .expect("scoped continuation input");
+        assert_eq!(target_session_id, scoped_session_id);
         let app = router(state);
 
         for descriptor in meerkat::workgraph_rest_path_catalog() {

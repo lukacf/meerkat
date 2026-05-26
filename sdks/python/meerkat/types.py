@@ -741,6 +741,21 @@ class SessionHistory:
     messages: list[SessionMessage] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class SessionTranscriptRevision:
+    """Paginated transcript page for a retained immutable revision."""
+
+    session_id: str = ""
+    session_ref: str | None = None
+    revision: str = ""
+    head_revision: str = ""
+    message_count: int = 0
+    offset: int = 0
+    limit: int | None = None
+    has_more: bool = False
+    messages: list[SessionMessage] = field(default_factory=list)
+
+
 TranscriptEditRunningBehavior = Literal["reject"]
 """Behavior for transcript edit requests when the source session has active work."""
 
@@ -778,6 +793,21 @@ TranscriptReplacement = (
 """Typed transcript replacement used to create an edited session fork."""
 
 
+class TranscriptMessageRangeSelection(TypedDict):
+    type: Literal["message_range"]
+    start: int
+    end: int
+
+
+TranscriptRewriteSelection = TranscriptMessageRangeSelection
+"""Concrete transcript selection for same-session rewrite."""
+
+
+class TranscriptRewriteReason(TypedDict):
+    kind: str
+    note: NotRequired[str]
+
+
 @dataclass(frozen=True, slots=True)
 class SessionForkResult:
     """Result of creating a forked transcript branch."""
@@ -786,6 +816,17 @@ class SessionForkResult:
     session_id: str = ""
     session_ref: str | None = None
     message_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTranscriptRewriteResult:
+    """Result of committing a same-session transcript rewrite."""
+
+    session_id: str = ""
+    parent_revision: str = ""
+    revision: str = ""
+    message_count: int = 0
+    commit: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

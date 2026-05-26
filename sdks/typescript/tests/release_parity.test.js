@@ -26,6 +26,9 @@ describe("Phase 1 release parity targets", () => {
       "listSessions",
       "readSession",
       "readSessionHistory",
+      "readSessionTranscriptRevision",
+      "rewriteSessionTranscript",
+      "restoreSessionTranscriptRevision",
       "sendExternalEvent",
       "injectContext",
       "getModelsCatalog",
@@ -71,7 +74,12 @@ describe("Phase 1 release parity targets", () => {
     const deferredMethods = Object.getOwnPropertyNames(DeferredSession.prototype);
     const mobMethods = Object.getOwnPropertyNames(Mob.prototype);
 
-    for (const method of ["injectContext"]) {
+    for (const method of [
+      "injectContext",
+      "transcriptRevision",
+      "rewriteTranscript",
+      "restoreTranscriptRevision",
+    ]) {
       assert.ok(sessionMethods.includes(method), `missing Session.${method}`);
       assert.ok(deferredMethods.includes(method), `missing DeferredSession.${method}`);
     }

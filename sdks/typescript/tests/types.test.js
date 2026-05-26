@@ -1086,6 +1086,40 @@ describe("Typed Events", () => {
     assert.deepEqual(event.raw, raw);
   });
 
+  it("should parse transcript_rewrite_committed with typed record access", () => {
+    const record = {
+      commit: {
+        parent_revision: "rev-parent",
+        revision: "rev-next",
+      },
+      parent_body: { revision: "rev-parent" },
+      revision_body: { revision: "rev-next" },
+    };
+    const event = parseEvent({
+      type: "transcript_rewrite_committed",
+      session_id: "session-123",
+      record,
+    });
+
+    assert.equal(event.type, "transcript_rewrite_committed");
+    if (event.type === "transcript_rewrite_committed") {
+      assert.equal(event.sessionId, "session-123");
+      assert.deepEqual(event.record, record);
+    }
+  });
+
+  it("should reject transcript_rewrite_committed without record", () => {
+    const raw = {
+      type: "transcript_rewrite_committed",
+      session_id: "session-123",
+    };
+    const event = parseEvent(raw);
+
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "transcript_rewrite_committed");
+    assert.deepEqual(event.raw, raw);
+  });
+
   it("should not fabricate standalone event envelope metadata or payload", () => {
     const envelope = MeerkatClient.parseAgentEventEnvelope({
       event_id: 3,

@@ -46,8 +46,9 @@ use meerkat_core::service::{
     SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
     SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
-    SessionSummary, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
-    StartTurnRuntimeSemantics,
+    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRewriteRequest,
+    SessionTranscriptRewriteResult, SessionView, StageToolResultsRequest, StageToolResultsResult,
+    StartTurnRequest, StartTurnRuntimeSemantics,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
@@ -6694,6 +6695,23 @@ impl SessionRuntime {
             .map(Into::into)
     }
 
+    /// Read a retained immutable session transcript revision body.
+    pub async fn read_session_transcript_revision_rich(
+        &self,
+        session_id: &SessionId,
+        query: meerkat_core::SessionTranscriptRevisionQuery,
+    ) -> Result<Option<meerkat_contracts::WireSessionTranscriptRevision>, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Ok(None);
+        }
+
+        self.service
+            .read_transcript_revision(session_id, query)
+            .await
+            .map(|page| Some(page.into()))
+            .map_err(session_error_to_rpc)
+    }
+
     async fn reject_active_transcript_edit(&self, session_id: &SessionId) -> Result<(), RpcError> {
         let runtime_running = self
             .runtime_adapter
@@ -6759,6 +6777,52 @@ impl SessionRuntime {
 
         self.service
             .fork_session_replace(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    /// Commit a typed same-session transcript rewrite on an idle materialized session.
+    pub async fn rewrite_session_transcript(
+        &self,
+        session_id: &SessionId,
+        req: SessionTranscriptRewriteRequest,
+    ) -> Result<SessionTranscriptRewriteResult, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript rewrite is available only for idle materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        self.reject_active_transcript_edit(session_id).await?;
+
+        self.service
+            .rewrite_session_transcript(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    /// Restore the transcript head to a retained revision on an idle materialized session.
+    pub async fn restore_session_transcript_revision(
+        &self,
+        session_id: &SessionId,
+        req: SessionTranscriptRestoreRevisionRequest,
+    ) -> Result<SessionTranscriptRewriteResult, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript restore is available only for idle materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        self.reject_active_transcript_edit(session_id).await?;
+
+        self.service
+            .restore_session_transcript_revision(session_id, req)
             .await
             .map_err(session_error_to_rpc)
     }

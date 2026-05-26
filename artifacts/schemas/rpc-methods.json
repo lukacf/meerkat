@@ -41,6 +41,24 @@
       "result_type": "SessionForkResult"
     },
     {
+      "description": "Commit a typed same-session transcript rewrite",
+      "name": "session/rewrite_transcript",
+      "params_type": "RewriteSessionTranscriptParams",
+      "result_type": "SessionTranscriptRewriteResult"
+    },
+    {
+      "description": "Read a retained immutable transcript revision body",
+      "name": "session/transcript_revision",
+      "params_type": "ReadSessionTranscriptRevisionParams",
+      "result_type": "WireSessionTranscriptRevision"
+    },
+    {
+      "description": "Commit a typed rewrite that restores a retained transcript revision",
+      "name": "session/restore_transcript_revision",
+      "params_type": "RestoreSessionTranscriptRevisionParams",
+      "result_type": "SessionTranscriptRewriteResult"
+    },
+    {
       "description": "Remove session",
       "name": "session/archive",
       "params_type": "ArchiveSessionParams",

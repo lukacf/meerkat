@@ -23,6 +23,7 @@ use crate::types::{
     StopReason, ToolDef, ToolProvenance, ToolResult, Usage, UserMessage,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -76,6 +77,163 @@ pub enum TranscriptReplacement {
     },
 }
 
+/// Session metadata key for the typed transcript revision graph head.
+pub const SESSION_TRANSCRIPT_HISTORY_STATE_KEY: &str = "session_transcript_history_state_v1";
+
+/// A concrete transcript span selected for same-session rewrite.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptRewriteSelection {
+    /// Replace messages in `[start, end)`.
+    MessageRange { start: usize, end: usize },
+}
+
+impl TranscriptRewriteSelection {
+    fn bounds(&self) -> (usize, usize) {
+        match self {
+            Self::MessageRange { start, end } => (*start, *end),
+        }
+    }
+}
+
+/// Machine-readable reason carried with a transcript rewrite commit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptRewriteReason {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl TranscriptRewriteReason {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            note: None,
+        }
+    }
+}
+
+/// Immutable rewrite commit that advances a session transcript head.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptRewriteCommit {
+    pub parent_revision: String,
+    pub revision: String,
+    pub selection: TranscriptRewriteSelection,
+    pub original_span_digest: String,
+    pub replacement_digest: String,
+    pub messages_before: usize,
+    pub messages_after: usize,
+    pub reason: TranscriptRewriteReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[cfg_attr(feature = "schema", schemars(with = "SchemaSystemTime"))]
+    pub committed_at: SystemTime,
+}
+
+/// Immutable transcript revision body retained by the session-local graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptRevisionBody {
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_revision: Option<String>,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
+    pub messages: Vec<Message>,
+    #[cfg_attr(feature = "schema", schemars(with = "SchemaSystemTime"))]
+    pub created_at: SystemTime,
+}
+
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename = "SystemTime")]
+struct SchemaSystemTime {
+    secs_since_epoch: u64,
+    nanos_since_epoch: u32,
+}
+
+/// Self-contained append-only transcript rewrite record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptRewriteRecord {
+    pub commit: TranscriptRewriteCommit,
+    pub parent_body: TranscriptRevisionBody,
+    pub revision_body: TranscriptRevisionBody,
+}
+
+impl TranscriptRewriteRecord {
+    pub fn new(
+        commit: TranscriptRewriteCommit,
+        parent_body: TranscriptRevisionBody,
+        revision_body: TranscriptRevisionBody,
+    ) -> Result<Self, TranscriptEditError> {
+        validate_transcript_rewrite_record(&commit, &parent_body, &revision_body)?;
+        Ok(Self {
+            commit,
+            parent_body,
+            revision_body,
+        })
+    }
+}
+
+/// Typed session-local transcript revision graph state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptHistoryState {
+    pub head: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<TranscriptRewriteCommit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<TranscriptRevisionBody>,
+}
+
+impl TranscriptHistoryState {
+    /// Rebuild transcript revision graph state from append-only rewrite records.
+    pub fn from_rewrite_records<I>(records: I) -> Result<Option<Self>, TranscriptEditError>
+    where
+        I: IntoIterator<Item = TranscriptRewriteRecord>,
+    {
+        let mut state: Option<Self> = None;
+        for record in records {
+            validate_transcript_rewrite_record(
+                &record.commit,
+                &record.parent_body,
+                &record.revision_body,
+            )?;
+            let state = state.get_or_insert_with(|| Self {
+                head: record.commit.parent_revision.clone(),
+                commits: Vec::new(),
+                revisions: Vec::new(),
+            });
+            if !state
+                .revisions
+                .iter()
+                .any(|body| body.revision == record.parent_body.revision)
+            {
+                state.revisions.push(record.parent_body);
+            }
+            if !state
+                .revisions
+                .iter()
+                .any(|body| body.revision == record.revision_body.revision)
+            {
+                state.revisions.push(record.revision_body);
+            }
+            state.head = record.commit.revision.clone();
+            state.commits.push(record.commit);
+        }
+        Ok(state)
+    }
+}
+
 /// Invalid typed transcript edit request.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TranscriptEditError {
@@ -96,6 +254,18 @@ pub enum TranscriptEditError {
         expected: &'static str,
         actual: &'static str,
     },
+    #[error("invalid transcript rewrite range {start}..{end} for {message_count} messages")]
+    InvalidRewriteRange {
+        start: usize,
+        end: usize,
+        message_count: usize,
+    },
+    #[error("transcript rewrite does not change transcript revision {revision}")]
+    NoOpRewrite { revision: String },
+    #[error("transcript rewrite parent revision mismatch: expected {expected}, actual {actual}")]
+    RevisionConflict { expected: String, actual: String },
+    #[error("transcript history state is malformed: {0}")]
+    HistoryStateMalformed(String),
 }
 
 fn message_role_name(message: &Message) -> &'static str {
@@ -107,6 +277,163 @@ fn message_role_name(message: &Message) -> &'static str {
         Message::BlockAssistant(_) => "block_assistant",
         Message::ToolResults { .. } => "tool_results",
     }
+}
+
+pub fn transcript_messages_digest(messages: &[Message]) -> Result<String, serde_json::Error> {
+    sha256_json_digest(messages)
+}
+
+fn validate_transcript_rewrite_record(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+) -> Result<(), TranscriptEditError> {
+    if parent_body.revision != commit.parent_revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "parent body revision {} does not match commit parent {}",
+            parent_body.revision, commit.parent_revision
+        )));
+    }
+    if revision_body.revision != commit.revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "revision body {} does not match commit revision {}",
+            revision_body.revision, commit.revision
+        )));
+    }
+    if commit.parent_revision == commit.revision {
+        return Err(TranscriptEditError::NoOpRewrite {
+            revision: commit.revision.clone(),
+        });
+    }
+    let parent_digest = transcript_messages_digest(&parent_body.messages)
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    if parent_digest != commit.parent_revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "parent body digest {parent_digest} does not match commit parent {}",
+            commit.parent_revision
+        )));
+    }
+    let revision_digest = transcript_messages_digest(&revision_body.messages)
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    if revision_digest != commit.revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "revision body digest {revision_digest} does not match commit revision {}",
+            commit.revision
+        )));
+    }
+    let (start, end) = commit.selection.bounds();
+    if start > end || end > parent_body.messages.len() {
+        return Err(TranscriptEditError::InvalidRewriteRange {
+            start,
+            end,
+            message_count: parent_body.messages.len(),
+        });
+    }
+    let original_span_digest = sha256_json_digest(&parent_body.messages[start..end])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    if original_span_digest != commit.original_span_digest {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "original span digest {original_span_digest} does not match commit digest {}",
+            commit.original_span_digest
+        )));
+    }
+    let removed_len = end - start;
+    let retained_len = commit
+        .messages_before
+        .checked_sub(removed_len)
+        .ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "commit removed more messages than it recorded before rewrite".to_string(),
+            )
+        })?;
+    let replacement_len = commit
+        .messages_after
+        .checked_sub(retained_len)
+        .ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "commit message counts cannot describe a replacement span".to_string(),
+            )
+        })?;
+    let replacement_end = start.checked_add(replacement_len).ok_or_else(|| {
+        TranscriptEditError::HistoryStateMalformed("replacement span end overflowed".to_string())
+    })?;
+    if replacement_end > revision_body.messages.len() {
+        return Err(TranscriptEditError::InvalidRewriteRange {
+            start,
+            end: replacement_end,
+            message_count: revision_body.messages.len(),
+        });
+    }
+    let replacement_digest = sha256_json_digest(&revision_body.messages[start..replacement_end])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    if replacement_digest != commit.replacement_digest {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "replacement span digest {replacement_digest} does not match commit digest {}",
+            commit.replacement_digest
+        )));
+    }
+    Ok(())
+}
+
+fn validate_transcript_history_state(
+    state: &TranscriptHistoryState,
+) -> Result<(), TranscriptEditError> {
+    if state
+        .revisions
+        .iter()
+        .all(|body| body.revision != state.head)
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "missing transcript head body {}",
+            state.head
+        )));
+    }
+    for body in &state.revisions {
+        let digest = transcript_messages_digest(&body.messages)
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        if digest != body.revision {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "transcript revision body {} has digest {digest}",
+                body.revision
+            )));
+        }
+    }
+    for commit in &state.commits {
+        let parent_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.parent_revision)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "missing parent transcript body {}",
+                    commit.parent_revision
+                ))
+            })?;
+        let revision_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.revision)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "missing transcript revision body {}",
+                    commit.revision
+                ))
+            })?;
+        validate_transcript_rewrite_record(commit, parent_body, revision_body)?;
+    }
+    Ok(())
+}
+
+fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(value)?;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(format!("sha256:{out}"))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -877,18 +1204,28 @@ impl Session {
         &self.messages
     }
 
-    /// Mutable access to the message buffer — *append-only witness escape hatch*.
+    /// Replace the message buffer for core-owned internal transcript rewrites.
     ///
-    /// Intentionally `pub(crate)`: the only legitimate mutations of the
-    /// message history within a single `SessionId` are `push` / `push_batch`
-    /// (extend) and the two in-crate rewrite operations used by the agent
-    /// loop (compaction-summary replacement, synthetic-notice stripping).
-    /// Cross-crate consumers must route in-place content rewrites through
-    /// the typed proxy [`Session::externalize_media`]; shrink or replace
-    /// operations must go through [`Session::fork_at`] which rotates
-    /// `SessionId` (F1/F7 closure from the state-scope audit).
-    pub(crate) fn messages_mut_internal(&mut self) -> &mut Vec<Message> {
-        Arc::make_mut(&mut self.messages)
+    /// Intentionally `pub(crate)`: cross-crate consumers must route same-session
+    /// rewrites through transcript-edit APIs so the revision graph remains the
+    /// semantic owner of message history.
+    pub(crate) fn replace_messages_internal(&mut self, messages: Vec<Message>) {
+        self.messages = Arc::new(messages);
+        self.updated_at = SystemTime::now();
+        self.refresh_transcript_head_after_message_mutation();
+    }
+
+    /// Retain messages for core-owned synthetic-notice projection cleanup.
+    pub(crate) fn retain_messages_internal<F>(&mut self, retain: F)
+    where
+        F: FnMut(&Message) -> bool,
+    {
+        let before_len = self.messages.len();
+        Arc::make_mut(&mut self.messages).retain(retain);
+        if self.messages.len() != before_len {
+            self.updated_at = SystemTime::now();
+            self.refresh_transcript_head_after_message_mutation();
+        }
     }
 
     /// Get creation time
@@ -907,6 +1244,7 @@ impl Session {
     pub fn push(&mut self, message: Message) {
         Arc::make_mut(&mut self.messages).push(message);
         self.updated_at = SystemTime::now();
+        self.refresh_transcript_head_after_message_mutation();
     }
 
     /// Add multiple messages in one operation (single timestamp update)
@@ -919,6 +1257,7 @@ impl Session {
         let inner = Arc::make_mut(&mut self.messages);
         inner.extend(messages);
         self.updated_at = SystemTime::now();
+        self.refresh_transcript_head_after_message_mutation();
     }
 
     /// Rewrite inline media payloads in-place as `BlobRef` pointers.
@@ -936,8 +1275,22 @@ impl Session {
         blob_store: &dyn crate::BlobStore,
         start: usize,
     ) -> Result<(), crate::blob::BlobStoreError> {
+        let previous_digest = if self
+            .metadata
+            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        {
+            transcript_messages_digest(self.messages()).ok()
+        } else {
+            None
+        };
         let messages = Arc::make_mut(&mut self.messages);
-        crate::image_content::externalize_messages_from(blob_store, messages, start).await
+        crate::image_content::externalize_messages_from(blob_store, messages, start).await?;
+        if let Some(previous_digest) = previous_digest
+            && transcript_messages_digest(self.messages()).ok().as_ref() != Some(&previous_digest)
+        {
+            self.refresh_transcript_head_after_message_mutation();
+        }
+        Ok(())
     }
 
     /// Explicitly update the timestamp
@@ -1633,6 +1986,7 @@ impl Session {
             inner.insert(0, Message::System(SystemMessage::new(prompt)));
         }
         self.updated_at = SystemTime::now();
+        self.refresh_transcript_head_after_message_mutation();
     }
 
     /// Remove transient active-turn steer context from persisted session state.
@@ -2004,6 +2358,230 @@ impl Session {
             .transpose()
     }
 
+    /// Load typed transcript revision state from metadata.
+    pub fn transcript_history_state(
+        &self,
+    ) -> Result<Option<TranscriptHistoryState>, serde_json::Error> {
+        self.metadata
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+    }
+
+    /// Return the retained immutable body for a transcript revision.
+    pub fn transcript_revision_body(
+        &self,
+        revision: &str,
+    ) -> Result<Option<TranscriptRevisionBody>, serde_json::Error> {
+        Ok(self.transcript_history_state()?.and_then(|state| {
+            state
+                .revisions
+                .into_iter()
+                .find(|body| body.revision == revision)
+        }))
+    }
+
+    /// Return the ordered messages for a retained transcript revision.
+    pub fn transcript_revision_messages(
+        &self,
+        revision: &str,
+    ) -> Result<Option<Vec<Message>>, serde_json::Error> {
+        Ok(self
+            .transcript_revision_body(revision)?
+            .map(|body| body.messages))
+    }
+
+    /// Materialize this session projection from a typed transcript history graph.
+    pub fn apply_transcript_history_state(
+        &mut self,
+        state: TranscriptHistoryState,
+    ) -> Result<(), TranscriptEditError> {
+        validate_transcript_history_state(&state)?;
+        let head_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == state.head)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "missing transcript head body {}",
+                    state.head
+                ))
+            })?
+            .clone();
+        let value = serde_json::to_value(&state)
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        self.set_metadata(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        let mut updated_at = head_body.created_at;
+        for commit in &state.commits {
+            if commit.committed_at > updated_at {
+                updated_at = commit.committed_at;
+            }
+        }
+        self.messages = Arc::new(head_body.messages);
+        self.updated_at = updated_at;
+        Ok(())
+    }
+
+    /// Current transcript head revision. Rows written before transcript
+    /// revisions derive their implicit head from the current message snapshot.
+    pub fn transcript_revision(&self) -> Result<String, serde_json::Error> {
+        if let Some(state) = self.transcript_history_state()? {
+            Ok(state.head)
+        } else {
+            transcript_messages_digest(self.messages())
+        }
+    }
+
+    /// Commit a same-session transcript rewrite and advance the transcript head.
+    pub fn commit_transcript_rewrite(
+        &mut self,
+        selection: TranscriptRewriteSelection,
+        replacement: Vec<Message>,
+        reason: TranscriptRewriteReason,
+        actor: Option<String>,
+        expected_parent_revision: Option<String>,
+    ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
+        let parent_revision = self
+            .transcript_revision()
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        if let Some(expected) = expected_parent_revision
+            && expected != parent_revision
+        {
+            return Err(TranscriptEditError::RevisionConflict {
+                expected,
+                actual: parent_revision,
+            });
+        }
+
+        let (start, end) = selection.bounds();
+        let message_count = self.messages.len();
+        if start > end || end > message_count {
+            return Err(TranscriptEditError::InvalidRewriteRange {
+                start,
+                end,
+                message_count,
+            });
+        }
+
+        let replacement_len = replacement.len();
+        let mut rewritten = Vec::with_capacity(
+            start
+                .saturating_add(replacement_len)
+                .saturating_add(message_count.saturating_sub(end)),
+        );
+        rewritten.extend_from_slice(&self.messages[..start]);
+        rewritten.extend(replacement);
+        rewritten.extend_from_slice(&self.messages[end..]);
+
+        let original_span_digest = sha256_json_digest(&self.messages[start..end])
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        let replacement_digest = sha256_json_digest(&rewritten[start..start + replacement_len])
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        let revision = transcript_messages_digest(&rewritten)
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        if revision == parent_revision {
+            return Err(TranscriptEditError::NoOpRewrite { revision });
+        }
+
+        let commit = TranscriptRewriteCommit {
+            parent_revision,
+            revision: revision.clone(),
+            selection,
+            original_span_digest,
+            replacement_digest,
+            messages_before: message_count,
+            messages_after: rewritten.len(),
+            reason,
+            actor,
+            committed_at: SystemTime::now(),
+        };
+
+        let mut state = self
+            .transcript_history_state()
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
+            .unwrap_or_else(|| TranscriptHistoryState {
+                head: commit.parent_revision.clone(),
+                commits: Vec::new(),
+                revisions: Vec::new(),
+            });
+        if !state
+            .revisions
+            .iter()
+            .any(|body| body.revision == commit.parent_revision)
+        {
+            state.revisions.push(TranscriptRevisionBody {
+                revision: commit.parent_revision.clone(),
+                parent_revision: None,
+                messages: self.messages().to_vec(),
+                created_at: self.updated_at,
+            });
+        }
+        if !state
+            .revisions
+            .iter()
+            .any(|body| body.revision == commit.revision)
+        {
+            state.revisions.push(TranscriptRevisionBody {
+                revision: commit.revision.clone(),
+                parent_revision: Some(commit.parent_revision.clone()),
+                messages: rewritten.clone(),
+                created_at: commit.committed_at,
+            });
+        }
+        state.head = revision;
+        state.commits.push(commit.clone());
+        let value = serde_json::to_value(state)
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        self.set_metadata(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+
+        self.messages = Arc::new(rewritten);
+        self.updated_at = SystemTime::now();
+        Ok(commit)
+    }
+
+    fn refresh_transcript_head_after_message_mutation(&mut self) {
+        if !self
+            .metadata
+            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        {
+            return;
+        }
+        let Ok(Some(mut state)) = self.transcript_history_state() else {
+            tracing::warn!(
+                session_id = %self.id,
+                "transcript history state is malformed; leaving head unchanged after message mutation"
+            );
+            return;
+        };
+        let Ok(head) = transcript_messages_digest(self.messages()) else {
+            tracing::warn!(
+                session_id = %self.id,
+                "failed to digest transcript after message mutation; leaving head unchanged"
+            );
+            return;
+        };
+        let previous_head = state.head.clone();
+        if !state.revisions.iter().any(|body| body.revision == head) {
+            state.revisions.push(TranscriptRevisionBody {
+                revision: head.clone(),
+                parent_revision: Some(previous_head),
+                messages: self.messages().to_vec(),
+                created_at: SystemTime::now(),
+            });
+        }
+        state.head = head;
+        match serde_json::to_value(state) {
+            Ok(value) => self.set_metadata(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.id,
+                    error = %error,
+                    "failed to serialize transcript history state after message mutation"
+                );
+            }
+        }
+    }
+
     /// Store typed mob operator authority inside canonical build-state metadata.
     pub fn set_mob_tool_authority_context(
         &mut self,
@@ -2033,7 +2611,7 @@ impl Session {
             messages: Arc::new(truncated),
             created_at: now,
             updated_at: now,
-            metadata: self.metadata.clone(),
+            metadata: self.branch_metadata(),
             usage: self.usage.clone(),
         }
     }
@@ -2152,9 +2730,15 @@ impl Session {
             messages: Arc::clone(&self.messages),
             created_at: now,
             updated_at: now,
-            metadata: self.metadata.clone(),
+            metadata: self.branch_metadata(),
             usage: self.usage.clone(),
         }
+    }
+
+    fn branch_metadata(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut metadata = self.metadata.clone();
+        metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+        metadata
     }
 }
 
@@ -2912,7 +3496,8 @@ impl From<&Session> for SessionMeta {
 mod tests {
     use super::*;
     use crate::types::{
-        AssistantMessage, BlockAssistantMessage, StopReason, SystemMessage, UserMessage,
+        AssistantMessage, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
+        UserMessage,
     };
     use std::sync::Arc;
 
@@ -2925,6 +3510,412 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn transcript_rewrite_preserves_full_assistant_block_trace() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text(
+            "run the trace".to_string(),
+        )));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "original assistant trace".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+
+        let parent_revision = session.transcript_revision().expect("parent revision");
+        let replacement = Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![
+                AssistantBlock::Text {
+                    text: "compacted assistant trace".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::ToolUse {
+                    id: "toolu_trace".to_string(),
+                    name: "trace_probe".to_string(),
+                    args: serde_json::value::RawValue::from_string(r#"{"path":"N-3"}"#.to_string())
+                        .expect("valid tool args"),
+                    meta: None,
+                },
+            ],
+            StopReason::ToolUse,
+        ));
+
+        let commit = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![replacement],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision.clone()),
+            )
+            .expect("rewrite should commit");
+
+        assert_eq!(commit.parent_revision, parent_revision);
+        let current = session
+            .transcript_revision_messages(&commit.revision)
+            .expect("history state should decode")
+            .expect("current revision should be retained");
+        let Message::BlockAssistant(assistant) = &current[1] else {
+            panic!("replacement should remain a block assistant message");
+        };
+        assert!(assistant.blocks.iter().any(|block| matches!(
+            block,
+            AssistantBlock::ToolUse { name, args, .. }
+                if name == "trace_probe" && args.get().contains("\"N-3\"")
+        )));
+
+        let parent = session
+            .transcript_revision_messages(&parent_revision)
+            .expect("history state should decode")
+            .expect("parent revision should remain retained");
+        assert!(matches!(
+            &parent[1],
+            Message::BlockAssistant(assistant)
+                if block_assistant_text(assistant).contains("original assistant trace")
+        ));
+    }
+
+    #[test]
+    fn transcript_rewrite_rejects_no_op_self_edge() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text(
+            "keep this exact transcript".to_string(),
+        )));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "unchanged".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let parent_revision = session.transcript_revision().expect("parent revision");
+        let err = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![session.messages()[1].clone()],
+                TranscriptRewriteReason::new("retry"),
+                Some("unit-test".to_string()),
+                Some(parent_revision.clone()),
+            )
+            .expect_err("same-content rewrite should not emit a self-edge commit");
+
+        assert!(matches!(
+            err,
+            TranscriptEditError::NoOpRewrite { revision } if revision == parent_revision
+        ));
+        assert!(
+            session
+                .transcript_history_state()
+                .expect("history state should decode")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn transcript_rewrite_replay_allows_normal_turn_revisions_between_rewrites() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("first".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose first answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: crate::types::Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let first_parent = session.transcript_revision().expect("first parent");
+        let first_commit = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact first answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: crate::types::Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(first_parent),
+            )
+            .expect("first rewrite");
+
+        session.push(Message::User(UserMessage::text("normal turn".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose second answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: crate::types::Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let bridge_parent = session
+            .transcript_revision()
+            .expect("normal turn should advance transcript head");
+        assert_ne!(bridge_parent, first_commit.revision);
+        validate_transcript_history_state(
+            &session
+                .transcript_history_state()
+                .expect("history state should decode")
+                .expect("history state should exist"),
+        )
+        .expect("normal turn head may legitimately differ from last rewrite commit");
+
+        let second_commit = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact second answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: crate::types::Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(bridge_parent.clone()),
+            )
+            .expect("second rewrite");
+
+        let state = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        let records = state.commits.iter().map(|commit| {
+            let parent_body = state
+                .revisions
+                .iter()
+                .find(|body| body.revision == commit.parent_revision)
+                .expect("parent body retained")
+                .clone();
+            let revision_body = state
+                .revisions
+                .iter()
+                .find(|body| body.revision == commit.revision)
+                .expect("revision body retained")
+                .clone();
+            TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body)
+                .expect("record should validate")
+        });
+
+        let replayed = TranscriptHistoryState::from_rewrite_records(records)
+            .expect("rewrite replay should accept normal-turn bridge revisions")
+            .expect("rewrite records should exist");
+        assert_eq!(replayed.head, second_commit.revision);
+        assert!(
+            replayed
+                .revisions
+                .iter()
+                .any(|body| body.revision == bridge_parent)
+        );
+    }
+
+    #[test]
+    fn internal_message_rewrites_refresh_transcript_history_head() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: crate::types::Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let parent = session.transcript_revision().expect("parent revision");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: crate::types::Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent),
+            )
+            .expect("rewrite should commit");
+
+        session.push(Message::User(UserMessage::text(
+            "notice-bearing turn".to_string(),
+        )));
+        session.retain_messages_internal(|message| {
+            !matches!(
+                message,
+                Message::User(user)
+                    if user.content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text { text } if text.contains("notice-bearing")
+                    ))
+            )
+        });
+        let retained_digest =
+            transcript_messages_digest(session.messages()).expect("retained digest");
+        assert_eq!(
+            session.transcript_revision().expect("retained head"),
+            retained_digest
+        );
+
+        session.replace_messages_internal(vec![
+            Message::User(UserMessage::text("compacted question".to_string())),
+            Message::Assistant(AssistantMessage {
+                content: "compacted answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: crate::types::Usage::default(),
+                created_at: crate::types::message_timestamp_now(),
+            }),
+        ]);
+        let replaced_digest =
+            transcript_messages_digest(session.messages()).expect("replaced digest");
+        assert_eq!(
+            session.transcript_revision().expect("replaced head"),
+            replaced_digest
+        );
+        let state = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        assert!(
+            state
+                .revisions
+                .iter()
+                .any(|body| body.revision == replaced_digest)
+        );
+        validate_transcript_history_state(&state).expect("history state remains valid");
+    }
+
+    #[test]
+    fn set_system_prompt_refreshes_transcript_history_head_after_rewrite() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: crate::types::Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let parent = session.transcript_revision().expect("parent revision");
+        let rewrite = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: crate::types::Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent),
+            )
+            .expect("rewrite should commit");
+
+        session.set_system_prompt("durable system prompt".to_string());
+
+        let head = session
+            .transcript_revision()
+            .expect("system prompt should refresh transcript head");
+        assert_ne!(head, rewrite.revision);
+        assert_eq!(
+            head,
+            transcript_messages_digest(session.messages()).expect("current digest")
+        );
+        let head_messages = session
+            .transcript_revision_messages(&head)
+            .expect("history state should decode")
+            .expect("refreshed head body should be retained");
+        assert_eq!(
+            serde_json::to_value(&head_messages).expect("head serializes"),
+            serde_json::to_value(session.messages()).expect("session serializes")
+        );
+        validate_transcript_history_state(
+            &session
+                .transcript_history_state()
+                .expect("history state should decode")
+                .expect("history state should exist"),
+        )
+        .expect("history state remains valid after system prompt update");
+    }
+
+    #[test]
+    fn apply_transcript_history_state_uses_latest_commit_time_for_restored_head() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: crate::types::Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let original_messages = session.messages().to_vec();
+        let parent = session.transcript_revision().expect("parent revision");
+        let compact = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: crate::types::Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent.clone()),
+            )
+            .expect("rewrite should commit");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let restore = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: session.messages().len(),
+                },
+                original_messages.clone(),
+                TranscriptRewriteReason::new("restore"),
+                Some("unit-test".to_string()),
+                Some(compact.revision),
+            )
+            .expect("restore should commit");
+        assert_eq!(restore.revision, parent);
+
+        let state = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        let restored_body_created_at = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == restore.revision)
+            .expect("restored body should be retained")
+            .created_at;
+        assert!(
+            restored_body_created_at < restore.committed_at,
+            "test requires restore commit to be newer than retained body"
+        );
+
+        let mut replayed = Session::new();
+        replayed
+            .apply_transcript_history_state(state)
+            .expect("replay should materialize restored head");
+        assert_eq!(
+            serde_json::to_value(replayed.messages()).expect("replayed serializes"),
+            serde_json::to_value(&original_messages).expect("original serializes")
+        );
+        assert_eq!(replayed.updated_at(), restore.committed_at);
     }
 
     #[test]
@@ -3832,6 +4823,70 @@ mod tests {
 
         // Original should be unchanged
         assert_eq!(session.messages().len(), 100);
+    }
+
+    #[test]
+    fn test_fork_at_resets_transcript_history_state_for_branch_identity() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text(
+            "summarize this".to_string(),
+        )));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "long assistant trace".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        let parent_revision = session.transcript_revision().expect("parent revision");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "compact trace".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                ))],
+                TranscriptRewriteReason::new("compaction"),
+                Some("test".to_string()),
+                Some(parent_revision),
+            )
+            .expect("rewrite should commit");
+
+        let source_head = session.transcript_revision().expect("source head");
+        let mut forked = session.fork_at(1);
+        assert_ne!(forked.id(), session.id());
+        assert!(
+            !forked
+                .metadata()
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        );
+        assert_eq!(
+            forked.transcript_revision().expect("fork head"),
+            transcript_messages_digest(forked.messages()).expect("fork digest")
+        );
+        assert!(
+            forked
+                .transcript_revision_messages(&source_head)
+                .expect("fork history lookup")
+                .is_none()
+        );
+
+        let fork_parent = forked.transcript_revision().expect("fork parent");
+        let commit = forked
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(
+                    "branch prompt".to_string(),
+                ))],
+                TranscriptRewriteReason::new("branch_edit"),
+                Some("test".to_string()),
+                Some(fork_parent.clone()),
+            )
+            .expect("fork rewrite should use fork-local parent");
+        assert_eq!(commit.parent_revision, fork_parent);
     }
 
     #[test]

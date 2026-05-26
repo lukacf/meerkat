@@ -9253,6 +9253,41 @@
     "title": "ProvisionApiKeyParams",
     "type": "object"
   },
+  "ReadSessionTranscriptRevisionParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/transcript_revision`.",
+    "properties": {
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "offset": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "revision": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "revision"
+    ],
+    "title": "ReadSessionTranscriptRevisionParams",
+    "type": "object"
+  },
   "RealmIdParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/profile/list` and `realm/get`.",
@@ -9265,6 +9300,1108 @@
       "realm_id"
     ],
     "title": "RealmIdParams",
+    "type": "object"
+  },
+  "RestoreSessionTranscriptRevisionParams": {
+    "$defs": {
+      "TranscriptEditRunningBehavior": {
+        "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
+        "oneOf": [
+          {
+            "const": "reject",
+            "description": "Reject the request while the source session is active.",
+            "type": "string"
+          }
+        ]
+      },
+      "TranscriptRewriteReason": {
+        "description": "Machine-readable reason carried with a transcript rewrite commit.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/restore_transcript_revision`.",
+    "properties": {
+      "actor": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "expected_parent_revision": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reason": {
+        "$ref": "#/$defs/TranscriptRewriteReason"
+      },
+      "revision": {
+        "type": "string"
+      },
+      "running_behavior": {
+        "$ref": "#/$defs/TranscriptEditRunningBehavior",
+        "default": "reject"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "revision",
+      "reason"
+    ],
+    "title": "RestoreSessionTranscriptRevisionParams",
+    "type": "object"
+  },
+  "RewriteSessionTranscriptParams": {
+    "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
+        ],
+        "type": "string"
+      },
+      "TranscriptEditRunningBehavior": {
+        "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
+        "oneOf": [
+          {
+            "const": "reject",
+            "description": "Reject the request while the source session is active.",
+            "type": "string"
+          }
+        ]
+      },
+      "TranscriptRewriteMessage": {
+        "description": "Public transcript message accepted by same-session rewrite APIs.",
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/WireContentInput"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "assistant",
+                "type": "string"
+              },
+              "stop_reason": {
+                "$ref": "#/$defs/WireStopReason",
+                "default": "end_turn"
+              },
+              "tool_calls": {
+                "items": {
+                  "$ref": "#/$defs/WireToolCall"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/$defs/WireAssistantBlock"
+                },
+                "type": "array"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "block_assistant",
+                "type": "string"
+              },
+              "stop_reason": {
+                "$ref": "#/$defs/WireStopReason",
+                "default": "end_turn"
+              }
+            },
+            "required": [
+              "role",
+              "blocks"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "results": {
+                "items": {
+                  "$ref": "#/$defs/WireToolResult"
+                },
+                "type": "array"
+              },
+              "role": {
+                "const": "tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "results"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TranscriptRewriteReason": {
+        "description": "Machine-readable reason carried with a transcript rewrite commit.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteSelection": {
+        "description": "A concrete transcript span selected for same-session rewrite.",
+        "oneOf": [
+          {
+            "description": "Replace messages in `[start, end)`.",
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAssistantBlock": {
+        "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
+        "oneOf": [
+          {
+            "properties": {
+              "block_type": {
+                "const": "text",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Spoken-transcript output (provider audio output → text). Distinct\nfrom `Text` so callers can render or filter by lane provenance.",
+            "properties": {
+              "block_type": {
+                "const": "transcript",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/$defs/WireTranscriptSource"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text",
+                  "source"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "reasoning",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "tool_use",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "args": {
+                    "description": "Wire-projected tool-call args. Carries the opaque JSON payload\nas `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`\ninvariant (\"tool-call args pass through un-parsed from provider\nto dispatcher\") — see `CLAUDE.md` Rust design principles §3.\nAllow-listed by dogma-blind-spots §7."
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "server_tool_content",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "content": true,
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "content"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "image",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "blob_ref": {
+                    "$ref": "#/$defs/BlobRef"
+                  },
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "image_id": {
+                    "$ref": "#/$defs/AssistantImageId"
+                  },
+                  "media_type": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "$ref": "#/$defs/ProviderImageMetadata"
+                  },
+                  "revised_prompt": {
+                    "$ref": "#/$defs/RevisedPromptDisposition"
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image_id",
+                  "blob_ref",
+                  "media_type",
+                  "width",
+                  "height",
+                  "revised_prompt",
+                  "meta"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
+      "WireProviderMeta": {
+        "description": "Provider continuity metadata for transcript blocks.",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "signature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_redacted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "thoughtSignature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "thoughtSignature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireStopReason": {
+        "description": "Canonical stop reason for transcript messages.",
+        "enum": [
+          "end_turn",
+          "tool_use",
+          "max_tokens",
+          "stop_sequence",
+          "content_filter",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireToolCall": {
+        "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
+        "properties": {
+          "args": true,
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "args"
+        ],
+        "type": "object"
+      },
+      "WireToolResult": {
+        "description": "Tool result payload in a transcript.",
+        "properties": {
+          "content": {
+            "$ref": "#/$defs/WireToolResultContent"
+          },
+          "is_error": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "content"
+        ],
+        "type": "object"
+      },
+      "WireToolResultContent": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe tool result content that handles both legacy string and array formats."
+      },
+      "WireTranscriptSource": {
+        "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/rewrite_transcript`.",
+    "properties": {
+      "actor": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "expected_parent_revision": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reason": {
+        "$ref": "#/$defs/TranscriptRewriteReason"
+      },
+      "replacement": {
+        "items": {
+          "$ref": "#/$defs/TranscriptRewriteMessage"
+        },
+        "type": "array"
+      },
+      "running_behavior": {
+        "$ref": "#/$defs/TranscriptEditRunningBehavior",
+        "default": "reject"
+      },
+      "selection": {
+        "$ref": "#/$defs/TranscriptRewriteSelection"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "selection",
+      "replacement",
+      "reason"
+    ],
+    "title": "RewriteSessionTranscriptParams",
     "type": "object"
   },
   "ScheduleIdParams": {

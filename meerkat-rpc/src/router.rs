@@ -18,6 +18,8 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
     SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionHistoryQuery,
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionQuery,
+    SessionTranscriptRewriteRequest,
 };
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
@@ -1230,8 +1232,18 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            "session/transcript_revision" => {
+                self.handle_session_transcript_revision(id, params).await
+            }
             "session/fork_at" => self.handle_session_fork_at(id, params).await,
             "session/fork_replace" => self.handle_session_fork_replace(id, params).await,
+            "session/rewrite_transcript" => {
+                self.handle_session_rewrite_transcript(id, params).await
+            }
+            "session/restore_transcript_revision" => {
+                self.handle_session_restore_transcript_revision(id, params)
+                    .await
+            }
             "blob/get" => self.handle_blob_get(id, params).await,
             "artifact/list" => self.handle_artifact_list(id, params).await,
             "artifact/get" => self.handle_artifact_get(id, params).await,
@@ -1819,6 +1831,68 @@ impl MethodRouter {
         }
     }
 
+    async fn handle_session_transcript_revision(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ReadSessionTranscriptRevisionParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                match self
+                    .runtime
+                    .read_session_transcript_revision_rich(
+                        &session_id,
+                        SessionTranscriptRevisionQuery {
+                            revision: params.revision,
+                            offset: params.offset.unwrap_or(0),
+                            limit: params.limit,
+                        },
+                    )
+                    .await
+                {
+                    Ok(Some(mut revision)) => {
+                        revision.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, revision)
+                    }
+                    Ok(None) => RpcResponse::error(
+                        id,
+                        error::SESSION_NOT_FOUND,
+                        format!("Transcript revision not found for session: {session_id}"),
+                    ),
+                    Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned session transcript revisions cannot be read through the generic session surface",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
     async fn handle_session_fork_at(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -1911,6 +1985,128 @@ impl MethodRouter {
                     });
                     RpcResponse::success(id, result)
                 }
+                Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+            },
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned session transcripts cannot be edited through the generic session surface",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_rewrite_transcript(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::RewriteSessionTranscriptParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                let replacement = match params
+                    .replacement
+                    .into_iter()
+                    .map(meerkat_contracts::TranscriptRewriteMessage::into_core)
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(replacement) => replacement,
+                    Err(conversion_error) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            conversion_error.to_string(),
+                        );
+                    }
+                };
+                match self
+                    .runtime
+                    .rewrite_session_transcript(
+                        &session_id,
+                        SessionTranscriptRewriteRequest {
+                            selection: params.selection,
+                            replacement,
+                            reason: params.reason,
+                            actor: params.actor,
+                            expected_parent_revision: params.expected_parent_revision,
+                            running_behavior: params.running_behavior,
+                        },
+                    )
+                    .await
+                {
+                    Ok(result) => RpcResponse::success(id, result),
+                    Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned session transcripts cannot be edited through the generic session surface",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_restore_transcript_revision(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::RestoreSessionTranscriptRevisionParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => match self
+                .runtime
+                .restore_session_transcript_revision(
+                    &session_id,
+                    SessionTranscriptRestoreRevisionRequest {
+                        revision: params.revision,
+                        reason: params.reason,
+                        actor: params.actor,
+                        expected_parent_revision: params.expected_parent_revision,
+                        running_behavior: params.running_behavior,
+                    },
+                )
+                .await
+            {
+                Ok(result) => RpcResponse::success(id, result),
                 Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
             },
             #[cfg(feature = "mob")]
@@ -4305,6 +4501,9 @@ args = [{}]
         assert!(method_names.contains(&"session/history"));
         assert!(method_names.contains(&"session/fork_at"));
         assert!(method_names.contains(&"session/fork_replace"));
+        assert!(method_names.contains(&"session/rewrite_transcript"));
+        assert!(method_names.contains(&"session/transcript_revision"));
+        assert!(method_names.contains(&"session/restore_transcript_revision"));
         assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/peer_response_terminal"));
         assert!(method_names.contains(&"session/inject_context"));
@@ -8339,6 +8538,163 @@ args = [{}]
             parent_history["messages"][message_index]["content"],
             "Follow up"
         );
+    }
+
+    #[tokio::test]
+    async fn session_rewrite_transcript_advances_same_session_history_head() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "Follow up",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(turn_resp.error.is_none(), "second turn should succeed");
+
+        let before_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let before = result_value(&before_resp);
+        let before_count = before["message_count"].as_u64().unwrap();
+        assert!(
+            before_count >= 4,
+            "test router should produce a multi-turn transcript: {before}"
+        );
+
+        let rewrite_resp = router
+            .dispatch(make_request(
+                "session/rewrite_transcript",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "selection": {
+                        "type": "message_range",
+                        "start": 1,
+                        "end": before_count
+                    },
+                    "replacement": [
+                        {
+                            "role": "block_assistant",
+                            "blocks": [
+                                {
+                                    "block_type": "text",
+                                    "data": {
+                                        "text": "compacted assistant trace"
+                                    }
+                                }
+                            ],
+                            "stop_reason": "end_turn"
+                        }
+                    ],
+                    "reason": {
+                        "kind": "compaction",
+                        "note": "test trace replacement"
+                    },
+                    "actor": "rpc-test",
+                    "running_behavior": "reject"
+                }),
+            ))
+            .await
+            .unwrap();
+        let rewrite = result_value(&rewrite_resp);
+        assert_eq!(rewrite["session_id"], session_id);
+        assert_eq!(rewrite["message_count"], 2);
+        assert!(
+            rewrite["parent_revision"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(rewrite["revision"].as_str().unwrap().starts_with("sha256:"));
+        assert_ne!(rewrite["revision"], rewrite["parent_revision"]);
+
+        let parent_revision_resp = router
+            .dispatch(make_request(
+                "session/transcript_revision",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "revision": rewrite["parent_revision"].as_str().unwrap()
+                }),
+            ))
+            .await
+            .unwrap();
+        let parent_revision = result_value(&parent_revision_resp);
+        assert_eq!(parent_revision["session_id"], session_id);
+        assert_eq!(parent_revision["revision"], rewrite["parent_revision"]);
+        assert_eq!(parent_revision["head_revision"], rewrite["revision"]);
+        assert_eq!(parent_revision["message_count"], before_count);
+        assert_eq!(parent_revision["messages"], before["messages"]);
+
+        let after_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let after = result_value(&after_resp);
+        assert_eq!(after["session_id"], session_id);
+        assert_eq!(after["message_count"], 2);
+        assert_eq!(after["messages"][1]["role"], "block_assistant");
+        assert_eq!(
+            after["messages"][1]["blocks"][0]["data"]["text"],
+            "compacted assistant trace"
+        );
+
+        let restore_resp = router
+            .dispatch(make_request(
+                "session/restore_transcript_revision",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "revision": rewrite["parent_revision"].as_str().unwrap(),
+                    "reason": {
+                        "kind": "restore",
+                        "note": "test recover prior truth"
+                    },
+                    "actor": "rpc-test",
+                    "expected_parent_revision": rewrite["revision"].as_str().unwrap(),
+                    "running_behavior": "reject"
+                }),
+            ))
+            .await
+            .unwrap();
+        let restore = result_value(&restore_resp);
+        assert_eq!(restore["session_id"], session_id);
+        assert_eq!(restore["parent_revision"], rewrite["revision"]);
+        assert_eq!(restore["revision"], rewrite["parent_revision"]);
+        assert_eq!(restore["message_count"], before_count);
+
+        let restored_history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let restored_history = result_value(&restored_history_resp);
+        assert_eq!(restored_history["session_id"], session_id);
+        assert_eq!(restored_history["message_count"], before_count);
+        assert_eq!(restored_history["messages"], before["messages"]);
     }
 
     #[tokio::test]

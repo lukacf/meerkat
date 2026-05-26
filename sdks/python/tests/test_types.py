@@ -78,6 +78,7 @@ from meerkat.events import (
     SkillResolutionFailureReason,
     ToolConfigChanged,
     TextDelta,
+    TranscriptRewriteCommitted,
     ToolCallRequested,
     ToolExecutionCompleted,
     ToolResultReceived,
@@ -1408,6 +1409,38 @@ def test_background_job_completed_constructor_requires_terminal_status():
             display_name="sleep 2",
             detail="exit_code: 0",
         )
+
+
+def test_parse_transcript_rewrite_committed_exposes_record():
+    record = {
+        "commit": {
+            "parent_revision": "rev-parent",
+            "revision": "rev-next",
+        },
+        "parent_body": {"revision": "rev-parent"},
+        "revision_body": {"revision": "rev-next"},
+    }
+    event = parse_event({
+        "type": "transcript_rewrite_committed",
+        "session_id": "session-123",
+        "record": record,
+    })
+
+    assert isinstance(event, TranscriptRewriteCommitted)
+    assert event.session_id == "session-123"
+    assert event.record == record
+
+
+def test_parse_transcript_rewrite_committed_rejects_missing_record():
+    raw = {
+        "type": "transcript_rewrite_committed",
+        "session_id": "session-123",
+    }
+    event = parse_event(raw)
+
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_turn_completed_with_usage():

@@ -276,6 +276,57 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn commit_session_transcript_rewrite_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let commit = commit.clone();
+            tokio::task::spawn_blocking(move || {
+                let incoming = serde_json::from_slice::<meerkat_core::Session>(
+                    &session_delta.session_snapshot,
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let previous = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .map(|bytes| {
+                        serde_json::from_slice::<meerkat_core::Session>(&bytes)
+                            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+                    })
+                    .transpose()?;
+                meerkat_core::session_store::transcript_rewrite_save_guard(
+                    &incoming,
+                    previous.as_ref(),
+                    &commit,
+                )
+                .map_err(|err| match err {
+                    meerkat_core::SessionStoreError::TranscriptRevisionConflict {
+                        expected, actual, ..
+                    } => RuntimeStoreError::TranscriptRevisionConflict { expected, actual },
+                    other => RuntimeStoreError::WriteFailed(other.to_string()),
+                })?;
+                write_session_snapshot_in_txn(&tx, &incoming)
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -581,6 +632,8 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         use crate::input_state::StoredInputState;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+        use meerkat_core::types::{AssistantMessage, Message, StopReason, UserMessage};
+        use meerkat_core::{Session, TranscriptRewriteReason, TranscriptRewriteSelection};
 
         fn temp_store() -> (TempDir, SqliteRuntimeStore) {
             let dir = TempDir::new().unwrap();
@@ -595,6 +648,19 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
 
         fn input_state() -> StoredInputState {
             StoredInputState::new_accepted(InputId::new())
+        }
+
+        fn session_with_one_turn() -> Session {
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text("hello".to_string())));
+            session.push(Message::Assistant(AssistantMessage {
+                content: "verbose answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }));
+            session
         }
 
         fn receipt_row_count(store: &SqliteRuntimeStore) -> usize {
@@ -676,6 +742,89 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     .unwrap()
                     .is_empty()
             );
+        }
+
+        #[tokio::test]
+        async fn transcript_rewrite_snapshot_rejects_stale_runtime_parent() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let original = session_with_one_turn();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&original).unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let parent_revision = original.transcript_revision().unwrap();
+            let mut first_rewrite = original.clone();
+            let first_commit = first_rewrite
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    vec![Message::Assistant(AssistantMessage {
+                        content: "first compact answer".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: meerkat_core::types::Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("sqlite-test".to_string()),
+                    Some(parent_revision.clone()),
+                )
+                .unwrap();
+            store
+                .commit_session_transcript_rewrite_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&first_rewrite).unwrap(),
+                    },
+                    &first_commit,
+                )
+                .await
+                .unwrap();
+
+            let mut stale_rewrite = original;
+            let stale_commit = stale_rewrite
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    vec![Message::Assistant(AssistantMessage {
+                        content: "stale compact answer".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: meerkat_core::types::Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("sqlite-test".to_string()),
+                    Some(parent_revision),
+                )
+                .unwrap();
+            let err = store
+                .commit_session_transcript_rewrite_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&stale_rewrite).unwrap(),
+                    },
+                    &stale_commit,
+                )
+                .await
+                .expect_err("stale rewrite parent should be rejected atomically");
+            assert!(matches!(
+                err,
+                RuntimeStoreError::TranscriptRevisionConflict { .. }
+            ));
+
+            let stored = store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let stored: Session = serde_json::from_slice(&stored).unwrap();
+            assert_eq!(stored.transcript_revision().unwrap(), first_commit.revision);
         }
 
         #[tokio::test]

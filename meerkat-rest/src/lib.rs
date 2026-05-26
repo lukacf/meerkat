@@ -52,8 +52,8 @@ use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, MachineSessionArchiveProtocol,
     OutputSchema, PersistentSessionService, ScheduleService, ScheduleToolDispatcher, Session,
     SessionId, SessionService, SessionServiceControlExt, SessionServiceHistoryExt,
-    WorkGraphService, encode_llm_client_override_for_service, handle_schedule_tools_call,
-    open_realm_persistence_in, schedule_tools_list,
+    SessionServiceTranscriptEditExt, WorkGraphService, encode_llm_client_override_for_service,
+    handle_schedule_tools_call, open_realm_persistence_in, schedule_tools_list,
 };
 use meerkat_contracts::{
     CommsSendParams, CommsSendResult, ErrorCode, RuntimeStateResult, SessionLocator, SkillsParams,
@@ -71,7 +71,8 @@ use meerkat_core::service::{
     AppendSystemContextRequest as SvcAppendSystemContextRequest,
     CreateSessionRequest as SvcCreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy,
     ResumeOverrideMask, SessionBuildOptions, SessionControlError, SessionError,
-    StartTurnRequest as SvcStartTurnRequest,
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionQuery,
+    SessionTranscriptRewriteRequest, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
@@ -1949,6 +1950,39 @@ pub struct SessionHistoryQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SessionTranscriptRevisionQueryParams {
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RewriteSessionTranscriptRequest {
+    pub selection: meerkat_core::TranscriptRewriteSelection,
+    pub replacement: Vec<meerkat_contracts::TranscriptRewriteMessage>,
+    pub reason: meerkat_core::TranscriptRewriteReason,
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub expected_parent_revision: Option<String>,
+    #[serde(default)]
+    pub running_behavior: meerkat_core::service::TranscriptEditRunningBehavior,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreSessionTranscriptRevisionRequest {
+    pub revision: String,
+    pub reason: meerkat_core::TranscriptRewriteReason,
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub expected_parent_revision: Option<String>,
+    #[serde(default)]
+    pub running_behavior: meerkat_core::service::TranscriptEditRunningBehavior,
+}
+
 /// Session response — canonical wire type from contracts.
 pub type SessionResponse = meerkat_contracts::WireRunResult;
 
@@ -2023,6 +2057,18 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(archive_session))
         .route("/sessions/{id}/history", get(get_session_history))
+        .route(
+            "/sessions/{id}/transcript-revisions/{revision}",
+            get(get_session_transcript_revision),
+        )
+        .route(
+            "/sessions/{id}/rewrite-transcript",
+            post(rewrite_session_transcript),
+        )
+        .route(
+            "/sessions/{id}/restore-transcript-revision",
+            post(restore_session_transcript_revision),
+        )
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/status", get(get_runtime_status))
         .route("/sessions/{id}/system_context", post(append_system_context))
@@ -4708,6 +4754,100 @@ async fn get_session_history(
     let mut wire: meerkat_contracts::WireSessionHistory = history.into();
     wire.session_ref = Some(format_session_ref(&state.realm, &session_id));
     Ok(Json(wire))
+}
+
+fn transcript_edit_session_error_to_api(id: &str, error: SessionError) -> ApiError {
+    let message = error.to_string();
+    match error {
+        SessionError::NotFound { .. } => ApiError::NotFound(format!("Session not found: {id}")),
+        SessionError::PersistenceDisabled => ApiError::BadRequest(format!(
+            "Session transcript edits are unavailable for: {id}"
+        )),
+        SessionError::Busy { .. }
+        | SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
+            ApiError::BadRequest(message)
+        }
+        other => ApiError::Internal(format!("{other}")),
+    }
+}
+
+/// Get a retained transcript revision body.
+async fn get_session_transcript_revision(
+    State(state): State<AppState>,
+    Path((id, revision)): Path<(String, String)>,
+    Query(query): Query<SessionTranscriptRevisionQueryParams>,
+) -> Result<Json<meerkat_contracts::WireSessionTranscriptRevision>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let page = state
+        .session_service
+        .read_transcript_revision(
+            &session_id,
+            SessionTranscriptRevisionQuery {
+                revision,
+                offset: query.offset.unwrap_or(0),
+                limit: query.limit,
+            },
+        )
+        .await
+        .map_err(|error| transcript_edit_session_error_to_api(&id, error))?;
+    let mut wire: meerkat_contracts::WireSessionTranscriptRevision = page.into();
+    wire.session_ref = Some(format_session_ref(&state.realm, &session_id));
+    Ok(Json(wire))
+}
+
+/// Commit a typed same-session transcript rewrite.
+async fn rewrite_session_transcript(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RewriteSessionTranscriptRequest>,
+) -> Result<Json<meerkat_core::service::SessionTranscriptRewriteResult>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let replacement = req
+        .replacement
+        .into_iter()
+        .map(meerkat_contracts::TranscriptRewriteMessage::into_core)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let result = state
+        .session_service
+        .rewrite_session_transcript(
+            &session_id,
+            SessionTranscriptRewriteRequest {
+                selection: req.selection,
+                replacement,
+                reason: req.reason,
+                actor: req.actor,
+                expected_parent_revision: req.expected_parent_revision,
+                running_behavior: req.running_behavior,
+            },
+        )
+        .await
+        .map_err(|error| transcript_edit_session_error_to_api(&id, error))?;
+    Ok(Json(result))
+}
+
+/// Restore a retained transcript revision as the current session head.
+async fn restore_session_transcript_revision(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RestoreSessionTranscriptRevisionRequest>,
+) -> Result<Json<meerkat_core::service::SessionTranscriptRewriteResult>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let result = state
+        .session_service
+        .restore_session_transcript_revision(
+            &session_id,
+            SessionTranscriptRestoreRevisionRequest {
+                revision: req.revision,
+                reason: req.reason,
+                actor: req.actor,
+                expected_parent_revision: req.expected_parent_revision,
+                running_behavior: req.running_behavior,
+            },
+        )
+        .await
+        .map_err(|error| transcript_edit_session_error_to_api(&id, error))?;
+    Ok(Json(result))
 }
 
 /// Interrupt an in-flight turn on a session.
@@ -9950,6 +10090,194 @@ mod tests {
                 .await,
             "archived REST continue must not register runtime state"
         );
+    }
+
+    #[tokio::test]
+    async fn test_rest_transcript_rewrite_routes_keep_same_session_and_retain_revision() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let created_session_id = create_completed_rest_runtime_session(&state).await;
+        let session_id = created_session_id.to_string();
+        let parent_history = state
+            .session_service
+            .read_history(&created_session_id, Default::default())
+            .await
+            .expect("parent history should read");
+        let parent_revision = meerkat_core::transcript_messages_digest(&parent_history.messages)
+            .expect("parent history should digest");
+
+        let app = router(state.clone());
+        let rewrite_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/rewrite-transcript"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "selection": {
+                                "type": "message_range",
+                                "start": 1,
+                                "end": 2
+                            },
+                            "replacement": [
+                                {
+                                    "role": "block_assistant",
+                                    "blocks": [
+                                        {
+                                            "block_type": "text",
+                                            "data": {
+                                                "text": "rest compacted trace"
+                                            }
+                                        }
+                                    ],
+                                    "stop_reason": "end_turn"
+                                }
+                            ],
+                            "reason": {
+                                "kind": "compaction",
+                                "note": "REST same-session trace replacement"
+                            },
+                            "actor": "rest-test",
+                            "expected_parent_revision": parent_revision,
+                            "running_behavior": "reject"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let rewrite_status = rewrite_response.status();
+        let rewrite_body = rewrite_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            rewrite_status,
+            StatusCode::OK,
+            "rewrite should commit through REST: {}",
+            String::from_utf8_lossy(&rewrite_body)
+        );
+        let rewrite_payload: Value = serde_json::from_slice(&rewrite_body).unwrap();
+        assert_eq!(rewrite_payload["session_id"], session_id);
+        assert_eq!(rewrite_payload["parent_revision"], parent_revision);
+        let rewrite_revision = rewrite_payload["revision"].as_str().unwrap().to_string();
+        assert_ne!(rewrite_revision, parent_revision);
+
+        let current_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{session_id}/history"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let current_body = current_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let current_payload: Value = serde_json::from_slice(&current_body).unwrap();
+        assert_eq!(current_payload["session_id"], session_id);
+        assert_eq!(
+            current_payload["message_count"],
+            parent_history.message_count
+        );
+        assert_eq!(
+            current_payload["messages"][1]["blocks"][0]["data"]["text"],
+            "rest compacted trace"
+        );
+
+        let revision_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/sessions/{session_id}/transcript-revisions/{parent_revision}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let revision_status = revision_response.status();
+        let revision_body = revision_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            revision_status,
+            StatusCode::OK,
+            "parent revision should remain readable through REST: {}",
+            String::from_utf8_lossy(&revision_body)
+        );
+        let revision_payload: Value = serde_json::from_slice(&revision_body).unwrap();
+        assert_eq!(revision_payload["revision"], parent_revision);
+        assert_eq!(revision_payload["head_revision"], rewrite_revision);
+        assert_eq!(
+            revision_payload["message_count"],
+            parent_history.message_count
+        );
+
+        let restore_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/sessions/{session_id}/restore-transcript-revision"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "revision": parent_revision,
+                            "reason": {
+                                "kind": "restore"
+                            },
+                            "actor": "rest-test",
+                            "expected_parent_revision": rewrite_revision,
+                            "running_behavior": "reject"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let restore_status = restore_response.status();
+        let restore_body = restore_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            restore_status,
+            StatusCode::OK,
+            "restore should commit through REST: {}",
+            String::from_utf8_lossy(&restore_body)
+        );
+        let restore_payload: Value = serde_json::from_slice(&restore_body).unwrap();
+        assert_eq!(restore_payload["session_id"], session_id);
+        assert_eq!(restore_payload["revision"], parent_revision);
     }
 
     #[tokio::test]

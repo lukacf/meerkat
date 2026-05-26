@@ -19,10 +19,12 @@
 
 use async_trait::async_trait;
 
-use crate::Session;
 use crate::session::SessionMeta;
 use crate::time_compat::SystemTime;
 use crate::types::SessionId;
+use crate::{
+    Session, TranscriptRewriteCommit, TranscriptRewriteSelection, transcript_messages_digest,
+};
 
 /// Filter for listing sessions.
 #[derive(Debug, Clone, Default)]
@@ -66,6 +68,18 @@ pub enum SessionStoreError {
         new_len: usize,
     },
 
+    #[error(
+        "session {id} rewrite rejected: previous transcript revision {actual} did not match commit parent {expected}"
+    )]
+    TranscriptRevisionConflict {
+        id: SessionId,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("session {id} rewrite rejected: {reason}")]
+    InvalidTranscriptRewrite { id: SessionId, reason: String },
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -94,6 +108,248 @@ pub fn append_only_save_guard(
                 new_len,
             });
         }
+    }
+    Ok(())
+}
+
+/// Validate that a same-session shrink/replace save is backed by a typed
+/// transcript rewrite commit.
+pub fn transcript_rewrite_save_guard(
+    incoming: &Session,
+    previous: Option<&Session>,
+    commit: &TranscriptRewriteCommit,
+) -> Result<(), SessionStoreError> {
+    let Some(previous) = previous else {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "rewrite target has no previously persisted session".to_string(),
+        });
+    };
+    if incoming.id() != previous.id() {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming session id {} differs from previous session id {}",
+                incoming.id(),
+                previous.id()
+            ),
+        });
+    }
+    let previous_revision = previous.transcript_revision().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript revision is malformed: {err}"),
+        }
+    })?;
+    if previous_revision != commit.parent_revision {
+        return Err(SessionStoreError::TranscriptRevisionConflict {
+            id: incoming.id().clone(),
+            expected: commit.parent_revision.clone(),
+            actual: previous_revision,
+        });
+    }
+    let previous_message_digest =
+        transcript_messages_digest(previous.messages()).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("previous current transcript is not digestible: {err}"),
+            }
+        })?;
+    if previous_message_digest != commit.parent_revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "previous current transcript digest {previous_message_digest} does not match commit parent {}",
+                commit.parent_revision
+            ),
+        });
+    }
+    let incoming_revision = incoming.transcript_revision().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript revision is malformed: {err}"),
+        }
+    })?;
+    if incoming_revision != commit.revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming transcript revision {incoming_revision} does not match commit revision {}",
+                commit.revision
+            ),
+        });
+    }
+    let incoming_message_digest =
+        transcript_messages_digest(incoming.messages()).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("incoming current transcript is not digestible: {err}"),
+            }
+        })?;
+    if incoming_message_digest != commit.revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming current transcript digest {incoming_message_digest} does not match commit revision {}",
+                commit.revision
+            ),
+        });
+    }
+    if previous.messages().len() != commit.messages_before
+        || incoming.messages().len() != commit.messages_after
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "commit message counts {} -> {} do not match persisted rewrite {} -> {}",
+                commit.messages_before,
+                commit.messages_after,
+                previous.messages().len(),
+                incoming.messages().len()
+            ),
+        });
+    }
+    let incoming_state = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?;
+    let Some(incoming_state) = incoming_state else {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
+        });
+    };
+    let Some(parent_body) = incoming_state
+        .revisions
+        .iter()
+        .find(|body| body.revision == commit.parent_revision)
+    else {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming rewrite omitted parent revision body {}",
+                commit.parent_revision
+            ),
+        });
+    };
+    let Some(revision_body) = incoming_state
+        .revisions
+        .iter()
+        .find(|body| body.revision == commit.revision)
+    else {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming rewrite omitted new revision body {}",
+                commit.revision
+            ),
+        });
+    };
+    let parent_body_revision =
+        transcript_messages_digest(&parent_body.messages).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("parent revision body is not digestible: {err}"),
+            }
+        })?;
+    if parent_body_revision != commit.parent_revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "parent revision body digest {parent_body_revision} does not match commit parent {}",
+                commit.parent_revision
+            ),
+        });
+    }
+    let (start, end) = match &commit.selection {
+        TranscriptRewriteSelection::MessageRange { start, end } => (*start, *end),
+    };
+    if start > end || end > parent_body.messages.len() {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "commit selection {start}..{end} is invalid for parent revision with {} messages",
+                parent_body.messages.len()
+            ),
+        });
+    }
+    let original_span_digest = transcript_messages_digest(&parent_body.messages[start..end])
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("original span body is not digestible: {err}"),
+        })?;
+    if original_span_digest != commit.original_span_digest {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "original span digest {original_span_digest} does not match commit digest {}",
+                commit.original_span_digest
+            ),
+        });
+    }
+    let revision_body_digest =
+        transcript_messages_digest(&revision_body.messages).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("new revision body is not digestible: {err}"),
+            }
+        })?;
+    if revision_body_digest != commit.revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "new revision body digest {revision_body_digest} does not match commit revision {}",
+                commit.revision
+            ),
+        });
+    }
+    let removed_len = end - start;
+    let retained_len = commit
+        .messages_before
+        .checked_sub(removed_len)
+        .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "commit removed more messages than it recorded before rewrite".to_string(),
+        })?;
+    let replacement_len = commit
+        .messages_after
+        .checked_sub(retained_len)
+        .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "commit message counts cannot describe a replacement span".to_string(),
+        })?;
+    let replacement_end = start.checked_add(replacement_len).ok_or_else(|| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "replacement span end overflowed".to_string(),
+        }
+    })?;
+    if replacement_end > revision_body.messages.len() {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "replacement span {start}..{replacement_end} is invalid for revision with {} messages",
+                revision_body.messages.len()
+            ),
+        });
+    }
+    let replacement_digest = transcript_messages_digest(
+        &revision_body.messages[start..replacement_end],
+    )
+    .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+        id: incoming.id().clone(),
+        reason: format!("replacement span body is not digestible: {err}"),
+    })?;
+    if replacement_digest != commit.replacement_digest {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "replacement span digest {replacement_digest} does not match commit digest {}",
+                commit.replacement_digest
+            ),
+        });
     }
     Ok(())
 }
@@ -137,6 +393,37 @@ pub trait SessionStore: Send + Sync {
     /// shorter than the previously persisted row for the same `SessionId`
     /// — see the trait-level doc on the append-only contract.
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError>;
+
+    /// Save a same-SessionId transcript rewrite.
+    ///
+    /// This is the only `SessionStore` path allowed to replace or shrink the
+    /// current message projection. Implementations must validate `commit`
+    /// against the previously persisted head before writing `session`.
+    async fn save_transcript_rewrite(
+        &self,
+        session: &Session,
+        commit: &TranscriptRewriteCommit,
+    ) -> Result<(), SessionStoreError> {
+        let _ = (session, commit);
+        Err(SessionStoreError::Internal(
+            "save_transcript_rewrite is not supported by this SessionStore".to_string(),
+        ))
+    }
+
+    /// Save a compatibility projection after a separate authority has already
+    /// committed the session snapshot.
+    ///
+    /// This method is for runtime-backed services only: the runtime snapshot
+    /// has already accepted the semantic mutation, and the `SessionStore` row is
+    /// a rebuildable projection. Normal callers must use [`SessionStore::save`]
+    /// or [`SessionStore::save_transcript_rewrite`] so the store boundary keeps
+    /// enforcing append-only/CAS semantics.
+    async fn save_authoritative_projection(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionStoreError> {
+        self.save(session).await
+    }
 
     /// Load a session by ID.
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError>;

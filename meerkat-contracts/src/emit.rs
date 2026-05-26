@@ -190,9 +190,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireProviderMeta": schema_for!(crate::wire::WireProviderMeta),
         "WireSessionHistory": schema_for!(crate::wire::WireSessionHistory),
         "SessionForkResult": schema_for!(meerkat_core::SessionForkResult),
+        "SessionTranscriptRewriteResult": schema_for!(meerkat_core::SessionTranscriptRewriteResult),
+        "TranscriptRewriteReason": schema_for!(meerkat_core::TranscriptRewriteReason),
+        "TranscriptRewriteSelection": schema_for!(meerkat_core::TranscriptRewriteSelection),
+        "TranscriptRewriteMessage": schema_for!(crate::wire::TranscriptRewriteMessage),
         "TranscriptEditRunningBehavior": schema_for!(meerkat_core::TranscriptEditRunningBehavior),
         "WireSessionInfo": schema_for!(crate::wire::WireSessionInfo),
         "WireSessionMessage": schema_for!(crate::wire::WireSessionMessage),
+        "WireSessionTranscriptRevision": schema_for!(crate::wire::WireSessionTranscriptRevision),
         "WireSessionSummary": schema_for!(crate::wire::WireSessionSummary),
         "WireStopReason": schema_for!(crate::wire::WireStopReason),
         "WireToolCall": schema_for!(crate::wire::WireToolCall),
@@ -332,6 +337,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "SessionStreamCloseParams": schema_for!(crate::wire::SessionStreamCloseParams),
         "ForkSessionAtParams": schema_for!(crate::wire::ForkSessionAtParams),
         "ForkSessionReplaceParams": schema_for!(crate::wire::ForkSessionReplaceParams),
+        "RewriteSessionTranscriptParams": schema_for!(crate::wire::RewriteSessionTranscriptParams),
+        "ReadSessionTranscriptRevisionParams": schema_for!(crate::wire::ReadSessionTranscriptRevisionParams),
+        "RestoreSessionTranscriptRevisionParams": schema_for!(crate::wire::RestoreSessionTranscriptRevisionParams),
         "CommsSendParams": schema_for!(crate::wire::CommsSendParams),
         "CommsPeersParams": schema_for!(crate::wire::CommsPeersParams),
         "ScheduleIdParams": schema_for!(crate::wire::ScheduleIdParams),
@@ -849,6 +857,45 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ),
         );
         components.insert(
+            "RestRewriteSessionTranscriptRequest".to_string(),
+            object_schema(
+                vec![
+                    ("selection", schema_ref("TranscriptRewriteSelection")),
+                    (
+                        "replacement",
+                        serde_json::json!({
+                            "type": "array",
+                            "items": schema_ref("TranscriptRewriteMessage")
+                        }),
+                    ),
+                    ("reason", schema_ref("TranscriptRewriteReason")),
+                    ("actor", string_schema()),
+                    ("expected_parent_revision", string_schema()),
+                    (
+                        "running_behavior",
+                        schema_ref("TranscriptEditRunningBehavior"),
+                    ),
+                ],
+                vec!["selection", "replacement", "reason"],
+            ),
+        );
+        components.insert(
+            "RestRestoreSessionTranscriptRevisionRequest".to_string(),
+            object_schema(
+                vec![
+                    ("revision", string_schema()),
+                    ("reason", schema_ref("TranscriptRewriteReason")),
+                    ("actor", string_schema()),
+                    ("expected_parent_revision", string_schema()),
+                    (
+                        "running_behavior",
+                        schema_ref("TranscriptEditRunningBehavior"),
+                    ),
+                ],
+                vec!["revision", "reason"],
+            ),
+        );
+        components.insert(
             "RestPeerResponseTerminalRequest".to_string(),
             closed_object_schema(
                 vec![
@@ -1070,6 +1117,21 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ("/sessions/{id}", "get") => RestOperationContract::json("SessionDetailsResponse"),
             ("/sessions/{id}", "delete") => RestOperationContract::json("StatusResponse"),
             ("/sessions/{id}/history", "get") => RestOperationContract::json("WireSessionHistory"),
+            ("/sessions/{id}/transcript-revisions/{revision}", "get") => {
+                RestOperationContract::json("WireSessionTranscriptRevision")
+            }
+            ("/sessions/{id}/rewrite-transcript", "post") => {
+                RestOperationContract::with_json_request(
+                    "RestRewriteSessionTranscriptRequest",
+                    "SessionTranscriptRewriteResult",
+                )
+            }
+            ("/sessions/{id}/restore-transcript-revision", "post") => {
+                RestOperationContract::with_json_request(
+                    "RestRestoreSessionTranscriptRevisionRequest",
+                    "SessionTranscriptRewriteResult",
+                )
+            }
             ("/sessions/{id}/interrupt", "post") => RestOperationContract::json("StatusResponse"),
             ("/sessions/{id}/system_context", "post") => RestOperationContract::with_json_request(
                 "RestAppendSystemContextRequest",

@@ -9,6 +9,7 @@ use crate::hooks::{HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
 use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
+use crate::session::TranscriptRewriteRecord;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
@@ -1021,6 +1022,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
+        AgentEvent::TranscriptRewriteCommitted { .. } => "transcript_rewrite_committed",
     }
 }
 
@@ -1734,6 +1736,12 @@ pub enum AgentEvent {
         terminal_status: BackgroundJobTerminalStatus,
         detail: String,
     },
+
+    /// A typed same-session transcript rewrite was durably committed.
+    TranscriptRewriteCommitted {
+        session_id: SessionId,
+        record: TranscriptRewriteRecord,
+    },
 }
 
 impl AgentEvent {
@@ -1971,6 +1979,10 @@ pub fn format_verbose_event_with_config(
                 "  BG job {job_id} ({display_name}) {status}: {detail}"
             ))
         }
+        AgentEvent::TranscriptRewriteCommitted { session_id, record } => Some(format!(
+            "  transcript rewrite committed for {session_id}: {} -> {} ({})",
+            record.commit.parent_revision, record.commit.revision, record.commit.reason.kind
+        )),
         AgentEvent::InteractionCallbackPending {
             tool_name, args, ..
         } => Some(format!(
@@ -2023,6 +2035,51 @@ mod tests {
 
     fn tool_args(value: Value) -> ToolCallArguments {
         ToolCallArguments::from_value(value).expect("test tool args must be an object")
+    }
+
+    fn rewrite_record_fixture() -> crate::TranscriptRewriteRecord {
+        let parent_messages = vec![crate::types::Message::User(
+            crate::types::UserMessage::with_blocks(vec![ContentBlock::Text {
+                text: "before rewrite".to_string(),
+            }]),
+        )];
+        let revision_messages = vec![crate::types::Message::User(
+            crate::types::UserMessage::with_blocks(vec![ContentBlock::Text {
+                text: "after rewrite".to_string(),
+            }]),
+        )];
+        let parent_revision =
+            crate::transcript_messages_digest(&parent_messages).expect("parent digest");
+        let revision = crate::transcript_messages_digest(&revision_messages).expect("digest");
+        crate::TranscriptRewriteRecord::new(
+            crate::TranscriptRewriteCommit {
+                parent_revision: parent_revision.clone(),
+                revision: revision.clone(),
+                selection: crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                original_span_digest: crate::transcript_messages_digest(&parent_messages)
+                    .expect("original digest"),
+                replacement_digest: crate::transcript_messages_digest(&revision_messages)
+                    .expect("replacement digest"),
+                messages_before: 1,
+                messages_after: 1,
+                reason: crate::TranscriptRewriteReason::new("compaction"),
+                actor: Some("test".to_string()),
+                committed_at: crate::time_compat::SystemTime::now(),
+            },
+            crate::TranscriptRevisionBody {
+                revision: parent_revision,
+                parent_revision: None,
+                messages: parent_messages,
+                created_at: crate::time_compat::SystemTime::now(),
+            },
+            crate::TranscriptRevisionBody {
+                revision,
+                parent_revision: None,
+                messages: revision_messages,
+                created_at: crate::time_compat::SystemTime::now(),
+            },
+        )
+        .expect("rewrite record should validate")
     }
 
     #[test]
@@ -2503,6 +2560,10 @@ mod tests {
                 BackgroundJobTerminalStatus::Completed,
                 "exit_code: 0",
             ),
+            AgentEvent::TranscriptRewriteCommitted {
+                session_id: SessionId::new(),
+                record: rewrite_record_fixture(),
+            },
         ];
 
         for event in events {
@@ -3129,6 +3190,10 @@ mod tests {
                 BackgroundJobTerminalStatus::Completed,
                 "exit_code: 0",
             ),
+            AgentEvent::TranscriptRewriteCommitted {
+                session_id: SessionId::new(),
+                record: rewrite_record_fixture(),
+            },
         ];
 
         let expected_event_count = events.len();

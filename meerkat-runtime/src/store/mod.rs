@@ -35,6 +35,9 @@ pub enum RuntimeStoreError {
     /// Operation is not supported by this store implementation.
     #[error("Unsupported store operation: {0}")]
     Unsupported(String),
+    /// Runtime snapshot CAS rejected a stale transcript rewrite.
+    #[error("Transcript revision conflict: expected {expected}, actual {actual}")]
+    TranscriptRevisionConflict { expected: String, actual: String },
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -131,6 +134,23 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
         session_delta: SessionDelta,
     ) -> Result<(), RuntimeStoreError>;
+
+    /// Atomically persist a same-session transcript rewrite snapshot.
+    ///
+    /// Store implementations that support transcript edits must compare the
+    /// currently persisted session transcript revision with `commit.parent_revision`
+    /// inside the same lock or transaction that writes `session_delta`.
+    async fn commit_session_transcript_rewrite_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        commit: &meerkat_core::TranscriptRewriteCommit,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = (runtime_id, session_delta, commit);
+        Err(RuntimeStoreError::Unsupported(
+            "commit_session_transcript_rewrite_snapshot".into(),
+        ))
+    }
 
     /// Atomically persist session delta + receipt + input state updates.
     ///

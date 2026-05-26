@@ -114,6 +114,8 @@ from .types import (
     SessionAssistantBlock,
     SessionForkResult,
     SessionHistory,
+    SessionTranscriptRevision,
+    SessionTranscriptRewriteResult,
     SessionSummary,
     SessionMessage,
     SessionToolCall,
@@ -126,6 +128,8 @@ from .types import (
     StoredMobProfile,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
+    TranscriptRewriteReason,
+    TranscriptRewriteSelection,
     WorkGraphEventFilter,
     WorkGraphEventsResult,
     WorkGraphItemFilter,
@@ -1002,6 +1006,25 @@ class MeerkatClient:
         raw = await self._request("session/history", params)
         return self._parse_session_history(raw)
 
+    async def read_session_transcript_revision(
+        self,
+        session_id: str,
+        revision: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevision:
+        """Read paginated transcript history for a retained revision."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "revision": revision,
+            "offset": offset,
+        }
+        if limit is not None:
+            params["limit"] = limit
+        raw = await self._request("session/transcript_revision", params)
+        return self._parse_session_transcript_revision(raw)
+
     async def fork_session_at(
         self,
         session_id: str,
@@ -1037,6 +1060,58 @@ class MeerkatClient:
             params["running_behavior"] = running_behavior
         raw = await self._request("session/fork_replace", params)
         return self._parse_session_fork_result(raw)
+
+    async def rewrite_session_transcript(
+        self,
+        session_id: str,
+        selection: TranscriptRewriteSelection,
+        replacement: list[dict[str, Any]],
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed same-session transcript rewrite."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "selection": selection,
+            "replacement": replacement,
+            "reason": reason,
+        }
+        if actor is not None:
+            params["actor"] = actor
+        if expected_parent_revision is not None:
+            params["expected_parent_revision"] = expected_parent_revision
+        if running_behavior is not None:
+            params["running_behavior"] = running_behavior
+        raw = await self._request("session/rewrite_transcript", params)
+        return self._parse_session_transcript_rewrite_result(raw)
+
+    async def restore_session_transcript_revision(
+        self,
+        session_id: str,
+        revision: str,
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed rewrite that restores a retained transcript revision."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "revision": revision,
+            "reason": reason,
+        }
+        if actor is not None:
+            params["actor"] = actor
+        if expected_parent_revision is not None:
+            params["expected_parent_revision"] = expected_parent_revision
+        if running_behavior is not None:
+            params["running_behavior"] = running_behavior
+        raw = await self._request("session/restore_transcript_revision", params)
+        return self._parse_session_transcript_rewrite_result(raw)
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
         raw = await self._request("blob/get", {"blob_id": blob_id})
@@ -3395,12 +3470,43 @@ class MeerkatClient:
         )
 
     @staticmethod
+    def _parse_session_transcript_revision(
+        data: dict[str, Any],
+    ) -> SessionTranscriptRevision:
+        return SessionTranscriptRevision(
+            session_id=data.get("session_id", ""),
+            session_ref=data.get("session_ref"),
+            revision=str(data.get("revision", "")),
+            head_revision=str(data.get("head_revision", "")),
+            message_count=data.get("message_count", 0),
+            offset=data.get("offset", 0),
+            limit=data.get("limit"),
+            has_more=bool(data.get("has_more", False)),
+            messages=[
+                MeerkatClient._parse_session_message(message)
+                for message in data.get("messages", [])
+            ],
+        )
+
+    @staticmethod
     def _parse_session_fork_result(data: dict[str, Any]) -> SessionForkResult:
         return SessionForkResult(
             source_session_id=str(data.get("source_session_id", "")),
             session_id=str(data.get("session_id", "")),
             session_ref=data.get("session_ref"),
             message_count=MeerkatClient._parse_int(data.get("message_count"), 0),
+        )
+
+    @staticmethod
+    def _parse_session_transcript_rewrite_result(
+        data: dict[str, Any],
+    ) -> SessionTranscriptRewriteResult:
+        return SessionTranscriptRewriteResult(
+            session_id=str(data.get("session_id", "")),
+            parent_revision=str(data.get("parent_revision", "")),
+            revision=str(data.get("revision", "")),
+            message_count=MeerkatClient._parse_int(data.get("message_count"), 0),
+            commit=dict(data.get("commit") or {}),
         )
 
     @staticmethod

@@ -128,6 +128,8 @@ import type {
   SessionListOptions,
   SessionMessage,
   SessionOptions,
+  SessionTranscriptRevision,
+  SessionTranscriptRewriteResult,
   SessionToolCall,
   SessionToolResult,
   SkillKey,
@@ -137,6 +139,9 @@ import type {
   SpawnSpec,
   TranscriptEditOptions,
   TranscriptReplacement,
+  TranscriptRewriteOptions,
+  TranscriptRewriteReason,
+  TranscriptRewriteSelection,
   UpdateScheduleRequest,
   TurnOptions,
   Usage,
@@ -786,6 +791,23 @@ export class MeerkatClient {
     return MeerkatClient.parseSessionHistory(raw);
   }
 
+  async readSessionTranscriptRevision(
+    sessionId: string,
+    revision: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevision> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      revision,
+      offset: options?.offset ?? 0,
+    };
+    if (options?.limit !== undefined) {
+      params.limit = options.limit;
+    }
+    const raw = await this.request("session/transcript_revision", params);
+    return MeerkatClient.parseSessionTranscriptRevision(raw);
+  }
+
   async forkSessionAt(
     sessionId: string,
     messageIndex: number,
@@ -818,6 +840,56 @@ export class MeerkatClient {
     }
     const raw = await this.request("session/fork_replace", params);
     return MeerkatClient.parseSessionForkResult(raw);
+  }
+
+  async rewriteSessionTranscript(
+    sessionId: string,
+    selection: TranscriptRewriteSelection,
+    replacement: readonly Record<string, unknown>[],
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      selection,
+      replacement,
+      reason,
+    };
+    if (options?.actor !== undefined) {
+      params.actor = options.actor;
+    }
+    if (options?.expectedParentRevision !== undefined) {
+      params.expected_parent_revision = options.expectedParentRevision;
+    }
+    if (options?.runningBehavior !== undefined) {
+      params.running_behavior = options.runningBehavior;
+    }
+    const raw = await this.request("session/rewrite_transcript", params);
+    return MeerkatClient.parseSessionTranscriptRewriteResult(raw);
+  }
+
+  async restoreSessionTranscriptRevision(
+    sessionId: string,
+    revision: string,
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      revision,
+      reason,
+    };
+    if (options?.actor !== undefined) {
+      params.actor = options.actor;
+    }
+    if (options?.expectedParentRevision !== undefined) {
+      params.expected_parent_revision = options.expectedParentRevision;
+    }
+    if (options?.runningBehavior !== undefined) {
+      params.running_behavior = options.runningBehavior;
+    }
+    const raw = await this.request("session/restore_transcript_revision", params);
+    return MeerkatClient.parseSessionTranscriptRewriteResult(raw);
   }
 
   // -- Capabilities -------------------------------------------------------
@@ -3611,12 +3683,43 @@ export class MeerkatClient {
     };
   }
 
+  static parseSessionTranscriptRevision(
+    data: Record<string, unknown>,
+  ): SessionTranscriptRevision {
+    const rawMessages = Array.isArray(data.messages)
+      ? (data.messages as Array<Record<string, unknown>>)
+      : [];
+    return {
+      sessionId: String(data.session_id ?? ""),
+      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
+      revision: String(data.revision ?? ""),
+      headRevision: String(data.head_revision ?? ""),
+      messageCount: Number(data.message_count ?? 0),
+      offset: Number(data.offset ?? 0),
+      limit: data.limit != null ? Number(data.limit) : undefined,
+      hasMore: Boolean(data.has_more ?? false),
+      messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
+    };
+  }
+
   static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
     return {
       sourceSessionId: String(data.source_session_id ?? ""),
       sessionId: String(data.session_id ?? ""),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
       messageCount: Number(data.message_count ?? 0),
+    };
+  }
+
+  static parseSessionTranscriptRewriteResult(
+    data: Record<string, unknown>,
+  ): SessionTranscriptRewriteResult {
+    return {
+      sessionId: String(data.session_id ?? ""),
+      parentRevision: String(data.parent_revision ?? ""),
+      revision: String(data.revision ?? ""),
+      messageCount: Number(data.message_count ?? 0),
+      commit: (data.commit ?? {}) as Record<string, unknown>,
     };
   }
 

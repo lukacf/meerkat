@@ -28,6 +28,7 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 dirs = { workspace = true }
+nix = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

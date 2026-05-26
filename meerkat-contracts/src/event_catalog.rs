@@ -38,4 +38,5 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "stream_truncated",
     "tool_config_changed",
     "background_job_completed",
+    "transcript_rewrite_committed",
 ];

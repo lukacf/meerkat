@@ -73,6 +73,27 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/sessions/{id}/transcript-revisions/{revision}",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get retained transcript revision",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/sessions/{id}/rewrite-transcript",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Rewrite current session transcript",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/sessions/{id}/restore-transcript-revision",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Restore retained transcript revision",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/sessions/{id}/interrupt",
             vec![RestOperationDescriptor::new(
                 "post",

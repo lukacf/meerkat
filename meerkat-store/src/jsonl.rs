@@ -7,12 +7,23 @@ use crate::index::SqliteSessionIndex;
 use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tokio::task::spawn_blocking;
+
+const SESSION_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const SESSION_WRITE_LOCK_POLL: Duration = Duration::from_millis(10);
+
+struct SessionWriteLock {
+    _lock: Flock<std::fs::File>,
+}
 
 /// File-based session store using JSONL format
 pub struct JsonlStore {
@@ -228,6 +239,58 @@ impl JsonlStore {
     fn metadata_path(&self, id: &SessionId) -> PathBuf {
         self.dir.join(format!("{}.meta", id.0))
     }
+
+    fn session_lock_path(&self, id: &SessionId) -> PathBuf {
+        self.dir.join(format!("{}.lock", id.0))
+    }
+
+    async fn acquire_session_write_lock(
+        &self,
+        id: &SessionId,
+    ) -> Result<SessionWriteLock, StoreError> {
+        self.init().await?;
+        let path = self.session_lock_path(id);
+        let id = id.clone();
+        spawn_blocking(move || -> Result<SessionWriteLock, StoreError> {
+            // The file path is only a rendezvous point; the kernel lock is the
+            // authority, so a stale file left by a crashed process is harmless.
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            let start = Instant::now();
+
+            loop {
+                match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+                    Ok(mut lock) => {
+                        lock.seek(SeekFrom::Start(0))?;
+                        lock.set_len(0)?;
+                        writeln!(lock, "pid={}", std::process::id())?;
+                        lock.sync_all()?;
+                        return Ok(SessionWriteLock { _lock: lock });
+                    }
+                    Err((returned, errno)) if errno == Errno::EWOULDBLOCK => {
+                        file = returned;
+                        if start.elapsed() >= SESSION_WRITE_LOCK_TIMEOUT {
+                            return Err(StoreError::Internal(format!(
+                                "timed out acquiring JSONL session write lock for {id}"
+                            )));
+                        }
+                        std::thread::sleep(SESSION_WRITE_LOCK_POLL);
+                    }
+                    Err((_returned, errno)) => {
+                        return Err(StoreError::Internal(format!(
+                            "failed to acquire JSONL session write lock for {id}: {errno}"
+                        )));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(StoreError::Join)?
+    }
 }
 
 // Private methods return StoreError (preserves internal ? chains).
@@ -348,11 +411,51 @@ impl SessionStore for JsonlStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         // F1 closure (wave-c C-H1): reject shrink-attempts at the trait
         // boundary before the JSONL row is rewritten on disk.
+        let _write_lock = self
+            .acquire_session_write_lock(session.id())
+            .await
+            .map_err(into_session_store_error)?;
         let previous = self
             .load_impl(session.id())
             .await
             .map_err(into_session_store_error)?;
         meerkat_core::session_store::append_only_save_guard(session, previous.as_ref())?;
+        self.save_impl(session)
+            .await
+            .map_err(into_session_store_error)
+    }
+
+    async fn save_transcript_rewrite(
+        &self,
+        session: &Session,
+        commit: &meerkat_core::TranscriptRewriteCommit,
+    ) -> Result<(), SessionStoreError> {
+        let _write_lock = self
+            .acquire_session_write_lock(session.id())
+            .await
+            .map_err(into_session_store_error)?;
+        let previous = self
+            .load_impl(session.id())
+            .await
+            .map_err(into_session_store_error)?;
+        meerkat_core::session_store::transcript_rewrite_save_guard(
+            session,
+            previous.as_ref(),
+            commit,
+        )?;
+        self.save_impl(session)
+            .await
+            .map_err(into_session_store_error)
+    }
+
+    async fn save_authoritative_projection(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionStoreError> {
+        let _write_lock = self
+            .acquire_session_write_lock(session.id())
+            .await
+            .map_err(into_session_store_error)?;
         self.save_impl(session)
             .await
             .map_err(into_session_store_error)
@@ -377,7 +480,10 @@ impl SessionStore for JsonlStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::{Message, UserMessage};
+    use meerkat_core::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptRewriteReason,
+        TranscriptRewriteSelection, UserMessage,
+    };
 
     /// Test that load() returns None for non-existent sessions without blocking
     /// This verifies we use async file operations, not sync Path::exists()
@@ -457,6 +563,30 @@ mod tests {
         let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, *session.id());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_write_lock_allows_stale_lock_file() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        let store = JsonlStore::new(temp_dir.path().to_path_buf());
+        store.init().await?;
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
+        let id = session.id().clone();
+
+        fs::write(store.session_lock_path(&id), "pid=stale\n").await?;
+
+        store.save(&session).await?;
+        let loaded = store.load(&id).await?.expect("session should be saved");
+        assert_eq!(loaded.messages().len(), 1);
+
+        session.push(Message::User(UserMessage::text("again".to_string())));
+        store.save(&session).await?;
+        let loaded = store.load(&id).await?.expect("session should be updated");
+        assert_eq!(loaded.messages().len(), 2);
         Ok(())
     }
 
@@ -627,6 +757,66 @@ mod tests {
             })
             .await?;
         assert_eq!(sessions.len(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_save_transcript_rewrite_rejects_stale_parent_after_intervening_save()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let first = JsonlStore::new(temp_dir.path().to_path_buf());
+        let second = JsonlStore::new(temp_dir.path().to_path_buf());
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "original".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        first.save(&session).await?;
+
+        let mut stale = first
+            .load(session.id())
+            .await?
+            .expect("session should exist");
+        let mut newer = second
+            .load(session.id())
+            .await?
+            .expect("session should exist");
+        newer.push(Message::User(UserMessage::text("intervening".to_string())));
+        second.save(&newer).await?;
+
+        let commit = stale.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "replacement".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))],
+            TranscriptRewriteReason::new("compaction"),
+            Some("test".to_string()),
+            None,
+        )?;
+
+        let err = first
+            .save_transcript_rewrite(&stale, &commit)
+            .await
+            .expect_err("stale rewrite must not overwrite newer session state");
+        assert!(
+            matches!(err, SessionStoreError::TranscriptRevisionConflict { .. }),
+            "unexpected error: {err}"
+        );
+
+        let saved = first
+            .load(session.id())
+            .await?
+            .expect("session should remain saved");
+        assert_eq!(saved.messages().len(), newer.messages().len());
         Ok(())
     }
 }

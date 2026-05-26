@@ -253,6 +253,18 @@ export interface SessionHistory {
   readonly messages: readonly SessionMessage[];
 }
 
+export interface SessionTranscriptRevision {
+  readonly sessionId: string;
+  readonly sessionRef?: string;
+  readonly revision: string;
+  readonly headRevision: string;
+  readonly messageCount: number;
+  readonly offset: number;
+  readonly limit?: number;
+  readonly hasMore: boolean;
+  readonly messages: readonly SessionMessage[];
+}
+
 /** Behavior for transcript edit requests when the source session has active work. */
 export type TranscriptEditRunningBehavior = "reject";
 
@@ -295,6 +307,36 @@ export type TranscriptReplacement =
   | TranscriptUserContentBlockReplacement
   | TranscriptAssistantBlockReplacement
   | TranscriptToolResultContentBlockReplacement;
+
+/** Concrete transcript selection for same-session rewrite. */
+export interface TranscriptMessageRangeSelection {
+  readonly type: "message_range";
+  readonly start: number;
+  readonly end: number;
+}
+
+export type TranscriptRewriteSelection = TranscriptMessageRangeSelection;
+
+/** Machine-readable reason for a same-session transcript rewrite. */
+export interface TranscriptRewriteReason {
+  readonly kind: string;
+  readonly note?: string;
+}
+
+/** Options for same-session transcript rewrite APIs. */
+export interface TranscriptRewriteOptions extends TranscriptEditOptions {
+  readonly actor?: string;
+  readonly expectedParentRevision?: string;
+}
+
+/** Result of committing a same-session transcript rewrite. */
+export interface SessionTranscriptRewriteResult {
+  readonly sessionId: string;
+  readonly parentRevision: string;
+  readonly revision: string;
+  readonly messageCount: number;
+  readonly commit: Record<string, unknown>;
+}
 
 /** Result of creating a forked transcript branch. */
 export interface SessionForkResult {

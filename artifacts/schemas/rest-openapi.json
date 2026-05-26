@@ -3968,6 +3968,61 @@
         ],
         "type": "object"
       },
+      "RestRestoreSessionTranscriptRevisionRequest": {
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "expected_parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/TranscriptRewriteReason"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "running_behavior": {
+            "$ref": "#/components/schemas/TranscriptEditRunningBehavior"
+          }
+        },
+        "required": [
+          "revision",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestRewriteSessionTranscriptRequest": {
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "expected_parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/TranscriptRewriteReason"
+          },
+          "replacement": {
+            "items": {
+              "$ref": "#/components/schemas/TranscriptRewriteMessage"
+            },
+            "type": "array"
+          },
+          "running_behavior": {
+            "$ref": "#/components/schemas/TranscriptEditRunningBehavior"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/TranscriptRewriteSelection"
+          }
+        },
+        "required": [
+          "selection",
+          "replacement",
+          "reason"
+        ],
+        "type": "object"
+      },
       "RestScheduleToolCallRequest": {
         "properties": {
           "arguments": {
@@ -4948,6 +5003,37 @@
           }
         ]
       },
+      "SessionTranscriptRewriteResult": {
+        "description": "Result of committing a same-session transcript rewrite.",
+        "properties": {
+          "commit": {
+            "$ref": "#/components/schemas/TranscriptRewriteCommit"
+          },
+          "message_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "parent_revision",
+          "revision",
+          "message_count",
+          "commit"
+        ],
+        "title": "SessionTranscriptRewriteResult",
+        "type": "object"
+      },
       "SkillEntry": {
         "description": "Wire representation of a skill entry (for list responses).",
         "properties": {
@@ -5546,6 +5632,25 @@
         ],
         "type": "object"
       },
+      "SystemTime": {
+        "properties": {
+          "nanos_since_epoch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs_since_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "secs_since_epoch",
+          "nanos_since_epoch"
+        ],
+        "type": "object"
+      },
       "TargetBinding": {
         "oneOf": [
           {
@@ -5833,6 +5938,255 @@
         },
         "type": "array",
         "uniqueItems": true
+      },
+      "TranscriptEditRunningBehavior": {
+        "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
+        "oneOf": [
+          {
+            "const": "reject",
+            "description": "Reject the request while the source session is active.",
+            "type": "string"
+          }
+        ],
+        "title": "TranscriptEditRunningBehavior"
+      },
+      "TranscriptRewriteCommit": {
+        "description": "Immutable rewrite commit that advances a session transcript head.",
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed_at": {
+            "$ref": "#/components/schemas/SystemTime"
+          },
+          "messages_after": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages_before": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "original_span_digest": {
+            "type": "string"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/TranscriptRewriteReason"
+          },
+          "replacement_digest": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/TranscriptRewriteSelection"
+          }
+        },
+        "required": [
+          "parent_revision",
+          "revision",
+          "selection",
+          "original_span_digest",
+          "replacement_digest",
+          "messages_before",
+          "messages_after",
+          "reason",
+          "committed_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteMessage": {
+        "description": "Public transcript message accepted by same-session rewrite APIs.",
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/WireContentInput"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "assistant",
+                "type": "string"
+              },
+              "stop_reason": {
+                "$ref": "#/components/schemas/WireStopReason",
+                "default": "end_turn"
+              },
+              "tool_calls": {
+                "items": {
+                  "$ref": "#/components/schemas/WireToolCall"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/components/schemas/WireAssistantBlock"
+                },
+                "type": "array"
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "const": "block_assistant",
+                "type": "string"
+              },
+              "stop_reason": {
+                "$ref": "#/components/schemas/WireStopReason",
+                "default": "end_turn"
+              }
+            },
+            "required": [
+              "role",
+              "blocks"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "results": {
+                "items": {
+                  "$ref": "#/components/schemas/WireToolResult"
+                },
+                "type": "array"
+              },
+              "role": {
+                "const": "tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "results"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "TranscriptRewriteMessage"
+      },
+      "TranscriptRewriteReason": {
+        "description": "Machine-readable reason carried with a transcript rewrite commit.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteSelection": {
+        "description": "A concrete transcript span selected for same-session rewrite.",
+        "oneOf": [
+          {
+            "description": "Replace messages in `[start, end)`.",
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TriggerSpec": {
         "oneOf": [
@@ -6155,8 +6509,7 @@
             ],
             "type": "object"
           }
-        ],
-        "title": "WireAssistantBlock"
+        ]
       },
       "WireAuthBindingRef": {
         "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
@@ -7516,6 +7869,64 @@
           "is_active"
         ],
         "title": "WireSessionSummary",
+        "type": "object"
+      },
+      "WireSessionTranscriptRevision": {
+        "description": "Full transcript revision body in canonical wire format.",
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "head_revision": {
+            "type": "string"
+          },
+          "limit": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/WireSessionMessage"
+            },
+            "type": "array"
+          },
+          "offset": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "revision",
+          "head_revision",
+          "message_count",
+          "offset",
+          "has_more",
+          "messages"
+        ],
+        "title": "WireSessionTranscriptRevision",
         "type": "object"
       },
       "WireStopReason": {
@@ -10233,6 +10644,102 @@
         "summary": "Admit a correlated terminal peer response through the typed runtime ingress"
       }
     },
+    "/sessions/{id}/restore-transcript-revision": {
+      "post": {
+        "operationId": "post_sessions_id_restore_transcript_revision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestRestoreSessionTranscriptRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTranscriptRewriteResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Restore retained transcript revision"
+      }
+    },
+    "/sessions/{id}/rewrite-transcript": {
+      "post": {
+        "operationId": "post_sessions_id_rewrite_transcript",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestRewriteSessionTranscriptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTranscriptRewriteResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Rewrite current session transcript"
+      }
+    },
     "/sessions/{id}/status": {
       "get": {
         "operationId": "get_sessions_id_status",
@@ -10317,6 +10824,52 @@
           }
         },
         "summary": "Append system context to a session"
+      }
+    },
+    "/sessions/{id}/transcript-revisions/{revision}": {
+      "get": {
+        "operationId": "get_sessions_id_transcript_revisions_revision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireSessionTranscriptRevision"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Get retained transcript revision"
       }
     },
     "/skills": {

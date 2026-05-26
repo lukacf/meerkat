@@ -31,9 +31,14 @@ import type {
   SessionForkResult,
   SessionHistory,
   SessionIngressOptions,
+  SessionTranscriptRevision,
+  SessionTranscriptRewriteResult,
   SkillRef,
   TranscriptEditOptions,
   TranscriptReplacement,
+  TranscriptRewriteOptions,
+  TranscriptRewriteReason,
+  TranscriptRewriteSelection,
   TurnOptions,
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
@@ -118,6 +123,13 @@ export class Session {
     return this._client.readSessionHistory(this._id, options);
   }
 
+  async transcriptRevision(
+    revision: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevision> {
+    return this._client.readSessionTranscriptRevision(this._id, revision, options);
+  }
+
   async forkAt(
     messageIndex: number,
     options?: TranscriptEditOptions,
@@ -131,6 +143,34 @@ export class Session {
     options?: TranscriptEditOptions,
   ): Promise<SessionForkResult> {
     return this._client.forkSessionReplace(this._id, messageIndex, replacement, options);
+  }
+
+  async rewriteTranscript(
+    selection: TranscriptRewriteSelection,
+    replacement: readonly Record<string, unknown>[],
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    return this._client.rewriteSessionTranscript(
+      this._id,
+      selection,
+      replacement,
+      reason,
+      options,
+    );
+  }
+
+  async restoreTranscriptRevision(
+    revision: string,
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    return this._client.restoreSessionTranscriptRevision(
+      this._id,
+      revision,
+      reason,
+      options,
+    );
   }
 
   async injectContext(
@@ -276,6 +316,13 @@ export class DeferredSession {
     return this._client.readSessionHistory(this._id, options);
   }
 
+  async transcriptRevision(
+    revision: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevision> {
+    return this._client.readSessionTranscriptRevision(this._id, revision, options);
+  }
+
   async forkAt(
     messageIndex: number,
     options?: TranscriptEditOptions,
@@ -289,6 +336,34 @@ export class DeferredSession {
     options?: TranscriptEditOptions,
   ): Promise<SessionForkResult> {
     return this._client.forkSessionReplace(this._id, messageIndex, replacement, options);
+  }
+
+  async rewriteTranscript(
+    selection: TranscriptRewriteSelection,
+    replacement: readonly Record<string, unknown>[],
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    return this._client.rewriteSessionTranscript(
+      this._id,
+      selection,
+      replacement,
+      reason,
+      options,
+    );
+  }
+
+  async restoreTranscriptRevision(
+    revision: string,
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    return this._client.restoreSessionTranscriptRevision(
+      this._id,
+      revision,
+      reason,
+      options,
+    );
   }
 
   async injectContext(

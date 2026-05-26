@@ -132,6 +132,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "SessionForkResult",
         ),
         RpcMethodDescriptor::typed(
+            "session/rewrite_transcript",
+            "Commit a typed same-session transcript rewrite",
+            "RewriteSessionTranscriptParams",
+            "SessionTranscriptRewriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/transcript_revision",
+            "Read a retained immutable transcript revision body",
+            "ReadSessionTranscriptRevisionParams",
+            "WireSessionTranscriptRevision",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/restore_transcript_revision",
+            "Commit a typed rewrite that restores a retained transcript revision",
+            "RestoreSessionTranscriptRevisionParams",
+            "SessionTranscriptRewriteResult",
+        ),
+        RpcMethodDescriptor::typed(
             "session/archive",
             "Remove session",
             "ArchiveSessionParams",

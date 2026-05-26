@@ -323,6 +323,45 @@ export interface TranscriptRewriteReason {
   readonly note?: string;
 }
 
+/** Public transcript message accepted by same-session rewrite APIs. */
+export type TranscriptRewriteMessage =
+  | {
+      readonly role: "system";
+      readonly content: string;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "system_notice";
+      readonly kind: string;
+      readonly body?: string;
+      readonly content?: string;
+      readonly blocks?: readonly Record<string, unknown>[];
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "user";
+      readonly content: ContentInput;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "assistant";
+      readonly content: string;
+      readonly tool_calls?: readonly SessionToolCall[];
+      readonly stop_reason?: string;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "block_assistant";
+      readonly blocks: readonly Record<string, unknown>[];
+      readonly stop_reason?: string;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "tool_results";
+      readonly results: readonly Record<string, unknown>[];
+      readonly created_at?: string;
+    };
+
 /** Options for same-session transcript rewrite APIs. */
 export interface TranscriptRewriteOptions extends TranscriptEditOptions {
   readonly actor?: string;

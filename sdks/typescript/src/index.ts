@@ -141,6 +141,7 @@ export type {
   TranscriptEditRunningBehavior,
   TranscriptMessageReplacement,
   TranscriptReplacement,
+  TranscriptRewriteMessage,
   TranscriptRewriteOptions,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,

@@ -329,6 +329,17 @@ fn validate_transcript_rewrite_record(
             message_count: parent_body.messages.len(),
         });
     }
+    if commit.messages_before != parent_body.messages.len()
+        || commit.messages_after != revision_body.messages.len()
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "commit message counts {} -> {} do not match revision bodies {} -> {}",
+            commit.messages_before,
+            commit.messages_after,
+            parent_body.messages.len(),
+            revision_body.messages.len()
+        )));
+    }
     let original_span_digest = sha256_json_digest(&parent_body.messages[start..end])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if original_span_digest != commit.original_span_digest {
@@ -363,6 +374,25 @@ fn validate_transcript_rewrite_record(
             end: replacement_end,
             message_count: revision_body.messages.len(),
         });
+    }
+    let parent_prefix_digest = transcript_messages_digest(&parent_body.messages[..start])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    let revision_prefix_digest = transcript_messages_digest(&revision_body.messages[..start])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    if parent_prefix_digest != revision_prefix_digest {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "rewrite revision changed messages before the selected span".to_string(),
+        ));
+    }
+    let parent_suffix_digest = transcript_messages_digest(&parent_body.messages[end..])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    let revision_suffix_digest =
+        transcript_messages_digest(&revision_body.messages[replacement_end..])
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    if parent_suffix_digest != revision_suffix_digest {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "rewrite revision changed messages after the selected span".to_string(),
+        ));
     }
     let replacement_digest = sha256_json_digest(&revision_body.messages[start..replacement_end])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
@@ -3613,6 +3643,66 @@ mod tests {
                 .transcript_history_state()
                 .expect("history state should decode")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn transcript_rewrite_record_rejects_prefix_or_suffix_tampering() {
+        let mut session = Session::new();
+        session.push(Message::System(SystemMessage::new("keep prefix")));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        session.push(Message::User(UserMessage::text("keep suffix".to_string())));
+
+        let parent_revision = session.transcript_revision().expect("parent revision");
+        let commit = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect("rewrite should commit");
+        let state = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        let parent_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.parent_revision)
+            .expect("parent body retained")
+            .clone();
+        let revision_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.revision)
+            .expect("revision body retained")
+            .clone();
+
+        let mut forged_body = revision_body;
+        forged_body.messages[0] = Message::System(SystemMessage::new("tampered prefix"));
+        forged_body.revision =
+            transcript_messages_digest(&forged_body.messages).expect("forged digest");
+        let mut forged_commit = commit;
+        forged_commit.revision = forged_body.revision.clone();
+        let err = TranscriptRewriteRecord::new(forged_commit, parent_body, forged_body)
+            .expect_err("record validation must reject changes outside selected span");
+        assert!(
+            err.to_string().contains("before the selected span"),
+            "unexpected error: {err}"
         );
     }
 

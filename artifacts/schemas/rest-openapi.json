@@ -6031,6 +6031,40 @@
           },
           {
             "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/components/schemas/SystemNoticeBlock"
+                },
+                "type": "array"
+              },
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SystemNoticeKind"
+              },
+              "role": {
+                "const": "system_notice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "content": {
                 "$ref": "#/components/schemas/WireContentInput"
               },

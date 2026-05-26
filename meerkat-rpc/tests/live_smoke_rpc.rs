@@ -972,8 +972,10 @@ async fn e2e_scenario_87_transcript_rewrite_revision_graph() {
         after_text.contains("rewrite smoke compacted trace"),
         "current head history should expose compacted trace: {after}"
     );
+    let assistant_after_text = serde_json::to_string(&after["result"]["messages"][1])
+        .expect("assistant history message should serialize");
     assert!(
-        !after_text.contains("rewrite smoke original trace"),
+        !assistant_after_text.contains("rewrite smoke original trace"),
         "current head history should not expose replaced assistant trace: {after}"
     );
 

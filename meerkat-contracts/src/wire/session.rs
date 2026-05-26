@@ -28,9 +28,10 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, AssistantMessage, BlobId, BlockAssistantMessage, ContentBlock, ContentInput,
     ImageData, Message, ProviderMeta, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
-    SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind, ToolCall,
-    ToolResult, TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteReason,
-    TranscriptRewriteSelection, TranscriptSource, Usage, UserMessage, VideoData,
+    SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
+    SystemNoticeMessage, ToolCall, ToolResult, TranscriptEditRunningBehavior,
+    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
+    Usage, UserMessage, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -99,6 +100,15 @@ pub struct ForkSessionReplaceParams {
 pub enum TranscriptRewriteMessage {
     System {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+    SystemNotice {
+        kind: SystemNoticeKind,
+        #[serde(default, alias = "content", skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<meerkat_core::SystemNoticeBlock>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
     },
@@ -898,6 +908,17 @@ impl TranscriptRewriteMessage {
                 content,
                 created_at: transcript_message_timestamp(created_at)?,
             })),
+            Self::SystemNotice {
+                kind,
+                body,
+                blocks,
+                created_at,
+            } => Ok(Message::SystemNotice(SystemNoticeMessage {
+                kind,
+                body,
+                blocks,
+                created_at: transcript_message_timestamp(created_at)?,
+            })),
             Self::User {
                 content,
                 created_at,
@@ -1319,6 +1340,45 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 ..
             }) if content == "Compacted assistant trace"
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_session_transcript_accepts_public_system_notice() {
+        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "selection": {
+                "type": "message_range",
+                "start": 0,
+                "end": 1
+            },
+            "replacement": [
+                {
+                    "role": "system_notice",
+                    "kind": "background_job",
+                    "body": "still running"
+                }
+            ],
+            "reason": {
+                "kind": "correction"
+            }
+        }))
+        .unwrap();
+
+        let message = params
+            .replacement
+            .into_iter()
+            .next()
+            .expect("replacement exists")
+            .into_core()
+            .expect("public system notice converts");
+        assert!(matches!(
+            message,
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage {
+                kind: meerkat_core::SystemNoticeKind::BackgroundJob,
+                body: Some(body),
+                ..
+            }) if body == "still running"
         ));
     }
 

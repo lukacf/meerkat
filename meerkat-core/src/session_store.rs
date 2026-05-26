@@ -335,6 +335,44 @@ pub fn transcript_rewrite_save_guard(
             ),
         });
     }
+    let parent_prefix_digest =
+        transcript_messages_digest(&parent_body.messages[..start]).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("parent prefix body is not digestible: {err}"),
+            }
+        })?;
+    let revision_prefix_digest = transcript_messages_digest(&revision_body.messages[..start])
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("revision prefix body is not digestible: {err}"),
+        })?;
+    if parent_prefix_digest != revision_prefix_digest {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "rewrite revision changed messages before the selected span".to_string(),
+        });
+    }
+    let parent_suffix_digest =
+        transcript_messages_digest(&parent_body.messages[end..]).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("parent suffix body is not digestible: {err}"),
+            }
+        })?;
+    let revision_suffix_digest =
+        transcript_messages_digest(&revision_body.messages[replacement_end..]).map_err(|err| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("revision suffix body is not digestible: {err}"),
+            }
+        })?;
+    if parent_suffix_digest != revision_suffix_digest {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "rewrite revision changed messages after the selected span".to_string(),
+        });
+    }
     let replacement_digest = transcript_messages_digest(
         &revision_body.messages[start..replacement_end],
     )

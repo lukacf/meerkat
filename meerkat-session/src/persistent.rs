@@ -1520,13 +1520,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             self.store
                 .save_transcript_rewrite(&session, commit)
                 .await
-                .map_err(|e| SessionError::Store(Box::new(e)))?;
+                .map_err(Self::transcript_rewrite_store_error_to_session_error)?;
         }
         self.append_transcript_rewrite_commit_event(&session, commit)
             .await?;
         self.converge_live_session_after_transcript_rewrite(&session)
             .await?;
         Ok(session)
+    }
+
+    fn transcript_rewrite_store_error_to_session_error(error: SessionStoreError) -> SessionError {
+        match error {
+            SessionStoreError::TranscriptRevisionConflict {
+                expected, actual, ..
+            } => meerkat_core::TranscriptEditError::RevisionConflict { expected, actual }
+                .into_session_error(),
+            other => SessionError::Store(Box::new(other)),
+        }
     }
 
     async fn converge_live_session_after_transcript_rewrite(
@@ -3942,17 +3952,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
     ) -> Result<SessionTranscriptRewriteResult, SessionError> {
         let _ = req.running_behavior;
         let _mutation_guard = self.transcript_edit_mutation_guard(id).await?;
-        let view = self.read(id).await?;
-        if view.state.is_active {
-            return Err(SessionError::Busy { id: id.clone() });
-        }
-        let mut source = self
-            .load_authoritative_session_base(id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        self.reject_if_archived_session(id, &source)
-            .await
-            .map_err(control_error_into_session_error)?;
+        let mut source = self.source_session_for_transcript_edit_locked(id).await?;
         source = self.normalized_session_for_persistence(source).await?;
         let replacement = source
             .transcript_revision_messages(&req.revision)
@@ -4719,6 +4719,59 @@ mod tests {
                 self.release_rewrite_save.notified().await;
             }
             self.inner.save_transcript_rewrite(session, commit).await
+        }
+
+        async fn save_authoritative_projection(
+            &self,
+            session: &Session,
+        ) -> Result<(), SessionStoreError> {
+            self.inner.save_authoritative_projection(session).await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
+    }
+
+    struct ConflictOnTranscriptRewriteStore {
+        inner: MemoryStore,
+    }
+
+    impl ConflictOnTranscriptRewriteStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for ConflictOnTranscriptRewriteStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            self.inner.save(session).await
+        }
+
+        async fn save_transcript_rewrite(
+            &self,
+            session: &Session,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), SessionStoreError> {
+            Err(SessionStoreError::TranscriptRevisionConflict {
+                id: session.id().clone(),
+                expected: commit.parent_revision.clone(),
+                actual: "sha256:stored-head".to_string(),
+            })
         }
 
         async fn save_authoritative_projection(
@@ -8716,6 +8769,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_persistent_rewrite_transcript_maps_store_cas_conflict_to_revision_conflict() {
+        let store: Arc<dyn SessionStore> = Arc::new(ConflictOnTranscriptRewriteStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let parent_revision = store
+            .load(&session_id)
+            .await
+            .expect("load source")
+            .expect("session exists")
+            .transcript_revision()
+            .expect("parent revision");
+
+        let err = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    replacement: vec![Message::BlockAssistant(
+                        meerkat_core::BlockAssistantMessage::new(
+                            vec![AssistantBlock::Text {
+                                text: "replacement".to_string(),
+                                meta: None,
+                            }],
+                            StopReason::EndTurn,
+                        ),
+                    )],
+                    reason: TranscriptRewriteReason::new("correction"),
+                    actor: None,
+                    expected_parent_revision: Some(parent_revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect_err("store CAS conflict must fail");
+
+        assert!(
+            matches!(
+                err,
+                SessionError::Agent(meerkat_core::AgentError::ConfigError(_))
+            ),
+            "store CAS conflict should surface as typed revision conflict, not store/internal: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("parent revision mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_persistent_rewrite_transcript_excludes_runtime_turn_admission_until_commit_finishes()
      {
         let pausing_store = Arc::new(PausingTranscriptRewriteStore::new());
@@ -9775,6 +9888,107 @@ mod tests {
             Message::Assistant(assistant)
                 if assistant.content == "event replay second compacted trace"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_transcript_rewrite_replay_materializes_projection_before_restore() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let stale_projection = store
+            .load(&session_id)
+            .await
+            .expect("load stale projection")
+            .expect("session exists before rewrite");
+        let parent_revision = stale_projection
+            .transcript_revision()
+            .expect("parent revision should digest");
+
+        let first = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
+                        content: "event replay compacted trace".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: Some("replay-restore-test".to_string()),
+                    expected_parent_revision: Some(parent_revision.clone()),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("first rewrite should commit");
+
+        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        recovery_store
+            .save(&stale_projection)
+            .await
+            .expect("seed stale projection");
+        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
+        let recovery_service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&recovery_store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store.clone(),
+            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
+        );
+
+        let restored = recovery_service
+            .restore_session_transcript_revision(
+                &session_id,
+                SessionTranscriptRestoreRevisionRequest {
+                    revision: parent_revision.clone(),
+                    reason: TranscriptRewriteReason::new("restore"),
+                    actor: Some("replay-restore-test".to_string()),
+                    expected_parent_revision: Some(first.revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("replay-recovered projection should be a valid parent for restore");
+
+        assert_eq!(restored.revision, parent_revision);
+        let saved = recovery_store
+            .load(&session_id)
+            .await
+            .expect("load recovered store")
+            .expect("recovered session exists");
+        assert_eq!(
+            saved.transcript_revision().expect("saved revision"),
+            restored.revision
+        );
+        assert_eq!(
+            serde_json::to_value(saved.messages()).expect("saved messages serialize"),
+            serde_json::to_value(stale_projection.messages()).expect("stale messages serialize")
+        );
     }
 
     #[tokio::test]

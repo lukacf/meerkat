@@ -9376,6 +9376,17 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "BackgroundJobTerminalStatus": {
+        "enum": [
+          "completed",
+          "failed",
+          "aborted",
+          "cancelled",
+          "retired",
+          "terminated"
+        ],
+        "type": "string"
+      },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
@@ -9395,6 +9406,160 @@
           "media_type"
         ],
         "type": "object"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "DeferredCatalogDelta": {
+        "description": "Additive hidden-catalog delta metadata for runtime notices.",
+        "properties": {
+          "added_hidden_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pending_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "removed_hidden_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ExternalToolDeltaPhase": {
+        "description": "Canonical lifecycle phase for external-tool boundary deltas.",
+        "enum": [
+          "pending",
+          "applied",
+          "draining",
+          "forced",
+          "failed"
+        ],
+        "type": "string"
       },
       "GeminiImageMetadata": {
         "properties": {
@@ -9562,6 +9727,527 @@
         ],
         "type": "string"
       },
+      "SystemNoticeBlock": {
+        "description": "Typed runtime-authored transcript metadata.\n\nThese blocks are the durable contract for comms, tool/MCP state, auth,\nbackground work, and other runtime facts. They are never user-authored text.",
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "direction": {
+                "$ref": "#/$defs/SystemNoticeDirection"
+              },
+              "intent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string"
+              },
+              "payload": true,
+              "peer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SystemNoticePeer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "comms",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind",
+              "direction"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "source": {
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "source",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ToolConfigChangedPayload"
+              },
+              "type": {
+                "const": "tool_config",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolConfigChangeOperation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pending_sources": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "persisted": {
+                "default": false,
+                "type": "boolean"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExternalToolDeltaPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "server_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "mcp",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "display_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/BackgroundJobTerminalStatus"
+              },
+              "type": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "job_id",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "binding": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              },
+              "type": {
+                "const": "auth",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "category": {
+                "type": "string"
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "payload": true,
+              "type": {
+                "const": "runtime_notice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "category"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": true,
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SystemNoticeDirection": {
+        "description": "Direction for runtime-authored communication metadata.",
+        "enum": [
+          "incoming",
+          "outgoing",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "SystemNoticeKind": {
+        "description": "Typed system notice content carried in the transcript.",
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "comms",
+              "external_event",
+              "mcp_pending",
+              "mcp",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
+      },
+      "SystemNoticePeer": {
+        "description": "Peer identity carried in a typed comms transcript block.",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "ToolConfigChangeDomain": {
+        "description": "Optional typed domain for tool-configuration change payloads.",
+        "enum": [
+          "tool_scope",
+          "deferred_catalog"
+        ],
+        "type": "string"
+      },
+      "ToolConfigChangeOperation": {
+        "description": "Operation kind for live tool configuration changes.",
+        "enum": [
+          "add",
+          "remove",
+          "reload"
+        ],
+        "type": "string"
+      },
+      "ToolConfigChangeStatus": {
+        "description": "Structured status data for live tool configuration change notifications.",
+        "oneOf": [
+          {
+            "properties": {
+              "base_changed": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "boundary_applied",
+                "type": "string"
+              },
+              "revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "visible_changed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "base_changed",
+              "visible_changed",
+              "revision"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "added_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "deferred_catalog_delta",
+                "type": "string"
+              },
+              "pending_source_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "added_hidden_count",
+              "removed_hidden_count",
+              "pending_source_count"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "warning_failed_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "external_tool_delta",
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/$defs/ExternalToolDeltaPhase"
+              }
+            },
+            "required": [
+              "kind",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "legacy_status",
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "status"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolConfigChangedPayload": {
+        "description": "Payload for tool configuration change notifications.",
+        "properties": {
+          "applied_at_turn": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "deferred_catalog_delta": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DeferredCatalogDelta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeDomain"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation": {
+            "$ref": "#/$defs/ToolConfigChangeOperation"
+          },
+          "persisted": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_info": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "target",
+          "status",
+          "persisted"
+        ],
+        "type": "object"
+      },
       "TranscriptEditRunningBehavior": {
         "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
         "oneOf": [
@@ -9594,6 +10280,40 @@
             "required": [
               "role",
               "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/$defs/SystemNoticeBlock"
+                },
+                "type": "array"
+              },
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/SystemNoticeKind"
+              },
+              "role": {
+                "const": "system_notice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "kind"
             ],
             "type": "object"
           },

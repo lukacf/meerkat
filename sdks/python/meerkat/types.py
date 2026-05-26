@@ -808,6 +808,59 @@ class TranscriptRewriteReason(TypedDict):
     note: NotRequired[str]
 
 
+class TranscriptRewriteSystemMessage(TypedDict):
+    role: Literal["system"]
+    content: str
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteSystemNoticeMessage(TypedDict):
+    role: Literal["system_notice"]
+    kind: str
+    body: NotRequired[str]
+    content: NotRequired[str]
+    blocks: NotRequired[list[dict[str, Any]]]
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteUserMessage(TypedDict):
+    role: Literal["user"]
+    content: ContentInput
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteAssistantMessage(TypedDict):
+    role: Literal["assistant"]
+    content: str
+    tool_calls: NotRequired[list[dict[str, Any]]]
+    stop_reason: NotRequired[str]
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteBlockAssistantMessage(TypedDict):
+    role: Literal["block_assistant"]
+    blocks: list[dict[str, Any]]
+    stop_reason: NotRequired[str]
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteToolResultsMessage(TypedDict):
+    role: Literal["tool_results"]
+    results: list[dict[str, Any]]
+    created_at: NotRequired[str]
+
+
+TranscriptRewriteMessage = (
+    TranscriptRewriteSystemMessage
+    | TranscriptRewriteSystemNoticeMessage
+    | TranscriptRewriteUserMessage
+    | TranscriptRewriteAssistantMessage
+    | TranscriptRewriteBlockAssistantMessage
+    | TranscriptRewriteToolResultsMessage
+)
+"""Public transcript message accepted by same-session rewrite APIs."""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionForkResult:
     """Result of creating a forked transcript branch."""

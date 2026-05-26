@@ -139,6 +139,7 @@ import type {
   SpawnSpec,
   TranscriptEditOptions,
   TranscriptReplacement,
+  TranscriptRewriteMessage,
   TranscriptRewriteOptions,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,
@@ -845,7 +846,7 @@ export class MeerkatClient {
   async rewriteSessionTranscript(
     sessionId: string,
     selection: TranscriptRewriteSelection,
-    replacement: readonly Record<string, unknown>[],
+    replacement: readonly TranscriptRewriteMessage[],
     reason: TranscriptRewriteReason,
     options?: TranscriptRewriteOptions,
   ): Promise<SessionTranscriptRewriteResult> {

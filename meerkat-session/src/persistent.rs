@@ -288,7 +288,100 @@ struct StoreCheckpointer {
     store: Arc<dyn SessionStore>,
     blob_store: Arc<dyn BlobStore>,
     gate: Arc<CheckpointerGate>,
-    last_saved_len: std::sync::atomic::AtomicUsize,
+    last_saved_revision: std::sync::Mutex<Option<String>>,
+}
+
+fn session_materialized_at_transcript_revision(
+    session: &Session,
+    revision: &str,
+) -> Result<Session, SessionError> {
+    let mut state = session
+        .transcript_history_state()
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to read transcript history for materialization: {err}"
+            )))
+        })?
+        .ok_or_else(|| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "session has no transcript history state to materialize".to_string(),
+            ))
+        })?;
+    state.head = revision.to_string();
+    let mut materialized = session.clone();
+    materialized
+        .apply_transcript_history_state(state)
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to materialize transcript revision {revision}: {err}"
+            )))
+        })?;
+    Ok(materialized)
+}
+
+async fn save_session_projection_allowing_internal_rewrite(
+    store: &dyn SessionStore,
+    session: &Session,
+) -> Result<(), SessionError> {
+    let previous = store
+        .load(session.id())
+        .await
+        .map_err(|err| SessionError::Store(Box::new(err)))?;
+    let Some(previous) = previous else {
+        return store
+            .save(session)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)));
+    };
+    let previous_revision =
+        meerkat_core::transcript_messages_digest(previous.messages()).map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to digest previous transcript for projection save: {err}"
+            )))
+        })?;
+    let incoming_revision =
+        meerkat_core::transcript_messages_digest(session.messages()).map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to digest incoming transcript for projection save: {err}"
+            )))
+        })?;
+    let Some(state) = session.transcript_history_state().map_err(|err| {
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+            "failed to read transcript history for projection save: {err}"
+        )))
+    })?
+    else {
+        return store
+            .save(session)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)));
+    };
+    let Some(commit) = meerkat_core::session_store::find_transcript_rewrite_commit_extending(
+        &state,
+        &previous_revision,
+        &incoming_revision,
+    )
+    .cloned() else {
+        return store
+            .save(session)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)));
+    };
+    if commit.revision == incoming_revision {
+        return store
+            .save_transcript_rewrite(session, &commit)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)));
+    }
+    let rewritten = session_materialized_at_transcript_revision(session, &commit.revision)?;
+    store
+        .save_transcript_rewrite(&rewritten, &commit)
+        .await
+        .map_err(|err| SessionError::Store(Box::new(err)))?;
+    store
+        .save(session)
+        .await
+        .map_err(|err| SessionError::Store(Box::new(err)))
 }
 
 #[async_trait]
@@ -298,11 +391,18 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
         if *guard {
             return;
         }
-        let current_len = session.messages().len();
-        let prev_len = self
-            .last_saved_len
-            .load(std::sync::atomic::Ordering::Acquire);
-        if current_len == prev_len {
+        let current_revision = match meerkat_core::transcript_messages_digest(session.messages()) {
+            Ok(revision) => revision,
+            Err(error) => {
+                tracing::warn!("Host-mode checkpoint transcript digest failed: {error}");
+                return;
+            }
+        };
+        if self
+            .last_saved_revision
+            .lock()
+            .is_ok_and(|revision| revision.as_ref() == Some(&current_revision))
+        {
             return;
         }
         let mut persisted = session.clone();
@@ -325,11 +425,12 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
                 return;
             }
         }
-        if let Err(e) = self.store.save(&persisted).await {
+        if let Err(e) =
+            save_session_projection_allowing_internal_rewrite(self.store.as_ref(), &persisted).await
+        {
             tracing::warn!("Host-mode checkpoint failed: {e}");
-        } else {
-            self.last_saved_len
-                .store(current_len, std::sync::atomic::Ordering::Release);
+        } else if let Ok(mut last_saved_revision) = self.last_saved_revision.lock() {
+            *last_saved_revision = Some(current_revision);
         }
         drop(guard);
     }
@@ -705,8 +806,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .load_authoritative_session_base_with_replay_info(id)
             .await?;
         if let Some(session) = session.as_ref() {
-            self.backfill_transcript_rewrite_audit_events(session)
-                .await?;
+            self.verify_transcript_rewrite_audit_events(session).await?;
         }
         Ok(session)
     }
@@ -814,26 +914,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         })
     }
 
-    async fn backfill_transcript_rewrite_audit_events(
+    async fn verify_transcript_rewrite_audit_events(
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
-        let recovery_gate = self.recovery_gate_for_session(session.id()).await;
-        let Ok(_backfill_guard) = recovery_gate.try_lock_owned() else {
-            return Ok(());
-        };
-        self.backfill_transcript_rewrite_audit_events_locked(session, false)
+        self.verify_transcript_rewrite_audit_events_locked(session)
             .await
     }
 
-    async fn backfill_transcript_rewrite_audit_events_locked(
+    async fn verify_transcript_rewrite_audit_events_locked(
         &self,
         session: &Session,
-        fail_on_append_error: bool,
     ) -> Result<(), SessionError> {
-        let Some(event_store) = self.event_store.as_ref() else {
+        if self.event_store.is_none() {
             return Ok(());
-        };
+        }
         let Some(state) = session.transcript_history_state().map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to read transcript history for session {}: {err}",
@@ -862,44 +957,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .filter(|commit| !existing_commits.contains(commit))
             .cloned()
             .collect::<Vec<_>>();
-        if missing_commits.is_empty() {
-            return Ok(());
-        }
-
-        let mut events = Vec::with_capacity(missing_commits.len());
-        for commit in &missing_commits {
-            events.push(
-                meerkat_core::event::AgentEvent::TranscriptRewriteCommitted {
-                    session_id: session.id().clone(),
-                    record: self.transcript_rewrite_record(session, commit)?,
-                },
-            );
-        }
-
-        let seq = match event_store.append(session.id(), &events).await {
-            Ok(seq) => seq,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %session.id(),
-                    missing_rewrite_events = missing_commits.len(),
-                    error = %error,
-                    "failed to backfill transcript rewrite audit events from durable session graph"
-                );
-                if fail_on_append_error {
-                    return Err(SessionError::Store(Box::new(error)));
-                }
-                return Ok(());
-            }
-        };
-        if let Some(projector) = self.projector.as_ref()
-            && let Err(error) = projector.resume(event_store.as_ref(), session.id()).await
-        {
-            tracing::warn!(
-                session_id = %session.id(),
-                seq,
-                error = %error,
-                "failed to project backfilled transcript rewrite audit events"
-            );
+        if !missing_commits.is_empty() {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "session {} has transcript rewrite graph commits without canonical audit events",
+                    session.id()
+                )),
+            ));
         }
         Ok(())
     }
@@ -1490,7 +1554,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     self.persist_replayed_transcript_projection_for_mutation(&session)
                         .await?;
                 }
-                self.backfill_transcript_rewrite_audit_events_locked(&session, true)
+                self.verify_transcript_rewrite_audit_events_locked(&session)
                     .await?;
                 session
             }
@@ -1624,13 +1688,48 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await);
             }
         } else {
-            self.store
-                .save_transcript_rewrite(&session, commit)
-                .await
-                .map_err(Self::transcript_rewrite_store_error_to_session_error)?;
+            let incoming_revision = meerkat_core::transcript_messages_digest(session.messages())
+                .map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to digest incoming transcript rewrite snapshot: {err}"
+                    )))
+                })?;
+            if incoming_revision == commit.revision {
+                self.store
+                    .save_transcript_rewrite(&session, commit)
+                    .await
+                    .map_err(Self::transcript_rewrite_store_error_to_session_error)?;
+            } else {
+                let rewritten =
+                    session_materialized_at_transcript_revision(&session, &commit.revision)?;
+                self.store
+                    .save_transcript_rewrite(&rewritten, commit)
+                    .await
+                    .map_err(Self::transcript_rewrite_store_error_to_session_error)?;
+                self.store
+                    .save(&session)
+                    .await
+                    .map_err(|err| SessionError::Store(Box::new(err)))?;
+            }
         }
-        self.append_transcript_rewrite_commit_event(&session, commit)
-            .await?;
+        if let Err(error) = self
+            .append_transcript_rewrite_commit_event(&session, commit)
+            .await
+        {
+            if self.runtime_store.is_some() {
+                match self.discard_live_session(session.id()).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(discard_error) => {
+                        tracing::warn!(
+                            session_id = %session.id(),
+                            error = %discard_error,
+                            "failed to discard live session after transcript rewrite audit append failure"
+                        );
+                    }
+                }
+            }
+            return Err(error);
+        }
         if converge_live {
             self.converge_live_session_after_transcript_rewrite(&session)
                 .await?;
@@ -1704,13 +1803,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         {
             Ok(seq) => seq,
             Err(error) => {
-                tracing::warn!(
+                tracing::error!(
                     session_id = %session.id(),
                     revision = %commit.revision,
                     error = %error,
-                    "failed to publish transcript rewrite audit event after durable rewrite commit"
+                    "failed to publish canonical transcript rewrite audit event after durable rewrite commit"
                 );
-                return Ok(());
+                return Err(SessionError::Store(Box::new(error)));
             }
         };
         if let Some(projector) = self.projector.as_ref()
@@ -1852,7 +1951,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub async fn persist_live_session_now(&self, id: &SessionId) -> Result<usize, SessionError> {
         let _mutation_guard = self.live_persist_mutation_guard(id).await?;
-        self.persist_full_session(id).await
+        self.persist_full_session(id)
+            .await
+            .map(|(message_count, _revision)| message_count)
     }
 
     pub async fn dispatch_external_tool_call(
@@ -2551,14 +2652,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         else {
             return Ok(None);
         };
-        Ok(state
-            .commits
-            .iter()
-            .rev()
-            .find(|commit| {
-                commit.parent_revision == previous_revision && commit.revision == incoming_revision
-            })
-            .cloned())
+        Ok(
+            meerkat_core::session_store::find_transcript_rewrite_commit_extending(
+                &state,
+                &previous_revision,
+                &incoming_revision,
+            )
+            .cloned(),
+        )
     }
 
     fn incoming_extends_previous_transcript(
@@ -3501,7 +3602,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             store: Arc::clone(&self.store),
             blob_store: Arc::clone(&self.blob_store),
             gate: Arc::clone(&gate),
-            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+            last_saved_revision: std::sync::Mutex::new(None),
         });
         let (resume_session_id, resume_session) = {
             let build = req.build.get_or_insert_with(Default::default);
@@ -3577,12 +3678,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // Persist the full session snapshot (messages + metadata) after first
         // turn and seed the checkpointer so the next keep-alive checkpoint is
         // skipped if the session hasn't changed since this save.
-        let saved_len = self
+        let saved_revision = self
             .persist_full_session_or_discard_live(&result.session_id)
             .await?;
-        checkpointer
-            .last_saved_len
-            .store(saved_len, std::sync::atomic::Ordering::Release);
+        if let Ok(mut last_saved_revision) = checkpointer.last_saved_revision.lock() {
+            *last_saved_revision = Some(saved_revision);
+        }
 
         Ok(result)
     }
@@ -4690,21 +4791,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Export the full session from the live task and persist it to the store.
     ///
-    /// Returns the saved message count so callers can seed a checkpointer's
-    /// `last_saved_len` without a second export round-trip.
-    async fn persist_full_session(&self, id: &SessionId) -> Result<usize, SessionError> {
+    /// Returns the saved transcript digest so callers can seed a checkpointer
+    /// without a second export round-trip.
+    async fn persist_full_session(&self, id: &SessionId) -> Result<(usize, String), SessionError> {
         let session = self.export_session_with_labels(id).await?;
         let persisted = self.save_normalized_session(session).await?;
         let message_count = persisted.messages().len();
-        Ok(message_count)
+        let revision =
+            meerkat_core::transcript_messages_digest(persisted.messages()).map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to digest persisted transcript for checkpoint seed: {err}"
+                )))
+            })?;
+        Ok((message_count, revision))
     }
 
     async fn persist_full_session_or_discard_live(
         &self,
         id: &SessionId,
-    ) -> Result<usize, SessionError> {
+    ) -> Result<String, SessionError> {
         match self.persist_full_session(id).await {
-            Ok(message_count) => Ok(message_count),
+            Ok((_message_count, revision)) => Ok(revision),
             Err(error) => {
                 match self.discard_live_session(id).await {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
@@ -7030,7 +7137,7 @@ mod tests {
             store: Arc::clone(&store),
             blob_store: memory_blob_store(),
             gate,
-            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+            last_saved_revision: std::sync::Mutex::new(None),
         };
 
         let mut session = Session::new();
@@ -7063,7 +7170,7 @@ mod tests {
             store: Arc::clone(&store),
             blob_store: memory_blob_store(),
             gate: Arc::clone(&gate),
-            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+            last_saved_revision: std::sync::Mutex::new(None),
         };
 
         let mut session = Session::new();
@@ -7103,7 +7210,7 @@ mod tests {
             store: Arc::clone(&store),
             blob_store: memory_blob_store(),
             gate,
-            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+            last_saved_revision: std::sync::Mutex::new(None),
         };
 
         let mut session = Session::new();
@@ -9367,7 +9474,7 @@ mod tests {
             .transcript_revision()
             .expect("parent revision");
 
-        let rewrite = service
+        let rewrite_err = service
             .rewrite_session_transcript(
                 &session_id,
                 meerkat_core::SessionTranscriptRewriteRequest {
@@ -9386,77 +9493,106 @@ mod tests {
                 },
             )
             .await
-            .expect("durable rewrite commit should not be reported failed by audit outage");
+            .expect_err(
+                "rewrite must fail closed when the canonical audit event cannot be appended",
+            );
+        assert!(
+            rewrite_err
+                .to_string()
+                .contains("synthetic transcript rewrite audit append failure"),
+            "unexpected error: {rewrite_err}"
+        );
 
         assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 0);
-        let saved = store
+        let raw_saved = store
             .load(&session_id)
             .await
-            .expect("load after rewrite")
-            .expect("session exists");
-        assert_eq!(
-            saved.transcript_revision().expect("saved revision"),
-            rewrite.revision
-        );
+            .expect("raw load after failed audit append")
+            .expect("session projection remains present");
         assert!(matches!(
-            &saved.messages()[1],
+            &raw_saved.messages()[1],
             Message::Assistant(assistant)
                 if assistant.content == "compact answer despite audit outage"
         ));
-
-        let second_err = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
-                        content: "second compact answer must wait for audit backfill".to_string(),
-                        tool_calls: Vec::new(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    })],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("audit-failure-test".to_string()),
-                    expected_parent_revision: Some(rewrite.revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err("new rewrites must fail closed while prior audit backfill fails");
-        assert!(
-            second_err
-                .to_string()
-                .contains("synthetic transcript rewrite audit append failure"),
-            "unexpected error: {second_err}"
-        );
-
-        event_store.allow_appends();
-        let recovered = service
+        let read_err = service
             .read_history(&session_id, SessionHistoryQuery::default())
             .await
-            .expect("read after audit store recovery should succeed");
-        assert_eq!(recovered.message_count, saved.messages().len());
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 1);
-        let backfilled = service
-            .event_log_read_from(&session_id, 1)
+            .expect_err("missing canonical rewrite event must not be backfilled from metadata");
+        assert!(
+            read_err
+                .to_string()
+                .contains("without canonical audit events"),
+            "unexpected error: {read_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persistent_internal_rewrite_then_append_persists_bridged_head() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
             .await
-            .expect("event log should read")
-            .expect("event projection installed");
-        assert!(backfilled.iter().any(|stored| matches!(
-            &stored.event,
-            AgentEvent::TranscriptRewriteCommitted { record, .. }
-                if record.commit.revision == rewrite.revision
-        )));
-        let events_path = dir
-            .path()
-            .join(".rkat")
-            .join("sessions")
-            .join(session_id.to_string())
-            .join("events.jsonl");
-        let projected =
-            read_projected_events_after(&events_path, "transcript_rewrite_committed").await;
-        assert!(projected.contains(&rewrite.revision));
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let original = store
+            .load(&session_id)
+            .await
+            .expect("load original")
+            .expect("session exists");
+        let parent_revision = original.transcript_revision().expect("parent revision");
+
+        let mut incoming = original.clone();
+        incoming
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(meerkat_core::AssistantMessage {
+                    content: "internal compact answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .expect("internal rewrite should commit");
+        incoming.push(Message::User(UserMessage::text("follow-up".to_string())));
+        incoming.push(Message::Assistant(meerkat_core::AssistantMessage {
+            content: "follow-up answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        }));
+        let incoming_revision =
+            meerkat_core::transcript_messages_digest(incoming.messages()).expect("digest");
+
+        let persisted = service
+            .save_normalized_session(incoming)
+            .await
+            .expect("bridged internal rewrite plus append should persist");
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(persisted.messages()).expect("digest"),
+            incoming_revision
+        );
+        let saved = store
+            .load(&session_id)
+            .await
+            .expect("load saved")
+            .expect("saved session exists");
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(saved.messages()).expect("digest"),
+            incoming_revision
+        );
     }
 
     #[tokio::test]

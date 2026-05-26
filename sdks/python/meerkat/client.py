@@ -3565,10 +3565,18 @@ class MeerkatClient:
             })
             if message.kind is not None:
                 payload["kind"] = message.kind
-            if message.body is not None:
-                payload["body"] = message.body
-            if message.content is not None:
-                payload["content"] = message.content
+            if message.role == "system_notice":
+                payload.pop("body", None)
+                payload.pop("content", None)
+                if message.body is not None:
+                    payload["body"] = message.body
+                elif message.content is not None:
+                    payload["content"] = message.content
+            else:
+                if message.body is not None:
+                    payload["body"] = message.body
+                if message.content is not None:
+                    payload["content"] = message.content
             if message.tool_calls:
                 payload["tool_calls"] = [
                     {"id": call.id, "name": call.name, "args": call.args}

@@ -280,6 +280,8 @@ pub enum TranscriptEditError {
     RevisionConflict { expected: String, actual: String },
     #[error("transcript history state is malformed: {0}")]
     HistoryStateMalformed(String),
+    #[error("invalid transcript shape after rewrite: {0}")]
+    InvalidTranscriptShape(String),
 }
 
 fn message_role_name(message: &Message) -> &'static str {
@@ -291,6 +293,69 @@ fn message_role_name(message: &Message) -> &'static str {
         Message::BlockAssistant(_) => "block_assistant",
         Message::ToolResults { .. } => "tool_results",
     }
+}
+
+fn assistant_tool_use_ids(message: &Message) -> Vec<&str> {
+    match message {
+        Message::Assistant(assistant) => assistant
+            .tool_calls
+            .iter()
+            .map(|tool_call| tool_call.id.as_str())
+            .collect(),
+        Message::BlockAssistant(assistant) => assistant
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn validate_transcript_tool_result_shape(messages: &[Message]) -> Result<(), TranscriptEditError> {
+    for (index, message) in messages.iter().enumerate() {
+        if let Message::ToolResults { results, .. } = message {
+            let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|previous| messages.get(previous))
+            else {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "tool_results at message {index} has no preceding assistant tool-use message"
+                )));
+            };
+            let expected = assistant_tool_use_ids(previous);
+            if expected.is_empty() {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "tool_results at message {index} follows {}, not an assistant tool-use message",
+                    message_role_name(previous)
+                )));
+            }
+            let actual = results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let expected_set = expected.iter().copied().collect::<BTreeSet<_>>();
+            if actual != expected_set {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "tool_results at message {index} resolve tool ids {actual:?}, expected {expected_set:?}"
+                )));
+            }
+        }
+
+        let tool_use_ids = assistant_tool_use_ids(message);
+        if !tool_use_ids.is_empty()
+            && let Some(next) = messages.get(index + 1)
+            && !matches!(next, Message::ToolResults { .. })
+        {
+            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                "assistant tool-use message {index} is followed by {}, not tool_results",
+                message_role_name(next)
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn transcript_messages_digest(messages: &[Message]) -> Result<String, serde_json::Error> {
@@ -2615,6 +2680,7 @@ impl Session {
         rewritten.extend_from_slice(&self.messages[..start]);
         rewritten.extend(replacement);
         rewritten.extend_from_slice(&self.messages[end..]);
+        validate_transcript_tool_result_shape(&rewritten)?;
 
         let original_span_digest = sha256_json_digest(&self.messages[start..end])
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
@@ -3757,6 +3823,90 @@ mod tests {
                 .expect("history state should decode")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn transcript_rewrite_run_boundary_guard_accepts_rewrite_then_append() {
+        let mut original = Session::new();
+        original.push(Message::User(UserMessage::text("question".to_string())));
+        original.push(Message::Assistant(AssistantMessage {
+            content: "verbose answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let parent_revision = original.transcript_revision().expect("parent revision");
+        let mut incoming = original.clone();
+        incoming
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "compact answer".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect("rewrite should commit");
+        incoming.push(Message::User(UserMessage::text("follow-up".to_string())));
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "follow-up answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        crate::session_store::run_boundary_snapshot_save_guard(&incoming, Some(&original))
+            .expect("rewrite plus appended turn should be a valid run-boundary commit");
+    }
+
+    #[test]
+    fn transcript_rewrite_rejects_orphaned_tool_results() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("use a tool".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "toolu_1".to_string(),
+                name: "lookup".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string())
+                    .expect("valid args"),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        )));
+        session.push(Message::tool_results(vec![ToolResult::new(
+            "toolu_1".to_string(),
+            "done".to_string(),
+            false,
+        )]));
+        let parent_revision = session.transcript_revision().expect("parent revision");
+
+        let err = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: "no tool after all".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect_err("rewrite should reject stranded tool results");
+        assert!(matches!(
+            err,
+            TranscriptEditError::InvalidTranscriptShape(_)
+        ));
     }
 
     #[test]

@@ -23,7 +23,8 @@ use crate::session::SessionMeta;
 use crate::time_compat::SystemTime;
 use crate::types::SessionId;
 use crate::{
-    Session, TranscriptRewriteCommit, TranscriptRewriteSelection, transcript_messages_digest,
+    Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteSelection,
+    transcript_messages_digest,
 };
 
 /// Filter for listing sessions.
@@ -236,14 +237,89 @@ pub fn run_boundary_snapshot_save_guard(
             else {
                 return Err(append_error);
             };
-            let Some(commit) = state.commits.iter().rev().find(|commit| {
-                commit.parent_revision == previous_revision && commit.revision == incoming_revision
-            }) else {
+            let Some(commit) = find_transcript_rewrite_commit_extending(
+                &state,
+                &previous_revision,
+                &incoming_revision,
+            ) else {
                 return Err(append_error);
             };
-            transcript_rewrite_save_guard(incoming, Some(previous), commit)
+            transcript_rewrite_bridge_save_guard(
+                incoming,
+                previous,
+                commit,
+                &state,
+                &incoming_revision,
+            )
         }
     }
+}
+
+/// Find the rewrite commit that authorizes replacing `previous_revision`,
+/// allowing the incoming head to extend the rewrite via normal append bodies.
+pub fn find_transcript_rewrite_commit_extending<'a>(
+    state: &'a TranscriptHistoryState,
+    previous_revision: &str,
+    incoming_revision: &str,
+) -> Option<&'a TranscriptRewriteCommit> {
+    state.commits.iter().rev().find(|commit| {
+        commit.parent_revision == previous_revision
+            && transcript_history_revision_extends(state, incoming_revision, &commit.revision)
+    })
+}
+
+fn transcript_history_revision_extends(
+    state: &TranscriptHistoryState,
+    descendant: &str,
+    ancestor: &str,
+) -> bool {
+    if descendant == ancestor {
+        return true;
+    }
+    let mut cursor = descendant;
+    while let Some(body) = state.revisions.iter().find(|body| body.revision == cursor) {
+        let Some(parent) = body.parent_revision.as_deref() else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        cursor = parent;
+    }
+    false
+}
+
+fn transcript_rewrite_bridge_save_guard(
+    incoming: &Session,
+    previous: &Session,
+    commit: &TranscriptRewriteCommit,
+    incoming_state: &TranscriptHistoryState,
+    incoming_message_digest: &str,
+) -> Result<(), SessionStoreError> {
+    validate_transcript_rewrite_commit_bodies(incoming, previous, commit, incoming_state)?;
+    if incoming_state.head != incoming_message_digest {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming transcript graph head {} does not match current message digest {incoming_message_digest}",
+                incoming_state.head
+            ),
+        });
+    }
+    if !transcript_history_revision_extends(
+        incoming_state,
+        incoming_message_digest,
+        &commit.revision,
+    ) {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming transcript head {incoming_message_digest} does not extend rewrite revision {}",
+                commit.revision
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Validate that a same-session shrink/replace save is backed by a typed
@@ -329,8 +405,34 @@ pub fn transcript_rewrite_save_guard(
             ),
         });
     }
+    let Some(incoming_state) = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?
+    else {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
+        });
+    };
+    validate_transcript_rewrite_commit_bodies(incoming, previous, commit, &incoming_state)
+}
+
+fn validate_transcript_rewrite_commit_bodies(
+    incoming: &Session,
+    previous: &Session,
+    commit: &TranscriptRewriteCommit,
+    incoming_state: &TranscriptHistoryState,
+) -> Result<(), SessionStoreError> {
     if previous.messages().len() != commit.messages_before
-        || incoming.messages().len() != commit.messages_after
+        || incoming_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.revision)
+            .map(|body| body.messages.len())
+            != Some(commit.messages_after)
     {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
@@ -339,22 +441,15 @@ pub fn transcript_rewrite_save_guard(
                 commit.messages_before,
                 commit.messages_after,
                 previous.messages().len(),
-                incoming.messages().len()
+                incoming_state
+                    .revisions
+                    .iter()
+                    .find(|body| body.revision == commit.revision)
+                    .map(|body| body.messages.len())
+                    .unwrap_or(0)
             ),
         });
     }
-    let incoming_state = incoming.transcript_history_state().map_err(|err| {
-        SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("incoming transcript history state is malformed: {err}"),
-        }
-    })?;
-    let Some(incoming_state) = incoming_state else {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
-        });
-    };
     if !incoming_state
         .commits
         .iter()

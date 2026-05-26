@@ -3816,11 +3816,21 @@ export class MeerkatClient {
       if (camel.kind !== undefined) {
         payload.kind = camel.kind;
       }
-      if (camel.body !== undefined) {
-        payload.body = camel.body;
-      }
-      if (camel.content !== undefined) {
-        payload.content = camel.content;
+      if (camel.role === "system_notice") {
+        delete payload.body;
+        delete payload.content;
+        if (camel.body !== undefined) {
+          payload.body = camel.body;
+        } else if (camel.content !== undefined) {
+          payload.content = camel.content;
+        }
+      } else {
+        if (camel.body !== undefined) {
+          payload.body = camel.body;
+        }
+        if (camel.content !== undefined) {
+          payload.content = camel.content;
+        }
       }
       if (camel.toolCalls?.length > 0) {
         payload.tool_calls = camel.toolCalls.map((toolCall) => ({

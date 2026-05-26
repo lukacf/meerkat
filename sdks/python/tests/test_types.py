@@ -890,6 +890,27 @@ def test_transcript_rewrite_serializes_block_assistant_blocks_to_wire_shape():
     }
 
 
+def test_transcript_rewrite_serializes_system_notice_with_one_body_alias():
+    parsed = MeerkatClient._parse_session_message(
+        {
+            "role": "system_notice",
+            "kind": "background_job",
+            "body": "done",
+            "created_at": "2026-05-26T10:00:00Z",
+        }
+    )
+
+    serialized = MeerkatClient._serialize_transcript_rewrite_message(parsed)
+
+    assert serialized == {
+        "role": "system_notice",
+        "kind": "background_job",
+        "body": "done",
+        "created_at": "2026-05-26T10:00:00Z",
+    }
+    assert "content" not in serialized
+
+
 def test_skill_key_export():
     key = SkillKey(source_uuid="abc-123", skill_name="my-skill")
     assert key.source_uuid == "abc-123"

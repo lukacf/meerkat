@@ -2189,6 +2189,57 @@ fn get_runtime_adapter(state: &AppState) -> &Arc<meerkat_runtime::MeerkatMachine
     &state.runtime_adapter
 }
 
+#[cfg(feature = "mob")]
+async fn rest_session_is_mob_owned(state: &AppState, session_id: &SessionId) -> bool {
+    state.mob_state.owns_live_bridge_session(session_id).await
+        || state
+            .mob_state
+            .owns_service_reported_bridge_session(session_id)
+            .await
+        || state
+            .mob_state
+            .owns_persisted_bridge_session(session_id)
+            .await
+}
+
+async fn reject_generic_transcript_surface_if_mob_owned(
+    state: &AppState,
+    session_id: &SessionId,
+    operation: &str,
+) -> Result<(), ApiError> {
+    #[cfg(feature = "mob")]
+    if rest_session_is_mob_owned(state, session_id).await {
+        return Err(ApiError::BadRequest(format!(
+            "mob-owned session transcripts cannot be {operation} through the generic session surface"
+        )));
+    }
+    let _ = (state, session_id, operation);
+    Ok(())
+}
+
+async fn reject_active_rest_transcript_edit(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), ApiError> {
+    reject_generic_transcript_surface_if_mob_owned(state, session_id, "edited").await?;
+    let runtime_running = state
+        .runtime_adapter
+        .runtime_state(session_id)
+        .await
+        .is_ok_and(|state| matches!(state, meerkat_runtime::RuntimeState::Running));
+    let has_active_inputs = state
+        .runtime_adapter
+        .list_active_inputs(session_id)
+        .await
+        .is_ok_and(|inputs| !inputs.is_empty());
+    if runtime_running || has_active_inputs {
+        return Err(ApiError::BadRequest(format!(
+            "session {session_id} is active; transcript edit uses running_behavior=reject"
+        )));
+    }
+    Ok(())
+}
+
 async fn session_archived_by_authority(
     state: &AppState,
     session_id: &SessionId,
@@ -4778,6 +4829,7 @@ async fn get_session_transcript_revision(
     Query(query): Query<SessionTranscriptRevisionQueryParams>,
 ) -> Result<Json<meerkat_contracts::WireSessionTranscriptRevision>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
+    reject_generic_transcript_surface_if_mob_owned(&state, &session_id, "read").await?;
     let page = state
         .session_service
         .read_transcript_revision(
@@ -4802,6 +4854,7 @@ async fn rewrite_session_transcript(
     Json(req): Json<RewriteSessionTranscriptRequest>,
 ) -> Result<Json<meerkat_core::service::SessionTranscriptRewriteResult>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
+    reject_active_rest_transcript_edit(&state, &session_id).await?;
     let replacement = req
         .replacement
         .into_iter()
@@ -4833,6 +4886,7 @@ async fn restore_session_transcript_revision(
     Json(req): Json<RestoreSessionTranscriptRevisionRequest>,
 ) -> Result<Json<meerkat_core::service::SessionTranscriptRewriteResult>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
+    reject_active_rest_transcript_edit(&state, &session_id).await?;
     let result = state
         .session_service
         .restore_session_transcript_revision(

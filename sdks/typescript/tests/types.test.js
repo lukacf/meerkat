@@ -144,6 +144,25 @@ describe("Transcript Rewrite Serialization", () => {
       ],
     });
   });
+
+  it("serializes parsed system_notice messages with a single body alias", () => {
+    const parsed = MeerkatClient.parseSessionMessage({
+      role: "system_notice",
+      kind: "background_job",
+      body: "done",
+      created_at: "2026-05-26T10:00:00Z",
+    });
+
+    const serialized = MeerkatClient.serializeTranscriptRewriteMessage(parsed);
+
+    assert.deepEqual(serialized, {
+      role: "system_notice",
+      kind: "background_job",
+      body: "done",
+      created_at: "2026-05-26T10:00:00Z",
+    });
+    assert.equal(Object.hasOwn(serialized, "content"), false);
+  });
 });
 
 // ---------------------------------------------------------------------------

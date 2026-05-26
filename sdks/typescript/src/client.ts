@@ -44,16 +44,9 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import {
   CONTRACT_VERSION,
   type AttentionBindingRequest,
-  type AttentionBindingResult,
-  type AttentionContinueResult,
   type AttentionListRequest,
   type AttentionListResult,
-  type AttentionPauseRequest,
-  type AttentionResumeRequest,
-  type GoalConfirmRequest,
   type GoalStatusRequest,
-  type PublicGoalCreateRequest,
-  type PublicGoalRequestCloseRequest,
   type LiveChannelParams,
   type LiveCommitInputParams,
   type LiveOpenParams,
@@ -1227,13 +1220,6 @@ export class MeerkatClient {
     };
   }
 
-  async createWorkGraphGoal(
-    params: PublicGoalCreateRequest,
-  ): Promise<WorkGraphGoalResult> {
-    const result = await this.request<Record<string, unknown>>("workgraph/goal/create", params);
-    return MeerkatClient.parseWorkGraphGoalResult(result);
-  }
-
   async getWorkGraphGoalStatus(
     params: GoalStatusRequest,
   ): Promise<WorkGraphGoalResult> {
@@ -1241,42 +1227,10 @@ export class MeerkatClient {
     return MeerkatClient.parseWorkGraphGoalResult(result);
   }
 
-  async confirmWorkGraphGoal(
-    params: GoalConfirmRequest,
-  ): Promise<WorkGraphGoalResult> {
-    const result = await this.request<Record<string, unknown>>("workgraph/goal/confirm", params);
-    return MeerkatClient.parseWorkGraphGoalResult(result);
-  }
-
-  async requestCloseWorkGraphGoal(
-    params: PublicGoalRequestCloseRequest,
-  ): Promise<WorkGraphGoalResult> {
-    const result = await this.request<Record<string, unknown>>("workgraph/goal/request_close", params);
-    return MeerkatClient.parseWorkGraphGoalResult(result);
-  }
-
   async listWorkGraphAttention(
     params: AttentionListRequest = {},
   ): Promise<AttentionListResult> {
     return this.request<AttentionListResult>("workgraph/attention/list", params);
-  }
-
-  async pauseWorkGraphAttention(
-    params: AttentionPauseRequest,
-  ): Promise<AttentionBindingResult> {
-    return this.request<AttentionBindingResult>("workgraph/attention/pause", params);
-  }
-
-  async resumeWorkGraphAttention(
-    params: AttentionResumeRequest,
-  ): Promise<AttentionBindingResult> {
-    return this.request<AttentionBindingResult>("workgraph/attention/resume", params);
-  }
-
-  async continueWorkGraphAttention(
-    params: AttentionBindingRequest,
-  ): Promise<AttentionContinueResult> {
-    return this.request<AttentionContinueResult>("workgraph/attention/continue", params);
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -3757,6 +3711,13 @@ export class MeerkatClient {
         data.edges,
         "Invalid workgraph snapshot edges",
       ).map((edge) => MeerkatClient.parseWorkGraphEdge(edge)),
+      attention:
+        data.attention === undefined
+          ? []
+          : (MeerkatClient.requireRecordArray(
+              data.attention,
+              "Invalid workgraph snapshot attention",
+            ) as unknown as WorkGraphSnapshot["attention"]),
       readyItemIds: MeerkatClient.requireStringArray(
         data.ready_item_ids,
         "Invalid workgraph snapshot ready item ids",

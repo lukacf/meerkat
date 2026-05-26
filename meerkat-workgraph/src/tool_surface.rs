@@ -197,12 +197,23 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
                             reason: err.to_string(),
                         }
                     })?;
+                let status = match request.status {
+                    crate::WorkStatus::Completed => crate::GoalTerminalStatus::Completed,
+                    crate::WorkStatus::Cancelled => crate::GoalTerminalStatus::Cancelled,
+                    crate::WorkStatus::Failed => crate::GoalTerminalStatus::Failed,
+                    _ => {
+                        return Err(ToolError::InvalidArguments {
+                            name: call.name.to_string(),
+                            reason: "attention-scoped goal closure requires completed, cancelled, or failed status".to_string(),
+                        });
+                    }
+                };
                 scoped_close = Some(GoalRequestCloseRequest {
                     binding_id: projection.binding_id.clone(),
                     realm_id: Some(projection.work_ref.realm_id.clone()),
                     namespace: Some(projection.work_ref.namespace.clone()),
                     expected_revision: request.expected_revision,
-                    status: request.status,
+                    status,
                 });
             }
         }

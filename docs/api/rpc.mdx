@@ -174,21 +174,13 @@ subset.
 | `workgraph/ready` | WorkGraph | List ready WorkGraph items (workgraph feature) |
 | `workgraph/snapshot` | WorkGraph | Read a WorkGraph observability snapshot (workgraph feature) |
 | `workgraph/events` | WorkGraph | Read WorkGraph event history (workgraph feature) |
-| `workgraph/goal/create` | WorkGraph | Create a session-scoped attention goal (workgraph feature) |
 | `workgraph/goal/status` | WorkGraph | Read goal and attention status (workgraph feature) |
-| `workgraph/goal/confirm` | WorkGraph | Attach completion confirmation evidence (workgraph feature) |
-| `workgraph/goal/request_close` | WorkGraph | Request policy-gated goal closure (workgraph feature) |
 | `workgraph/attention/list` | WorkGraph | List active attention bindings (workgraph feature) |
-| `workgraph/attention/pause` | WorkGraph | Pause an attention binding (workgraph feature) |
-| `workgraph/attention/resume` | WorkGraph | Resume an attention binding (workgraph feature) |
-| `workgraph/attention/continue` | WorkGraph | Queue a hidden continuation for a session-bound attention binding (workgraph feature) |
 | `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 
 WorkGraph goal and attention mutation methods require trusted in-process
-host/session authority. Public JSON-RPC servers keep the methods visible for
-contract stability, but fail closed for create, confirm, close, pause, resume,
-and continuation injection.
+host/session authority and are not part of the public JSON-RPC catalog.
 | `skills/list` | Skills | List skills with provenance |
 | `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |

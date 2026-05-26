@@ -5,14 +5,8 @@ pub enum WorkGraphRestRoute {
     Ready,
     Snapshot,
     Events,
-    GoalCreate,
     GoalStatus,
-    GoalConfirm,
-    GoalRequestClose,
     AttentionList,
-    AttentionPause,
-    AttentionResume,
-    AttentionContinue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,14 +64,6 @@ const WORKGRAPH_EVENTS_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
         response_schema: "WorkGraphEventsResponse",
     }];
 
-const WORKGRAPH_GOAL_CREATE_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
-    &[WorkGraphRestOperationDescriptor {
-        method: "post",
-        summary: "Create WorkGraph goal and attention binding",
-        request_schema: Some("PublicGoalCreateRequest"),
-        response_schema: "GoalCreateResult",
-    }];
-
 const WORKGRAPH_GOAL_STATUS_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
     &[WorkGraphRestOperationDescriptor {
         method: "post",
@@ -86,52 +72,12 @@ const WORKGRAPH_GOAL_STATUS_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
         response_schema: "GoalStatusResult",
     }];
 
-const WORKGRAPH_GOAL_CONFIRM_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
-    &[WorkGraphRestOperationDescriptor {
-        method: "post",
-        summary: "Attach WorkGraph goal confirmation evidence",
-        request_schema: Some("GoalConfirmRequest"),
-        response_schema: "GoalConfirmResult",
-    }];
-
-const WORKGRAPH_GOAL_REQUEST_CLOSE_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
-    &[WorkGraphRestOperationDescriptor {
-        method: "post",
-        summary: "Request policy-gated WorkGraph goal closure",
-        request_schema: Some("PublicGoalRequestCloseRequest"),
-        response_schema: "GoalRequestCloseResult",
-    }];
-
 const WORKGRAPH_ATTENTION_LIST_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
     &[WorkGraphRestOperationDescriptor {
         method: "post",
         summary: "List WorkGraph attention bindings",
         request_schema: Some("AttentionListRequest"),
         response_schema: "AttentionListResult",
-    }];
-
-const WORKGRAPH_ATTENTION_PAUSE_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
-    &[WorkGraphRestOperationDescriptor {
-        method: "post",
-        summary: "Pause WorkGraph attention binding",
-        request_schema: Some("AttentionPauseRequest"),
-        response_schema: "AttentionBindingResult",
-    }];
-
-const WORKGRAPH_ATTENTION_RESUME_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
-    &[WorkGraphRestOperationDescriptor {
-        method: "post",
-        summary: "Resume WorkGraph attention binding",
-        request_schema: Some("AttentionResumeRequest"),
-        response_schema: "AttentionBindingResult",
-    }];
-
-const WORKGRAPH_ATTENTION_CONTINUE_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
-    &[WorkGraphRestOperationDescriptor {
-        method: "post",
-        summary: "Queue WorkGraph attention continuation for its target session",
-        request_schema: Some("AttentionBindingRequest"),
-        response_schema: "AttentionContinueResult",
     }];
 
 pub const WORKGRAPH_REST_PATHS: &[WorkGraphRestPathDescriptor] = &[
@@ -161,44 +107,14 @@ pub const WORKGRAPH_REST_PATHS: &[WorkGraphRestPathDescriptor] = &[
         operations: WORKGRAPH_EVENTS_OPERATIONS,
     },
     WorkGraphRestPathDescriptor {
-        route: WorkGraphRestRoute::GoalCreate,
-        path: "/workgraph/goal/create",
-        operations: WORKGRAPH_GOAL_CREATE_OPERATIONS,
-    },
-    WorkGraphRestPathDescriptor {
         route: WorkGraphRestRoute::GoalStatus,
         path: "/workgraph/goal/status",
         operations: WORKGRAPH_GOAL_STATUS_OPERATIONS,
     },
     WorkGraphRestPathDescriptor {
-        route: WorkGraphRestRoute::GoalConfirm,
-        path: "/workgraph/goal/confirm",
-        operations: WORKGRAPH_GOAL_CONFIRM_OPERATIONS,
-    },
-    WorkGraphRestPathDescriptor {
-        route: WorkGraphRestRoute::GoalRequestClose,
-        path: "/workgraph/goal/request_close",
-        operations: WORKGRAPH_GOAL_REQUEST_CLOSE_OPERATIONS,
-    },
-    WorkGraphRestPathDescriptor {
         route: WorkGraphRestRoute::AttentionList,
         path: "/workgraph/attention/list",
         operations: WORKGRAPH_ATTENTION_LIST_OPERATIONS,
-    },
-    WorkGraphRestPathDescriptor {
-        route: WorkGraphRestRoute::AttentionPause,
-        path: "/workgraph/attention/pause",
-        operations: WORKGRAPH_ATTENTION_PAUSE_OPERATIONS,
-    },
-    WorkGraphRestPathDescriptor {
-        route: WorkGraphRestRoute::AttentionResume,
-        path: "/workgraph/attention/resume",
-        operations: WORKGRAPH_ATTENTION_RESUME_OPERATIONS,
-    },
-    WorkGraphRestPathDescriptor {
-        route: WorkGraphRestRoute::AttentionContinue,
-        path: "/workgraph/attention/continue",
-        operations: WORKGRAPH_ATTENTION_CONTINUE_OPERATIONS,
     },
 ];
 

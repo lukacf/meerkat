@@ -1296,44 +1296,31 @@ impl MethodRouter {
             "schedule/call" => {
                 handlers::schedule::handle_call(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/get" => {
                 handlers::workgraph::handle_get(id, params, self.runtime.clone()).await
             }
-            "workgraph/goal/create" => {
-                handlers::workgraph::handle_goal_create(id, params, self.runtime.clone()).await
-            }
+            #[cfg(feature = "workgraph")]
             "workgraph/goal/status" => {
                 handlers::workgraph::handle_goal_status(id, params, self.runtime.clone()).await
             }
-            "workgraph/goal/confirm" => {
-                handlers::workgraph::handle_goal_confirm(id, params, self.runtime.clone()).await
-            }
-            "workgraph/goal/request_close" => {
-                handlers::workgraph::handle_goal_request_close(id, params, self.runtime.clone())
-                    .await
-            }
+            #[cfg(feature = "workgraph")]
             "workgraph/attention/list" => {
                 handlers::workgraph::handle_attention_list(id, params, self.runtime.clone()).await
             }
-            "workgraph/attention/pause" => {
-                handlers::workgraph::handle_attention_pause(id, params, self.runtime.clone()).await
-            }
-            "workgraph/attention/resume" => {
-                handlers::workgraph::handle_attention_resume(id, params, self.runtime.clone()).await
-            }
-            "workgraph/attention/continue" => {
-                handlers::workgraph::handle_attention_continue(id, params, self.runtime.clone())
-                    .await
-            }
+            #[cfg(feature = "workgraph")]
             "workgraph/list" => {
                 handlers::workgraph::handle_list(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/ready" => {
                 handlers::workgraph::handle_ready(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/snapshot" => {
                 handlers::workgraph::handle_snapshot(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/events" => {
                 handlers::workgraph::handle_events(id, params, self.runtime.clone()).await
             }

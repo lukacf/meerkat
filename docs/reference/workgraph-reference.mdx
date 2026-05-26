@@ -115,20 +115,12 @@ Evidence refs are pointers. WorkGraph does not own the artifact content.
 | `workgraph/ready` | List ready items |
 | `workgraph/snapshot` | Read graph snapshot |
 | `workgraph/events` | Read event history |
-| `workgraph/goal/create` | Create a session-scoped attention goal |
 | `workgraph/goal/status` | Read goal and attention status |
-| `workgraph/goal/confirm` | Attach completion confirmation evidence |
-| `workgraph/goal/request_close` | Request policy-gated closure |
 | `workgraph/attention/list` | List attention bindings |
-| `workgraph/attention/pause` | Pause an attention binding |
-| `workgraph/attention/resume` | Resume an attention binding |
-| `workgraph/attention/continue` | Queue a hidden continuation for a session-bound binding |
 
 General WorkGraph item mutation remains tool-owned. The goal and attention
-mutation methods are trusted host-control methods: public REST and JSON-RPC
-servers expose observability, but fail closed for create, confirm, close, pause,
-resume, and continuation injection unless the call is made through an in-process
-host/runtime authority.
+mutation methods are trusted host-control methods and are not part of the public
+REST or JSON-RPC catalog.
 
 ## REST
 
@@ -139,14 +131,8 @@ host/runtime authority.
 | `GET` | `/workgraph/ready` | List ready items |
 | `GET` | `/workgraph/snapshot` | Read graph snapshot |
 | `GET` | `/workgraph/events` | Read event history |
-| `POST` | `/workgraph/goal/create` | Create a session-scoped attention goal |
 | `POST` | `/workgraph/goal/status` | Read goal and attention status |
-| `POST` | `/workgraph/goal/confirm` | Attach completion confirmation evidence |
-| `POST` | `/workgraph/goal/request_close` | Request policy-gated closure |
 | `POST` | `/workgraph/attention/list` | List attention bindings |
-| `POST` | `/workgraph/attention/pause` | Pause an attention binding |
-| `POST` | `/workgraph/attention/resume` | Resume an attention binding |
-| `POST` | `/workgraph/attention/continue` | Queue a hidden continuation for a session-bound binding |
 
 Common query parameters: `realm_id`, `namespace`, `all_namespaces`,
 `statuses`, `labels`, `include_terminal`, `limit`, and `after_seq` for events.

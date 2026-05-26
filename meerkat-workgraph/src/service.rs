@@ -18,6 +18,7 @@ use crate::types::{
     WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
     WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
     WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
+    WorkStatus,
 };
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
@@ -509,7 +510,8 @@ impl WorkGraphService {
                 attention.work_ref.item_id.clone(),
             )
             .await?;
-        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
+        let requested_status = WorkStatus::from(request.status);
+        if requested_status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
             return Err(WorkGraphError::InvalidTransition(format!(
                 "work item {} completion policy {} is not satisfied",
                 item.id,
@@ -529,7 +531,7 @@ impl WorkGraphService {
                 realm_id: Some(item.realm_id.clone()),
                 namespace: Some(item.namespace.clone()),
                 expected_revision: request.expected_revision,
-                status: request.status,
+                status: requested_status,
             })
             .await?;
         let attention = self
@@ -683,8 +685,19 @@ impl WorkGraphService {
 
         let namespaces = self.snapshot_namespaces(&realm_id, &filter, &items).await?;
         let mut edges = Vec::new();
+        let mut attention = Vec::new();
         for namespace in &namespaces {
             edges.extend(self.store.list_edges(&realm_id, namespace).await?);
+            attention.extend(
+                self.store
+                    .list_attention(AttentionListRequest {
+                        realm_id: Some(realm_id.clone()),
+                        namespace: Some(namespace.clone()),
+                        target: None,
+                        status: None,
+                    })
+                    .await?,
+            );
         }
 
         let ready_item_ids = self
@@ -720,6 +733,7 @@ impl WorkGraphService {
             event_high_water_mark,
             items,
             edges,
+            attention,
             ready_item_ids,
         })
     }

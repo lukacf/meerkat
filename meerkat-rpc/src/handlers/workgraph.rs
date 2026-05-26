@@ -3,10 +3,8 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest, AttentionResumeRequest,
-    GoalConfirmRequest, GoalStatusRequest, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
-    ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter,
-    WorkItemId, WorkNamespace,
+    AttentionListRequest, GoalStatusRequest, ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter,
+    WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -49,14 +47,6 @@ fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse 
     }
 }
 
-fn trusted_workgraph_goal_mutation_required(id: Option<RpcId>) -> RpcResponse {
-    RpcResponse::error(
-        id,
-        error::INVALID_PARAMS,
-        "WorkGraph goal and attention mutations require trusted in-process host/session authority; the public JSON-RPC surface is fail-closed for these operations",
-    )
-}
-
 pub async fn handle_get(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -76,18 +66,6 @@ pub async fn handle_get(
     }
 }
 
-pub async fn handle_goal_create(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
-    let _request: PublicGoalCreateRequest = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-    trusted_workgraph_goal_mutation_required(id)
-}
-
 pub async fn handle_goal_status(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -101,30 +79,6 @@ pub async fn handle_goal_status(
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
-}
-
-pub async fn handle_goal_confirm(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
-    let _request: GoalConfirmRequest = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-    trusted_workgraph_goal_mutation_required(id)
-}
-
-pub async fn handle_goal_request_close(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
-    let _request: PublicGoalRequestCloseRequest = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_attention_list(
@@ -149,42 +103,6 @@ pub async fn handle_attention_list(
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
-}
-
-pub async fn handle_attention_pause(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
-    let _request: AttentionPauseRequest = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-    trusted_workgraph_goal_mutation_required(id)
-}
-
-pub async fn handle_attention_resume(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
-    let _request: AttentionResumeRequest = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-    trusted_workgraph_goal_mutation_required(id)
-}
-
-pub async fn handle_attention_continue(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    _runtime: Arc<SessionRuntime>,
-) -> RpcResponse {
-    let _request: AttentionBindingRequest = match parse_params(params) {
-        Ok(params) => params,
-        Err(response) => return response.with_id(id),
-    };
-    trusted_workgraph_goal_mutation_required(id)
 }
 
 pub async fn handle_list(

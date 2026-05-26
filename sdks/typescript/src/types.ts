@@ -1079,6 +1079,7 @@ export interface WorkGraphSnapshot {
   readonly eventHighWaterMark?: number;
   readonly items: readonly WorkItem[];
   readonly edges: readonly WorkGraphEdge[];
+  readonly attention: readonly WorkAttentionBinding[];
   readonly readyItemIds: readonly string[];
 }
 

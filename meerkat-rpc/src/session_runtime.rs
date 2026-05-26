@@ -3116,25 +3116,20 @@ impl SessionRuntime {
             meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
 
         let input_id = InputId::new();
-        let context_key = format!(
-            "{}:{}",
-            meerkat::workgraph_attention_continuation_key(&projection),
-            input_id
-        );
+        let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
+        let context_key = format!("{attention_key}:{input_id}");
         let input = Input::Continuation(ContinuationInput {
             header: InputHeader {
                 id: input_id,
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::System,
-                durability: InputDurability::Ephemeral,
+                durability: InputDurability::Durable,
                 visibility: InputVisibility {
                     transcript_eligible: false,
                     operator_eligible: false,
                 },
-                idempotency_key: None,
-                supersession_key: Some(SupersessionKey::new(
-                    meerkat::workgraph_attention_continuation_key(&projection),
-                )),
+                idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(attention_key.clone())),
+                supersession_key: Some(SupersessionKey::new(attention_key)),
                 correlation_id: None,
             },
             reason: "workgraph_attention".to_string(),
@@ -11354,7 +11349,12 @@ mod tests {
     async fn workgraph_attention_continue_queues_runtime_continuation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut runtime = make_runtime_with_workgraph_store(temp_factory(&temp), 10);
-        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        runtime.set_default_llm_client(Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        })));
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
@@ -11379,14 +11379,38 @@ mod tests {
             .await
             .expect("create workgraph goal");
 
-        let outcome = runtime
-            .enqueue_workgraph_attention_binding_continuation(meerkat::AttentionBindingRequest {
-                binding_id: goal.attention.binding_id,
-                realm_id: None,
-                namespace: Some(meerkat::WorkNamespace::new("scoped-goals").expect("namespace")),
-            })
+        let request = meerkat::AttentionBindingRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: Some(meerkat::WorkNamespace::new("scoped-goals").expect("namespace")),
+        };
+        let runtime_for_first = Arc::clone(&runtime);
+        let first_request = request.clone();
+        let first = tokio::spawn(async move {
+            runtime_for_first
+                .enqueue_workgraph_attention_binding_continuation(first_request)
+                .await
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let retry = runtime
+            .enqueue_workgraph_attention_binding_continuation(request)
             .await
+            .expect("retry attention continuation");
+        release.notify_one();
+        let outcome = first
+            .await
+            .expect("join first continuation")
             .expect("enqueue attention continuation");
+        let deduplicated = [&outcome, &retry]
+            .iter()
+            .filter(|outcome| {
+                matches!(outcome, meerkat_runtime::AcceptOutcome::Deduplicated { .. })
+            })
+            .count();
+        assert_eq!(
+            deduplicated, 1,
+            "concurrent unchanged attention continuations should admit once and deduplicate once: first={outcome:?}, retry={retry:?}"
+        );
         assert!(
             matches!(
                 outcome,

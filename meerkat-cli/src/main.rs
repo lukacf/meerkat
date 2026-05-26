@@ -1850,6 +1850,23 @@ impl From<WorkGraphStatusArg> for meerkat::WorkStatus {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkGraphTerminalStatusArg {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+impl From<WorkGraphTerminalStatusArg> for meerkat::GoalTerminalStatus {
+    fn from(value: WorkGraphTerminalStatusArg) -> Self {
+        match value {
+            WorkGraphTerminalStatusArg::Completed => meerkat::GoalTerminalStatus::Completed,
+            WorkGraphTerminalStatusArg::Cancelled => meerkat::GoalTerminalStatus::Cancelled,
+            WorkGraphTerminalStatusArg::Failed => meerkat::GoalTerminalStatus::Failed,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum WorkAttentionModeArg {
     Pursue,
     Coordinate,
@@ -2074,7 +2091,7 @@ enum WorkGraphCommands {
         #[arg(long)]
         expected_revision: u64,
         #[arg(long = "status", value_enum, default_value = "completed")]
-        status: WorkGraphStatusArg,
+        status: WorkGraphTerminalStatusArg,
         #[arg(long)]
         json: bool,
     },
@@ -2104,17 +2121,6 @@ enum WorkGraphCommands {
         namespace: Option<String>,
         #[arg(long)]
         expected_revision: u64,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Queue an attention continuation through a running REST server
-    AttentionContinue {
-        binding_id: String,
-        /// REST server base URL, for example http://127.0.0.1:3000
-        #[arg(long)]
-        rest_url: String,
-        #[arg(long)]
-        namespace: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -6313,44 +6319,6 @@ async fn handle_workgraph_command(
                 })
                 .await?;
             print_workgraph_attention(vec![result.attention], json)
-        }
-        WorkGraphCommands::AttentionContinue {
-            binding_id,
-            rest_url,
-            namespace,
-            json,
-        } => {
-            let request = meerkat::AttentionBindingRequest {
-                binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
-                realm_id: None,
-                namespace: parse_work_namespace(namespace)?,
-            };
-            let url = format!(
-                "{}/workgraph/attention/continue",
-                rest_url.trim_end_matches('/')
-            );
-            let response = reqwest::Client::new()
-                .post(url)
-                .json(&request)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<meerkat::AttentionContinueResult>()
-                .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&response)?);
-            } else {
-                println!(
-                    "attention continuation: {:?}{}",
-                    response.outcome,
-                    response
-                        .reason
-                        .as_deref()
-                        .map(|reason| format!(" ({reason})"))
-                        .unwrap_or_default()
-                );
-            }
-            Ok(())
         }
     }
 }
@@ -15171,6 +15139,8 @@ default_model = "gemma"
             "principal_confirmation",
             "--id",
             "approval-1",
+            "--expected-revision",
+            "1",
         ])
         .expect("workgraph goal-confirm principal should parse");
         match cli.command {

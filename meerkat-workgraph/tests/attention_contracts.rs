@@ -7,10 +7,10 @@ use meerkat_workgraph::{
     AttentionPauseRequest, AttentionProjectionPolicy, AttentionProjectionRequest,
     AttentionReassignRequest, AttentionResumeRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     GoalAttentionTarget, GoalConfirmRequest, GoalCreateRequest, GoalRequestCloseRequest,
-    GoalStatusRequest, LinkWorkItemsRequest, UpdateWorkItemRequest, WorkAttentionBinding,
-    WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode, WorkAttentionStatus,
-    WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef, WorkGraphService,
-    WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
+    GoalStatusRequest, GoalTerminalStatus, LinkWorkItemsRequest, UpdateWorkItemRequest,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
+    WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
+    WorkGraphService, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use serde_json::json;
 
@@ -249,7 +249,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            status: WorkStatus::Completed,
+            status: GoalTerminalStatus::Completed,
         })
         .await
         .expect_err("host confirmation is required before closure");
@@ -284,7 +284,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             realm_id: None,
             namespace: None,
             expected_revision: confirmed.item.revision,
-            status: WorkStatus::Completed,
+            status: GoalTerminalStatus::Completed,
         })
         .await
         .expect("close after policy satisfied");
@@ -397,7 +397,7 @@ async fn goal_confirm_and_request_close_reject_stale_item_revision() {
             realm_id: None,
             namespace: None,
             expected_revision: closable.item.revision,
-            status: WorkStatus::Completed,
+            status: GoalTerminalStatus::Completed,
         })
         .await
         .expect_err("closure must reject stale reviewed revision");
@@ -415,7 +415,7 @@ async fn goal_policy_only_gates_successful_completion() {
     let session_id =
         SessionId::parse("019e63c2-0000-7000-8000-000000000109").expect("valid session id");
 
-    for status in [WorkStatus::Failed, WorkStatus::Cancelled] {
+    for status in [GoalTerminalStatus::Failed, GoalTerminalStatus::Cancelled] {
         let goal = service
             .create_goal(GoalCreateRequest {
                 realm_id: None,
@@ -443,7 +443,7 @@ async fn goal_policy_only_gates_successful_completion() {
             })
             .await
             .expect("non-success terminal close should not require completion evidence");
-        assert_eq!(closed.item.status, status);
+        assert_eq!(closed.item.status, WorkStatus::from(status));
         assert_eq!(closed.attention.status, WorkAttentionStatus::Stopped);
     }
 }
@@ -932,7 +932,7 @@ async fn closed_goal_stops_attention_and_cannot_resume() {
             realm_id: None,
             namespace: None,
             expected_revision: goal.item.revision,
-            status: WorkStatus::Completed,
+            status: GoalTerminalStatus::Completed,
         })
         .await
         .expect("close goal");
@@ -1230,7 +1230,7 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
         expected_revision: 8,
-        status: WorkStatus::Completed,
+        status: GoalTerminalStatus::Completed,
     };
     let pause = AttentionPauseRequest {
         binding_id: binding_id.clone(),

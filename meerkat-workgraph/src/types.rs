@@ -1206,8 +1206,8 @@ pub struct GoalRequestCloseRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
     pub expected_revision: u64,
-    #[serde(default = "default_terminal_status")]
-    pub status: WorkStatus,
+    #[serde(default)]
+    pub status: GoalTerminalStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1250,7 +1250,7 @@ impl From<PublicGoalRequestCloseRequest> for GoalRequestCloseRequest {
             realm_id: request.realm_id,
             namespace: request.namespace,
             expected_revision: request.expected_revision,
-            status: request.status.into(),
+            status: request.status,
         }
     }
 }
@@ -1467,6 +1467,8 @@ pub struct WorkGraphSnapshot {
     pub event_high_water_mark: Option<i64>,
     pub items: Vec<WorkItem>,
     pub edges: Vec<WorkEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<WorkAttentionBinding>,
     pub ready_item_ids: Vec<WorkItemId>,
 }
 

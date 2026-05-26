@@ -11455,11 +11455,8 @@
   },
   "GoalRequestCloseRequest": {
     "$defs": {
-      "WorkStatus": {
+      "GoalTerminalStatus": {
         "enum": [
-          "open",
-          "in_progress",
-          "blocked",
           "completed",
           "cancelled",
           "failed"
@@ -11490,7 +11487,7 @@
         ]
       },
       "status": {
-        "$ref": "#/$defs/WorkStatus",
+        "$ref": "#/$defs/GoalTerminalStatus",
         "default": "completed"
       }
     },
@@ -41656,6 +41653,237 @@
   },
   "WorkGraphSnapshot": {
     "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WorkEdge": {
         "properties": {
           "created_at": {
@@ -42019,12 +42247,62 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "all_namespaces": {
         "type": "boolean"
+      },
+      "attention": {
+        "items": {
+          "$ref": "#/$defs/WorkAttentionBinding"
+        },
+        "type": "array"
       },
       "captured_at": {
         "format": "date-time",

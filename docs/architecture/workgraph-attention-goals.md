@@ -451,17 +451,16 @@ Suggested minimal host APIs:
 - `workgraph/attention/continue`: enqueue a hidden continuation for a
   session-bound binding.
 
-These are WorkGraph-feature host APIs. Public REST and JSON-RPC entrypoints keep
-the contract names visible for discovery and compatibility, but fail closed for
-mutating goal/attention calls; only trusted in-process host/runtime authority may
-create goals, add confirmation evidence, close goals, pause/resume attention, or
-inject continuations. They are unavailable when WorkGraph is not compiled or
-enabled.
+These are WorkGraph-feature host APIs. Public REST and JSON-RPC entrypoints
+expose goal/attention observability only; mutating goal/attention calls are
+trusted in-process host/runtime authority and are not part of the public
+catalog. They are unavailable when WorkGraph is not compiled or enabled.
 
 The CLI mirrors the narrow session-first subset under `rkat workgraph`:
 `goal-create`, `goal-status`, `goal-confirm`, `goal-close`, `attention-list`,
-`attention-pause`, and `attention-resume`. The CLI intentionally does not
-expose the broad WorkGraph mutation surface as the goal UX.
+`attention-pause`, and `attention-resume`. Attention continuation injection is a
+runtime host operation, not a REST-backed CLI command. The CLI intentionally
+does not expose the broad WorkGraph mutation surface as the goal UX.
 
 Core host goal creation targets a session handle. Mob/agent targets are not
 accepted through this core host contract; `meerkat-mob` must validate

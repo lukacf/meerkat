@@ -14,32 +14,18 @@ from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
     AttentionBindingRequest as AttentionBindingRequest,
     AttentionBindingResult as AttentionBindingResult,
-    AttentionContinueOutcome as AttentionContinueOutcome,
-    AttentionContinueResult as AttentionContinueResult,
     AttentionContextProjection as AttentionContextProjection,
     AttentionDelegatedAuthority as AttentionDelegatedAuthority,
     AttentionListRequest as AttentionListRequest,
     AttentionListResult as AttentionListResult,
-    AttentionPauseRequest as AttentionPauseRequest,
-    AttentionResumeRequest as AttentionResumeRequest,
     AttentionProjectionPolicy as AttentionProjectionPolicy,
     AttentionProjectionRequest as AttentionProjectionRequest,
     AttentionProjectionResult as AttentionProjectionResult,
     AttentionProjectionText as AttentionProjectionText,
     AttentionReassignRequest as AttentionReassignRequest,
     GoalAttentionTarget as GoalAttentionTarget,
-    GoalConfirmRequest as GoalConfirmRequest,
-    GoalConfirmResult as GoalConfirmResult,
-    GoalCreateRequest as GoalCreateRequest,
-    GoalCreateResult as GoalCreateResult,
-    GoalRequestCloseRequest as GoalRequestCloseRequest,
-    GoalRequestCloseResult as GoalRequestCloseResult,
-    GoalTerminalStatus as GoalTerminalStatus,
     GoalStatusRequest as GoalStatusRequest,
     GoalStatusResult as GoalStatusResult,
-    PublicGoalCompletionPolicy as PublicGoalCompletionPolicy,
-    PublicGoalCreateRequest as PublicGoalCreateRequest,
-    PublicGoalRequestCloseRequest as PublicGoalRequestCloseRequest,
     McpAddParams as McpAddParams,
     McpHttpConfig as McpHttpConfig,
     McpHttpServerConfig as McpHttpServerConfig,
@@ -581,6 +567,7 @@ class WorkGraphSnapshot(TypedDict):
     event_high_water_mark: NotRequired[int]
     items: list[WorkItem]
     edges: list[WorkGraphEdge]
+    attention: list[WorkAttentionBinding]
     ready_item_ids: list[str]
 
 

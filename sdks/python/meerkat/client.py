@@ -38,21 +38,10 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
-    AttentionBindingRequest,
-    AttentionBindingResult,
-    AttentionContinueResult,
     AttentionListRequest,
     AttentionListResult,
-    AttentionPauseRequest,
-    AttentionResumeRequest,
-    GoalConfirmRequest,
-    GoalConfirmResult,
-    GoalCreateResult,
-    GoalRequestCloseResult,
     GoalStatusRequest,
     GoalStatusResult,
-    PublicGoalCreateRequest,
-    PublicGoalRequestCloseRequest,
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
@@ -1344,44 +1333,14 @@ class MeerkatClient:
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
 
-    async def create_workgraph_goal(self, params: PublicGoalCreateRequest) -> GoalCreateResult:
-        return await self._request("workgraph/goal/create", _wire_params(params))
-
     async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
         return await self._request("workgraph/goal/status", _wire_params(params))
-
-    async def confirm_workgraph_goal(self, params: GoalConfirmRequest) -> GoalConfirmResult:
-        return await self._request("workgraph/goal/confirm", _wire_params(params))
-
-    async def request_close_workgraph_goal(
-        self,
-        params: PublicGoalRequestCloseRequest,
-    ) -> GoalRequestCloseResult:
-        return await self._request("workgraph/goal/request_close", _wire_params(params))
 
     async def list_workgraph_attention(
         self,
         params: AttentionListRequest | None = None,
     ) -> AttentionListResult:
         return await self._request("workgraph/attention/list", _wire_params(params or {}))
-
-    async def pause_workgraph_attention(
-        self,
-        params: AttentionPauseRequest,
-    ) -> AttentionBindingResult:
-        return await self._request("workgraph/attention/pause", _wire_params(params))
-
-    async def resume_workgraph_attention(
-        self,
-        params: AttentionResumeRequest,
-    ) -> AttentionBindingResult:
-        return await self._request("workgraph/attention/resume", _wire_params(params))
-
-    async def continue_workgraph_attention(
-        self,
-        params: AttentionBindingRequest,
-    ) -> AttentionContinueResult:
-        return await self._request("workgraph/attention/continue", _wire_params(params))
 
     async def mcp_add(
         self,

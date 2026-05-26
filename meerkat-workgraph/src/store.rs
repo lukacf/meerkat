@@ -9,11 +9,12 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
 use crate::WorkGraphError;
-use crate::WorkGraphMachine;
 use crate::types::{
-    AttentionListRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkEdge, WorkGraphEvent,
-    WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
+    AttentionListRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus,
+    WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
+    WorkNamespace,
 };
+use crate::{WorkAttentionMachine, WorkGraphMachine};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
@@ -648,6 +649,7 @@ impl SqliteWorkGraphStore {
             for event in events {
                 replay_event_tx(&tx, &event)?;
             }
+            normalize_attention_for_terminal_items_tx(&tx)?;
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))
         })
@@ -1308,6 +1310,54 @@ fn replay_event_tx(tx: &Transaction<'_>, event: &WorkGraphEvent) -> Result<(), W
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn normalize_attention_for_terminal_items_tx(tx: &Transaction<'_>) -> Result<(), WorkGraphError> {
+    let bindings = {
+        let mut stmt = tx
+            .prepare("SELECT attention_json FROM workgraph_attention")
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row_json::<WorkAttentionBinding>(row, 0))
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let mut bindings = Vec::new();
+        for row in rows {
+            bindings.push(row.map_err(|err| WorkGraphError::Store(err.to_string()))?);
+        }
+        bindings
+    };
+
+    for binding in bindings {
+        if matches!(
+            binding.status,
+            WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
+        ) {
+            continue;
+        }
+        let item = tx
+            .query_row(
+                "SELECT item_json FROM workgraph_items
+                 WHERE realm_id = ?1 AND namespace = ?2 AND item_id = ?3",
+                params![
+                    binding.work_ref.realm_id,
+                    binding.work_ref.namespace.as_str(),
+                    binding.work_ref.item_id.as_str(),
+                ],
+                |row| row_json::<WorkItem>(row, 0),
+            )
+            .optional()
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let Some(item) = item else {
+            continue;
+        };
+        if item.status.is_terminal() {
+            let expected_revision = binding.machine_state.revision;
+            let stopped = WorkAttentionMachine::stop(binding, expected_revision, item.updated_at)?;
+            upsert_attention_tx(tx, &stopped)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn payload_field<T: serde::de::DeserializeOwned>(
     event: &WorkGraphEvent,
     field: &str,
@@ -1342,10 +1392,12 @@ mod tests {
 
     use crate::types::WorkEdge;
     use crate::{
-        ClaimWorkItemRequest, CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore,
-        WorkEdgeKind, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind,
-        WorkGraphService, WorkGraphStore, WorkItemFilter, WorkItemId, WorkNamespace, WorkOwner,
-        WorkOwnerKey, WorkStatus,
+        AttentionDelegatedAuthority, AttentionProjectionPolicy, ClaimWorkItemRequest,
+        CreateWorkItemRequest, GoalAttentionTarget, GoalCreateRequest, GoalRequestCloseRequest,
+        GoalTerminalStatus, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkAttentionMode,
+        WorkAttentionStatus, WorkCompletionPolicy, WorkEdgeKind, WorkGraphError, WorkGraphEvent,
+        WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService, WorkGraphStore, WorkItemFilter,
+        WorkItemId, WorkNamespace, WorkOwner, WorkOwnerKey, WorkStatus,
     };
 
     fn test_edge() -> WorkEdge {
@@ -1669,6 +1721,67 @@ mod tests {
             .await
             .expect("rebuilt edges");
         assert_eq!(rebuilt_edges.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_event_replay_stops_attention_for_terminal_goal_items() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000045")
+            .expect("session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "terminal goal".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Pursue,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        service
+            .goal_request_close(GoalRequestCloseRequest {
+                binding_id: goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: goal.item.revision,
+                status: GoalTerminalStatus::Completed,
+            })
+            .await
+            .expect("close goal");
+
+        store
+            .with_connection(|conn| {
+                conn.execute("DELETE FROM workgraph_items", [])
+                    .map_err(|err| crate::WorkGraphError::Store(err.to_string()))?;
+                conn.execute("DELETE FROM workgraph_attention", [])
+                    .map_err(|err| crate::WorkGraphError::Store(err.to_string()))?;
+                Ok(())
+            })
+            .expect("clear projection");
+
+        store
+            .rebuild_projection_from_events()
+            .expect("rebuild projection");
+
+        let binding = store
+            .get_attention(
+                "realm",
+                &WorkNamespace::default(),
+                &goal.attention.binding_id,
+            )
+            .await
+            .expect("read binding")
+            .expect("rebuilt binding");
+        assert_eq!(binding.status, WorkAttentionStatus::Stopped);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

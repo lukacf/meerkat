@@ -335,11 +335,22 @@ fn validate_transcript_tool_result_shape(messages: &[Message]) -> Result<(), Tra
             let actual = results
                 .iter()
                 .map(|result| result.tool_use_id.as_str())
-                .collect::<BTreeSet<_>>();
+                .collect::<Vec<_>>();
+            let actual_set = actual.iter().copied().collect::<BTreeSet<_>>();
             let expected_set = expected.iter().copied().collect::<BTreeSet<_>>();
-            if actual != expected_set {
+            if actual.len() != actual_set.len() {
                 return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "tool_results at message {index} resolve tool ids {actual:?}, expected {expected_set:?}"
+                    "tool_results at message {index} contains duplicate tool ids"
+                )));
+            }
+            if expected.len() != expected_set.len() {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "assistant tool-use message before tool_results at message {index} contains duplicate tool ids"
+                )));
+            }
+            if actual_set != expected_set {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "tool_results at message {index} resolve tool ids {actual_set:?}, expected {expected_set:?}"
                 )));
             }
         }
@@ -3903,6 +3914,49 @@ mod tests {
                 Some(parent_revision),
             )
             .expect_err("rewrite should reject stranded tool results");
+        assert!(matches!(
+            err,
+            TranscriptEditError::InvalidTranscriptShape(_)
+        ));
+    }
+
+    #[test]
+    fn transcript_rewrite_rejects_duplicate_tool_results() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("use a tool".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "plain answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = session.transcript_revision().expect("parent revision");
+
+        let err = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![
+                    Message::BlockAssistant(BlockAssistantMessage::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "toolu_1".to_string(),
+                            name: "lookup".to_string(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("valid args"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                    )),
+                    Message::tool_results(vec![
+                        ToolResult::new("toolu_1".to_string(), "one".to_string(), false),
+                        ToolResult::new("toolu_1".to_string(), "two".to_string(), false),
+                    ]),
+                ],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect_err("rewrite should reject duplicate tool results");
         assert!(matches!(
             err,
             TranscriptEditError::InvalidTranscriptShape(_)

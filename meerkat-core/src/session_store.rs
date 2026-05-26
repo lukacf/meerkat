@@ -237,20 +237,21 @@ pub fn run_boundary_snapshot_save_guard(
             else {
                 return Err(append_error);
             };
-            let Some(commit) = find_transcript_rewrite_commit_extending(
+            let Some(commits) = find_transcript_rewrite_commit_chain_extending(
                 &state,
                 &previous_revision,
                 &incoming_revision,
             ) else {
                 return Err(append_error);
             };
-            transcript_rewrite_bridge_save_guard(
-                incoming,
-                previous,
-                commit,
-                &state,
-                &incoming_revision,
-            )
+            let Some(commit) = commits.first() else {
+                return Err(append_error);
+            };
+            transcript_rewrite_bridge_save_guard(incoming, commit, &state, &incoming_revision)?;
+            for commit in commits.iter().skip(1) {
+                validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
+            }
+            Ok(())
         }
     }
 }
@@ -262,10 +263,38 @@ pub fn find_transcript_rewrite_commit_extending<'a>(
     previous_revision: &str,
     incoming_revision: &str,
 ) -> Option<&'a TranscriptRewriteCommit> {
-    state.commits.iter().rev().find(|commit| {
-        commit.parent_revision == previous_revision
-            && transcript_history_revision_extends(state, incoming_revision, &commit.revision)
-    })
+    find_transcript_rewrite_commit_chain_extending(state, previous_revision, incoming_revision)
+        .and_then(|commits| commits.into_iter().next())
+}
+
+/// Find the contiguous rewrite commits that connect `previous_revision` to the
+/// incoming head, allowing normal append bodies after the final rewrite.
+pub fn find_transcript_rewrite_commit_chain_extending<'a>(
+    state: &'a TranscriptHistoryState,
+    previous_revision: &str,
+    incoming_revision: &str,
+) -> Option<Vec<&'a TranscriptRewriteCommit>> {
+    let mut chain = Vec::new();
+    let mut cursor = previous_revision;
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if incoming_revision == cursor {
+            return Some(chain);
+        }
+        if !visited.insert(cursor.to_string()) {
+            return None;
+        }
+        let commit = state.commits.iter().find(|commit| {
+            commit.parent_revision == cursor
+                && transcript_history_revision_extends(state, incoming_revision, &commit.revision)
+        });
+        let Some(commit) = commit else {
+            return transcript_history_revision_extends(state, incoming_revision, cursor)
+                .then_some(chain);
+        };
+        cursor = &commit.revision;
+        chain.push(commit);
+    }
 }
 
 fn transcript_history_revision_extends(
@@ -291,12 +320,11 @@ fn transcript_history_revision_extends(
 
 fn transcript_rewrite_bridge_save_guard(
     incoming: &Session,
-    previous: &Session,
     commit: &TranscriptRewriteCommit,
     incoming_state: &TranscriptHistoryState,
     incoming_message_digest: &str,
 ) -> Result<(), SessionStoreError> {
-    validate_transcript_rewrite_commit_bodies(incoming, previous, commit, incoming_state)?;
+    validate_transcript_rewrite_commit_bodies(incoming, commit, incoming_state)?;
     if incoming_state.head != incoming_message_digest {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
@@ -417,39 +445,14 @@ pub fn transcript_rewrite_save_guard(
             reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
         });
     };
-    validate_transcript_rewrite_commit_bodies(incoming, previous, commit, &incoming_state)
+    validate_transcript_rewrite_commit_bodies(incoming, commit, &incoming_state)
 }
 
 fn validate_transcript_rewrite_commit_bodies(
     incoming: &Session,
-    previous: &Session,
     commit: &TranscriptRewriteCommit,
     incoming_state: &TranscriptHistoryState,
 ) -> Result<(), SessionStoreError> {
-    if previous.messages().len() != commit.messages_before
-        || incoming_state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.revision)
-            .map(|body| body.messages.len())
-            != Some(commit.messages_after)
-    {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!(
-                "commit message counts {} -> {} do not match persisted rewrite {} -> {}",
-                commit.messages_before,
-                commit.messages_after,
-                previous.messages().len(),
-                incoming_state
-                    .revisions
-                    .iter()
-                    .find(|body| body.revision == commit.revision)
-                    .map(|body| body.messages.len())
-                    .unwrap_or(0)
-            ),
-        });
-    }
     if !incoming_state
         .commits
         .iter()
@@ -457,8 +460,16 @@ fn validate_transcript_rewrite_commit_bodies(
     {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
-            reason: "incoming rewrite did not persist the rewrite commit in the transcript graph"
-                .to_string(),
+            reason: format!(
+                "incoming rewrite did not persist the rewrite commit in the transcript graph (wanted {} -> {}, graph commits: {:?})",
+                commit.parent_revision,
+                commit.revision,
+                incoming_state
+                    .commits
+                    .iter()
+                    .map(|commit| (&commit.parent_revision, &commit.revision))
+                    .collect::<Vec<_>>()
+            ),
         });
     }
     let Some(parent_body) = incoming_state
@@ -487,6 +498,20 @@ fn validate_transcript_rewrite_commit_bodies(
             ),
         });
     };
+    if parent_body.messages.len() != commit.messages_before
+        || revision_body.messages.len() != commit.messages_after
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "commit message counts {} -> {} do not match persisted rewrite {} -> {}",
+                commit.messages_before,
+                commit.messages_after,
+                parent_body.messages.len(),
+                revision_body.messages.len()
+            ),
+        });
+    }
     let parent_body_revision =
         transcript_messages_digest(&parent_body.messages).map_err(|err| {
             SessionStoreError::InvalidTranscriptRewrite {

@@ -59,13 +59,22 @@ pub enum SessionStoreError {
 
     #[error(
         "session {id} save rejected: new message count {new_len} is shorter than previously \
-         persisted {prev_len} — shrink operations must go through Session::fork_at (F1 \
-         closure, wave-c C-H1)"
+         persisted {prev_len} without transcript-continuity proof"
     )]
     MonotonicityViolation {
         id: SessionId,
         prev_len: usize,
         new_len: usize,
+    },
+
+    #[error(
+        "session {id} save rejected: incoming transcript is not a continuation of persisted revision {previous_revision}"
+    )]
+    TranscriptContinuityViolation {
+        id: SessionId,
+        previous_revision: String,
+        incoming_revision: String,
+        reason: String,
     },
 
     #[error(
@@ -90,17 +99,39 @@ pub enum SessionStoreError {
 /// session and the previously persisted row (or `None` if no prior row
 /// exists). Returns
 /// [`SessionStoreError::MonotonicityViolation`] when the new row's
-/// message count is strictly smaller than the previously persisted one.
+/// message count is strictly smaller than the previously persisted one
+/// without a transcript graph edge that proves a core-owned mutation.
 ///
-/// Backends are free to additionally short-circuit on `Equal` /
-/// `Greater` outcomes — the guard only rejects strict decreases.
+/// The guard also rejects equal/longer saves whose retained prefix no longer
+/// matches the persisted transcript. A plain save may append, update metadata,
+/// or persist a graph-aware core mutation; arbitrary same-session replacement
+/// must go through [`transcript_rewrite_save_guard`].
 pub fn append_only_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
 ) -> Result<(), SessionStoreError> {
-    if let Some(prev) = previous {
-        let prev_len = prev.messages().len();
-        let new_len = incoming.messages().len();
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+
+    let previous_revision =
+        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    if previous_revision == incoming_revision {
+        return Ok(());
+    }
+
+    let prev_len = previous.messages().len();
+    let new_len = incoming.messages().len();
+    if previous
+        .transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        })?
+        .is_none()
+    {
         if new_len < prev_len {
             return Err(SessionStoreError::MonotonicityViolation {
                 id: incoming.id().clone(),
@@ -108,8 +139,68 @@ pub fn append_only_save_guard(
                 new_len,
             });
         }
+        return Ok(());
     }
-    Ok(())
+
+    if new_len >= prev_len {
+        let incoming_prefix_revision = transcript_messages_digest(&incoming.messages()[..prev_len])
+            .map_err(SessionStoreError::from)?;
+        if incoming_prefix_revision == previous_revision {
+            return Ok(());
+        }
+    }
+
+    if graph_authorizes_plain_save_mutation(incoming, &previous_revision, &incoming_revision)? {
+        return Ok(());
+    }
+
+    if new_len < prev_len {
+        return Err(SessionStoreError::MonotonicityViolation {
+            id: incoming.id().clone(),
+            prev_len,
+            new_len,
+        });
+    }
+
+    Err(SessionStoreError::TranscriptContinuityViolation {
+        id: incoming.id().clone(),
+        previous_revision,
+        incoming_revision,
+        reason: "incoming transcript neither preserves the persisted prefix nor records a graph edge from the persisted head".to_string(),
+    })
+}
+
+fn graph_authorizes_plain_save_mutation(
+    incoming: &Session,
+    previous_revision: &str,
+    incoming_revision: &str,
+) -> Result<bool, SessionStoreError> {
+    let Some(state) = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?
+    else {
+        return Ok(false);
+    };
+
+    if state.head != incoming_revision {
+        return Ok(false);
+    }
+    let Some(head_body) = state
+        .revisions
+        .iter()
+        .find(|body| body.revision == incoming_revision)
+    else {
+        return Ok(false);
+    };
+    if head_body.parent_revision.as_deref() != Some(previous_revision) {
+        return Ok(false);
+    }
+    let head_body_revision =
+        transcript_messages_digest(&head_body.messages).map_err(SessionStoreError::from)?;
+    Ok(head_body_revision == incoming_revision)
 }
 
 /// Validate that a same-session shrink/replace save is backed by a typed
@@ -221,6 +312,17 @@ pub fn transcript_rewrite_save_guard(
             reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
         });
     };
+    if !incoming_state
+        .commits
+        .iter()
+        .any(|persisted| persisted == commit)
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming rewrite did not persist the rewrite commit in the transcript graph"
+                .to_string(),
+        });
+    }
     let Some(parent_body) = incoming_state
         .revisions
         .iter()

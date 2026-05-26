@@ -44,6 +44,8 @@ export interface WireToolResult {
 export interface WireSessionMessage {
   role: string;
   created_at: string;
+  kind?: string;
+  body?: string;
   content?: WireContentInput;
   tool_calls?: WireToolCall[];
   stop_reason?: WireStopReason;

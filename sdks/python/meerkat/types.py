@@ -721,11 +721,14 @@ class SessionMessage:
 
     role: str = ""
     created_at: str = ""
+    kind: str | None = None
+    body: str | None = None
     content: ContentInput | None = None
     tool_calls: list[SessionToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)
     results: list[SessionToolResult] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -859,6 +862,9 @@ TranscriptRewriteMessage = (
     | TranscriptRewriteToolResultsMessage
 )
 """Public transcript message accepted by same-session rewrite APIs."""
+
+TranscriptRewriteInputMessage = TranscriptRewriteMessage | SessionMessage
+"""Public rewrite input; accepts raw rewrite messages or SDK-read session messages."""
 
 
 @dataclass(frozen=True, slots=True)

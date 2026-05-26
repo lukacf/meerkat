@@ -818,11 +818,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
-        let Some(event_store) = self.event_store.as_ref() else {
-            return Ok(());
-        };
         let recovery_gate = self.recovery_gate_for_session(session.id()).await;
         let Ok(_backfill_guard) = recovery_gate.try_lock_owned() else {
+            return Ok(());
+        };
+        self.backfill_transcript_rewrite_audit_events_locked(session)
+            .await
+    }
+
+    async fn backfill_transcript_rewrite_audit_events_locked(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionError> {
+        let Some(event_store) = self.event_store.as_ref() else {
             return Ok(());
         };
         let Some(state) = session.transcript_history_state().map_err(|err| {
@@ -930,6 +938,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .any(|body| body.revision == current_revision);
         if let Some(existing_state) = existing_state {
             if replay_contains_current_digest || replay_contains_current {
+                let existing_state_value = serde_json::to_value(&existing_state).map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to serialize existing transcript history for session {id}: {err}"
+                    )))
+                })?;
                 let replay_covers_existing_commits = existing_state.commits.iter().all(|commit| {
                     replayed_state
                         .commits
@@ -941,6 +954,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     replayed_state,
                     replay_covers_existing_commits,
                 );
+                let materialized_state_value =
+                    serde_json::to_value(&materialized_state).map_err(|err| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!(
+                                "failed to serialize replayed transcript history for session {id}: {err}"
+                            ),
+                        ))
+                    })?;
                 session
                     .apply_transcript_history_state(materialized_state)
                     .map_err(|err| {
@@ -950,6 +971,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             ),
                         ))
                     })?;
+                return Ok((
+                    Some(session),
+                    materialized_state_value != existing_state_value,
+                ));
             }
             return Ok((Some(session), false));
         }
@@ -964,7 +989,75 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 })?;
             return Ok((Some(session), true));
         }
+        if let Some(materialized_state) =
+            Self::extend_replayed_history_to_current_projection(&session, replayed_state)?
+        {
+            session
+                .apply_transcript_history_state(materialized_state)
+                .map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to materialize transcript history for session {id}: {err}"
+                    )))
+                })?;
+            return Ok((Some(session), true));
+        }
         Ok((Some(session), false))
+    }
+
+    fn extend_replayed_history_to_current_projection(
+        session: &Session,
+        mut replayed_state: meerkat_core::TranscriptHistoryState,
+    ) -> Result<Option<meerkat_core::TranscriptHistoryState>, SessionError> {
+        let current_revision = meerkat_core::transcript_messages_digest(session.messages())
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to digest current transcript for session {}: {err}",
+                    session.id()
+                )))
+            })?;
+        if replayed_state
+            .revisions
+            .iter()
+            .any(|body| body.revision == current_revision)
+        {
+            replayed_state.head = current_revision;
+            return Ok(Some(replayed_state));
+        }
+        let Some(replayed_head_body) = replayed_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == replayed_state.head)
+        else {
+            return Ok(None);
+        };
+        let replayed_len = replayed_head_body.messages.len();
+        if session.messages().len() < replayed_len {
+            return Ok(None);
+        }
+        let current_prefix_digest = meerkat_core::transcript_messages_digest(
+            &session.messages()[..replayed_len],
+        )
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to digest current transcript prefix for session {}: {err}",
+                session.id()
+            )))
+        })?;
+        if current_prefix_digest != replayed_state.head {
+            return Ok(None);
+        }
+
+        let previous_head = replayed_state.head.clone();
+        replayed_state
+            .revisions
+            .push(meerkat_core::TranscriptRevisionBody {
+                revision: current_revision.clone(),
+                parent_revision: Some(previous_head),
+                messages: session.messages().to_vec(),
+                created_at: session.updated_at(),
+            });
+        replayed_state.head = current_revision;
+        Ok(Some(replayed_state))
     }
 
     fn merge_transcript_history_replay(
@@ -1393,7 +1486,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     self.persist_replayed_transcript_projection_for_mutation(&session)
                         .await?;
                 }
-                self.backfill_transcript_rewrite_audit_events(&session)
+                self.backfill_transcript_rewrite_audit_events_locked(&session)
                     .await?;
                 session
             }
@@ -4062,6 +4155,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 (status, snapshot_state, candidate)
             };
 
+            let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
             let mut session = if self.runtime_store.is_some() {
                 match self.load_authoritative_session_base(id).await? {
                     Some(session) => session,
@@ -4216,6 +4310,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             drop(gate_guard);
         }
 
+        let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         let mut session = match self
             .load_persisted_session_for_control(id, "append_system_context")
             .await?
@@ -4287,6 +4382,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     });
                 }
 
+                let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
                 let mut session = if self.runtime_store.is_some() {
                     match self.load_authoritative_session_base(id).await? {
                         Some(session) => session,
@@ -4371,6 +4467,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             drop(gate_guard);
         }
 
+        let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         let mut session = match self
             .load_persisted_session_for_control(id, "stage_tool_results")
             .await?
@@ -9367,7 +9464,7 @@ mod tests {
             )
             .await
             .expect("second rewrite should commit with audit event");
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 1);
+        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
 
         let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
         let recovery_service = PersistentSessionService::new(
@@ -9989,6 +10086,213 @@ mod tests {
             serde_json::to_value(saved.messages()).expect("saved messages serialize"),
             serde_json::to_value(stale_projection.messages()).expect("stale messages serialize")
         );
+    }
+
+    #[tokio::test]
+    async fn test_transcript_rewrite_replay_materializes_partial_graph_before_restore() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let original_revision = store
+            .load(&session_id)
+            .await
+            .expect("load original projection")
+            .expect("session exists")
+            .transcript_revision()
+            .expect("original revision");
+
+        let first = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
+                        content: "first compacted trace".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: Some("partial-graph-replay-test".to_string()),
+                    expected_parent_revision: Some(original_revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("first rewrite should commit");
+        let stale_partial_graph = store
+            .load(&session_id)
+            .await
+            .expect("load partial graph")
+            .expect("session exists after first rewrite");
+
+        let second = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
+                        content: "second compacted trace".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: Some("partial-graph-replay-test".to_string()),
+                    expected_parent_revision: Some(first.revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("second rewrite should commit");
+
+        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        recovery_store
+            .save(&stale_partial_graph)
+            .await
+            .expect("seed stale partial graph projection");
+        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
+        let recovery_service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&recovery_store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store.clone(),
+            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
+        );
+
+        recovery_service
+            .restore_session_transcript_revision(
+                &session_id,
+                SessionTranscriptRestoreRevisionRequest {
+                    revision: stale_partial_graph
+                        .transcript_revision()
+                        .expect("stale revision"),
+                    reason: TranscriptRewriteReason::new("restore"),
+                    actor: Some("partial-graph-replay-test".to_string()),
+                    expected_parent_revision: Some(second.revision.clone()),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("replay-merged partial graph should be materialized before restore");
+    }
+
+    #[tokio::test]
+    async fn test_transcript_rewrite_replay_recovers_graph_lost_after_normal_turn() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let original = store
+            .load(&session_id)
+            .await
+            .expect("load original")
+            .expect("session exists");
+        let original_revision = original.transcript_revision().expect("original revision");
+
+        let rewrite = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                    replacement: vec![Message::Assistant(meerkat_core::AssistantMessage {
+                        content: "compacted trace before normal turn".to_string(),
+                        tool_calls: Vec::new(),
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
+                    })],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: Some("graph-loss-replay-test".to_string()),
+                    expected_parent_revision: Some(original_revision.clone()),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("rewrite should commit");
+
+        let mut graphless_post_turn = store
+            .load(&session_id)
+            .await
+            .expect("load rewritten")
+            .expect("session exists after rewrite");
+        graphless_post_turn.push(Message::User(UserMessage::text(
+            "normal turn after rewrite".to_string(),
+        )));
+        graphless_post_turn.remove_metadata(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+
+        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        recovery_store
+            .save(&graphless_post_turn)
+            .await
+            .expect("seed graphless post-turn projection");
+        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
+        let recovery_service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&recovery_store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store,
+            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
+        );
+
+        let retained_original = recovery_service
+            .read_transcript_revision(
+                &session_id,
+                SessionTranscriptRevisionQuery {
+                    revision: original_revision.clone(),
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("replay should restore retained graph before serving revision");
+        assert_eq!(retained_original.revision, original_revision);
+        assert_ne!(retained_original.head_revision, rewrite.parent_revision);
     }
 
     #[tokio::test]

@@ -128,7 +128,7 @@ from .types import (
     StoredMobProfile,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
-    TranscriptRewriteMessage,
+    TranscriptRewriteInputMessage,
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
     WorkGraphEventFilter,
@@ -1066,7 +1066,7 @@ class MeerkatClient:
         self,
         session_id: str,
         selection: TranscriptRewriteSelection,
-        replacement: list[TranscriptRewriteMessage],
+        replacement: list[TranscriptRewriteInputMessage],
         reason: TranscriptRewriteReason,
         *,
         actor: str | None = None,
@@ -1077,7 +1077,10 @@ class MeerkatClient:
         params: dict[str, Any] = {
             "session_id": session_id,
             "selection": selection,
-            "replacement": replacement,
+            "replacement": [
+                self._serialize_transcript_rewrite_message(message)
+                for message in replacement
+            ],
             "reason": reason,
         }
         if actor is not None:
@@ -3513,10 +3516,19 @@ class MeerkatClient:
     @staticmethod
     def _parse_session_message(data: dict[str, Any]) -> SessionMessage:
         role = data.get("role", "")
+        content_value = (
+            data.get("body")
+            if role == "system_notice" and "content" not in data and "body" in data
+            else data.get("content")
+        )
         return SessionMessage(
             role=role,
             created_at=str(data.get("created_at", "")),
-            content=MeerkatClient._parse_content_input(data["content"]) if "content" in data else None,
+            kind=str(data["kind"]) if "kind" in data else None,
+            body=str(data["body"]) if "body" in data else None,
+            content=MeerkatClient._parse_content_input(content_value)
+            if content_value is not None
+            else None,
             tool_calls=[
                 SessionToolCall(
                     id=tool_call.get("id", ""),
@@ -3538,7 +3550,46 @@ class MeerkatClient:
                 )
                 for result in data.get("results", [])
             ],
+            raw=dict(data),
         )
+
+    @staticmethod
+    def _serialize_transcript_rewrite_message(
+        message: TranscriptRewriteInputMessage,
+    ) -> dict[str, Any]:
+        if isinstance(message, SessionMessage):
+            if message.raw:
+                return dict(message.raw)
+            payload: dict[str, Any] = {
+                "role": message.role,
+                "created_at": message.created_at,
+            }
+            if message.kind is not None:
+                payload["kind"] = message.kind
+            if message.body is not None:
+                payload["body"] = message.body
+            if message.content is not None:
+                payload["content"] = message.content
+            if message.tool_calls:
+                payload["tool_calls"] = [
+                    {"id": call.id, "name": call.name, "args": call.args}
+                    for call in message.tool_calls
+                ]
+            if message.stop_reason is not None:
+                payload["stop_reason"] = message.stop_reason
+            if message.blocks:
+                payload["blocks"] = [asdict(block) for block in message.blocks]
+            if message.results:
+                payload["results"] = [
+                    {
+                        "tool_use_id": result.tool_use_id,
+                        "content": result.content,
+                        "is_error": result.is_error,
+                    }
+                    for result in message.results
+                ]
+            return payload
+        return dict(message)
 
     @staticmethod
     def _parse_content_input(value: Any) -> ContentInput:

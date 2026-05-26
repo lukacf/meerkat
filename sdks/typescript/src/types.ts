@@ -236,11 +236,14 @@ export interface SessionAssistantBlock {
 export interface SessionMessage {
   readonly role: string;
   readonly createdAt: string;
+  readonly kind?: string;
+  readonly body?: string;
   readonly content?: ContentInput;
   readonly toolCalls: readonly SessionToolCall[];
   readonly stopReason?: string;
   readonly blocks: readonly SessionAssistantBlock[];
   readonly results: readonly SessionToolResult[];
+  readonly raw?: Record<string, unknown>;
 }
 
 export interface SessionHistory {
@@ -361,6 +364,8 @@ export type TranscriptRewriteMessage =
       readonly results: readonly Record<string, unknown>[];
       readonly created_at?: string;
     };
+
+export type TranscriptRewriteInputMessage = TranscriptRewriteMessage | SessionMessage;
 
 /** Options for same-session transcript rewrite APIs. */
 export interface TranscriptRewriteOptions extends TranscriptEditOptions {

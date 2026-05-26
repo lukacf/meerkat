@@ -39,7 +39,7 @@ from .types import (
     SkillRef,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
-    TranscriptRewriteMessage,
+    TranscriptRewriteInputMessage,
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
 )
@@ -328,7 +328,7 @@ class Session:
     async def rewrite_transcript(
         self,
         selection: TranscriptRewriteSelection,
-        replacement: list[TranscriptRewriteMessage],
+        replacement: list[TranscriptRewriteInputMessage],
         reason: TranscriptRewriteReason,
         *,
         actor: str | None = None,
@@ -598,7 +598,7 @@ class DeferredSession:
     async def rewrite_transcript(
         self,
         selection: TranscriptRewriteSelection,
-        replacement: list[TranscriptRewriteMessage],
+        replacement: list[TranscriptRewriteInputMessage],
         reason: TranscriptRewriteReason,
         *,
         actor: str | None = None,

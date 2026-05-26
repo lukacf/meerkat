@@ -36,7 +36,7 @@ import type {
   SkillRef,
   TranscriptEditOptions,
   TranscriptReplacement,
-  TranscriptRewriteMessage,
+  TranscriptRewriteInputMessage,
   TranscriptRewriteOptions,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,
@@ -148,7 +148,7 @@ export class Session {
 
   async rewriteTranscript(
     selection: TranscriptRewriteSelection,
-    replacement: readonly TranscriptRewriteMessage[],
+    replacement: readonly TranscriptRewriteInputMessage[],
     reason: TranscriptRewriteReason,
     options?: TranscriptRewriteOptions,
   ): Promise<SessionTranscriptRewriteResult> {
@@ -341,7 +341,7 @@ export class DeferredSession {
 
   async rewriteTranscript(
     selection: TranscriptRewriteSelection,
-    replacement: readonly TranscriptRewriteMessage[],
+    replacement: readonly TranscriptRewriteInputMessage[],
     reason: TranscriptRewriteReason,
     options?: TranscriptRewriteOptions,
   ): Promise<SessionTranscriptRewriteResult> {

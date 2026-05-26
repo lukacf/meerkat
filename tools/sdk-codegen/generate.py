@@ -773,6 +773,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += '    """Canonical transcript message."""\n'
     types_content += "    role: str = ''\n"
     types_content += "    created_at: str = ''\n"
+    types_content += "    kind: Optional[str] = None\n"
+    types_content += "    body: Optional[str] = None\n"
     types_content += "    content: Optional[WireContentInput] = None\n"
     types_content += "    tool_calls: Optional[list[WireToolCall]] = None\n"
     types_content += "    stop_reason: Optional[WireStopReason] = None\n"
@@ -1296,6 +1298,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "export interface WireSessionMessage {\n"
     types_content += "  role: string;\n"
     types_content += "  created_at: string;\n"
+    types_content += "  kind?: string;\n"
+    types_content += "  body?: string;\n"
     types_content += "  content?: WireContentInput;\n"
     types_content += "  tool_calls?: WireToolCall[];\n"
     types_content += "  stop_reason?: WireStopReason;\n"

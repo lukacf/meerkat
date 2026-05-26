@@ -139,6 +139,7 @@ import type {
   SpawnSpec,
   TranscriptEditOptions,
   TranscriptReplacement,
+  TranscriptRewriteInputMessage,
   TranscriptRewriteMessage,
   TranscriptRewriteOptions,
   TranscriptRewriteReason,
@@ -846,14 +847,16 @@ export class MeerkatClient {
   async rewriteSessionTranscript(
     sessionId: string,
     selection: TranscriptRewriteSelection,
-    replacement: readonly TranscriptRewriteMessage[],
+    replacement: readonly TranscriptRewriteInputMessage[],
     reason: TranscriptRewriteReason,
     options?: TranscriptRewriteOptions,
   ): Promise<SessionTranscriptRewriteResult> {
     const params: Record<string, unknown> = {
       session_id: sessionId,
       selection,
-      replacement,
+      replacement: replacement.map((message) =>
+        MeerkatClient.serializeTranscriptRewriteMessage(message),
+      ),
       reason,
     };
     if (options?.actor !== undefined) {
@@ -3776,6 +3779,8 @@ export class MeerkatClient {
     return {
       role,
       createdAt: String(data.created_at ?? ""),
+      kind: data.kind != null ? String(data.kind) : undefined,
+      body: data.body != null ? String(data.body) : undefined,
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
       toolCalls: rawToolCalls.map(
@@ -3794,7 +3799,55 @@ export class MeerkatClient {
           isError: Boolean(result.is_error ?? false),
         }),
       ),
+      raw: { ...data },
     };
+  }
+
+  static serializeTranscriptRewriteMessage(
+    message: TranscriptRewriteInputMessage,
+  ): Record<string, unknown> {
+    const raw = (message as SessionMessage).raw;
+    if (raw !== undefined) {
+      return { ...raw };
+    }
+    const camel = message as SessionMessage;
+    if (camel.createdAt !== undefined) {
+      const payload: Record<string, unknown> = {
+        role: camel.role,
+        created_at: camel.createdAt,
+      };
+      if (camel.kind !== undefined) {
+        payload.kind = camel.kind;
+      }
+      if (camel.body !== undefined) {
+        payload.body = camel.body;
+      }
+      if (camel.content !== undefined) {
+        payload.content = camel.content;
+      }
+      if (camel.toolCalls?.length > 0) {
+        payload.tool_calls = camel.toolCalls.map((toolCall) => ({
+          id: toolCall.id,
+          name: toolCall.name,
+          args: toolCall.args,
+        }));
+      }
+      if (camel.stopReason !== undefined) {
+        payload.stop_reason = camel.stopReason;
+      }
+      if (camel.blocks?.length > 0) {
+        payload.blocks = camel.blocks;
+      }
+      if (camel.results?.length > 0) {
+        payload.results = camel.results.map((result) => ({
+          tool_use_id: result.toolUseId,
+          content: result.content,
+          is_error: result.isError,
+        }));
+      }
+      return payload;
+    }
+    return { ...(message as TranscriptRewriteMessage) };
   }
 
   static parseContentInput(value: unknown): ContentInput {

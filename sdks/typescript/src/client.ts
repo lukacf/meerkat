@@ -347,6 +347,7 @@ function mobTurnStartPayload(
     payload.flow_tool_overlay = {
       allowed_tools: options.flowToolOverlay.allowedTools,
       blocked_tools: options.flowToolOverlay.blockedTools,
+      dispatch_context: options.flowToolOverlay.dispatchContext,
     } as MobTurnStartParams["flow_tool_overlay"];
   }
   setIfDefined(payload, "additional_instructions", options?.additionalInstructions);
@@ -2309,6 +2310,7 @@ export class MeerkatClient {
       params.flow_tool_overlay = {
         allowed_tools: options.flowToolOverlay.allowedTools,
         blocked_tools: options.flowToolOverlay.blockedTools,
+        dispatch_context: options.flowToolOverlay.dispatchContext,
       };
     }
     if (options?.additionalInstructions != null) {
@@ -2355,6 +2357,7 @@ export class MeerkatClient {
       params.flow_tool_overlay = {
         allowed_tools: options.flowToolOverlay.allowedTools,
         blocked_tools: options.flowToolOverlay.blockedTools,
+        dispatch_context: options.flowToolOverlay.dispatchContext,
       };
     }
     if (options?.additionalInstructions != null) {

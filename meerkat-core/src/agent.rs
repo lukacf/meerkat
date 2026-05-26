@@ -49,7 +49,7 @@ use crate::types::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use builder::{AgentBuildPolicyError, AgentBuilder};
@@ -186,6 +186,7 @@ pub struct ExternalToolUpdate {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolDispatchContext {
     current_turn: Option<CurrentTurnContent>,
+    turn_metadata: BTreeMap<String, serde_json::Value>,
 }
 
 impl ToolDispatchContext {
@@ -196,7 +197,18 @@ impl ToolDispatchContext {
         };
         Self {
             current_turn: blocks.map(CurrentTurnContent::new),
+            turn_metadata: BTreeMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_turn_metadata(mut self, metadata: BTreeMap<String, serde_json::Value>) -> Self {
+        self.turn_metadata = metadata;
+        self
+    }
+
+    pub fn turn_metadata(&self, key: &str) -> Option<&serde_json::Value> {
+        self.turn_metadata.get(key)
     }
 
     pub fn current_turn(&self) -> Option<&CurrentTurnContent> {
@@ -1118,6 +1130,8 @@ where
     pub(crate) last_pending_catalog_sources: BTreeSet<String>,
     /// Dispatch-time projection of the current turn input for contextual tools.
     pub(crate) tool_dispatch_context: ToolDispatchContext,
+    /// Runtime-owned dispatch metadata for this turn.
+    pub(crate) turn_tool_dispatch_metadata: BTreeMap<String, serde_json::Value>,
 }
 
 #[cfg(test)]

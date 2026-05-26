@@ -44,6 +44,21 @@ impl WorkAttentionMachine {
         Ok(binding)
     }
 
+    pub fn stop(
+        mut binding: WorkAttentionBinding,
+        expected_revision: u64,
+        now: DateTime<Utc>,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        let input = attention_dsl::WorkAttentionLifecycleInput::Stop {
+            expected_revision,
+            at_utc_ms: datetime_to_millis(now),
+        };
+        binding.machine_state = apply_attention_dsl(&binding, input)?;
+        sync_attention_from_machine_state(&mut binding);
+        binding.updated_at = now;
+        Ok(binding)
+    }
+
     pub fn is_eligible_at(binding: &WorkAttentionBinding, now: DateTime<Utc>) -> bool {
         match binding.machine_state.lifecycle_phase {
             attention_dsl::WorkAttentionLifecycleState::Active => true,

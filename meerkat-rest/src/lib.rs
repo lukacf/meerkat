@@ -1299,9 +1299,7 @@ async fn apply_runtime_turn(
     );
     let typed_turn_appends = primitive.typed_turn_appends();
     let pre_turn_context_appends = match primitive {
-        RunPrimitive::StagedInput(staged)
-            if primitive.is_peer_response_terminal_context_and_run() =>
-        {
+        RunPrimitive::StagedInput(staged) if !staged.context_appends.is_empty() => {
             pending_system_context_appends(&staged.context_appends)
         }
         _ => Vec::new(),
@@ -4729,6 +4727,7 @@ async fn workgraph_attention_continue(
     let (session_id, input) = workgraph_attention_continuation_input(&state, request)
         .await
         .map_err(workgraph_error_to_api)?;
+    ensure_rest_session_exists(&state, &session_id).await?;
     ensure_rest_session_runtime_executor(&state, &session_id).await;
     let outcome = state
         .runtime_adapter
@@ -4738,6 +4737,26 @@ async fn workgraph_attention_continue(
     rest_runtime_accept_result(outcome)
         .map(Json)
         .map_err(ApiError::Internal)
+}
+
+async fn ensure_rest_session_exists(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), ApiError> {
+    if state.runtime_adapter.contains_session(session_id).await
+        || state.session_service.read(session_id).await.is_ok()
+        || state
+            .session_service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(|error| ApiError::Internal(format!("{error}")))?
+            .is_some()
+    {
+        return Ok(());
+    }
+    Err(ApiError::NotFound(format!(
+        "Session not found: {session_id}"
+    )))
 }
 
 async fn workgraph_attention_continuation_input(
@@ -4767,19 +4786,9 @@ async fn workgraph_attention_continuation_input(
         })
         .await?
         .projection;
-    let scoped_surface = meerkat::WorkGraphToolSurface::with_attention_projection(
-        state.workgraph_service.clone(),
-        projection.clone(),
-    );
-    let allowed_tools = scoped_surface
-        .tools()
-        .iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    let context_key = format!(
-        "workgraph_attention:{}:{}:{}",
-        projection.binding_id, projection.binding_revision, projection.item_revision
-    );
+    let flow_tool_overlay =
+        meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
+    let context_key = meerkat::workgraph_attention_continuation_key(&projection);
     let input = meerkat_runtime::Input::Continuation(meerkat_runtime::ContinuationInput {
         header: meerkat_runtime::InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
@@ -4799,16 +4808,14 @@ async fn workgraph_attention_continuation_input(
         reason: "workgraph_attention".to_string(),
         handling_mode: meerkat_core::types::HandlingMode::Steer,
         request_id: Some(binding_id.to_string()),
-        flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
-            allowed_tools: Some(allowed_tools),
-            blocked_tools: None,
-        }),
+        flow_tool_overlay: Some(flow_tool_overlay),
         context_append: Some(ConversationContextAppend {
             key: context_key,
             content: CoreRenderable::Text {
-                text: projection.text.rendered,
+                text: projection.text.rendered.clone(),
             },
         }),
+        turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
     });
     Ok((session_id, input))
 }
@@ -9655,12 +9662,20 @@ mod tests {
         let meerkat_runtime::Input::Continuation(continuation) = input else {
             unreachable!("attention continuation should build a continuation input");
         };
-        let allowed_tools = continuation
+        let overlay = continuation
             .flow_tool_overlay
-            .and_then(|overlay| overlay.allowed_tools)
             .expect("attention continuation should carry scoped tool overlay");
-        assert!(allowed_tools.contains(&"workgraph_add_evidence".to_string()));
-        assert!(!allowed_tools.contains(&"workgraph_link".to_string()));
+        let blocked_tools = overlay
+            .blocked_tools
+            .expect("attention continuation should carry scoped tool overlay");
+        assert!(!blocked_tools.contains(&"workgraph_add_evidence".to_string()));
+        assert!(blocked_tools.contains(&"workgraph_link".to_string()));
+        assert!(
+            overlay
+                .dispatch_context
+                .contains_key(meerkat::WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY)
+        );
+        assert!(continuation.turn_append.is_some());
         let app = router(state);
 
         for descriptor in meerkat::workgraph_rest_path_catalog() {

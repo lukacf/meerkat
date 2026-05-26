@@ -244,6 +244,7 @@ mod tests {
             request_id: None,
             flow_tool_overlay: None,
             context_append: None,
+            turn_append: None,
         });
         assert!(validate_durability(&input).is_err());
     }

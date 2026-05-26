@@ -23,7 +23,8 @@ pub use error::WorkGraphError;
 pub use machine::{WorkAttentionMachine, WorkGraphMachine};
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
-    WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_response_schema,
+    WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
+    workgraph_rest_response_schema,
 };
 pub use service::WorkGraphService;
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,7 +34,10 @@ pub use store::{
     WorkGraphStoreKind,
 };
 pub use surface::wire_workgraph_tools;
-pub use tool_surface::WorkGraphToolSurface;
+pub use tool_surface::{
+    WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkGraphToolSurface,
+    workgraph_attention_continuation_key, workgraph_attention_turn_append,
+};
 pub use tools::{
     CAPABILITY_UNAVAILABLE as WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
     INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,

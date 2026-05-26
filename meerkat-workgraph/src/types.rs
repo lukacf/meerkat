@@ -455,8 +455,12 @@ pub enum AttentionDelegatedAuthority {
 pub struct AttentionProjectionPolicy {
     #[serde(default = "default_projection_max_text_chars")]
     pub max_text_chars: u32,
-    #[serde(default)]
+    #[serde(default = "default_include_parent_context")]
     pub include_parent_context: bool,
+}
+
+fn default_include_parent_context() -> bool {
+    true
 }
 
 impl Default for AttentionProjectionPolicy {
@@ -1098,6 +1102,8 @@ pub struct GoalConfirmRequest {
     pub evidence: WorkEvidenceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<WorkOwnerKey>,
+    #[serde(skip)]
+    pub trusted_principal: Option<WorkOwnerKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

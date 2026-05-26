@@ -511,9 +511,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         let prompt = primitive.extract_content_input();
         let pre_turn_context_appends = match &primitive {
-            RunPrimitive::StagedInput(staged)
-                if primitive.is_peer_response_terminal_context_and_run() =>
-            {
+            RunPrimitive::StagedInput(staged) if !staged.context_appends.is_empty() => {
                 pending_system_context_appends_from_primitive(&staged.context_appends)
             }
             _ => Vec::new(),

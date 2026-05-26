@@ -11470,6 +11470,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
         Some(TurnToolOverlay {
             allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
             blocked_tools: Some(vec!["beta".to_string()]),
+            dispatch_context: Default::default(),
         }),
         "flow step turn should pass flow overlay"
     );

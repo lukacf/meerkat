@@ -256,6 +256,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
                 summary: Some("Host accepted the result".to_string()),
             },
             principal: None,
+            trusted_principal: None,
         })
         .await
         .expect("confirm goal");
@@ -312,6 +313,7 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 summary: None,
             },
             principal: Some(WorkOwnerKey::principal("other").expect("principal")),
+            trusted_principal: Some(WorkOwnerKey::principal("other").expect("principal")),
         })
         .await
         .expect_err("only the configured supervisor may confirm");
@@ -332,6 +334,7 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 summary: None,
             },
             principal: Some(supervisor.clone()),
+            trusted_principal: Some(supervisor.clone()),
         })
         .await
         .expect("supervisor confirmation");
@@ -519,6 +522,65 @@ async fn attention_projection_policy_controls_parent_context() {
     assert!(!projection.text.rendered.contains("Parent objective"));
 }
 
+#[test]
+fn partial_projection_policy_preserves_parent_context_default() {
+    let policy: AttentionProjectionPolicy = serde_json::from_value(serde_json::json!({
+        "max_text_chars": 512
+    }))
+    .expect("policy should deserialize");
+    assert!(policy.include_parent_context);
+}
+
+#[tokio::test]
+async fn closed_goal_stops_attention_and_cannot_resume() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000041").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Closable".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let closed = service
+        .goal_request_close(GoalRequestCloseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            status: WorkStatus::Completed,
+        })
+        .await
+        .expect("close goal");
+    assert!(matches!(
+        closed.attention.status,
+        WorkAttentionStatus::Stopped
+    ));
+
+    let resume_err = service
+        .resume_attention(AttentionBindingRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect_err("closed goal attention must not resume");
+    assert!(matches!(
+        resume_err,
+        meerkat_workgraph::WorkGraphError::InvalidTransition(_)
+    ));
+}
+
 #[tokio::test]
 async fn disabled_store_rejects_goal_create_fail_closed() {
     let service = WorkGraphService::new(std::sync::Arc::new(
@@ -602,6 +664,7 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
             summary: None,
         },
         principal: Some(WorkOwnerKey::principal("user").expect("principal")),
+        trusted_principal: Some(WorkOwnerKey::principal("user").expect("principal")),
     };
     let request_close = GoalRequestCloseRequest {
         binding_id: binding_id.clone(),

@@ -8713,6 +8713,11 @@
               "array",
               "null"
             ]
+          },
+          "dispatch_context": {
+            "additionalProperties": true,
+            "description": "Tool-dispatch metadata visible only to dispatchers for this turn.",
+            "type": "object"
           }
         },
         "type": "object"

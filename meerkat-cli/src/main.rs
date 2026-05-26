@@ -6167,6 +6167,10 @@ async fn handle_workgraph_command(
                         summary,
                     },
                     principal: principal
+                        .clone()
+                        .map(meerkat::WorkOwnerKey::principal)
+                        .transpose()?,
+                    trusted_principal: principal
                         .map(meerkat::WorkOwnerKey::principal)
                         .transpose()?,
                 })
@@ -7917,6 +7921,7 @@ fn build_flow_tool_overlay(
         } else {
             Some(block_tools)
         },
+        dispatch_context: Default::default(),
     })
 }
 

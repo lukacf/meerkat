@@ -2838,7 +2838,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -3464,7 +3464,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -3730,7 +3730,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "include_parent_context": {
-        "default": false,
+        "default": true,
         "type": "boolean"
       },
       "max_text_chars": {
@@ -9912,7 +9912,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -10479,7 +10479,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -10696,7 +10696,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -11305,7 +11305,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -11897,7 +11897,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -40212,7 +40212,7 @@
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {

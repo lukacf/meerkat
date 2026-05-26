@@ -11615,6 +11615,7 @@ mod tests {
         start_req.runtime.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay {
             allowed_tools: Some(vec!["blocked-before-run".to_string()]),
             blocked_tools: None,
+            dispatch_context: Default::default(),
         });
         let error = service
             .start_turn_with_reserved_admission(&created.session_id, start_req, promoted)

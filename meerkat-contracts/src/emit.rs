@@ -1130,10 +1130,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     }
 
     fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
-        if let Some(response_schema) =
-            meerkat_workgraph::workgraph_rest_response_schema(path, method)
+        if let Some((request_schema, response_schema)) =
+            meerkat_workgraph::workgraph_rest_request_response_schema(path, method)
         {
-            return RestOperationContract::json(response_schema);
+            return match request_schema {
+                Some(request_schema) => {
+                    RestOperationContract::with_json_request(request_schema, response_schema)
+                }
+                None => RestOperationContract::json(response_schema),
+            };
         }
 
         match (path, method) {
@@ -2041,6 +2046,18 @@ mod tests {
                     catalog_operation.method,
                     descriptor.path
                 );
+                if let Some(request_schema) = catalog_operation.request_schema {
+                    let expected_request = format!("#/components/schemas/{request_schema}");
+                    assert_eq!(
+                        operation
+                            .pointer("/requestBody/content/application~1json/schema/$ref")
+                            .and_then(serde_json::Value::as_str),
+                        Some(expected_request.as_str()),
+                        "{} {} must expose its generated REST request body",
+                        catalog_operation.method,
+                        descriptor.path
+                    );
+                }
             }
         }
 

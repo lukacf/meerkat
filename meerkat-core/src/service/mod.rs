@@ -988,6 +988,9 @@ pub struct TurnToolOverlay {
     /// Optional deny-list for this turn.
     #[serde(default)]
     pub blocked_tools: Option<Vec<String>>,
+    /// Tool-dispatch metadata visible only to dispatchers for this turn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub dispatch_context: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Query parameters for listing sessions.

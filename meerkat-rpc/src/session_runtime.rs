@@ -3110,21 +3110,11 @@ impl SessionRuntime {
             .await
             .map_err(workgraph_error_to_rpc)?
             .projection;
-        let scoped_surface = meerkat::WorkGraphToolSurface::with_attention_projection(
-            service.clone(),
-            projection.clone(),
-        );
-        let allowed_tools = scoped_surface
-            .tools()
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
+        let flow_tool_overlay =
+            meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
 
         self.ensure_runtime_executor(session_id).await?;
-        let context_key = format!(
-            "workgraph_attention:{}:{}:{}",
-            projection.binding_id, projection.binding_revision, projection.item_revision
-        );
+        let context_key = meerkat::workgraph_attention_continuation_key(&projection);
         let input = Input::Continuation(ContinuationInput {
             header: InputHeader {
                 id: InputId::new(),
@@ -3142,16 +3132,14 @@ impl SessionRuntime {
             reason: "workgraph_attention".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: Some(binding_id.to_string()),
-            flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
-                allowed_tools: Some(allowed_tools),
-                blocked_tools: None,
-            }),
+            flow_tool_overlay: Some(flow_tool_overlay),
             context_append: Some(ConversationContextAppend {
                 key: context_key,
                 content: CoreRenderable::Text {
-                    text: projection.text.rendered,
+                    text: projection.text.rendered.clone(),
                 },
             }),
+            turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
         });
         self.runtime_adapter
             .accept_input(session_id, input)
@@ -4982,9 +4970,7 @@ impl SessionRuntime {
         }
 
         let pre_turn_context_appends = match primitive {
-            RunPrimitive::StagedInput(staged)
-                if primitive.is_peer_response_terminal_context_and_run() =>
-            {
+            RunPrimitive::StagedInput(staged) if !staged.context_appends.is_empty() => {
                 pending_system_context_appends(&staged.context_appends)
             }
             _ => Vec::new(),

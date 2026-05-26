@@ -1222,6 +1222,7 @@ impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
         Self {
             allowed_tools: value.allowed_tools,
             blocked_tools: value.blocked_tools,
+            dispatch_context: Default::default(),
         }
     }
 }

@@ -513,6 +513,9 @@ pub struct ContinuationInput {
     /// Optional runtime-owned context projected into the next turn boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_append: Option<ConversationContextAppend>,
+    /// Optional runtime-owned turn append used to force a continuation turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_append: Option<ConversationAppend>,
 }
 
 impl ContinuationInput {
@@ -541,6 +544,7 @@ impl ContinuationInput {
             request_id: None,
             flow_tool_overlay: None,
             context_append: None,
+            turn_append: None,
         }
     }
 }
@@ -895,7 +899,8 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
             ConversationAppendRole::SystemNotice,
             external_event_notice_renderable(e),
         ),
-        Input::Continuation(_) | Input::Operation(_) => return None,
+        Input::Continuation(continuation) => return continuation.turn_append.clone(),
+        Input::Operation(_) => return None,
     };
 
     Some(ConversationAppend { role, content })
@@ -1301,6 +1306,7 @@ mod tests {
             flow_tool_overlay: Some(TurnToolOverlay {
                 allowed_tools: Some(vec!["workgraph_add_evidence".into()]),
                 blocked_tools: None,
+                dispatch_context: Default::default(),
             }),
             context_append: Some(ConversationContextAppend {
                 key: "workgraph_attention:binding-1:2:5".into(),
@@ -1308,6 +1314,7 @@ mod tests {
                     text: "WorkGraph attention projection".into(),
                 },
             }),
+            turn_append: None,
         });
         let projection = runtime_input_projection_for_machine_batch(&input);
         let appends = projection_to_pending_system_context_appends(input.id(), &projection);
@@ -1694,6 +1701,7 @@ mod tests {
             request_id: None,
             flow_tool_overlay: None,
             context_append: None,
+            turn_append: None,
         });
         assert_eq!(continuation.kind(), InputKind::Continuation);
 

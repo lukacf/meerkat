@@ -4,6 +4,30 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AttentionBindingRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "binding_id"
+        ],
+        "title": "AttentionBindingRequest",
+        "type": "object"
+      },
       "AttentionBindingResult": {
         "properties": {
           "attention": {
@@ -64,6 +88,44 @@
         ],
         "type": "string"
       },
+      "AttentionListRequest": {
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "AttentionListRequest",
+        "type": "object"
+      },
       "AttentionListResult": {
         "properties": {
           "attention": {
@@ -79,10 +141,41 @@
         "title": "AttentionListResult",
         "type": "object"
       },
+      "AttentionPauseRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "binding_id"
+        ],
+        "title": "AttentionPauseRequest",
+        "type": "object"
+      },
       "AttentionProjectionPolicy": {
         "properties": {
           "include_parent_context": {
-            "default": false,
+            "default": true,
             "type": "boolean"
           },
           "max_text_chars": {
@@ -2322,6 +2415,64 @@
         ],
         "type": "object"
       },
+      "GoalAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "GoalConfirmRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/WorkEvidenceRef"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "principal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "binding_id",
+          "evidence"
+        ],
+        "title": "GoalConfirmRequest",
+        "type": "object"
+      },
       "GoalConfirmResult": {
         "properties": {
           "attention": {
@@ -2336,6 +2487,61 @@
           "attention"
         ],
         "title": "GoalConfirmResult",
+        "type": "object"
+      },
+      "GoalCreateRequest": {
+        "properties": {
+          "completion_policy": {
+            "$ref": "#/components/schemas/WorkCompletionPolicy",
+            "default": {
+              "kind": "self_attest"
+            }
+          },
+          "delegated_authority": {
+            "$ref": "#/components/schemas/AttentionDelegatedAuthority",
+            "default": "add_evidence"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/WorkAttentionMode",
+            "default": "pursue"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projection_policy": {
+            "$ref": "#/components/schemas/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/GoalAttentionTarget"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "target"
+        ],
+        "title": "GoalCreateRequest",
         "type": "object"
       },
       "GoalCreateResult": {
@@ -2354,6 +2560,34 @@
         "title": "GoalCreateResult",
         "type": "object"
       },
+      "GoalRequestCloseRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkStatus",
+            "default": "completed"
+          }
+        },
+        "required": [
+          "binding_id"
+        ],
+        "title": "GoalRequestCloseRequest",
+        "type": "object"
+      },
       "GoalRequestCloseResult": {
         "properties": {
           "attention": {
@@ -2368,6 +2602,30 @@
           "attention"
         ],
         "title": "GoalRequestCloseResult",
+        "type": "object"
+      },
+      "GoalStatusRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "binding_id"
+        ],
+        "title": "GoalStatusRequest",
         "type": "object"
       },
       "GoalStatusResult": {
@@ -8411,6 +8669,81 @@
           }
         ]
       },
+      "WorkCompletionPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "host_confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "principal_confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "supervisor",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/components/schemas/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "reviewer_quorum",
+                "type": "string"
+              },
+              "threshold": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "threshold"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WorkEdge": {
         "properties": {
           "created_at": {
@@ -8452,6 +8785,33 @@
           "derived_from"
         ],
         "type": "string"
+      },
+      "WorkEvidenceRef": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
       },
       "WorkGraphEvent": {
         "properties": {
@@ -8954,6 +9314,17 @@
           "session",
           "mob",
           "label"
+        ],
+        "type": "string"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
         ],
         "type": "string"
       }
@@ -11380,6 +11751,16 @@
     "/workgraph/attention/continue": {
       "post": {
         "operationId": "post_workgraph_attention_continue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttentionBindingRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11408,6 +11789,16 @@
     "/workgraph/attention/list": {
       "post": {
         "operationId": "post_workgraph_attention_list",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttentionListRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11436,6 +11827,16 @@
     "/workgraph/attention/pause": {
       "post": {
         "operationId": "post_workgraph_attention_pause",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttentionPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11464,6 +11865,16 @@
     "/workgraph/attention/resume": {
       "post": {
         "operationId": "post_workgraph_attention_resume",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttentionBindingRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11520,6 +11931,16 @@
     "/workgraph/goal/confirm": {
       "post": {
         "operationId": "post_workgraph_goal_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11548,6 +11969,16 @@
     "/workgraph/goal/create": {
       "post": {
         "operationId": "post_workgraph_goal_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11576,6 +12007,16 @@
     "/workgraph/goal/request_close": {
       "post": {
         "operationId": "post_workgraph_goal_request_close",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalRequestCloseRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -11604,6 +12045,16 @@
     "/workgraph/goal/status": {
       "post": {
         "operationId": "post_workgraph_goal_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {

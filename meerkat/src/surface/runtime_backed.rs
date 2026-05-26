@@ -911,6 +911,7 @@ mod tests {
             flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
                 allowed_tools: Some(vec!["runtime_tool".to_string()]),
                 blocked_tools: None,
+                dispatch_context: Default::default(),
             }),
             ..Default::default()
         };

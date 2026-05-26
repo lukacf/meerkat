@@ -34,6 +34,7 @@ import type {
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
 export type { TurnTerminalCauseKind, Usage } from "./events.js";
+export type { WorkCompletionPolicy } from "./generated/types.js";
 
 declare const peerIdBrand: unique symbol;
 declare const peerCorrelationIdBrand: unique symbol;

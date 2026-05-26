@@ -73,6 +73,7 @@ import {
   type McpRemoveParams,
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
+  type WorkOwnerKey,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -3491,6 +3492,18 @@ export class MeerkatClient {
     };
   }
 
+  private static parseWorkOwnerKey(raw: unknown, context: string): WorkOwnerKey {
+    const key = MeerkatClient.requireRecord(raw, "owner_key", context);
+    const kind = MeerkatClient.requireStringField(key, "kind", context);
+    if (!["principal", "agent", "session", "mob", "label"].includes(kind)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid owner key kind`);
+    }
+    return {
+      kind: kind as WorkGraphOwnerKind,
+      id: MeerkatClient.requireStringField(key, "id", context),
+    };
+  }
+
   private static parseMobWireMembersBatchEdge(
     raw: unknown,
     context: string,
@@ -3567,12 +3580,11 @@ export class MeerkatClient {
       case "supervisor":
         return {
           kind,
-          owner_key: MeerkatClient.requireRecord(
+          owner_key: MeerkatClient.parseWorkOwnerKey(
             policy.owner_key,
-            "owner_key",
             "Invalid workgraph completion policy",
           ),
-        } as WorkCompletionPolicy;
+        };
       case "reviewer_quorum":
         return {
           kind,

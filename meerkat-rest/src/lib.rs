@@ -9722,16 +9722,17 @@ mod tests {
                             "title":"ship it",
                             "target":{{"kind":"session","session_id":"{session_id}"}},
                             "mode":"pursue",
-                            "completion_policy":{{"kind":"host_confirmed"}}
+                            "completion_policy":{{"kind":"self_attest"}}
                         }}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert!(response.status().is_client_error());
+        assert_eq!(response.status(), StatusCode::OK);
         let binding_id = scoped_goal.attention.binding_id.as_str().to_string();
         let goal_revision = scoped_goal.item.revision;
+        let namespace = "scoped-goals";
 
         let response = app
             .clone()
@@ -9763,12 +9764,30 @@ mod tests {
                     .method("POST")
                     .uri("/workgraph/attention/pause")
                     .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"binding_id":"{binding_id}"}}"#)))
+                    .body(Body::from(format!(
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}"}}"#
+                    )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert!(response.status().is_client_error());
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/attention/resume")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
         let response = app
             .clone()
@@ -9777,28 +9796,14 @@ mod tests {
                     .method("POST")
                     .uri("/workgraph/attention/continue")
                     .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"binding_id":"{binding_id}"}}"#)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/workgraph/goal/request_close")
-                    .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","expected_revision":{goal_revision},"status":"completed"}}"#
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}"}}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let response = app
             .clone()
@@ -9810,6 +9815,7 @@ mod tests {
                     .body(Body::from(format!(
                         r#"{{
                             "binding_id":"{binding_id}",
+                            "namespace":"{namespace}",
                             "expected_revision":{goal_revision},
                             "evidence":{{
                                 "kind":"host_confirmation",
@@ -9822,7 +9828,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let confirmed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let confirmed_revision = confirmed["item"]["revision"].as_u64().unwrap();
 
         let response = app
             .clone()
@@ -9832,13 +9841,13 @@ mod tests {
                     .uri("/workgraph/goal/request_close")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","expected_revision":{goal_revision},"status":"completed"}}"#
+                        r#"{{"binding_id":"{binding_id}","namespace":"{namespace}","expected_revision":{confirmed_revision},"status":"completed"}}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
 
         let events_path = meerkat::workgraph_rest_path_catalog()
             .iter()

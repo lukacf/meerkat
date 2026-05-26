@@ -220,6 +220,26 @@ const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
   "work_not_found",
   "internal",
 ]);
+const WORK_ATTENTION_DELEGATED_AUTHORITIES = new Set<string>([
+  "add_evidence",
+  "close_own_review_item",
+  "request_closure",
+  "close_if_policy_allows",
+]);
+const WORK_ATTENTION_MODES = new Set<string>([
+  "pursue",
+  "coordinate",
+  "review",
+  "falsify",
+  "judge",
+  "observe",
+]);
+const WORK_ATTENTION_STATES = new Set<string>([
+  "active",
+  "paused",
+  "superseded",
+  "stopped",
+]);
 
 function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailureCause {
   return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
@@ -3679,12 +3699,28 @@ export class MeerkatClient {
   ): WorkGraphGoalResult["attention"] {
     MeerkatClient.requireStringField(data, "binding_id", "Invalid workgraph attention binding");
     MeerkatClient.requireStringField(data, "created_at", "Invalid workgraph attention binding");
-    MeerkatClient.requireStringField(
+    const delegatedAuthority = MeerkatClient.requireStringField(
       data,
       "delegated_authority",
       "Invalid workgraph attention binding",
     );
-    MeerkatClient.requireStringField(data, "mode", "Invalid workgraph attention binding");
+    if (!WORK_ATTENTION_DELEGATED_AUTHORITIES.has(delegatedAuthority)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid workgraph attention binding: invalid delegated_authority",
+      );
+    }
+    const mode = MeerkatClient.requireStringField(
+      data,
+      "mode",
+      "Invalid workgraph attention binding",
+    );
+    if (!WORK_ATTENTION_MODES.has(mode)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid workgraph attention binding: invalid mode",
+      );
+    }
     MeerkatClient.requireStringField(data, "updated_at", "Invalid workgraph attention binding");
 
     const status = MeerkatClient.requireRecord(
@@ -3697,7 +3733,7 @@ export class MeerkatClient {
       "state",
       "Invalid workgraph attention status",
     );
-    if (!["active", "paused", "superseded", "stopped"].includes(statusState)) {
+    if (!WORK_ATTENTION_STATES.has(statusState)) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
         "Invalid workgraph attention status: invalid state",
@@ -3821,10 +3857,7 @@ export class MeerkatClient {
         data.edges,
         "Invalid workgraph snapshot edges",
       ).map((edge) => MeerkatClient.parseWorkGraphEdge(edge)),
-      attention:
-        data.attention === undefined
-          ? []
-          : MeerkatClient.parseWorkAttentionBindingArray(data.attention),
+      attention: MeerkatClient.parseWorkAttentionBindingArray(data.attention),
       readyItemIds: MeerkatClient.requireStringArray(
         data.ready_item_ids,
         "Invalid workgraph snapshot ready item ids",

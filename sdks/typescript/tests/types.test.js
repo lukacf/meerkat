@@ -1286,6 +1286,7 @@ describe("WorkGraph parsers", () => {
           created_at: timestamp,
         },
       ],
+      attention: [],
       ready_item_ids: ["prep-dentist-ride"],
     });
 
@@ -1307,6 +1308,7 @@ describe("WorkGraph parsers", () => {
           captured_at: timestamp,
           items: [{ ...claimedItem, status: undefined }],
           edges: [],
+          attention: [],
           ready_item_ids: [],
         }),
       (error) =>
@@ -1339,11 +1341,62 @@ describe("WorkGraph parsers", () => {
           captured_at: timestamp,
           items: [claimedItem],
           edges: [],
+          ready_item_ids: [],
         }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("ready item ids"),
+        String(error.message).includes("attention"),
+    );
+  });
+
+  it("rejects malformed WorkGraph attention authority enums", () => {
+    const attention = {
+      binding_id: "attention-1",
+      target: { kind: "session", session_id: "session-1" },
+      work_ref: {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+      },
+      mode: "pursue",
+      status: { state: "active" },
+      delegated_authority: "request_closure",
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+
+    assert.throws(
+      () =>
+        MeerkatClient.parseWorkGraphSnapshot({
+          realm_id: "homecore",
+          all_namespaces: false,
+          captured_at: timestamp,
+          items: [claimedItem],
+          edges: [],
+          attention: [{ ...attention, mode: "not_a_mode" }],
+          ready_item_ids: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("invalid mode"),
+    );
+    assert.throws(
+      () =>
+        MeerkatClient.parseWorkGraphSnapshot({
+          realm_id: "homecore",
+          all_namespaces: false,
+          captured_at: timestamp,
+          items: [claimedItem],
+          edges: [],
+          attention: [{ ...attention, delegated_authority: "not_authority" }],
+          ready_item_ids: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("delegated_authority"),
     );
   });
 

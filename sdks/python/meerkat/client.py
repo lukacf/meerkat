@@ -1323,10 +1323,7 @@ class MeerkatClient:
         self,
         filter: WorkGraphSnapshotFilter | None = None,
     ) -> WorkGraphSnapshot:
-        raw = await self._request("workgraph/snapshot", dict(filter or {}))
-        if isinstance(raw, dict) and "attention" not in raw:
-            raw = {**raw, "attention": []}
-        return raw
+        return await self._request("workgraph/snapshot", dict(filter or {}))
 
     async def list_workgraph_events(
         self,

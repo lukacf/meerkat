@@ -7,7 +7,8 @@ use super::{
     },
     dsl::{
         dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
-        dsl_schedule_lifecycle_machine, dsl_workgraph_lifecycle_machine,
+        dsl_schedule_lifecycle_machine, dsl_work_attention_lifecycle_machine,
+        dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -274,6 +275,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "ValidateLink and LinkValidated reject missing endpoints, self edges, duplicate edges, and dependency cycles without adding a separate topology machine",
                 ),
             ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_work_attention_lifecycle_machine(),
+            &[anchor(
+                "work_attention_lifecycle",
+                "meerkat-workgraph/src/machine.rs",
+                "WorkAttentionMachine domain-facing lifecycle transition seam over Pause, Resume, Stop, and Supersede; effects Paused, Resumed, Stopped, Superseded; invariants active_has_no_pause_deadline, paused_has_pause_deadline, stopped_has_stop_time, superseded_has_target; revision, timed pause eligibility, stopped state, and supersession target ownership",
+            )],
+            &[scenario(
+                "work_attention_pause_resume_stop",
+                "PauseActive, PausePaused, ResumePaused, SupersedeActive, SupersedePaused, StopActive, StopPaused, AttentionPaused, AttentionResumed, AttentionSuperseded, AttentionStopped, live_has_no_terminal_time, paused_has_pause_state, superseded_records_successor, timed pause eligibility, CAS revision, and terminal work item attention stop stay under WorkAttentionLifecycleMachine authority",
+            )],
         ),
     ]
 }

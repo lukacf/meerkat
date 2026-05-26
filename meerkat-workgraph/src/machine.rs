@@ -8,8 +8,8 @@ use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifec
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionStatus,
-    WorkClaim, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState,
-    WorkItem, WorkItemId, WorkNamespace, WorkStatus,
+    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
+    WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -332,6 +332,13 @@ impl WorkGraphMachine {
         request: CloseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work item {} completion policy {} is not satisfied",
+                item.id,
+                completion_policy_name(&item.completion_policy)
+            )));
+        }
         let dsl_input = match request.status {
             WorkStatus::Completed => wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
                 expected_revision: request.expected_revision,
@@ -430,6 +437,53 @@ impl WorkGraphMachine {
             },
         )?;
         Ok(())
+    }
+}
+
+pub(crate) fn completion_policy_is_satisfied(item: &WorkItem) -> bool {
+    match &item.completion_policy {
+        WorkCompletionPolicy::SelfAttest => true,
+        WorkCompletionPolicy::HostConfirmed => item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "host_confirmation"),
+        WorkCompletionPolicy::PrincipalConfirmed => item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "principal_confirmation"),
+        WorkCompletionPolicy::Supervisor { owner_key } => {
+            let owner = owner_key.canonical();
+            item.evidence_refs.iter().any(|evidence| {
+                evidence.kind == "supervisor_confirmation"
+                    && (evidence.id == owner || evidence.label.as_deref() == Some(owner.as_str()))
+            })
+        }
+        WorkCompletionPolicy::ReviewerQuorum { threshold } => {
+            let reviewers = item
+                .evidence_refs
+                .iter()
+                .filter(|evidence| evidence.kind == "reviewer_confirmation")
+                .filter_map(reviewer_identity)
+                .collect::<BTreeSet<_>>();
+            reviewers.len() >= usize::from(*threshold)
+        }
+    }
+}
+
+fn reviewer_identity(evidence: &WorkEvidenceRef) -> Option<&str> {
+    evidence
+        .label
+        .as_deref()
+        .or_else(|| (!evidence.id.is_empty()).then_some(evidence.id.as_str()))
+}
+
+pub(crate) fn completion_policy_name(policy: &WorkCompletionPolicy) -> &'static str {
+    match policy {
+        WorkCompletionPolicy::SelfAttest => "self_attest",
+        WorkCompletionPolicy::HostConfirmed => "host_confirmed",
+        WorkCompletionPolicy::PrincipalConfirmed => "principal_confirmed",
+        WorkCompletionPolicy::Supervisor { .. } => "supervisor",
+        WorkCompletionPolicy::ReviewerQuorum { .. } => "reviewer_quorum",
     }
 }
 
@@ -905,6 +959,27 @@ mod tests {
             now,
         )
         .expect_err("terminal claim should fail");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
+    fn completed_close_is_completion_policy_gated_by_machine() {
+        let now = Utc::now();
+        let mut item = create("needs host confirmation", now);
+        item.completion_policy = WorkCompletionPolicy::HostConfirmed;
+
+        let error = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect_err("machine must reject completed close without policy evidence");
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
     }
 

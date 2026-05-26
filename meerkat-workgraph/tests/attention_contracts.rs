@@ -12,8 +12,9 @@ use meerkat_workgraph::{
     GoalStatusRequest, GoalTerminalStatus, LinkWorkItemsRequest, UpdateWorkItemRequest,
     WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
     WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef, WorkNamespace, WorkOwnerKey,
-    WorkStatus, workgraph_attention_continuation_key, workgraph_attention_supersession_key,
+    WorkGraphEventFilter, WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef, WorkNamespace,
+    WorkOwnerKey, WorkStatus, workgraph_attention_continuation_key,
+    workgraph_attention_supersession_key,
 };
 use serde_json::json;
 
@@ -960,7 +961,7 @@ async fn closed_goal_stops_attention_and_cannot_resume() {
 }
 
 #[tokio::test]
-async fn expired_timed_pause_normalizes_on_attention_reads() {
+async fn expired_timed_pause_reads_are_pure_but_time_eligible() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
@@ -992,6 +993,10 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
         .await
         .expect("pause attention");
 
+    let before_events = service
+        .events(WorkGraphEventFilter::default())
+        .await
+        .expect("events before read");
     let binding = service
         .attention_binding(AttentionBindingRequest {
             binding_id: goal.attention.binding_id.clone(),
@@ -1001,7 +1006,15 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
         .await
         .expect("read binding")
         .attention;
-    assert_eq!(binding.status, WorkAttentionStatus::Active);
+    assert!(matches!(
+        binding.status,
+        WorkAttentionStatus::Paused { until: Some(_) }
+    ));
+    let after_events = service
+        .events(WorkGraphEventFilter::default())
+        .await
+        .expect("events after read");
+    assert_eq!(before_events.len(), after_events.len());
 
     let active = service
         .list_attention(AttentionListRequest {
@@ -1012,6 +1025,10 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
         .expect("list active");
     assert_eq!(active.attention.len(), 1);
     assert_eq!(active.attention[0].binding_id, goal.attention.binding_id);
+    assert!(matches!(
+        active.attention[0].status,
+        WorkAttentionStatus::Paused { until: Some(_) }
+    ));
 
     let paused = service
         .list_attention(AttentionListRequest {
@@ -1024,7 +1041,7 @@ async fn expired_timed_pause_normalizes_on_attention_reads() {
 }
 
 #[tokio::test]
-async fn snapshot_attention_uses_normalized_binding_state() {
+async fn snapshot_attention_reads_are_pure() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
@@ -1056,6 +1073,10 @@ async fn snapshot_attention_uses_normalized_binding_state() {
         .await
         .expect("pause attention");
 
+    let before_events = service
+        .events(WorkGraphEventFilter::default())
+        .await
+        .expect("events before snapshot");
     let snapshot = service
         .snapshot(WorkGraphSnapshotFilter::default())
         .await
@@ -1065,7 +1086,15 @@ async fn snapshot_attention_uses_normalized_binding_state() {
         .iter()
         .find(|binding| binding.binding_id == goal.attention.binding_id)
         .expect("snapshot attention binding");
-    assert_eq!(binding.status, WorkAttentionStatus::Active);
+    assert!(matches!(
+        binding.status,
+        WorkAttentionStatus::Paused { until: Some(_) }
+    ));
+    let after_events = service
+        .events(WorkGraphEventFilter::default())
+        .await
+        .expect("events after snapshot");
+    assert_eq!(before_events.len(), after_events.len());
 }
 
 #[tokio::test]

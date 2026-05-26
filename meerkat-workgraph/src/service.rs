@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::WorkGraphError;
-use crate::machine::{WorkAttentionMachine, WorkGraphMachine};
+use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
 use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
@@ -161,8 +161,6 @@ impl WorkGraphService {
                     request.binding_id
                 ))
             })?;
-        let now = self.store.get_store_time_utc().await?;
-        let attention = self.normalize_attention_for_read(attention, now).await?;
         Ok(AttentionBindingResult { attention })
     }
 
@@ -181,7 +179,6 @@ impl WorkGraphService {
         let now = self.store.get_store_time_utc().await?;
         let mut attention = Vec::new();
         for binding in self.store.list_attention(filter).await? {
-            let binding = self.normalize_attention_for_read(binding, now).await?;
             if status_filter
                 .as_ref()
                 .is_none_or(|status| attention_status_matches_at(&binding.status, status, now))
@@ -190,108 +187,6 @@ impl WorkGraphService {
             }
         }
         Ok(AttentionListResult { attention })
-    }
-
-    async fn normalize_attention_for_read(
-        &self,
-        mut attention: WorkAttentionBinding,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<WorkAttentionBinding, WorkGraphError> {
-        for attempt in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
-            match self
-                .normalize_attention_for_read_once(attention.clone(), now)
-                .await
-            {
-                Ok(attention) => return Ok(attention),
-                Err(WorkGraphError::StaleRevision { .. })
-                    if attempt + 1 < BEST_EFFORT_REFRESH_ATTEMPTS =>
-                {
-                    attention = self
-                        .store
-                        .get_attention(
-                            &attention.work_ref.realm_id,
-                            &attention.work_ref.namespace,
-                            &attention.binding_id,
-                        )
-                        .await?
-                        .ok_or_else(|| {
-                            WorkGraphError::not_found(
-                                attention.work_ref.realm_id.clone(),
-                                attention.work_ref.namespace.clone(),
-                                attention.work_ref.item_id.clone(),
-                            )
-                        })?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(attention)
-    }
-
-    async fn normalize_attention_for_read_once(
-        &self,
-        attention: WorkAttentionBinding,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<WorkAttentionBinding, WorkGraphError> {
-        if matches!(
-            attention.status,
-            WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
-        ) {
-            return Ok(attention);
-        }
-
-        let item = self
-            .store
-            .get_item(
-                &attention.work_ref.realm_id,
-                &attention.work_ref.namespace,
-                &attention.work_ref.item_id,
-            )
-            .await?
-            .ok_or_else(|| {
-                WorkGraphError::not_found(
-                    attention.work_ref.realm_id.clone(),
-                    attention.work_ref.namespace.clone(),
-                    attention.work_ref.item_id.clone(),
-                )
-            })?;
-        if item.status.is_terminal() {
-            return self.stop_attention_binding_at(attention, now).await;
-        }
-
-        if matches!(
-            attention.status,
-            WorkAttentionStatus::Paused { until: Some(until) } if until <= now
-        ) {
-            let expected_previous_revision = attention.machine_state.revision;
-            let resumed = WorkAttentionMachine::resume(attention, expected_previous_revision, now)?;
-            let event = attention_updated_event(&resumed, now);
-            return self
-                .store
-                .update_attention_cas(resumed, expected_previous_revision, event)
-                .await;
-        }
-
-        Ok(attention)
-    }
-
-    async fn stop_attention_binding_at(
-        &self,
-        attention: WorkAttentionBinding,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<WorkAttentionBinding, WorkGraphError> {
-        if matches!(
-            attention.status,
-            WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
-        ) {
-            return Ok(attention);
-        }
-        let expected_previous_revision = attention.machine_state.revision;
-        let stopped = WorkAttentionMachine::stop(attention, expected_previous_revision, now)?;
-        let event = attention_updated_event(&stopped, now);
-        self.store
-            .update_attention_cas(stopped, expected_previous_revision, event)
-            .await
     }
 
     pub async fn pause_attention(
@@ -518,13 +413,6 @@ impl WorkGraphService {
                 actual: item.revision,
             });
         }
-        if requested_status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
-            return Err(WorkGraphError::InvalidTransition(format!(
-                "work item {} completion policy {} is not satisfied",
-                item.id,
-                completion_policy_name(&item.completion_policy)
-            )));
-        }
         let item = self
             .close(CloseWorkItemRequest {
                 id: item.id.clone(),
@@ -543,59 +431,6 @@ impl WorkGraphService {
             .await?
             .attention;
         Ok(GoalRequestCloseResult { item, attention })
-    }
-
-    async fn stop_attention_binding(
-        &self,
-        attention: WorkAttentionBinding,
-    ) -> Result<WorkAttentionBinding, WorkGraphError> {
-        if matches!(
-            attention.status,
-            crate::types::WorkAttentionStatus::Stopped
-                | crate::types::WorkAttentionStatus::Superseded
-        ) {
-            return Ok(attention);
-        }
-        let now = self.store.get_store_time_utc().await?;
-        self.stop_attention_binding_at(attention, now).await
-    }
-
-    async fn best_effort_stop_attention_bindings_for_item(&self, item: &WorkItem) {
-        for _ in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
-            match self.stop_attention_bindings_for_item(item).await {
-                Ok(()) => return,
-                Err(WorkGraphError::StaleRevision { .. }) => continue,
-                Err(_) => return,
-            }
-        }
-    }
-
-    async fn stop_attention_bindings_for_item(
-        &self,
-        item: &WorkItem,
-    ) -> Result<(), WorkGraphError> {
-        let bindings = self
-            .store
-            .list_attention(AttentionListRequest {
-                realm_id: Some(item.realm_id.clone()),
-                namespace: Some(item.namespace.clone()),
-                target: None,
-                status: None,
-            })
-            .await?;
-        for binding in bindings
-            .into_iter()
-            .filter(|binding| binding.work_ref.item_id == item.id)
-            .filter(|binding| {
-                !matches!(
-                    binding.status,
-                    WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
-                )
-            })
-        {
-            self.stop_attention_binding(binding).await?;
-        }
-        Ok(())
     }
 
     async fn validate_completion_policy_update(
@@ -720,10 +555,7 @@ impl WorkGraphService {
                     binding.work_ref.namespace.clone(),
                     binding.work_ref.item_id.clone(),
                 )) {
-                    attention.push(
-                        self.normalize_attention_for_read(binding, captured_at)
-                            .await?,
-                    );
+                    attention.push(binding);
                 }
             }
         }
@@ -862,23 +694,52 @@ impl WorkGraphService {
                 actual: item.revision,
             });
         }
-        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
-            return Err(WorkGraphError::InvalidTransition(format!(
-                "work item {} completion policy {} is not satisfied",
-                item.id,
-                completion_policy_name(&item.completion_policy)
-            )));
-        }
         let (item, event) = WorkGraphMachine::close_item(item, request, now)?;
+        let attention_updates = self.attention_stop_updates_for_item(&item, now).await?;
         let closed = self
             .store
-            .update_item_cas(item, expected_previous_revision, event)
+            .update_item_and_attention_cas(
+                item,
+                expected_previous_revision,
+                event,
+                attention_updates,
+            )
             .await?;
-        self.best_effort_stop_attention_bindings_for_item(&closed)
-            .await;
         self.best_effort_refresh_dependents_after_blocker_change(&closed, now)
             .await;
         Ok(closed)
+    }
+
+    async fn attention_stop_updates_for_item(
+        &self,
+        item: &WorkItem,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>, WorkGraphError> {
+        let bindings = self
+            .store
+            .list_attention(AttentionListRequest {
+                realm_id: Some(item.realm_id.clone()),
+                namespace: Some(item.namespace.clone()),
+                target: None,
+                status: None,
+            })
+            .await?;
+        bindings
+            .into_iter()
+            .filter(|binding| binding.work_ref.item_id == item.id)
+            .filter(|binding| {
+                !matches!(
+                    binding.status,
+                    WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
+                )
+            })
+            .map(|binding| {
+                let expected_previous_revision = binding.machine_state.revision;
+                let stopped = WorkAttentionMachine::stop(binding, expected_previous_revision, now)?;
+                let event = attention_updated_event(&stopped, now);
+                Ok((stopped, expected_previous_revision, event))
+            })
+            .collect()
     }
 
     pub async fn link(&self, request: LinkWorkItemsRequest) -> Result<WorkEdge, WorkGraphError> {
@@ -1477,51 +1338,6 @@ fn attention_status_matches_at(
     }
 }
 
-fn completion_policy_is_satisfied(item: &WorkItem) -> bool {
-    match &item.completion_policy {
-        WorkCompletionPolicy::SelfAttest => true,
-        WorkCompletionPolicy::HostConfirmed => item
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "host_confirmation"),
-        WorkCompletionPolicy::PrincipalConfirmed => item
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "principal_confirmation"),
-        WorkCompletionPolicy::Supervisor { owner_key } => {
-            let owner = owner_key.canonical();
-            item.evidence_refs.iter().any(|evidence| {
-                evidence.kind == "supervisor_confirmation"
-                    && (evidence.id == owner || evidence.label.as_deref() == Some(owner.as_str()))
-            })
-        }
-        WorkCompletionPolicy::ReviewerQuorum { threshold } => {
-            let reviewers = item
-                .evidence_refs
-                .iter()
-                .filter(|evidence| evidence.kind == "reviewer_confirmation")
-                .filter_map(|evidence| {
-                    evidence
-                        .label
-                        .as_deref()
-                        .or_else(|| (!evidence.id.is_empty()).then_some(evidence.id.as_str()))
-                })
-                .collect::<BTreeSet<_>>();
-            reviewers.len() >= usize::from(*threshold)
-        }
-    }
-}
-
-fn completion_policy_name(policy: &WorkCompletionPolicy) -> &'static str {
-    match policy {
-        WorkCompletionPolicy::SelfAttest => "self_attest",
-        WorkCompletionPolicy::HostConfirmed => "host_confirmed",
-        WorkCompletionPolicy::PrincipalConfirmed => "principal_confirmed",
-        WorkCompletionPolicy::Supervisor { .. } => "supervisor",
-        WorkCompletionPolicy::ReviewerQuorum { .. } => "reviewer_quorum",
-    }
-}
-
 fn unresolved_blocker_count(
     item: &WorkItem,
     all_items: &BTreeMap<WorkItemId, WorkItem>,
@@ -1638,6 +1454,23 @@ mod tests {
             }
             self.inner
                 .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: WorkItem,
+            expected_previous_revision: u64,
+            item_event: WorkGraphEvent,
+            attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
                 .await
         }
 

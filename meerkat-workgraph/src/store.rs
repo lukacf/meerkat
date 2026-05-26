@@ -76,6 +76,14 @@ pub trait WorkGraphStore: Send + Sync {
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError>;
 
+    async fn update_item_and_attention_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        item_event: WorkGraphEvent,
+        attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError>;
+
     async fn get_item(
         &self,
         realm_id: &str,
@@ -165,6 +173,16 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         _item: WorkItem,
         _expected_previous_revision: u64,
         _event: WorkGraphEvent,
+    ) -> Result<WorkItem, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn update_item_and_attention_cas(
+        &self,
+        _item: WorkItem,
+        _expected_previous_revision: u64,
+        _item_event: WorkGraphEvent,
+        _attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
     ) -> Result<WorkItem, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
@@ -415,6 +433,65 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         guard.attention.insert(key, attention.clone());
         guard.append_event(event);
         Ok(attention)
+    }
+
+    async fn update_item_and_attention_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        item_event: WorkGraphEvent,
+        attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        let mut guard = self.inner.write().await;
+        let key = item_key(&item.realm_id, &item.namespace, &item.id);
+        let Some(current) = guard.items.get(&key) else {
+            return Err(WorkGraphError::not_found(
+                item.realm_id.clone(),
+                item.namespace.clone(),
+                item.id.clone(),
+            ));
+        };
+        if current.revision != expected_previous_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: item.id.clone(),
+                expected: expected_previous_revision,
+                actual: current.revision,
+            });
+        }
+        for (attention, expected_revision, _) in &attention_updates {
+            let key = attention_key(
+                &attention.work_ref.realm_id,
+                &attention.work_ref.namespace,
+                &attention.binding_id,
+            );
+            let Some(current) = guard.attention.get(&key) else {
+                return Err(WorkGraphError::not_found(
+                    attention.work_ref.realm_id.clone(),
+                    attention.work_ref.namespace.clone(),
+                    attention.work_ref.item_id.clone(),
+                ));
+            };
+            if current.machine_state.revision != *expected_revision {
+                return Err(WorkGraphError::StaleRevision {
+                    id: attention.work_ref.item_id.clone(),
+                    expected: *expected_revision,
+                    actual: current.machine_state.revision,
+                });
+            }
+        }
+        guard.items.insert(key, item.clone());
+        guard.append_event(item_event);
+        for (attention, _, event) in attention_updates {
+            let key = attention_key(
+                &attention.work_ref.realm_id,
+                &attention.work_ref.namespace,
+                &attention.binding_id,
+            );
+            guard.attention.insert(key, attention);
+            guard.append_event(event);
+        }
+        Ok(item)
     }
 
     async fn get_attention(
@@ -815,6 +892,65 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             Ok(attention)
+        })
+    }
+
+    async fn update_item_and_attention_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        item_event: WorkGraphEvent,
+        attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let changed = update_item_tx(&tx, &item, expected_previous_revision)?;
+            if changed == 0 {
+                let actual = current_revision_tx(&tx, &item.realm_id, &item.namespace, &item.id)?;
+                return match actual {
+                    Some(actual) => Err(WorkGraphError::StaleRevision {
+                        id: item.id,
+                        expected: expected_previous_revision,
+                        actual,
+                    }),
+                    None => Err(WorkGraphError::not_found(
+                        item.realm_id,
+                        item.namespace,
+                        item.id,
+                    )),
+                };
+            }
+            insert_event_tx(&tx, &item_event)?;
+            for (attention, expected_revision, event) in &attention_updates {
+                let changed = update_attention_tx(&tx, attention, *expected_revision)?;
+                if changed == 0 {
+                    let actual = current_attention_revision_tx(
+                        &tx,
+                        &attention.work_ref.realm_id,
+                        &attention.work_ref.namespace,
+                        &attention.binding_id,
+                    )?;
+                    return match actual {
+                        Some(actual) => Err(WorkGraphError::StaleRevision {
+                            id: attention.work_ref.item_id.clone(),
+                            expected: *expected_revision,
+                            actual,
+                        }),
+                        None => Err(WorkGraphError::not_found(
+                            attention.work_ref.realm_id.clone(),
+                            attention.work_ref.namespace.clone(),
+                            attention.work_ref.item_id.clone(),
+                        )),
+                    };
+                }
+                insert_event_tx(&tx, event)?;
+            }
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(item)
         })
     }
 

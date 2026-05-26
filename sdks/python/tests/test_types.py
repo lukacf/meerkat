@@ -2320,6 +2320,7 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
                 "event_high_water_mark": 7,
                 "items": [item],
                 "edges": [],
+                "attention": [],
                 "ready_item_ids": ["prep-dentist-ride"],
             }
         if method == "workgraph/events":

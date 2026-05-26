@@ -79,7 +79,6 @@ machine! {
             on input Pause { expected_revision, until_utc_ms }
             guard { self.lifecycle_phase == Phase::Active && self.revision == expected_revision }
             update {
-                self.lifecycle_phase = Phase::Paused;
                 self.paused_until_utc_ms = until_utc_ms;
                 self.revision += 1;
             }
@@ -102,7 +101,6 @@ machine! {
             on input Resume { expected_revision }
             guard { self.lifecycle_phase == Phase::Paused && self.revision == expected_revision }
             update {
-                self.lifecycle_phase = Phase::Active;
                 self.paused_until_utc_ms = None;
                 self.revision += 1;
             }
@@ -114,7 +112,6 @@ machine! {
             on input Supersede { expected_revision, superseded_by_binding_key, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Active && self.revision == expected_revision }
             update {
-                self.lifecycle_phase = Phase::Superseded;
                 self.paused_until_utc_ms = None;
                 self.superseded_by_binding_key = Some(superseded_by_binding_key);
                 self.terminal_at_utc_ms = Some(at_utc_ms);
@@ -128,7 +125,6 @@ machine! {
             on input Supersede { expected_revision, superseded_by_binding_key, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Paused && self.revision == expected_revision }
             update {
-                self.lifecycle_phase = Phase::Superseded;
                 self.paused_until_utc_ms = None;
                 self.superseded_by_binding_key = Some(superseded_by_binding_key);
                 self.terminal_at_utc_ms = Some(at_utc_ms);
@@ -142,7 +138,6 @@ machine! {
             on input Stop { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Active && self.revision == expected_revision }
             update {
-                self.lifecycle_phase = Phase::Stopped;
                 self.paused_until_utc_ms = None;
                 self.terminal_at_utc_ms = Some(at_utc_ms);
                 self.revision += 1;
@@ -155,7 +150,6 @@ machine! {
             on input Stop { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Paused && self.revision == expected_revision }
             update {
-                self.lifecycle_phase = Phase::Stopped;
                 self.paused_until_utc_ms = None;
                 self.terminal_at_utc_ms = Some(at_utc_ms);
                 self.revision += 1;

@@ -321,15 +321,22 @@ fn session_materialized_at_transcript_revision(
             .find(|body| body.revision == current)
             .and_then(|body| body.parent_revision.as_deref());
     }
-    state.commits.retain(|commit| {
-        let retain = commit.revision == revision
-            || transcript_state_revision_extends(&original_state, revision, &commit.revision);
-        if retain {
-            retained_revisions.insert(commit.parent_revision.clone());
-            retained_revisions.insert(commit.revision.clone());
-        }
-        retain
-    });
+    let retain_commit_count = state
+        .commits
+        .iter()
+        .rposition(|commit| commit.revision == revision)
+        .or_else(|| {
+            state.commits.iter().rposition(|commit| {
+                transcript_state_revision_extends(&original_state, revision, &commit.revision)
+            })
+        })
+        .map(|index| index + 1)
+        .unwrap_or_default();
+    state.commits.truncate(retain_commit_count);
+    for commit in &state.commits {
+        retained_revisions.insert(commit.parent_revision.clone());
+        retained_revisions.insert(commit.revision.clone());
+    }
     state
         .revisions
         .retain(|body| retained_revisions.contains(&body.revision));

@@ -19,9 +19,9 @@
 
 use async_trait::async_trait;
 
-use crate::session::SessionMeta;
+use crate::session::{SYSTEM_CONTEXT_SEPARATOR, SessionMeta};
 use crate::time_compat::SystemTime;
-use crate::types::SessionId;
+use crate::types::{Message, SessionId};
 use crate::{
     Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteSelection,
     transcript_messages_digest,
@@ -159,6 +159,9 @@ pub fn append_only_save_guard(
             return Ok(());
         }
     }
+    if incoming_preserves_conversation_tail_with_system_context_append(incoming, previous)? {
+        return Ok(());
+    }
     if new_len < prev_len {
         return Err(SessionStoreError::MonotonicityViolation {
             id: incoming.id().clone(),
@@ -173,6 +176,49 @@ pub fn append_only_save_guard(
         incoming_revision,
         reason: "incoming transcript neither preserves the persisted prefix nor records a graph edge from the persisted head".to_string(),
     })
+}
+
+fn incoming_preserves_conversation_tail_with_system_context_append(
+    incoming: &Session,
+    previous: &Session,
+) -> Result<bool, SessionStoreError> {
+    let (previous_system, previous_tail) = split_single_leading_system(previous.messages());
+    let (incoming_system, incoming_tail) = split_single_leading_system(incoming.messages());
+    let Some(incoming_system) = incoming_system else {
+        return Ok(false);
+    };
+    if !system_context_is_append(previous_system, incoming_system) {
+        return Ok(false);
+    }
+    if incoming_tail.len() < previous_tail.len() {
+        return Ok(false);
+    }
+    let previous_tail_revision =
+        transcript_messages_digest(previous_tail).map_err(SessionStoreError::from)?;
+    let incoming_tail_prefix_revision =
+        transcript_messages_digest(&incoming_tail[..previous_tail.len()])
+            .map_err(SessionStoreError::from)?;
+    Ok(previous_tail_revision == incoming_tail_prefix_revision)
+}
+
+fn split_single_leading_system(messages: &[Message]) -> (Option<&str>, &[Message]) {
+    match messages.first() {
+        Some(Message::System(system)) => (Some(system.content.as_str()), &messages[1..]),
+        _ => (None, messages),
+    }
+}
+
+fn system_context_is_append(previous: Option<&str>, incoming: &str) -> bool {
+    let appended = match previous {
+        Some(previous) if incoming == previous => return true,
+        Some(previous) if incoming.starts_with(previous) => {
+            let appended = &incoming[previous.len()..];
+            appended.strip_prefix(SYSTEM_CONTEXT_SEPARATOR)
+        }
+        Some(_) => None,
+        None => Some(incoming),
+    };
+    appended.is_some_and(|appended| appended.starts_with("[Runtime System Context]"))
 }
 
 /// Validate a runtime run-boundary snapshot.
@@ -715,7 +761,7 @@ pub trait SessionStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, SystemMessage, UserMessage};
+    use crate::types::{SystemMessage, UserMessage};
 
     #[test]
     fn append_only_guard_rejects_leading_system_message_replacement() {
@@ -740,5 +786,30 @@ mod tests {
             append_only_save_guard(&incoming, Some(&previous)),
             Err(SessionStoreError::TranscriptContinuityViolation { .. })
         ));
+    }
+
+    #[test]
+    fn append_only_guard_accepts_runtime_system_context_append() {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt(format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
+        ));
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_ok());
+    }
+
+    #[test]
+    fn append_only_guard_accepts_system_timestamp_refresh_without_content_change() {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt("base system".to_string());
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_ok());
     }
 }

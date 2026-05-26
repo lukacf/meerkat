@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest, GoalConfirmRequest,
-    GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest, ReadyWorkFilter, WorkGraphError,
-    WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
+    AttentionBindingRequest, AttentionContinueResult, AttentionListRequest, AttentionPauseRequest,
+    GoalConfirmRequest, GoalStatusRequest, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
+    ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter,
+    WorkItemId, WorkNamespace,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -72,18 +73,15 @@ pub async fn handle_goal_create(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: GoalCreateRequest = match parse_params(params) {
+    let request: PublicGoalCreateRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    if request.completion_policy.requires_trusted_principal() {
-        return RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            "principal-gated WorkGraph goal policies require trusted in-process principal authority and are not available on the public RPC workgraph/goal/create surface",
-        );
-    }
-    match runtime.workgraph_service().create_goal(request).await {
+    match runtime
+        .workgraph_service()
+        .create_goal(request.into())
+        .await
+    {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -113,7 +111,11 @@ pub async fn handle_goal_confirm(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    match runtime.workgraph_service().goal_confirm(request).await {
+    match runtime
+        .workgraph_service()
+        .goal_confirm_public(request)
+        .await
+    {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
@@ -124,13 +126,13 @@ pub async fn handle_goal_request_close(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let request: GoalRequestCloseRequest = match parse_params(params) {
+    let request: PublicGoalRequestCloseRequest = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
     match runtime
         .workgraph_service()
-        .goal_request_close(request)
+        .goal_request_close(request.into())
         .await
     {
         Ok(result) => RpcResponse::success(id, result),
@@ -204,41 +206,38 @@ pub async fn handle_attention_continue(
     match runtime
         .enqueue_workgraph_attention_binding_continuation(request)
         .await
-        .map(attention_continue_result)
     {
-        Ok(result) => RpcResponse::success(id, result),
+        Ok(outcome) => RpcResponse::success(id, rpc_attention_continue_result(outcome)),
         Err(error) => RpcResponse::error(id, error.code, error.message),
     }
 }
 
-fn attention_continue_result(
+fn rpc_attention_continue_result(
     outcome: meerkat_runtime::AcceptOutcome,
-) -> meerkat::AttentionContinueResult {
+) -> AttentionContinueResult {
     match outcome {
-        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => {
-            meerkat::AttentionContinueResult {
-                outcome: meerkat::AttentionContinueOutcome::Accepted,
-                input_id: Some(input_id.to_string()),
-                existing_id: None,
-                reason: None,
-            }
-        }
+        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => AttentionContinueResult {
+            outcome: meerkat::AttentionContinueOutcome::Accepted,
+            input_id: Some(input_id.to_string()),
+            existing_id: None,
+            reason: None,
+        },
         meerkat_runtime::AcceptOutcome::Deduplicated {
             input_id,
             existing_id,
-        } => meerkat::AttentionContinueResult {
+        } => AttentionContinueResult {
             outcome: meerkat::AttentionContinueOutcome::Deduplicated,
             input_id: Some(input_id.to_string()),
             existing_id: Some(existing_id.to_string()),
             reason: None,
         },
-        meerkat_runtime::AcceptOutcome::Rejected { reason } => meerkat::AttentionContinueResult {
+        meerkat_runtime::AcceptOutcome::Rejected { reason } => AttentionContinueResult {
             outcome: meerkat::AttentionContinueOutcome::Rejected,
             input_id: None,
             existing_id: None,
             reason: Some(reason.to_string()),
         },
-        _ => meerkat::AttentionContinueResult {
+        _ => AttentionContinueResult {
             outcome: meerkat::AttentionContinueOutcome::Rejected,
             input_id: None,
             existing_id: None,

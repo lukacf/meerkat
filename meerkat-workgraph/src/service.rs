@@ -406,6 +406,7 @@ impl WorkGraphService {
         &self,
         request: GoalConfirmRequest,
     ) -> Result<GoalConfirmResult, WorkGraphError> {
+        let expected_revision = request.expected_revision;
         let binding_request = AttentionBindingRequest {
             binding_id: request.binding_id,
             realm_id: request.realm_id,
@@ -414,44 +415,58 @@ impl WorkGraphService {
         let principal = request.trusted_principal;
         let evidence_request = request.evidence;
         let attention = self.attention_binding(binding_request).await?.attention;
-        for attempt in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
-            let item = self
-                .get(
-                    Some(attention.work_ref.realm_id.clone()),
-                    Some(attention.work_ref.namespace.clone()),
-                    attention.work_ref.item_id.clone(),
-                )
-                .await?;
-            let evidence = confirmation_evidence_for_policy(
-                &item.completion_policy,
-                principal.as_ref(),
-                evidence_request.clone(),
-            )?;
-            match self
-                .add_evidence_internal(
-                    AddEvidenceRequest {
-                        id: item.id.clone(),
-                        realm_id: Some(item.realm_id.clone()),
-                        namespace: Some(item.namespace.clone()),
-                        expected_revision: item.revision,
-                        evidence,
-                    },
-                    true,
-                )
-                .await
-            {
-                Ok(item) => return Ok(GoalConfirmResult { item, attention }),
-                Err(WorkGraphError::StaleRevision { .. })
-                    if attempt + 1 < BEST_EFFORT_REFRESH_ATTEMPTS =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
+        let item = self
+            .get(
+                Some(attention.work_ref.realm_id.clone()),
+                Some(attention.work_ref.namespace.clone()),
+                attention.work_ref.item_id.clone(),
+            )
+            .await?;
+        if item.revision != expected_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: item.id.clone(),
+                expected: expected_revision,
+                actual: item.revision,
+            });
         }
-        Err(WorkGraphError::Conflict(
-            "goal confirmation retry budget exhausted".to_string(),
-        ))
+        let evidence = confirmation_evidence_for_policy(
+            &item.completion_policy,
+            principal.as_ref(),
+            evidence_request,
+        )?;
+        let item = self
+            .add_evidence_internal(
+                AddEvidenceRequest {
+                    id: item.id.clone(),
+                    realm_id: Some(item.realm_id.clone()),
+                    namespace: Some(item.namespace.clone()),
+                    expected_revision,
+                    evidence,
+                },
+                true,
+            )
+            .await?;
+        Ok(GoalConfirmResult { item, attention })
+    }
+
+    pub async fn goal_confirm_public(
+        &self,
+        request: GoalConfirmRequest,
+    ) -> Result<GoalConfirmResult, WorkGraphError> {
+        let current = self
+            .goal_status(GoalStatusRequest {
+                binding_id: request.binding_id.clone(),
+                realm_id: request.realm_id.clone(),
+                namespace: request.namespace.clone(),
+            })
+            .await?;
+        if current.item.completion_policy != WorkCompletionPolicy::SelfAttest {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "{} confirmation requires trusted in-process host authority",
+                completion_policy_name(&current.item.completion_policy)
+            )));
+        }
+        self.goal_confirm(request).await
     }
 
     pub async fn goal_request_close(
@@ -480,12 +495,10 @@ impl WorkGraphService {
                 completion_policy_name(&item.completion_policy)
             )));
         }
-        if let Some(expected_revision) = request.expected_revision
-            && item.revision != expected_revision
-        {
+        if item.revision != request.expected_revision {
             return Err(WorkGraphError::StaleRevision {
-                id: item.id,
-                expected: expected_revision,
+                id: item.id.clone(),
+                expected: request.expected_revision,
                 actual: item.revision,
             });
         }
@@ -494,7 +507,7 @@ impl WorkGraphService {
                 id: item.id.clone(),
                 realm_id: Some(item.realm_id.clone()),
                 namespace: Some(item.namespace.clone()),
-                expected_revision: item.revision,
+                expected_revision: request.expected_revision,
                 status: request.status,
             })
             .await?;
@@ -1169,14 +1182,20 @@ fn projected_attention_authority(attention: &WorkAttentionBinding) -> ProjectedA
         attention.mode,
         WorkAttentionMode::Review | WorkAttentionMode::Falsify | WorkAttentionMode::Observe
     );
+    let close_own_review_item = matches!(
+        attention.mode,
+        WorkAttentionMode::Review | WorkAttentionMode::Falsify
+    ) && matches!(
+        attention.delegated_authority,
+        crate::types::AttentionDelegatedAuthority::CloseOwnReviewItem
+    );
     ProjectedAttentionAuthority {
         can_add_evidence: !matches!(attention.mode, WorkAttentionMode::Observe),
         can_request_closure: matches!(
             attention.delegated_authority,
-            crate::types::AttentionDelegatedAuthority::RequestClosure
-                | crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
+            crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
         ) && !adversarial,
-        can_close_own_review_item: false,
+        can_close_own_review_item: close_own_review_item,
         can_close_if_policy_allows: matches!(
             attention.delegated_authority,
             crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows

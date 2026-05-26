@@ -227,7 +227,7 @@ make release-preflight
 
 **Scheduling.** Durable schedules run sessions or mobs from once, interval, or calendar triggers. Occurrences survive process restarts and carry overlap, misfire, and missing-target policy. Host apps use REST/RPC schedule APIs; agents use the `meerkat_schedule_*` tools.
 
-**WorkGraph.** WorkGraph is a realm-scoped durable commitment graph for agent work. Agents create, claim, link, evidence, and close work items through `workgraph_*` tools, while CLI, REST, RPC, Python, and TypeScript surfaces provide read-only observability for items, ready work, snapshots, and events.
+**WorkGraph.** WorkGraph is a realm-scoped durable commitment graph for agent work. Agents create, claim, link, evidence, and close work items through `workgraph_*` tools, while CLI, REST, RPC, Python, and TypeScript surfaces provide observability plus narrow goal and attention controls.
 
 **Multi-agent mobs.** Mobs are reusable teams built from definitions, profiles, profile stores, budgets, scoped tools, credentials, flows, and signed peer-to-peer wiring. Prefabs are no longer the model; define the team you need and launch members through the current `mob_*` tools and host APIs.
 

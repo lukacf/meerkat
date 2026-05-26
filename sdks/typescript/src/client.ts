@@ -50,13 +50,9 @@ import {
   type AttentionListResult,
   type AttentionPauseRequest,
   type GoalConfirmRequest,
-  type GoalConfirmResult,
-  type GoalCreateRequest,
-  type GoalCreateResult,
-  type GoalRequestCloseRequest,
-  type GoalRequestCloseResult,
   type GoalStatusRequest,
-  type GoalStatusResult,
+  type PublicGoalCreateRequest,
+  type PublicGoalRequestCloseRequest,
   type LiveChannelParams,
   type LiveCommitInputParams,
   type LiveOpenParams,
@@ -162,6 +158,7 @@ import type {
   TurnOptions,
   Usage,
   WorkGraphClaim,
+  WorkCompletionPolicy,
   WorkGraphEdge,
   WorkGraphEdgeKind,
   WorkGraphEvent,
@@ -170,6 +167,7 @@ import type {
   WorkGraphEventKind,
   WorkGraphItemFilter,
   WorkGraphItemLookupOptions,
+  WorkGraphGoalResult,
   WorkGraphOwner,
   WorkGraphOwnerKind,
   WorkGraphPriority,
@@ -1228,27 +1226,31 @@ export class MeerkatClient {
   }
 
   async createWorkGraphGoal(
-    params: GoalCreateRequest,
-  ): Promise<GoalCreateResult> {
-    return this.request<GoalCreateResult>("workgraph/goal/create", params);
+    params: PublicGoalCreateRequest,
+  ): Promise<WorkGraphGoalResult> {
+    const result = await this.request<Record<string, unknown>>("workgraph/goal/create", params);
+    return MeerkatClient.parseWorkGraphGoalResult(result);
   }
 
   async getWorkGraphGoalStatus(
     params: GoalStatusRequest,
-  ): Promise<GoalStatusResult> {
-    return this.request<GoalStatusResult>("workgraph/goal/status", params);
+  ): Promise<WorkGraphGoalResult> {
+    const result = await this.request<Record<string, unknown>>("workgraph/goal/status", params);
+    return MeerkatClient.parseWorkGraphGoalResult(result);
   }
 
   async confirmWorkGraphGoal(
     params: GoalConfirmRequest,
-  ): Promise<GoalConfirmResult> {
-    return this.request<GoalConfirmResult>("workgraph/goal/confirm", params);
+  ): Promise<WorkGraphGoalResult> {
+    const result = await this.request<Record<string, unknown>>("workgraph/goal/confirm", params);
+    return MeerkatClient.parseWorkGraphGoalResult(result);
   }
 
   async requestCloseWorkGraphGoal(
-    params: GoalRequestCloseRequest,
-  ): Promise<GoalRequestCloseResult> {
-    return this.request<GoalRequestCloseResult>("workgraph/goal/request_close", params);
+    params: PublicGoalRequestCloseRequest,
+  ): Promise<WorkGraphGoalResult> {
+    const result = await this.request<Record<string, unknown>>("workgraph/goal/request_close", params);
+    return MeerkatClient.parseWorkGraphGoalResult(result);
   }
 
   async listWorkGraphAttention(
@@ -3546,6 +3548,48 @@ export class MeerkatClient {
     };
   }
 
+  private static parseWorkCompletionPolicy(raw: unknown): WorkCompletionPolicy {
+    const policy = MeerkatClient.requireRecord(
+      raw,
+      "completion_policy",
+      "Invalid workgraph item",
+    );
+    const kind = MeerkatClient.requireStringField(
+      policy,
+      "kind",
+      "Invalid workgraph completion policy",
+    );
+    switch (kind) {
+      case "self_attest":
+      case "host_confirmed":
+      case "principal_confirmed":
+        return { kind } as WorkCompletionPolicy;
+      case "supervisor":
+        return {
+          kind,
+          owner_key: MeerkatClient.requireRecord(
+            policy.owner_key,
+            "owner_key",
+            "Invalid workgraph completion policy",
+          ),
+        } as WorkCompletionPolicy;
+      case "reviewer_quorum":
+        return {
+          kind,
+          threshold: MeerkatClient.requireNumberField(
+            policy,
+            "threshold",
+            "Invalid workgraph completion policy",
+          ),
+        };
+      default:
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          "Invalid workgraph completion policy: invalid kind",
+        );
+    }
+  }
+
   static parseWorkItem(data: Record<string, unknown>): WorkItem {
     const status = MeerkatClient.requireStringField(data, "status", "Invalid workgraph item");
     if (!["open", "in_progress", "blocked", "completed", "cancelled", "failed"].includes(status)) {
@@ -3567,9 +3611,15 @@ export class MeerkatClient {
       description: MeerkatClient.parseOptionalString(data.description),
       status: status as WorkGraphStatus,
       priority: priority as WorkGraphPriority,
+      completionPolicy: MeerkatClient.parseWorkCompletionPolicy(data.completion_policy),
       labels: MeerkatClient.parseStringArray(data.labels, "Invalid workgraph item labels"),
       owner: MeerkatClient.parseWorkGraphOwner(data.owner, "Invalid workgraph item"),
       claim: MeerkatClient.parseWorkGraphClaim(data.claim),
+      machineState: MeerkatClient.requireRecord(
+        data.machine_state,
+        "machine_state",
+        "Invalid workgraph item",
+      ),
       revision: MeerkatClient.requireNumberField(data, "revision", "Invalid workgraph item"),
       dueAt: MeerkatClient.parseOptionalString(data.due_at),
       notBefore: MeerkatClient.parseOptionalString(data.not_before),
@@ -3604,6 +3654,21 @@ export class MeerkatClient {
     return MeerkatClient.requireRecordArray(value, context).map((item) =>
       MeerkatClient.parseWorkItem(item),
     );
+  }
+
+  private static parseWorkGraphGoalResult(
+    data: Record<string, unknown>,
+  ): WorkGraphGoalResult {
+    return {
+      item: MeerkatClient.parseWorkItem(
+        MeerkatClient.requireRecord(data.item, "item", "Invalid workgraph goal result"),
+      ),
+      attention: MeerkatClient.requireRecord(
+        data.attention,
+        "attention",
+        "Invalid workgraph goal result",
+      ) as unknown as WorkGraphGoalResult["attention"],
+    };
   }
 
   private static parseWorkGraphEdge(data: Record<string, unknown>): WorkGraphEdge {

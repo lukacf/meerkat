@@ -28,6 +28,8 @@ import type {
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
+  WorkAttentionBinding,
+  WorkCompletionPolicy,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
@@ -1020,9 +1022,11 @@ export interface WorkItem {
   readonly description?: string;
   readonly status: WorkGraphStatus;
   readonly priority: WorkGraphPriority;
+  readonly completionPolicy: WorkCompletionPolicy;
   readonly labels: readonly string[];
   readonly owner?: WorkGraphOwner;
   readonly claim?: WorkGraphClaim;
+  readonly machineState: Record<string, unknown>;
   readonly revision: number;
   readonly dueAt?: string;
   readonly notBefore?: string;
@@ -1055,6 +1059,11 @@ export interface WorkGraphEvent {
 
 export interface WorkItemListResult {
   readonly items: readonly WorkItem[];
+}
+
+export interface WorkGraphGoalResult {
+  readonly item: WorkItem;
+  readonly attention: WorkAttentionBinding;
 }
 
 export interface WorkGraphEventsResult {

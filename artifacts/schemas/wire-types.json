@@ -9941,6 +9941,11 @@
       "evidence": {
         "$ref": "#/$defs/WorkEvidenceRef"
       },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
       "namespace": {
         "type": [
           "string",
@@ -9956,6 +9961,7 @@
     },
     "required": [
       "binding_id",
+      "expected_revision",
       "evidence"
     ],
     "title": "GoalConfirmRequest",
@@ -11432,10 +11438,7 @@
       "expected_revision": {
         "format": "uint64",
         "minimum": 0,
-        "type": [
-          "integer",
-          "null"
-        ]
+        "type": "integer"
       },
       "namespace": {
         "type": [
@@ -11455,7 +11458,8 @@
       }
     },
     "required": [
-      "binding_id"
+      "binding_id",
+      "expected_revision"
     ],
     "title": "GoalRequestCloseRequest",
     "type": "object"
@@ -12716,6 +12720,16 @@
     ],
     "title": "GoalStatusResult",
     "type": "object"
+  },
+  "GoalTerminalStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "completed",
+      "cancelled",
+      "failed"
+    ],
+    "title": "GoalTerminalStatus",
+    "type": "string"
   },
   "HelpExecutionMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18732,6 +18746,202 @@
       "can_close_parent"
     ],
     "title": "ProjectedAttentionAuthority",
+    "type": "object"
+  },
+  "PublicGoalCompletionPolicy": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "self_attest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "PublicGoalCompletionPolicy"
+  },
+  "PublicGoalCreateRequest": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "GoalAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PublicGoalCompletionPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "completion_policy": {
+        "$ref": "#/$defs/PublicGoalCompletionPolicy",
+        "default": {
+          "kind": "self_attest"
+        }
+      },
+      "delegated_authority": {
+        "$ref": "#/$defs/AttentionDelegatedAuthority",
+        "default": "add_evidence"
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mode": {
+        "$ref": "#/$defs/WorkAttentionMode",
+        "default": "pursue"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "projection_policy": {
+        "$ref": "#/$defs/AttentionProjectionPolicy",
+        "default": {
+          "include_parent_context": true,
+          "max_text_chars": 4096
+        }
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "target": {
+        "$ref": "#/$defs/GoalAttentionTarget"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "title",
+      "target"
+    ],
+    "title": "PublicGoalCreateRequest",
+    "type": "object"
+  },
+  "PublicGoalRequestCloseRequest": {
+    "$defs": {
+      "GoalTerminalStatus": {
+        "enum": [
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "$ref": "#/$defs/GoalTerminalStatus",
+        "default": "completed"
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision"
+    ],
+    "title": "PublicGoalRequestCloseRequest",
     "type": "object"
   },
   "RealtimeAudioChunk": {

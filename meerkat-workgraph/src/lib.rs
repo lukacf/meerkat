@@ -52,14 +52,15 @@ pub use types::{
     AttentionProjectionText, AttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
     CreateWorkItemRequest, ExternalWorkRef, GoalAttentionTarget, GoalConfirmRequest,
     GoalConfirmResult, GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest,
-    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, LinkWorkItemsRequest,
-    ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode,
-    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
-    WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse,
-    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey,
-    WorkOwnerKind, WorkPriority, WorkStatus,
+    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, GoalTerminalStatus,
+    LinkWorkItemsRequest, ProjectedAttentionAuthority, PublicGoalCompletionPolicy,
+    PublicGoalCreateRequest, PublicGoalRequestCloseRequest, ReadyWorkFilter,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId,
+    WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
+    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
+    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse, WorkGraphMachineState,
+    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef,
+    WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =

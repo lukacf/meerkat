@@ -2054,6 +2054,8 @@ enum WorkGraphCommands {
         #[arg(long)]
         principal: Option<String>,
         #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
         kind: String,
         #[arg(long)]
         id: String,
@@ -2069,6 +2071,8 @@ enum WorkGraphCommands {
         binding_id: String,
         #[arg(long)]
         namespace: Option<String>,
+        #[arg(long)]
+        expected_revision: u64,
         #[arg(long = "status", value_enum, default_value = "completed")]
         status: WorkGraphStatusArg,
         #[arg(long)]
@@ -6212,6 +6216,7 @@ async fn handle_workgraph_command(
             binding_id,
             namespace,
             principal,
+            expected_revision,
             kind,
             id,
             label,
@@ -6223,6 +6228,7 @@ async fn handle_workgraph_command(
                     binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
+                    expected_revision,
                     evidence: meerkat::WorkEvidenceRef {
                         kind,
                         id,
@@ -6241,6 +6247,7 @@ async fn handle_workgraph_command(
         WorkGraphCommands::GoalClose {
             binding_id,
             namespace,
+            expected_revision,
             status,
             json,
         } => {
@@ -6249,7 +6256,7 @@ async fn handle_workgraph_command(
                     binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
-                    expected_revision: None,
+                    expected_revision,
                     status: status.into(),
                 })
                 .await?;

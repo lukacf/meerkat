@@ -333,9 +333,10 @@ not parent closure. A reviewer may close its own review child item and attach
 blocking or non-blocking evidence. The parent item closes only when its policy
 allows it.
 
-Current WorkGraph host surfaces are read-only. A user-facing `/goal` or host
-goal API therefore needs a typed host/principal mutation path. It should not
-pretend agent-only WorkGraph tools are sufficient for user-owned goals.
+WorkGraph host surfaces expose observability plus narrow goal and attention
+controls. Trusted principal-gated goal policies still belong to in-process host
+authority; public REST/RPC clients use the self-attested goal contract and
+cannot smuggle principal authority through JSON.
 
 ## Session-Only Shape
 

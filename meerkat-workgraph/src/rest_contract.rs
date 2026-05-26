@@ -74,7 +74,7 @@ const WORKGRAPH_GOAL_CREATE_OPERATIONS: &[WorkGraphRestOperationDescriptor] =
     &[WorkGraphRestOperationDescriptor {
         method: "post",
         summary: "Create WorkGraph goal and attention binding",
-        request_schema: Some("GoalCreateRequest"),
+        request_schema: Some("PublicGoalCreateRequest"),
         response_schema: "GoalCreateResult",
     }];
 
@@ -98,7 +98,7 @@ const WORKGRAPH_GOAL_REQUEST_CLOSE_OPERATIONS: &[WorkGraphRestOperationDescripto
     &[WorkGraphRestOperationDescriptor {
         method: "post",
         summary: "Request policy-gated WorkGraph goal closure",
-        request_schema: Some("GoalRequestCloseRequest"),
+        request_schema: Some("PublicGoalRequestCloseRequest"),
         response_schema: "GoalRequestCloseResult",
     }];
 

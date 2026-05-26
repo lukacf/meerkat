@@ -2443,6 +2443,11 @@
           "evidence": {
             "$ref": "#/components/schemas/WorkEvidenceRef"
           },
+          "expected_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "namespace": {
             "type": [
               "string",
@@ -2458,6 +2463,7 @@
         },
         "required": [
           "binding_id",
+          "expected_revision",
           "evidence"
         ],
         "title": "GoalConfirmRequest",
@@ -2479,61 +2485,6 @@
         "title": "GoalConfirmResult",
         "type": "object"
       },
-      "GoalCreateRequest": {
-        "properties": {
-          "completion_policy": {
-            "$ref": "#/components/schemas/WorkCompletionPolicy",
-            "default": {
-              "kind": "self_attest"
-            }
-          },
-          "delegated_authority": {
-            "$ref": "#/components/schemas/AttentionDelegatedAuthority",
-            "default": "add_evidence"
-          },
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "mode": {
-            "$ref": "#/components/schemas/WorkAttentionMode",
-            "default": "pursue"
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "projection_policy": {
-            "$ref": "#/components/schemas/AttentionProjectionPolicy",
-            "default": {
-              "include_parent_context": true,
-              "max_text_chars": 4096
-            }
-          },
-          "realm_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "target": {
-            "$ref": "#/components/schemas/GoalAttentionTarget"
-          },
-          "title": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "title",
-          "target"
-        ],
-        "title": "GoalCreateRequest",
-        "type": "object"
-      },
       "GoalCreateResult": {
         "properties": {
           "attention": {
@@ -2548,42 +2499,6 @@
           "attention"
         ],
         "title": "GoalCreateResult",
-        "type": "object"
-      },
-      "GoalRequestCloseRequest": {
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "expected_revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "realm_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "$ref": "#/components/schemas/WorkStatus",
-            "default": "completed"
-          }
-        },
-        "required": [
-          "binding_id"
-        ],
-        "title": "GoalRequestCloseRequest",
         "type": "object"
       },
       "GoalRequestCloseResult": {
@@ -2641,6 +2556,15 @@
         ],
         "title": "GoalStatusResult",
         "type": "object"
+      },
+      "GoalTerminalStatus": {
+        "enum": [
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "title": "GoalTerminalStatus",
+        "type": "string"
       },
       "HandlingMode": {
         "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
@@ -3942,6 +3866,112 @@
             "type": "object"
           }
         ]
+      },
+      "PublicGoalCompletionPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "PublicGoalCompletionPolicy"
+      },
+      "PublicGoalCreateRequest": {
+        "properties": {
+          "completion_policy": {
+            "$ref": "#/components/schemas/PublicGoalCompletionPolicy",
+            "default": {
+              "kind": "self_attest"
+            }
+          },
+          "delegated_authority": {
+            "$ref": "#/components/schemas/AttentionDelegatedAuthority",
+            "default": "add_evidence"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/WorkAttentionMode",
+            "default": "pursue"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projection_policy": {
+            "$ref": "#/components/schemas/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/GoalAttentionTarget"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "target"
+        ],
+        "title": "PublicGoalCreateRequest",
+        "type": "object"
+      },
+      "PublicGoalRequestCloseRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "expected_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/GoalTerminalStatus",
+            "default": "completed"
+          }
+        },
+        "required": [
+          "binding_id",
+          "expected_revision"
+        ],
+        "title": "PublicGoalRequestCloseRequest",
+        "type": "object"
       },
       "PublicTurnToolOverlay": {
         "additionalProperties": false,
@@ -8749,81 +8779,6 @@
           }
         ]
       },
-      "WorkCompletionPolicy": {
-        "oneOf": [
-          {
-            "properties": {
-              "kind": {
-                "const": "self_attest",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "host_confirmed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "principal_confirmed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "supervisor",
-                "type": "string"
-              },
-              "owner_key": {
-                "$ref": "#/components/schemas/WorkOwnerKey"
-              }
-            },
-            "required": [
-              "kind",
-              "owner_key"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "reviewer_quorum",
-                "type": "string"
-              },
-              "threshold": {
-                "format": "uint16",
-                "maximum": 65535,
-                "minimum": 0,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "kind",
-              "threshold"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "WorkEdge": {
         "properties": {
           "created_at": {
@@ -12097,7 +12052,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GoalCreateRequest"
+                "$ref": "#/components/schemas/PublicGoalCreateRequest"
               }
             }
           },
@@ -12135,7 +12090,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GoalRequestCloseRequest"
+                "$ref": "#/components/schemas/PublicGoalRequestCloseRequest"
               }
             }
           },

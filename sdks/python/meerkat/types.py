@@ -33,8 +33,12 @@ from .generated.types import (
     GoalCreateResult as GoalCreateResult,
     GoalRequestCloseRequest as GoalRequestCloseRequest,
     GoalRequestCloseResult as GoalRequestCloseResult,
+    GoalTerminalStatus as GoalTerminalStatus,
     GoalStatusRequest as GoalStatusRequest,
     GoalStatusResult as GoalStatusResult,
+    PublicGoalCompletionPolicy as PublicGoalCompletionPolicy,
+    PublicGoalCreateRequest as PublicGoalCreateRequest,
+    PublicGoalRequestCloseRequest as PublicGoalRequestCloseRequest,
     McpAddParams as McpAddParams,
     McpHttpConfig as McpHttpConfig,
     McpHttpServerConfig as McpHttpServerConfig,
@@ -526,6 +530,7 @@ class WorkItem(TypedDict, total=False):
     description: str
     status: WorkGraphStatus
     priority: WorkGraphPriority
+    completion_policy: WorkCompletionPolicy
     labels: list[str]
     owner: WorkGraphOwner
     claim: WorkGraphClaim

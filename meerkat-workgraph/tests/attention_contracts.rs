@@ -247,7 +247,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
-            expected_revision: None,
+            expected_revision: goal.item.revision,
             status: WorkStatus::Completed,
         })
         .await
@@ -262,6 +262,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: goal.item.revision,
             evidence: WorkEvidenceRef {
                 kind: "host_confirmation".to_string(),
                 id: "acceptance-1".to_string(),
@@ -281,7 +282,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
-            expected_revision: None,
+            expected_revision: confirmed.item.revision,
             status: WorkStatus::Completed,
         })
         .await
@@ -289,6 +290,120 @@ async fn goal_confirmation_and_close_are_policy_gated() {
     assert_eq!(closed.item.status, WorkStatus::Completed);
     assert_eq!(closed.attention.binding_id, goal.attention.binding_id);
     assert_eq!(closed.attention.status, WorkAttentionStatus::Stopped);
+}
+
+#[tokio::test]
+async fn goal_confirm_and_request_close_reject_stale_item_revision() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000110").expect("valid session id");
+
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Confirm exact revision".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session {
+                session_id: session_id.clone(),
+            },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+    service
+        .update(UpdateWorkItemRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            title: Some("Changed after review".to_string()),
+            description: None,
+            priority: None,
+            completion_policy: None,
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("update item");
+
+    let stale_confirm = service
+        .goal_confirm(GoalConfirmRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            evidence: WorkEvidenceRef {
+                kind: "host_confirmation".to_string(),
+                id: "acceptance-1".to_string(),
+                label: None,
+                summary: None,
+            },
+            principal: None,
+            trusted_principal: None,
+        })
+        .await
+        .expect_err("confirmation must reject stale reviewed revision");
+    assert!(matches!(
+        stale_confirm,
+        meerkat_workgraph::WorkGraphError::StaleRevision { .. }
+    ));
+
+    let closable = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Close exact revision".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create closable goal");
+    service
+        .update(UpdateWorkItemRequest {
+            id: closable.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: closable.item.revision,
+            title: Some("Changed before close".to_string()),
+            description: None,
+            priority: None,
+            completion_policy: None,
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("update closable item");
+
+    let stale_close = service
+        .goal_request_close(GoalRequestCloseRequest {
+            binding_id: closable.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: closable.item.revision,
+            status: WorkStatus::Completed,
+        })
+        .await
+        .expect_err("closure must reject stale reviewed revision");
+    assert!(matches!(
+        stale_close,
+        meerkat_workgraph::WorkGraphError::StaleRevision { .. }
+    ));
 }
 
 #[tokio::test]
@@ -322,7 +437,7 @@ async fn goal_policy_only_gates_successful_completion() {
                 binding_id: goal.attention.binding_id,
                 realm_id: None,
                 namespace: None,
-                expected_revision: None,
+                expected_revision: goal.item.revision,
                 status,
             })
             .await
@@ -560,6 +675,7 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: goal.item.revision,
             evidence: WorkEvidenceRef {
                 kind: "supervisor_confirmation".to_string(),
                 id: "approval".to_string(),
@@ -581,6 +697,7 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: goal.item.revision,
             evidence: WorkEvidenceRef {
                 kind: "supervisor_confirmation".to_string(),
                 id: "approval".to_string(),
@@ -812,7 +929,7 @@ async fn closed_goal_stops_attention_and_cannot_resume() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
-            expected_revision: None,
+            expected_revision: goal.item.revision,
             status: WorkStatus::Completed,
         })
         .await
@@ -1016,6 +1133,7 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         binding_id: binding_id.clone(),
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
+        expected_revision: 7,
         evidence: WorkEvidenceRef {
             kind: "host_confirmation".to_string(),
             id: "confirmation-1".to_string(),
@@ -1029,7 +1147,7 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         binding_id: binding_id.clone(),
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
-        expected_revision: None,
+        expected_revision: 8,
         status: WorkStatus::Completed,
     };
     let pause = AttentionPauseRequest {

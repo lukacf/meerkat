@@ -4638,17 +4638,11 @@ async fn workgraph_events(
 
 async fn workgraph_goal_create(
     State(state): State<AppState>,
-    Json(request): Json<meerkat::GoalCreateRequest>,
+    Json(request): Json<meerkat::PublicGoalCreateRequest>,
 ) -> Result<Json<meerkat::GoalCreateResult>, ApiError> {
-    if request.completion_policy.requires_trusted_principal() {
-        return Err(ApiError::BadRequest(
-            "principal-gated WorkGraph goal policies require trusted in-process principal authority and are not available on the public REST /workgraph/goal/create surface"
-                .to_string(),
-        ));
-    }
     state
         .workgraph_service
-        .create_goal(request)
+        .create_goal(request.into())
         .await
         .map(Json)
         .map_err(workgraph_error_to_api)
@@ -4672,7 +4666,7 @@ async fn workgraph_goal_confirm(
 ) -> Result<Json<meerkat::GoalConfirmResult>, ApiError> {
     state
         .workgraph_service
-        .goal_confirm(request)
+        .goal_confirm_public(request)
         .await
         .map(Json)
         .map_err(workgraph_error_to_api)
@@ -4680,11 +4674,11 @@ async fn workgraph_goal_confirm(
 
 async fn workgraph_goal_request_close(
     State(state): State<AppState>,
-    Json(request): Json<meerkat::GoalRequestCloseRequest>,
+    Json(request): Json<meerkat::PublicGoalRequestCloseRequest>,
 ) -> Result<Json<meerkat::GoalRequestCloseResult>, ApiError> {
     state
         .workgraph_service
-        .goal_request_close(request)
+        .goal_request_close(request.into())
         .await
         .map(Json)
         .map_err(workgraph_error_to_api)
@@ -4735,11 +4729,11 @@ async fn workgraph_attention_continue(
         .map_err(workgraph_error_to_api)?;
     ensure_rest_session_exists(&state, &session_id).await?;
     ensure_rest_session_runtime_executor(&state, &session_id).await;
-    let outcome = state
+    let (outcome, _handle) = state
         .runtime_adapter
-        .accept_input(&session_id, input)
+        .accept_input_with_completion(&session_id, input)
         .await
-        .map_err(|error| ApiError::Internal(format!("runtime accept failed: {error}")))?;
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
     rest_runtime_accept_result(outcome)
         .map(Json)
         .map_err(ApiError::Internal)
@@ -9567,7 +9561,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.status().is_client_error());
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
@@ -9660,7 +9654,7 @@ mod tests {
         let (target_session_id, input) = workgraph_attention_continuation_input(
             &state,
             meerkat::AttentionBindingRequest {
-                binding_id: scoped_goal.attention.binding_id,
+                binding_id: scoped_goal.attention.binding_id.clone(),
                 realm_id: None,
                 namespace: Some(scoped_namespace),
             },
@@ -9735,10 +9729,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let goal: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let binding_id = goal["attention"]["binding_id"].as_str().unwrap();
+        assert!(response.status().is_client_error());
+        let binding_id = scoped_goal.attention.binding_id.as_str().to_string();
+        let goal_revision = scoped_goal.item.revision;
 
         let response = app
             .clone()
@@ -9761,7 +9754,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.status().is_client_error());
 
         let response = app
             .clone()
@@ -9775,10 +9768,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let paused: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(paused["attention"]["status"]["state"], "paused");
+        assert!(response.status().is_client_error());
 
         let response = app
             .clone()
@@ -9802,7 +9792,7 @@ mod tests {
                     .uri("/workgraph/goal/request_close")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","status":"completed"}}"#
+                        r#"{{"binding_id":"{binding_id}","expected_revision":{goal_revision},"status":"completed"}}"#
                     )))
                     .unwrap(),
             )
@@ -9820,6 +9810,7 @@ mod tests {
                     .body(Body::from(format!(
                         r#"{{
                             "binding_id":"{binding_id}",
+                            "expected_revision":{goal_revision},
                             "evidence":{{
                                 "kind":"host_confirmation",
                                 "id":"acceptance-1",
@@ -9831,7 +9822,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let response = app
             .clone()
@@ -9841,16 +9832,13 @@ mod tests {
                     .uri("/workgraph/goal/request_close")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"binding_id":"{binding_id}","status":"completed"}}"#
+                        r#"{{"binding_id":"{binding_id}","expected_revision":{goal_revision},"status":"completed"}}"#
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let closed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(closed["item"]["status"], "completed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let events_path = meerkat::workgraph_rest_path_catalog()
             .iter()

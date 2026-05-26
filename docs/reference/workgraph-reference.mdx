@@ -1,13 +1,14 @@
 ---
 title: "WorkGraph Reference"
-description: "WorkGraph item fields, statuses, edges, evidence, tools, and read-only host surfaces."
+description: "WorkGraph item fields, statuses, edges, evidence, tools, and host surfaces."
 icon: "list-tree"
 ---
 
 # WorkGraph Reference
 
-WorkGraph is an optional realm-scoped subsystem. Agents mutate it through tools.
-Host RPC, REST, and CLI expose read-only observability/operator lookup.
+WorkGraph is an optional realm-scoped subsystem. Agents mutate general work
+items through tools. Host RPC, REST, and CLI expose observability/operator
+lookup plus narrow goal and attention controls.
 
 ## WorkItem
 
@@ -105,7 +106,7 @@ Evidence refs are pointers. WorkGraph does not own the artifact content.
 | `workgraph_link` | Add a graph edge |
 | `workgraph_add_evidence` | Add an evidence reference |
 
-## Read-Only RPC
+## RPC
 
 | Method | Purpose |
 |--------|---------|
@@ -127,7 +128,7 @@ General WorkGraph item mutation remains tool-owned. The narrow goal and
 attention RPC methods above are host-control methods for creating, observing,
 pausing, resuming, and driving attention over WorkGraph items.
 
-## Read-Only REST
+## REST
 
 | Method | Path | Purpose |
 |--------|------|---------|

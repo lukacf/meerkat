@@ -3115,7 +3115,6 @@ impl SessionRuntime {
         let flow_tool_overlay =
             meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
 
-        self.ensure_runtime_executor(session_id).await?;
         let input_id = InputId::new();
         let context_key = format!(
             "{}:{}",
@@ -3148,14 +3147,9 @@ impl SessionRuntime {
             )),
             turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
         });
-        self.runtime_adapter
-            .accept_input(session_id, input)
+        let adapter = Arc::clone(&self.runtime_adapter);
+        self.accept_runtime_input_with_active_admission(&adapter, session_id, input)
             .await
-            .map_err(|err| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {err}"),
-                data: None,
-            })
     }
 
     pub async fn enqueue_workgraph_attention_binding_continuation(

@@ -1250,6 +1250,7 @@ describe("WorkGraph parsers", () => {
     title: "Prep A for non-preferred dentist car",
     status: "in_progress",
     priority: "high",
+    completion_policy: { kind: "host_confirmed" },
     labels: ["autism-support", "dentist"],
     owner: {
       key: { kind: "agent", id: "homecore-kapellmeister" },
@@ -1259,6 +1260,7 @@ describe("WorkGraph parsers", () => {
       owner: { key: { kind: "agent", id: "homecore-kapellmeister" } },
       claimed_at: timestamp,
     },
+    machine_state: { lifecycle_phase: "claimed", revision: 4 },
     revision: 4,
     created_at: timestamp,
     updated_at: timestamp,
@@ -1290,6 +1292,7 @@ describe("WorkGraph parsers", () => {
     assert.equal(snapshot.realmId, "homecore");
     assert.equal(snapshot.items[0].owner?.key.kind, "agent");
     assert.equal(snapshot.items[0].claim?.owner.key.id, "homecore-kapellmeister");
+    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "host_confirmed" });
     assert.equal(snapshot.edges[0].kind, "blocks");
     assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
   });
@@ -2220,7 +2223,9 @@ describe("Parity wrappers", () => {
       title: "Prep A for non-preferred dentist car",
       status: "open",
       priority: "high",
+      completion_policy: { kind: "self_attest" },
       labels: ["autism-support", "dentist"],
+      machine_state: { lifecycle_phase: "open", revision: 1 },
       revision: 1,
       created_at: timestamp,
       updated_at: timestamp,

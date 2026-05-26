@@ -494,7 +494,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::typed(
                 "workgraph/goal/create",
                 "Create a WorkGraph goal and session attention binding",
-                "GoalCreateRequest",
+                "PublicGoalCreateRequest",
                 "GoalCreateResult",
             ),
             RpcMethodDescriptor::typed(
@@ -512,7 +512,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::typed(
                 "workgraph/goal/request_close",
                 "Request policy-gated WorkGraph goal closure",
-                "GoalRequestCloseRequest",
+                "PublicGoalRequestCloseRequest",
                 "GoalRequestCloseResult",
             ),
             RpcMethodDescriptor::typed(

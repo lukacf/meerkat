@@ -1196,6 +1196,7 @@ class GoalConfirmRequest:
     """Wire payload for GoalConfirmRequest."""
     binding_id: str
     evidence: WorkEvidenceRef
+    expected_revision: int
     namespace: Optional[str] = None
     realm_id: Optional[str] = None
 
@@ -1232,7 +1233,7 @@ class GoalCreateResult:
 class GoalRequestCloseRequest:
     """Wire payload for GoalRequestCloseRequest."""
     binding_id: str
-    expected_revision: Optional[int] = None
+    expected_revision: int
     namespace: Optional[str] = None
     realm_id: Optional[str] = None
     status: Optional[Literal['open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed']] = None
@@ -1258,6 +1259,30 @@ class GoalStatusResult:
     """Wire payload for GoalStatusResult."""
     attention: WorkAttentionBinding
     item: WorkItem
+
+
+@dataclass
+class PublicGoalCreateRequest:
+    """Wire payload for PublicGoalCreateRequest."""
+    target: GoalAttentionTarget
+    title: str
+    completion_policy: Optional[PublicGoalCompletionPolicy] = None
+    delegated_authority: Optional[AttentionDelegatedAuthority] = None
+    description: Optional[str] = None
+    mode: Optional[WorkAttentionMode] = None
+    namespace: Optional[str] = None
+    projection_policy: Optional[AttentionProjectionPolicy] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class PublicGoalRequestCloseRequest:
+    """Wire payload for PublicGoalRequestCloseRequest."""
+    binding_id: str
+    expected_revision: int
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+    status: Optional[GoalTerminalStatus] = None
 
 
 @dataclass
@@ -3009,6 +3034,15 @@ class GoalAttentionTargetSession(TypedDict, total=False):
     session_id: Required[str]
 
 GoalAttentionTarget = GoalAttentionTargetSession
+
+# WorkGraph RPC helper wire type for GoalTerminalStatus.
+GoalTerminalStatus = Literal['completed', 'cancelled', 'failed']
+
+# WorkGraph RPC helper wire type for PublicGoalCompletionPolicy.
+class PublicGoalCompletionPolicySelfAttest(TypedDict, total=False):
+    kind: Required[Literal['self_attest']]
+
+PublicGoalCompletionPolicy = PublicGoalCompletionPolicySelfAttest
 
 # WorkGraph RPC helper wire type for WorkAttentionMode.
 WorkAttentionMode = Literal['pursue', 'coordinate', 'review', 'falsify', 'judge', 'observe']

@@ -383,7 +383,7 @@
     {
       "description": "Create a WorkGraph goal and session attention binding",
       "name": "workgraph/goal/create",
-      "params_type": "GoalCreateRequest",
+      "params_type": "PublicGoalCreateRequest",
       "result_type": "GoalCreateResult"
     },
     {
@@ -401,7 +401,7 @@
     {
       "description": "Request policy-gated WorkGraph goal closure",
       "name": "workgraph/goal/request_close",
-      "params_type": "GoalRequestCloseRequest",
+      "params_type": "PublicGoalRequestCloseRequest",
       "result_type": "GoalRequestCloseResult"
     },
     {

@@ -264,6 +264,22 @@ pub enum WorkCompletionPolicy {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PublicGoalCompletionPolicy {
+    #[default]
+    SelfAttest,
+}
+
+impl From<PublicGoalCompletionPolicy> for WorkCompletionPolicy {
+    fn from(policy: PublicGoalCompletionPolicy) -> Self {
+        match policy {
+            PublicGoalCompletionPolicy::SelfAttest => Self::SelfAttest,
+        }
+    }
+}
+
 impl WorkCompletionPolicy {
     pub fn requires_trusted_principal(&self) -> bool {
         matches!(
@@ -1087,6 +1103,43 @@ pub struct GoalCreateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PublicGoalCreateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub target: GoalAttentionTarget,
+    #[serde(default)]
+    pub mode: WorkAttentionMode,
+    #[serde(default)]
+    pub completion_policy: PublicGoalCompletionPolicy,
+    #[serde(default)]
+    pub delegated_authority: AttentionDelegatedAuthority,
+    #[serde(default)]
+    pub projection_policy: AttentionProjectionPolicy,
+}
+
+impl From<PublicGoalCreateRequest> for GoalCreateRequest {
+    fn from(request: PublicGoalCreateRequest) -> Self {
+        Self {
+            realm_id: request.realm_id,
+            namespace: request.namespace,
+            title: request.title,
+            description: request.description,
+            target: request.target,
+            mode: request.mode,
+            completion_policy: request.completion_policy.into(),
+            delegated_authority: request.delegated_authority,
+            projection_policy: request.projection_policy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GoalCreateResult {
     pub item: WorkItem,
     pub attention: WorkAttentionBinding,
@@ -1117,6 +1170,7 @@ pub struct GoalConfirmRequest {
     pub realm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
     pub evidence: WorkEvidenceRef,
     #[serde(skip)]
     #[cfg_attr(feature = "schema", schemars(skip))]
@@ -1151,10 +1205,54 @@ pub struct GoalRequestCloseRequest {
     pub realm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<u64>,
+    pub expected_revision: u64,
     #[serde(default = "default_terminal_status")]
     pub status: WorkStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum GoalTerminalStatus {
+    #[default]
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+impl From<GoalTerminalStatus> for WorkStatus {
+    fn from(status: GoalTerminalStatus) -> Self {
+        match status {
+            GoalTerminalStatus::Completed => Self::Completed,
+            GoalTerminalStatus::Cancelled => Self::Cancelled,
+            GoalTerminalStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PublicGoalRequestCloseRequest {
+    pub binding_id: WorkAttentionBindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
+    #[serde(default)]
+    pub status: GoalTerminalStatus,
+}
+
+impl From<PublicGoalRequestCloseRequest> for GoalRequestCloseRequest {
+    fn from(request: PublicGoalRequestCloseRequest) -> Self {
+        Self {
+            binding_id: request.binding_id,
+            realm_id: request.realm_id,
+            namespace: request.namespace,
+            expected_revision: request.expected_revision,
+            status: request.status.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

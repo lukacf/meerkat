@@ -878,6 +878,7 @@ export interface AttentionReassignRequest {
 export interface GoalConfirmRequest {
   binding_id: string;
   evidence: WorkEvidenceRef;
+  expected_revision: number;
   namespace?: string;
   realm_id?: string;
 }
@@ -906,7 +907,7 @@ export interface GoalCreateResult {
 
 export interface GoalRequestCloseRequest {
   binding_id: string;
-  expected_revision?: number;
+  expected_revision: number;
   namespace?: string;
   realm_id?: string;
   status?: "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed";
@@ -926,6 +927,26 @@ export interface GoalStatusRequest {
 export interface GoalStatusResult {
   attention: WorkAttentionBinding;
   item: WorkItem;
+}
+
+export interface PublicGoalCreateRequest {
+  completion_policy?: PublicGoalCompletionPolicy;
+  delegated_authority?: AttentionDelegatedAuthority;
+  description?: string;
+  mode?: WorkAttentionMode;
+  namespace?: string;
+  projection_policy?: AttentionProjectionPolicy;
+  realm_id?: string;
+  target: GoalAttentionTarget;
+  title: string;
+}
+
+export interface PublicGoalRequestCloseRequest {
+  binding_id: string;
+  expected_revision: number;
+  namespace?: string;
+  realm_id?: string;
+  status?: GoalTerminalStatus;
 }
 
 export interface ProjectedAttentionAuthority {
@@ -1420,6 +1441,14 @@ export interface GoalAttentionTargetSession {
 }
 
 export type GoalAttentionTarget = GoalAttentionTargetSession;
+
+export type GoalTerminalStatus = "completed" | "cancelled" | "failed";
+
+export interface PublicGoalCompletionPolicySelfAttest {
+  kind: "self_attest";
+}
+
+export type PublicGoalCompletionPolicy = PublicGoalCompletionPolicySelfAttest;
 
 export type WorkAttentionMode = "pursue" | "coordinate" | "review" | "falsify" | "judge" | "observe";
 

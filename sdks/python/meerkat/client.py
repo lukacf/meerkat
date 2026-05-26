@@ -46,12 +46,12 @@ from .generated.types import (
     AttentionPauseRequest,
     GoalConfirmRequest,
     GoalConfirmResult,
-    GoalCreateRequest,
     GoalCreateResult,
-    GoalRequestCloseRequest,
     GoalRequestCloseResult,
     GoalStatusRequest,
     GoalStatusResult,
+    PublicGoalCreateRequest,
+    PublicGoalRequestCloseRequest,
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
@@ -1343,7 +1343,7 @@ class MeerkatClient:
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
 
-    async def create_workgraph_goal(self, params: GoalCreateRequest) -> GoalCreateResult:
+    async def create_workgraph_goal(self, params: PublicGoalCreateRequest) -> GoalCreateResult:
         return await self._request("workgraph/goal/create", _wire_params(params))
 
     async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
@@ -1354,7 +1354,7 @@ class MeerkatClient:
 
     async def request_close_workgraph_goal(
         self,
-        params: GoalRequestCloseRequest,
+        params: PublicGoalRequestCloseRequest,
     ) -> GoalRequestCloseResult:
         return await self._request("workgraph/goal/request_close", _wire_params(params))
 

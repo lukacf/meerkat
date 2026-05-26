@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 
+use std::collections::BTreeSet;
+
 use chrono::{Duration, TimeZone, Utc};
 use meerkat_core::SessionId;
 use meerkat_workgraph::{
@@ -1111,6 +1113,188 @@ async fn attention_continuation_supersession_is_binding_scoped_not_projection_sc
         workgraph_attention_supersession_key(&stale_successor),
         "supersession must retire older queued continuations for the same binding"
     );
+}
+
+#[tokio::test]
+async fn request_closure_projects_request_only_authority() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000046").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Request closure only".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::RequestClosure,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("project attention")
+        .projection;
+
+    assert!(projection.authority.can_request_closure);
+    assert!(!projection.authority.can_close_if_policy_allows);
+    assert!(!projection.authority.can_close_parent);
+}
+
+#[tokio::test]
+async fn close_if_policy_projection_does_not_advertise_parent_close_without_parent_handler() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000047").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Close self only".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("project attention")
+        .projection;
+
+    assert!(projection.authority.can_request_closure);
+    assert!(projection.authority.can_close_if_policy_allows);
+    assert!(!projection.authority.can_close_parent);
+}
+
+#[tokio::test]
+async fn filtered_snapshot_does_not_include_attention_edges_or_ready_ids_for_filtered_out_items() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let included = service
+        .create(CreateWorkItemRequest {
+            title: "Included item".to_string(),
+            labels: BTreeSet::from(["included".to_string()]),
+            ..CreateWorkItemRequest::default()
+        })
+        .await
+        .expect("create included item");
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000048").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Filtered out goal".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+    service
+        .link(LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            from_id: included.id.clone(),
+            to_id: goal.item.id.clone(),
+            kind: WorkEdgeKind::Related,
+        })
+        .await
+        .expect("link included item to filtered goal");
+
+    let snapshot = service
+        .snapshot(WorkGraphSnapshotFilter {
+            labels: vec!["included".to_string()],
+            ..WorkGraphSnapshotFilter::default()
+        })
+        .await
+        .expect("snapshot");
+
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].id, included.id);
+    assert!(snapshot.attention.is_empty());
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(snapshot.ready_item_ids, vec![included.id]);
+}
+
+#[tokio::test]
+async fn stale_close_revision_wins_over_unsatisfied_completion_policy() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000049").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Needs host confirmation".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .goal_request_close(GoalRequestCloseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: 0,
+            status: GoalTerminalStatus::Completed,
+        })
+        .await
+        .expect_err("stale goal close should fail before policy check");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::StaleRevision { .. }
+    ));
+
+    let err = service
+        .close(CloseWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: 0,
+            status: WorkStatus::Completed,
+        })
+        .await
+        .expect_err("stale direct close should fail before policy check");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::StaleRevision { .. }
+    ));
 }
 
 #[tokio::test]

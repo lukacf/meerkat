@@ -178,9 +178,6 @@ subset.
 | `workgraph/attention/list` | WorkGraph | List attention bindings, optionally filtered by status (workgraph feature) |
 | `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
-
-WorkGraph goal and attention mutation methods require trusted in-process
-host/session authority and are not part of the public JSON-RPC catalog.
 | `skills/list` | Skills | List skills with provenance |
 | `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |
@@ -203,6 +200,9 @@ host/session authority and are not part of the public JSON-RPC catalog.
 | `auth/logout` | Auth | Revoke + remove persisted credentials |
 | `realm/list` | Realm | List realm summaries |
 | `realm/get` | Realm | Get full realm connection set |
+
+WorkGraph goal and attention mutation methods require trusted in-process
+host/session authority and are not part of the public JSON-RPC catalog.
 
 <Note>
 Generated assistant images use the same surface-neutral history and blob APIs as other blob-backed artifacts. Read `session/history`, find assistant blocks with `block_type: "image"`, then call `blob/get` with `data.blob_ref.blob_id` to retrieve the base64 payload.

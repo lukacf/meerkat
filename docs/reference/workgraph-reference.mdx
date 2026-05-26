@@ -134,10 +134,12 @@ REST or JSON-RPC catalog.
 | `POST` | `/workgraph/goal/status` | Read goal and attention status |
 | `POST` | `/workgraph/attention/list` | List attention bindings |
 
-Common query parameters: `realm_id`, `namespace`, `all_namespaces`,
-`statuses`, `labels`, `include_terminal`, `limit`, and `after_seq` for events.
+The `GET` routes use query parameters such as `realm_id`, `namespace`,
+`all_namespaces`, `statuses`, `labels`, `include_terminal`, `limit`, and
+`after_seq` for events. The `POST /workgraph/goal/status` and
+`POST /workgraph/attention/list` routes accept JSON request bodies.
 
-## Read-Only CLI
+## CLI
 
 ```bash
 rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
@@ -145,6 +147,13 @@ rkat workgraph show <ID> [--namespace <NS>] [--json]
 rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
 rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
+rkat workgraph goal-create --title <TITLE> --session-id <SESSION_ID> [--namespace <NS>] [--completion-policy <POLICY>] [--json]
+rkat workgraph goal-status --binding-id <BINDING_ID> [--namespace <NS>] [--json]
+rkat workgraph goal-confirm --binding-id <BINDING_ID> --expected-revision <N> [--principal <ID>] [--namespace <NS>] [--json]
+rkat workgraph goal-close --binding-id <BINDING_ID> --expected-revision <N> [--status <completed|cancelled|failed>] [--namespace <NS>] [--json]
+rkat workgraph attention-list [--namespace <NS>] [--status <STATUS>] [--target-kind <KIND>] [--target-id <ID>] [--json]
+rkat workgraph attention-pause --binding-id <BINDING_ID> --expected-revision <N> [--until <RFC3339>] [--namespace <NS>] [--json]
+rkat workgraph attention-resume --binding-id <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 ```
 
 CLI commands use the same realm flags as other `rkat` commands.

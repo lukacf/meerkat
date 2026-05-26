@@ -92,9 +92,6 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
-
-WorkGraph goal and attention mutation routes require trusted in-process
-host/session authority and are not part of the public REST catalog.
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
 | `GET` | `/auth/profiles` | List realm auth profiles, backend profiles, and bindings |
 | `POST` | `/auth/profiles` | Store binding-scoped credentials |
@@ -127,6 +124,9 @@ host/session authority and are not part of the public REST catalog.
 | `PUT` | `/config` | Replace config |
 | `PATCH` | `/config` | Merge-patch config (RFC 7396) |
 | `POST` | `/requests/{request_id}/cancel` | Cancel an uncommitted in-flight request |
+
+WorkGraph goal and attention mutation routes require trusted in-process
+host/session authority and are not part of the public REST catalog.
 
 <Note>
 Generated images are not returned as inline bytes in history. `GET /sessions/{id}/history` returns assistant image blocks with `image_id`, `blob_ref`, dimensions, and metadata; fetch image bytes through the blob/artifact surface exposed by the runtime-backed RPC/SDK path.

@@ -511,19 +511,19 @@ impl WorkGraphService {
             )
             .await?;
         let requested_status = WorkStatus::from(request.status);
-        if requested_status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
-            return Err(WorkGraphError::InvalidTransition(format!(
-                "work item {} completion policy {} is not satisfied",
-                item.id,
-                completion_policy_name(&item.completion_policy)
-            )));
-        }
         if item.revision != request.expected_revision {
             return Err(WorkGraphError::StaleRevision {
                 id: item.id.clone(),
                 expected: request.expected_revision,
                 actual: item.revision,
             });
+        }
+        if requested_status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work item {} completion policy {} is not satisfied",
+                item.id,
+                completion_policy_name(&item.completion_policy)
+            )));
         }
         let item = self
             .close(CloseWorkItemRequest {
@@ -682,12 +682,30 @@ impl WorkGraphService {
                 limit: filter.limit,
             })
             .await?;
+        let included_item_refs = items
+            .iter()
+            .map(|item| (item.namespace.clone(), item.id.clone()))
+            .collect::<BTreeSet<_>>();
+        let included_item_ids = items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<BTreeSet<_>>();
 
         let namespaces = self.snapshot_namespaces(&realm_id, &filter, &items).await?;
         let mut edges = Vec::new();
         let mut attention = Vec::new();
         for namespace in &namespaces {
-            edges.extend(self.store.list_edges(&realm_id, namespace).await?);
+            edges.extend(
+                self.store
+                    .list_edges(&realm_id, namespace)
+                    .await?
+                    .into_iter()
+                    .filter(|edge| {
+                        included_item_refs.contains(&(edge.namespace.clone(), edge.from_id.clone()))
+                            && included_item_refs
+                                .contains(&(edge.namespace.clone(), edge.to_id.clone()))
+                    }),
+            );
             for binding in self
                 .store
                 .list_attention(AttentionListRequest {
@@ -698,16 +716,22 @@ impl WorkGraphService {
                 })
                 .await?
             {
-                attention.push(
-                    self.normalize_attention_for_read(binding, captured_at)
-                        .await?,
-                );
+                if included_item_refs.contains(&(
+                    binding.work_ref.namespace.clone(),
+                    binding.work_ref.item_id.clone(),
+                )) {
+                    attention.push(
+                        self.normalize_attention_for_read(binding, captured_at)
+                            .await?,
+                    );
+                }
             }
         }
 
-        let ready_item_ids = self
+        let mut ready_item_ids = self
             .ready_item_ids_in_namespaces(&realm_id, &namespaces, &filter.labels, captured_at)
             .await?;
+        ready_item_ids.retain(|id| included_item_ids.contains(id));
         let event_high_water_mark = self
             .store
             .list_events(WorkGraphEventFilter {
@@ -831,6 +855,13 @@ impl WorkGraphService {
             )
             .await?;
         let expected_previous_revision = item.revision;
+        if item.revision != request.expected_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: item.id.clone(),
+                expected: request.expected_revision,
+                actual: item.revision,
+            });
+        }
         if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
             return Err(WorkGraphError::InvalidTransition(format!(
                 "work item {} completion policy {} is not satisfied",
@@ -1229,21 +1260,20 @@ fn projected_attention_authority(attention: &WorkAttentionBinding) -> ProjectedA
         attention.delegated_authority,
         crate::types::AttentionDelegatedAuthority::CloseOwnReviewItem
     );
+    let request_closure = matches!(
+        attention.delegated_authority,
+        crate::types::AttentionDelegatedAuthority::RequestClosure
+            | crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
+    ) && !adversarial;
     ProjectedAttentionAuthority {
         can_add_evidence: !matches!(attention.mode, WorkAttentionMode::Observe),
-        can_request_closure: matches!(
-            attention.delegated_authority,
-            crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
-        ) && !adversarial,
+        can_request_closure: request_closure,
         can_close_own_review_item: close_own_review_item,
         can_close_if_policy_allows: matches!(
             attention.delegated_authority,
             crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
         ) && !adversarial,
-        can_close_parent: matches!(
-            attention.delegated_authority,
-            crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
-        ) && !adversarial,
+        can_close_parent: false,
     }
 }
 

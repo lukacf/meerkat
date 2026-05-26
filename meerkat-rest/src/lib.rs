@@ -2018,6 +2018,7 @@ pub struct ErrorResponse {
     pub details: Option<Value>,
 }
 
+#[cfg(feature = "workgraph")]
 fn workgraph_observability_router() -> Router<AppState> {
     meerkat::workgraph_rest_path_catalog()
         .iter()
@@ -2044,6 +2045,11 @@ fn workgraph_observability_router() -> Router<AppState> {
                 router.route(descriptor.path, post(workgraph_attention_list))
             }
         })
+}
+
+#[cfg(not(feature = "workgraph"))]
+fn workgraph_observability_router() -> Router<AppState> {
+    Router::new()
 }
 
 /// Build the REST API router

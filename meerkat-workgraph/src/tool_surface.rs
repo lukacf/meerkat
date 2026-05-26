@@ -266,18 +266,21 @@ async fn validate_attention_projection_current(
         && current.work_ref == projection.work_ref
         && current.mode == projection.mode
         && current.binding_revision == projection.binding_revision
+        && current.item_revision == projection.item_revision
         && current.authority == projection.authority
     {
         return Ok(());
     }
     Err(ToolError::ExecutionFailed {
         message: format!(
-            "{name} cannot use stale WorkGraph attention projection for binding {} item {}; current binding revision {} authority {:?}, projected binding revision {} authority {:?}",
+            "{name} cannot use stale WorkGraph attention projection for binding {} item {}; current binding revision {} item revision {} authority {:?}, projected binding revision {} item revision {} authority {:?}",
             projection.binding_id,
             projection.work_ref.item_id,
             current.binding_revision,
+            current.item_revision,
             current.authority,
             projection.binding_revision,
+            projection.item_revision,
             projection.authority
         ),
     })
@@ -772,7 +775,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attention_scoped_projection_survives_own_item_mutations() {
+    async fn attention_scoped_projection_rejects_item_mutation_staleness() {
         let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
         let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000026")
             .expect("valid session id");
@@ -837,15 +840,11 @@ mod tests {
                 args: &second_args,
             })
             .await
-            .expect("same attention projection remains usable after own item mutation");
-        let second_value: Value = serde_json::from_str(&second.result.text_content()).unwrap();
-        assert_eq!(
-            second_value["item"]["evidence_refs"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
+            .expect_err("same attention projection is stale after item mutation");
+        let ToolError::ExecutionFailed { message } = second else {
+            panic!("expected execution failure for stale item projection");
+        };
+        assert!(message.contains("item revision"));
     }
 
     #[tokio::test]

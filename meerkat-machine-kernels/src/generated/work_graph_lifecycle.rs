@@ -631,7 +631,7 @@ pub fn initial_state() -> State {
         due_at_utc_ms: None,
         not_before_utc_ms: None,
         snoozed_until_utc_ms: None,
-        completion_policy: WorkCompletionPolicy::default(),
+        completion_policy: WorkCompletionPolicy::SelfAttest,
         completion_supervisor_owner_key: None,
         completion_reviewer_quorum_threshold: None,
         terminal_at_utc_ms: None,

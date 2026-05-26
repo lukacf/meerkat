@@ -211,8 +211,8 @@ WorkAttentionLifecycleMachine
 workgraph_attention_runtime seam
   Owns the legal handoff from WorkGraph attention to runtime continuation,
   including projection eligibility and fail-closed checks. The current
-  implementation exposes this as an explicit public continuation operation;
-  automatic idle polling can later call the same seam.
+  implementation keeps continuation enqueueing as trusted runtime-host
+  authority; automatic idle polling can later call the same seam.
 
 MeerkatMachine
   Owns input admission, WakeIfIdle, active turn state, continuation, and
@@ -448,8 +448,8 @@ Suggested minimal host APIs:
 - `workgraph/attention/pause`: pause a binding without mutating the item.
 - `workgraph/attention/resume`: resume a paused binding if the item remains
   non-terminal.
-- `workgraph/attention/continue`: enqueue a hidden continuation for a
-  session-bound binding.
+- trusted runtime-host attention continuation: enqueue a hidden continuation for
+  a session-bound binding.
 
 These are WorkGraph-feature host APIs. Public REST and JSON-RPC entrypoints
 expose goal/attention observability only; mutating goal/attention calls are
@@ -459,7 +459,8 @@ catalog. They are unavailable when WorkGraph is not compiled or enabled.
 The CLI mirrors the narrow session-first subset under `rkat workgraph`:
 `goal-create`, `goal-status`, `goal-confirm`, `goal-close`, `attention-list`,
 `attention-pause`, and `attention-resume`. Attention continuation injection is a
-runtime host operation, not a REST-backed CLI command. The CLI intentionally
+runtime host operation, not a REST-backed CLI command, and CLI confirmation does
+not accept raw principal authority. The CLI intentionally
 does not expose the broad WorkGraph mutation surface as the goal UX.
 
 Core host goal creation targets a session handle. Mob/agent targets are not
@@ -498,9 +499,8 @@ The design must fail closed when:
 ## Resolved Recommendations
 
 1. Model attention as WorkGraph-owned state with
-   `WorkAttentionLifecycleMachine`, plus a generated
-   `workgraph_attention_runtime` composition. Do not add a generic core goal
-   machine.
+   `WorkAttentionLifecycleMachine` and a trusted runtime-host continuation seam.
+   Do not add a generic core goal machine.
 2. Model pause/resume on the attention binding. Timed pauses may use
    `Paused { until }` or schedule-driven resume, but should not mutate item
    readiness.

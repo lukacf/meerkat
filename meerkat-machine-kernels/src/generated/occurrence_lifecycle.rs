@@ -558,12 +558,12 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Pending,
-        occurrence_id: OccurrenceId::default(),
-        schedule_id: ScheduleId::default(),
-        schedule_revision: 0,
+        occurrence_id: OccurrenceId("occurrence-0".to_string()),
+        schedule_id: ScheduleId("schedule-0".to_string()),
+        schedule_revision: 1,
         occurrence_ordinal: 0,
-        target_binding_key: String::new(),
-        due_at_utc_ms: 0,
+        target_binding_key: "target-0".to_string(),
+        due_at_utc_ms: 1,
         claimed_by: None,
         lease_expires_at_utc_ms: None,
         claimed_at_utc_ms: None,

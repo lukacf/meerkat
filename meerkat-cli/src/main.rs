@@ -2069,8 +2069,6 @@ enum WorkGraphCommands {
         #[arg(long)]
         namespace: Option<String>,
         #[arg(long)]
-        principal: Option<String>,
-        #[arg(long)]
         expected_revision: u64,
         #[arg(long)]
         kind: String,
@@ -6225,7 +6223,6 @@ async fn handle_workgraph_command(
         WorkGraphCommands::GoalConfirm {
             binding_id,
             namespace,
-            principal,
             expected_revision,
             kind,
             id,
@@ -6246,10 +6243,7 @@ async fn handle_workgraph_command(
                         summary,
                     },
                     principal: None,
-                    trusted_principal: principal
-                        .as_deref()
-                        .map(parse_work_owner_key)
-                        .transpose()?,
+                    trusted_principal: None,
                 })
                 .await?;
             print_workgraph_goal_result(&result.item, &result.attention, json)
@@ -15133,6 +15127,26 @@ default_model = "gemma"
             "workgraph",
             "goal-confirm",
             "binding-1",
+            "--kind",
+            "host_confirmation",
+            "--id",
+            "approval-1",
+            "--expected-revision",
+            "1",
+        ])
+        .expect("workgraph goal-confirm should parse");
+        match cli.command {
+            Commands::WorkGraph {
+                command: WorkGraphCommands::GoalConfirm { kind, .. },
+            } => assert_eq!(kind, "host_confirmation"),
+            _ => unreachable!("expected workgraph goal-confirm command"),
+        }
+
+        let err = match Cli::try_parse_from([
+            "rkat",
+            "workgraph",
+            "goal-confirm",
+            "binding-1",
             "--principal",
             "user",
             "--kind",
@@ -15141,14 +15155,16 @@ default_model = "gemma"
             "approval-1",
             "--expected-revision",
             "1",
-        ])
-        .expect("workgraph goal-confirm principal should parse");
-        match cli.command {
-            Commands::WorkGraph {
-                command: WorkGraphCommands::GoalConfirm { principal, .. },
-            } => assert_eq!(principal.as_deref(), Some("user")),
-            _ => unreachable!("expected workgraph goal-confirm command"),
-        }
+        ]) {
+            Ok(_) => panic!("goal-confirm must not accept raw principal authority"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("unexpected argument '--principal'")
+                || err.to_string().contains("Found argument '--principal'"),
+            "unexpected parse error for --principal: {err}"
+        );
     }
 
     #[test]

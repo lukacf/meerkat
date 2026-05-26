@@ -236,7 +236,7 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Active,
-        revision: 0,
+        revision: 1,
         paused_until_utc_ms: None,
         superseded_by_binding_key: None,
         terminal_at_utc_ms: None,

@@ -681,27 +681,62 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "}}");
     pushln!(&mut out);
 
-    let first_phase = schema
-        .state
-        .phase
-        .variants
-        .first()
-        .map(|variant| rust_ident(&variant.name))
-        .unwrap_or_else(|| "Running".to_string());
     pushln!(&mut out, "pub fn initial_state() -> State {{");
     pushln!(&mut out, "    State {{");
-    pushln!(&mut out, "        phase: Phase::{first_phase},");
+    let initial_phase = rust_ident(schema.state.init.phase.as_str());
+    let initial_fields = schema
+        .state
+        .init
+        .fields
+        .iter()
+        .map(|field| (field.field.as_str(), &field.expr))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    pushln!(&mut out, "        phase: Phase::{initial_phase},");
     for field in &schema.state.fields {
+        let value = initial_fields
+            .get(field.name.as_str())
+            .map(|expr| render_initial_rust_expr(expr, &field.ty))
+            .unwrap_or_else(|| direct_default_value_expr(&field.ty));
         pushln!(
             &mut out,
             "        {}: {},",
             rust_field_ident(&field.name),
-            direct_default_value_expr(&field.ty)
+            value
         );
     }
     pushln!(&mut out, "    }}");
     pushln!(&mut out, "}}");
     out
+}
+
+#[cfg(not(test))]
+fn render_initial_rust_expr(expr: &Expr, ty: &TypeRef) -> String {
+    match expr {
+        Expr::Bool(value) => value.to_string(),
+        Expr::U64(value) => value.to_string(),
+        Expr::String(value) => match ty {
+            TypeRef::Named(name) => format!("{}({value:?}.to_string())", rust_ident(name.as_str())),
+            _ => format!("{value:?}.to_string()"),
+        },
+        Expr::NamedVariant { enum_name, variant } => {
+            format!(
+                "{}::{}",
+                rust_ident(enum_name.as_str()),
+                rust_ident(variant.as_str())
+            )
+        }
+        Expr::EmptySet | Expr::EmptyMap => "Default::default()".to_string(),
+        Expr::SeqLiteral(items) if items.is_empty() => "Vec::new()".to_string(),
+        Expr::None => "None".to_string(),
+        Expr::Some(inner) => {
+            let inner_ty = match ty {
+                TypeRef::Option(inner_ty) => inner_ty.as_ref(),
+                _ => ty,
+            };
+            format!("Some({})", render_initial_rust_expr(inner, inner_ty))
+        }
+        other => panic!("unsupported machine initial-state expression for Rust kernel: {other:?}"),
+    }
 }
 
 #[cfg(not(test))]

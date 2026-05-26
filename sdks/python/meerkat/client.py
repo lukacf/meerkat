@@ -38,6 +38,20 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    AttentionBindingRequest,
+    AttentionBindingResult,
+    AttentionContinueResult,
+    AttentionListRequest,
+    AttentionListResult,
+    AttentionPauseRequest,
+    GoalConfirmRequest,
+    GoalConfirmResult,
+    GoalCreateRequest,
+    GoalCreateResult,
+    GoalRequestCloseRequest,
+    GoalRequestCloseResult,
+    GoalStatusRequest,
+    GoalStatusResult,
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
@@ -1329,32 +1343,44 @@ class MeerkatClient:
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
 
-    async def create_workgraph_goal(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/goal/create", dict(params))
+    async def create_workgraph_goal(self, params: GoalCreateRequest) -> GoalCreateResult:
+        return await self._request("workgraph/goal/create", _wire_params(params))
 
-    async def get_workgraph_goal_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/goal/status", dict(params))
+    async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
+        return await self._request("workgraph/goal/status", _wire_params(params))
 
-    async def confirm_workgraph_goal(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/goal/confirm", dict(params))
+    async def confirm_workgraph_goal(self, params: GoalConfirmRequest) -> GoalConfirmResult:
+        return await self._request("workgraph/goal/confirm", _wire_params(params))
 
-    async def request_close_workgraph_goal(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/goal/request_close", dict(params))
+    async def request_close_workgraph_goal(
+        self,
+        params: GoalRequestCloseRequest,
+    ) -> GoalRequestCloseResult:
+        return await self._request("workgraph/goal/request_close", _wire_params(params))
 
     async def list_workgraph_attention(
         self,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await self._request("workgraph/attention/list", dict(params or {}))
+        params: AttentionListRequest | None = None,
+    ) -> AttentionListResult:
+        return await self._request("workgraph/attention/list", _wire_params(params or {}))
 
-    async def pause_workgraph_attention(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/attention/pause", dict(params))
+    async def pause_workgraph_attention(
+        self,
+        params: AttentionPauseRequest,
+    ) -> AttentionBindingResult:
+        return await self._request("workgraph/attention/pause", _wire_params(params))
 
-    async def resume_workgraph_attention(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/attention/resume", dict(params))
+    async def resume_workgraph_attention(
+        self,
+        params: AttentionBindingRequest,
+    ) -> AttentionBindingResult:
+        return await self._request("workgraph/attention/resume", _wire_params(params))
 
-    async def continue_workgraph_attention(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("workgraph/attention/continue", dict(params))
+    async def continue_workgraph_attention(
+        self,
+        params: AttentionBindingRequest,
+    ) -> AttentionContinueResult:
+        return await self._request("workgraph/attention/continue", _wire_params(params))
 
     async def mcp_add(
         self,

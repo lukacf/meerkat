@@ -451,6 +451,8 @@ WorkGraphEventKind = Literal[
     "closed",
     "linked",
     "evidence_added",
+    "attention_created",
+    "attention_updated",
 ]
 WorkGraphOwnerKind = Literal["principal", "agent", "session", "mob", "label"]
 

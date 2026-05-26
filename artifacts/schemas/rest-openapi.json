@@ -2449,6 +2449,16 @@
               "null"
             ]
           },
+          "principal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "realm_id": {
             "type": [
               "string",
@@ -2554,6 +2564,14 @@
         "properties": {
           "binding_id": {
             "type": "string"
+          },
+          "expected_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "namespace": {
             "type": [

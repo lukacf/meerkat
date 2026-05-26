@@ -16,8 +16,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AttentionContextProjection, CloseWorkItemRequest, GoalRequestCloseRequest, WorkAttentionMode,
-    WorkGraphService, handle_workgraph_tools_call, workgraph_tools_list,
+    AttentionContextProjection, AttentionProjectionRequest, CloseWorkItemRequest,
+    GoalRequestCloseRequest, WorkAttentionMode, WorkGraphService, handle_workgraph_tools_call,
+    workgraph_tools_list,
 };
 
 pub const WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY: &str = "workgraph.attention_projection";
@@ -172,6 +173,7 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
             if !allowed.contains(call.name) {
                 return Err(ToolError::access_denied(call.name));
             }
+            validate_attention_projection_current(&self.service, projection, call.name).await?;
             normalize_attention_scoped_args(projection, call.name, &mut args)?;
             validate_attention_scoped_call(projection, call.name, &args)?;
             if call.name == "workgraph_close" && projection.authority.can_close_if_policy_allows {
@@ -186,6 +188,7 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
                     binding_id: projection.binding_id.clone(),
                     realm_id: Some(projection.work_ref.realm_id.clone()),
                     namespace: Some(projection.work_ref.namespace.clone()),
+                    expected_revision: Some(request.expected_revision),
                     status: request.status,
                 });
             }
@@ -208,6 +211,42 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
             })?;
         Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
     }
+}
+
+async fn validate_attention_projection_current(
+    service: &WorkGraphService,
+    projection: &AttentionContextProjection,
+    name: &str,
+) -> Result<(), ToolError> {
+    let current = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: projection.binding_id.clone(),
+            realm_id: Some(projection.work_ref.realm_id.clone()),
+            namespace: Some(projection.work_ref.namespace.clone()),
+        })
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            message: format!(
+                "{name} cannot use stale or inactive WorkGraph attention projection: {error}"
+            ),
+        })?
+        .projection;
+    if current.binding_revision == projection.binding_revision
+        && current.item_revision == projection.item_revision
+    {
+        return Ok(());
+    }
+    Err(ToolError::ExecutionFailed {
+        message: format!(
+            "{name} cannot use stale WorkGraph attention projection for binding {} item {}; current binding revision {} item revision {}, projected binding revision {} item revision {}",
+            projection.binding_id,
+            projection.work_ref.item_id,
+            current.binding_revision,
+            current.item_revision,
+            projection.binding_revision,
+            projection.item_revision
+        ),
+    })
 }
 
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
@@ -745,5 +784,73 @@ mod tests {
             .await
             .expect_err("host confirmation should be required before close");
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn scoped_close_if_policy_allows_rejects_stale_revision() {
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000025")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "Host-confirmed stale item".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Pursue,
+                completion_policy: WorkCompletionPolicy::HostConfirmed,
+                delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        let projection = service
+            .attention_projection(crate::AttentionProjectionRequest {
+                binding_id: goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("projection")
+            .projection;
+        service
+            .goal_confirm(crate::GoalConfirmRequest {
+                binding_id: goal.attention.binding_id,
+                realm_id: None,
+                namespace: None,
+                evidence: crate::WorkEvidenceRef {
+                    kind: "host_confirmation".to_string(),
+                    id: "acceptance-1".to_string(),
+                    label: Some("accepted".to_string()),
+                    summary: None,
+                },
+                principal: None,
+                trusted_principal: None,
+            })
+            .await
+            .expect("confirm goal");
+        let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
+        let args = serde_json::value::RawValue::from_string(
+            json!({
+                "id": goal.item.id,
+                "expected_revision": goal.item.revision,
+                "status": "completed"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = surface
+            .dispatch(ToolCallView {
+                id: "call-7",
+                name: "workgraph_close",
+                args: &args,
+            })
+            .await
+            .expect_err("stale projection revision should fail closed");
+        let ToolError::ExecutionFailed { message } = err else {
+            panic!("expected execution failure for stale revision");
+        };
+        assert!(message.contains("stale WorkGraph attention projection"));
     }
 }

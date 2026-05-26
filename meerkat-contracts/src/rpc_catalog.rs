@@ -537,7 +537,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "workgraph/attention/continue",
                 "Queue a WorkGraph attention continuation for its target session",
                 "AttentionBindingRequest",
-                "RuntimeAcceptResult",
+                "AttentionContinueResult",
             ),
         ]);
     }

@@ -10,7 +10,6 @@ use meerkat::{
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use super::runtime::to_wire_accept_result;
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -198,15 +197,46 @@ pub async fn handle_attention_continue(
     match runtime
         .enqueue_workgraph_attention_binding_continuation(request)
         .await
-        .and_then(|outcome| {
-            to_wire_accept_result(outcome).map_err(|message| crate::protocol::RpcError {
-                code: error::INTERNAL_ERROR,
-                message,
-                data: None,
-            })
-        }) {
+        .map(attention_continue_result)
+    {
         Ok(result) => RpcResponse::success(id, result),
         Err(error) => RpcResponse::error(id, error.code, error.message),
+    }
+}
+
+fn attention_continue_result(
+    outcome: meerkat_runtime::AcceptOutcome,
+) -> meerkat::AttentionContinueResult {
+    match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => {
+            meerkat::AttentionContinueResult {
+                outcome: meerkat::AttentionContinueOutcome::Accepted,
+                input_id: Some(input_id.to_string()),
+                existing_id: None,
+                reason: None,
+            }
+        }
+        meerkat_runtime::AcceptOutcome::Deduplicated {
+            input_id,
+            existing_id,
+        } => meerkat::AttentionContinueResult {
+            outcome: meerkat::AttentionContinueOutcome::Deduplicated,
+            input_id: Some(input_id.to_string()),
+            existing_id: Some(existing_id.to_string()),
+            reason: None,
+        },
+        meerkat_runtime::AcceptOutcome::Rejected { reason } => meerkat::AttentionContinueResult {
+            outcome: meerkat::AttentionContinueOutcome::Rejected,
+            input_id: None,
+            existing_id: None,
+            reason: Some(reason.to_string()),
+        },
+        _ => meerkat::AttentionContinueResult {
+            outcome: meerkat::AttentionContinueOutcome::Rejected,
+            input_id: None,
+            existing_id: None,
+            reason: Some("unsupported accept outcome variant".to_string()),
+        },
     }
 }
 

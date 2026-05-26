@@ -977,7 +977,9 @@ export type WorkGraphEventKind =
   | "blocked"
   | "closed"
   | "linked"
-  | "evidence_added";
+  | "evidence_added"
+  | "attention_created"
+  | "attention_updated";
 
 export type WorkGraphOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
 

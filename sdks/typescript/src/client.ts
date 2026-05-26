@@ -43,6 +43,20 @@ import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
+  type AttentionBindingRequest,
+  type AttentionBindingResult,
+  type AttentionContinueResult,
+  type AttentionListRequest,
+  type AttentionListResult,
+  type AttentionPauseRequest,
+  type GoalConfirmRequest,
+  type GoalConfirmResult,
+  type GoalCreateRequest,
+  type GoalCreateResult,
+  type GoalRequestCloseRequest,
+  type GoalRequestCloseResult,
+  type GoalStatusRequest,
+  type GoalStatusResult,
   type LiveChannelParams,
   type LiveCommitInputParams,
   type LiveOpenParams,
@@ -1214,51 +1228,51 @@ export class MeerkatClient {
   }
 
   async createWorkGraphGoal(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/goal/create", params);
+    params: GoalCreateRequest,
+  ): Promise<GoalCreateResult> {
+    return this.request<GoalCreateResult>("workgraph/goal/create", params);
   }
 
   async getWorkGraphGoalStatus(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/goal/status", params);
+    params: GoalStatusRequest,
+  ): Promise<GoalStatusResult> {
+    return this.request<GoalStatusResult>("workgraph/goal/status", params);
   }
 
   async confirmWorkGraphGoal(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/goal/confirm", params);
+    params: GoalConfirmRequest,
+  ): Promise<GoalConfirmResult> {
+    return this.request<GoalConfirmResult>("workgraph/goal/confirm", params);
   }
 
   async requestCloseWorkGraphGoal(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/goal/request_close", params);
+    params: GoalRequestCloseRequest,
+  ): Promise<GoalRequestCloseResult> {
+    return this.request<GoalRequestCloseResult>("workgraph/goal/request_close", params);
   }
 
   async listWorkGraphAttention(
-    params: Record<string, unknown> = {},
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/attention/list", params);
+    params: AttentionListRequest = {},
+  ): Promise<AttentionListResult> {
+    return this.request<AttentionListResult>("workgraph/attention/list", params);
   }
 
   async pauseWorkGraphAttention(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/attention/pause", params);
+    params: AttentionPauseRequest,
+  ): Promise<AttentionBindingResult> {
+    return this.request<AttentionBindingResult>("workgraph/attention/pause", params);
   }
 
   async resumeWorkGraphAttention(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/attention/resume", params);
+    params: AttentionBindingRequest,
+  ): Promise<AttentionBindingResult> {
+    return this.request<AttentionBindingResult>("workgraph/attention/resume", params);
   }
 
   async continueWorkGraphAttention(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("workgraph/attention/continue", params);
+    params: AttentionBindingRequest,
+  ): Promise<AttentionContinueResult> {
+    return this.request<AttentionContinueResult>("workgraph/attention/continue", params);
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -2906,7 +2920,7 @@ export class MeerkatClient {
     };
   }
 
-  private request(method: string, params: unknown): Promise<Record<string, unknown>> {
+  private request<T = Record<string, unknown>>(method: string, params: unknown): Promise<T> {
     if (!this.process?.stdin) {
       throw new MeerkatError("NOT_CONNECTED", "Client not connected");
     }
@@ -2914,14 +2928,17 @@ export class MeerkatClient {
     this.requestId++;
     const id = this.requestId;
     const rpcRequest = { jsonrpc: "2.0", id, method, params };
-    const promise = this.registerRequest(id);
+    const promise = this.registerRequest<T>(id);
     this.process.stdin!.write(JSON.stringify(rpcRequest) + "\n");
     return promise;
   }
 
-  private registerRequest(id: number): Promise<Record<string, unknown>> {
+  private registerRequest<T = Record<string, unknown>>(id: number): Promise<T> {
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
+      this.pendingRequests.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
     });
   }
 
@@ -3616,6 +3633,8 @@ export class MeerkatClient {
         "closed",
         "linked",
         "evidence_added",
+        "attention_created",
+        "attention_updated",
       ].includes(kind)
     ) {
       throw new MeerkatError("INVALID_RESPONSE", "Invalid workgraph event: invalid kind");
@@ -3631,7 +3650,7 @@ export class MeerkatClient {
     };
   }
 
-  private static parseWorkGraphEventArray(value: unknown): WorkGraphEvent[] {
+  static parseWorkGraphEventArray(value: unknown): WorkGraphEvent[] {
     return MeerkatClient.requireRecordArray(value, "Invalid workgraph event list").map((event) =>
       MeerkatClient.parseWorkGraphEvent(event),
     );

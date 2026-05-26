@@ -426,7 +426,7 @@
       "description": "Queue a WorkGraph attention continuation for its target session",
       "name": "workgraph/attention/continue",
       "params_type": "AttentionBindingRequest",
-      "result_type": "RuntimeAcceptResult"
+      "result_type": "AttentionContinueResult"
     },
     {
       "description": "List available skills",

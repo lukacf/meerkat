@@ -1111,8 +1111,7 @@ pub struct GoalConfirmRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
     pub evidence: WorkEvidenceRef,
-    #[serde(skip)]
-    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<WorkOwnerKey>,
     #[serde(skip)]
     #[cfg_attr(feature = "schema", schemars(skip))]
@@ -1144,6 +1143,8 @@ pub struct GoalRequestCloseRequest {
     pub realm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
     #[serde(default = "default_terminal_status")]
     pub status: WorkStatus,
 }

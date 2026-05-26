@@ -1343,6 +1343,31 @@ describe("WorkGraph parsers", () => {
         String(error.message).includes("ready item ids"),
     );
   });
+
+  it("parses WorkGraph attention lifecycle events", () => {
+    const result = MeerkatClient.parseWorkGraphEventArray([
+      {
+        seq: 43,
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+        kind: "attention_created",
+        at: timestamp,
+        payload: { attention: { binding_id: "attention-1" } },
+      },
+      {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+        kind: "attention_updated",
+        at: timestamp,
+      },
+    ]);
+
+    assert.equal(result[0].kind, "attention_created");
+    assert.equal(result[0].payload.attention.binding_id, "attention-1");
+    assert.equal(result[1].kind, "attention_updated");
+  });
 });
 
 describe("Session wrappers", () => {

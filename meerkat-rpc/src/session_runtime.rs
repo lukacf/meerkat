@@ -3068,6 +3068,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         request: meerkat::AttentionBindingRequest,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        use meerkat_runtime::identifiers::SupersessionKey;
         use meerkat_runtime::input::{
             ContinuationInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         };
@@ -3132,7 +3133,9 @@ impl SessionRuntime {
                     operator_eligible: false,
                 },
                 idempotency_key: None,
-                supersession_key: None,
+                supersession_key: Some(SupersessionKey::new(
+                    meerkat::workgraph_attention_continuation_key(&projection),
+                )),
                 correlation_id: None,
             },
             reason: "workgraph_attention".to_string(),

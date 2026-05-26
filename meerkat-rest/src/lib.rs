@@ -4805,7 +4805,9 @@ async fn workgraph_attention_continuation_input(
                 operator_eligible: false,
             },
             idempotency_key: None,
-            supersession_key: None,
+            supersession_key: Some(meerkat_runtime::identifiers::SupersessionKey::new(
+                meerkat::workgraph_attention_continuation_key(&projection),
+            )),
             correlation_id: None,
         },
         reason: "workgraph_attention".to_string(),

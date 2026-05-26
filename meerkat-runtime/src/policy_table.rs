@@ -96,7 +96,7 @@ impl DefaultPolicyTable {
                 } else {
                     WakeMode::InterruptYielding
                 },
-                QueueMode::Fifo,
+                QueueMode::Supersede,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::QueueNextTurn,
                 RoutingDisposition::Steer,
@@ -108,7 +108,11 @@ impl DefaultPolicyTable {
                 meerkat_core::types::HandlingMode::Queue => pd(
                     ApplyMode::StageRunStart,
                     WakeMode::WakeIfIdle,
-                    QueueMode::Fifo,
+                    if matches!(input, Input::Continuation(_)) {
+                        QueueMode::Supersede
+                    } else {
+                        QueueMode::Fifo
+                    },
                     ConsumePoint::OnRunComplete,
                     DrainPolicy::QueueNextTurn,
                     RoutingDisposition::Queue,
@@ -121,7 +125,11 @@ impl DefaultPolicyTable {
                     } else {
                         WakeMode::InterruptYielding
                     },
-                    QueueMode::Fifo,
+                    if matches!(input, Input::Continuation(_)) {
+                        QueueMode::Supersede
+                    } else {
+                        QueueMode::Fifo
+                    },
                     ConsumePoint::OnRunComplete,
                     DrainPolicy::SteerBatch,
                     RoutingDisposition::Steer,
@@ -288,7 +296,7 @@ impl DefaultPolicyTable {
             (InputKind::Continuation, true) => pd(
                 ApplyMode::StageRunBoundary,
                 WakeMode::WakeIfIdle,
-                QueueMode::Fifo,
+                QueueMode::Supersede,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::SteerBatch,
                 RoutingDisposition::Steer,
@@ -297,7 +305,7 @@ impl DefaultPolicyTable {
             (InputKind::Continuation, false) => pd(
                 ApplyMode::StageRunBoundary,
                 WakeMode::InterruptYielding,
-                QueueMode::Fifo,
+                QueueMode::Supersede,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::SteerBatch,
                 RoutingDisposition::Steer,
@@ -531,7 +539,7 @@ mod tests {
             true,
             ApplyMode::StageRunBoundary,
             WakeMode::WakeIfIdle,
-            QueueMode::Fifo,
+            QueueMode::Supersede,
             ConsumePoint::OnRunComplete,
             false,
         );
@@ -543,7 +551,7 @@ mod tests {
             false,
             ApplyMode::StageRunBoundary,
             WakeMode::InterruptYielding,
-            QueueMode::Fifo,
+            QueueMode::Supersede,
             ConsumePoint::OnRunComplete,
             false,
         );

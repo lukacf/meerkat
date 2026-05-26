@@ -2099,6 +2099,17 @@ enum WorkGraphCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Queue an attention continuation through a running REST server
+    AttentionContinue {
+        binding_id: String,
+        /// REST server base URL, for example http://127.0.0.1:3000
+        #[arg(long)]
+        rest_url: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// CLI transport type selection
@@ -6238,6 +6249,7 @@ async fn handle_workgraph_command(
                     binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
+                    expected_revision: None,
                     status: status.into(),
                 })
                 .await?;
@@ -6286,6 +6298,44 @@ async fn handle_workgraph_command(
                 })
                 .await?;
             print_workgraph_attention(vec![result.attention], json)
+        }
+        WorkGraphCommands::AttentionContinue {
+            binding_id,
+            rest_url,
+            namespace,
+            json,
+        } => {
+            let request = meerkat::AttentionBindingRequest {
+                binding_id: meerkat::WorkAttentionBindingId::new(binding_id)?,
+                realm_id: None,
+                namespace: parse_work_namespace(namespace)?,
+            };
+            let url = format!(
+                "{}/workgraph/attention/continue",
+                rest_url.trim_end_matches('/')
+            );
+            let response = reqwest::Client::new()
+                .post(url)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<meerkat::AttentionContinueResult>()
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!(
+                    "attention continuation: {:?}{}",
+                    response.outcome,
+                    response
+                        .reason
+                        .as_deref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                );
+            }
+            Ok(())
         }
     }
 }

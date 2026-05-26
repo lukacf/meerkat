@@ -247,6 +247,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: None,
             status: WorkStatus::Completed,
         })
         .await
@@ -280,6 +281,7 @@ async fn goal_confirmation_and_close_are_policy_gated() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: None,
             status: WorkStatus::Completed,
         })
         .await
@@ -545,10 +547,10 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 summary: None,
             },
             principal: Some(supervisor.clone()),
-            trusted_principal: Some(supervisor.clone()),
+            trusted_principal: None,
         })
         .await
-        .expect("supervisor confirmation");
+        .expect("wire principal confirmation");
     assert_eq!(
         confirmed.item.evidence_refs[0].label.as_deref(),
         Some(supervisor.canonical().as_str())
@@ -769,6 +771,7 @@ async fn closed_goal_stops_attention_and_cannot_resume() {
             binding_id: goal.attention.binding_id.clone(),
             realm_id: None,
             namespace: None,
+            expected_revision: None,
             status: WorkStatus::Completed,
         })
         .await
@@ -985,6 +988,7 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         binding_id: binding_id.clone(),
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
+        expected_revision: None,
         status: WorkStatus::Completed,
     };
     let pause = AttentionPauseRequest {
@@ -1020,6 +1024,8 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
 
     let confirm_json = serde_json::to_value(confirm).expect("serialize confirm");
     assert_eq!(confirm_json["evidence"]["kind"], json!("host_confirmation"));
+    assert_eq!(confirm_json["principal"]["id"], json!("user"));
+    assert!(confirm_json.get("trusted_principal").is_none());
     serde_json::from_value::<GoalConfirmRequest>(confirm_json).expect("deserialize confirm");
 
     let request_close_json = serde_json::to_value(request_close).expect("serialize request close");

@@ -406,39 +406,52 @@ impl WorkGraphService {
         &self,
         request: GoalConfirmRequest,
     ) -> Result<GoalConfirmResult, WorkGraphError> {
-        let attention = self
-            .attention_binding(AttentionBindingRequest {
-                binding_id: request.binding_id,
-                realm_id: request.realm_id,
-                namespace: request.namespace,
-            })
-            .await?
-            .attention;
-        let item = self
-            .get(
-                Some(attention.work_ref.realm_id.clone()),
-                Some(attention.work_ref.namespace.clone()),
-                attention.work_ref.item_id.clone(),
-            )
-            .await?;
-        let evidence = confirmation_evidence_for_policy(
-            &item.completion_policy,
-            request.trusted_principal.as_ref(),
-            request.evidence,
-        )?;
-        let item = self
-            .add_evidence_internal(
-                AddEvidenceRequest {
-                    id: item.id.clone(),
-                    realm_id: Some(item.realm_id.clone()),
-                    namespace: Some(item.namespace.clone()),
-                    expected_revision: item.revision,
-                    evidence,
-                },
-                true,
-            )
-            .await?;
-        Ok(GoalConfirmResult { item, attention })
+        let binding_request = AttentionBindingRequest {
+            binding_id: request.binding_id,
+            realm_id: request.realm_id,
+            namespace: request.namespace,
+        };
+        let principal = request.trusted_principal.or(request.principal);
+        let evidence_request = request.evidence;
+        let attention = self.attention_binding(binding_request).await?.attention;
+        for attempt in 0..BEST_EFFORT_REFRESH_ATTEMPTS {
+            let item = self
+                .get(
+                    Some(attention.work_ref.realm_id.clone()),
+                    Some(attention.work_ref.namespace.clone()),
+                    attention.work_ref.item_id.clone(),
+                )
+                .await?;
+            let evidence = confirmation_evidence_for_policy(
+                &item.completion_policy,
+                principal.as_ref(),
+                evidence_request.clone(),
+            )?;
+            match self
+                .add_evidence_internal(
+                    AddEvidenceRequest {
+                        id: item.id.clone(),
+                        realm_id: Some(item.realm_id.clone()),
+                        namespace: Some(item.namespace.clone()),
+                        expected_revision: item.revision,
+                        evidence,
+                    },
+                    true,
+                )
+                .await
+            {
+                Ok(item) => return Ok(GoalConfirmResult { item, attention }),
+                Err(WorkGraphError::StaleRevision { .. })
+                    if attempt + 1 < BEST_EFFORT_REFRESH_ATTEMPTS =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(WorkGraphError::Conflict(
+            "goal confirmation retry budget exhausted".to_string(),
+        ))
     }
 
     pub async fn goal_request_close(
@@ -466,6 +479,15 @@ impl WorkGraphService {
                 item.id,
                 completion_policy_name(&item.completion_policy)
             )));
+        }
+        if let Some(expected_revision) = request.expected_revision
+            && item.revision != expected_revision
+        {
+            return Err(WorkGraphError::StaleRevision {
+                id: item.id,
+                expected: expected_revision,
+                actual: item.revision,
+            });
         }
         let item = self
             .close(CloseWorkItemRequest {

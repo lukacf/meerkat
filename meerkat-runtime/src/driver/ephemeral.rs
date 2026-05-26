@@ -1354,11 +1354,20 @@ impl EphemeralRuntimeDriver {
         &self,
         input: &Input,
     ) -> Option<(InputId, crate::coalescing::CoalescingResult)> {
-        let candidates: Vec<InputId> = self
-            .dsl_queue_lane()
-            .into_iter()
-            .chain(self.dsl_steer_lane())
-            .collect();
+        let mut candidates = self.queue.input_ids();
+        candidates.extend(self.steer_queue.input_ids());
+        candidates.extend(self.dsl_queue_lane());
+        candidates.extend(self.dsl_steer_lane());
+        candidates.extend(self.ledger.active_input_ids());
+        let mut seen = Vec::<InputId>::new();
+        candidates.retain(|id| {
+            if seen.contains(id) {
+                false
+            } else {
+                seen.push(id.clone());
+                true
+            }
+        });
         candidates.into_iter().find_map(|queued_id| {
             let existing = self.ledger.get(&queued_id)?.persisted_input.as_ref()?;
             let result = crate::coalescing::check_supersession(input, existing, &self.runtime_id);
@@ -2320,15 +2329,17 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::EphemeralRuntimeDriver;
-    use crate::identifiers::LogicalRuntimeId;
+    use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
     use crate::input::{
-        Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
-        PeerInput,
+        ContinuationInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+        PeerConvention, PeerInput,
     };
+    use crate::input_state::{InputAbandonReason, InputLifecycleState};
     use crate::traits::RuntimeDriver;
     use crate::{RuntimeState, WakeMode};
     use chrono::Utc;
     use meerkat_core::lifecycle::{InputId, RunId};
+    use meerkat_core::types::HandlingMode;
 
     fn peer_message_input() -> Input {
         Input::Peer(PeerInput {
@@ -2351,6 +2362,27 @@ mod tests {
             payload: None,
             blocks: None,
             handling_mode: None,
+        })
+    }
+
+    fn continuation_input(supersession_key: Option<&str>) -> Input {
+        Input::Continuation(ContinuationInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Ephemeral,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: supersession_key.map(SupersessionKey::new),
+                correlation_id: None,
+            },
+            reason: "test-continuation".to_string(),
+            handling_mode: HandlingMode::Steer,
+            request_id: None,
+            flow_tool_overlay: None,
+            context_append: None,
+            turn_append: None,
         })
     }
 
@@ -2404,6 +2436,76 @@ mod tests {
         assert!(
             outcome.is_accepted(),
             "direct RuntimeDriver admission should follow DSL phase, not a stale control shadow",
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_supersession_coalesces_only_in_flight_inputs() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("continuation-supersession"));
+
+        let first = continuation_input(Some("attention:key"));
+        let first_id = first.id().clone();
+        let first_outcome = driver.accept_input(first).await.unwrap();
+        assert!(first_outcome.is_accepted());
+        assert!(
+            driver
+                .ledger()
+                .get(&first_id)
+                .and_then(|state| state.persisted_input.as_ref())
+                .is_some(),
+            "accepted continuation should keep its persisted input for supersession"
+        );
+
+        let second = continuation_input(Some("attention:key"));
+        let existing = driver
+            .ledger()
+            .get(&first_id)
+            .and_then(|state| state.persisted_input.as_ref())
+            .expect("persisted input");
+        assert!(matches!(
+            crate::coalescing::check_supersession(&second, existing, driver.runtime_id()),
+            crate::coalescing::CoalescingResult::Supersedes { .. }
+        ));
+        assert!(driver.existing_superseded_input(&second).is_some());
+        let resolved = driver.resolve_admission(&second);
+        assert!(matches!(
+            resolved.admission_plan,
+            crate::accept::AdmissionPlan::Queued {
+                existing_action: Some(
+                    crate::accept::ExistingQueuedAdmissionAction::Supersede { .. }
+                ),
+                ..
+            }
+        ));
+        let second_id = second.id().clone();
+        let second_outcome = driver.accept_input(second).await.unwrap();
+        assert!(second_outcome.is_accepted());
+
+        assert_eq!(
+            driver.input_phase(&first_id),
+            Some(InputLifecycleState::Superseded)
+        );
+        assert_eq!(
+            driver.input_phase(&second_id),
+            Some(InputLifecycleState::Queued)
+        );
+        assert_eq!(driver.dsl_steer_lane(), vec![second_id.clone()]);
+
+        driver.abandon_all_non_terminal(InputAbandonReason::Reset);
+        let third = continuation_input(Some("attention:key"));
+        let third_id = third.id().clone();
+        let third_outcome = driver.accept_input(third).await.unwrap();
+        assert!(third_outcome.is_accepted());
+
+        assert_eq!(
+            driver.input_phase(&third_id),
+            Some(InputLifecycleState::Queued)
+        );
+        assert_eq!(
+            driver.dsl_steer_lane(),
+            vec![third_id],
+            "terminal/superseded continuations must not dedupe future keep-alive turns",
         );
     }
 

@@ -159,10 +159,6 @@ pub fn append_only_save_guard(
             return Ok(());
         }
     }
-    if incoming_preserves_conversation_tail(incoming, previous)? {
-        return Ok(());
-    }
-
     if new_len < prev_len {
         return Err(SessionStoreError::MonotonicityViolation {
             id: incoming.id().clone(),
@@ -177,33 +173,6 @@ pub fn append_only_save_guard(
         incoming_revision,
         reason: "incoming transcript neither preserves the persisted prefix nor records a graph edge from the persisted head".to_string(),
     })
-}
-
-fn incoming_preserves_conversation_tail(
-    incoming: &Session,
-    previous: &Session,
-) -> Result<bool, SessionStoreError> {
-    let previous_tail = previous
-        .messages()
-        .iter()
-        .position(|message| !matches!(message, crate::types::Message::System(_)))
-        .map(|index| &previous.messages()[index..])
-        .unwrap_or(&[]);
-    let incoming_tail = incoming
-        .messages()
-        .iter()
-        .position(|message| !matches!(message, crate::types::Message::System(_)))
-        .map(|index| &incoming.messages()[index..])
-        .unwrap_or(&[]);
-    if incoming_tail.len() < previous_tail.len() {
-        return Ok(false);
-    }
-    let previous_tail_revision =
-        transcript_messages_digest(previous_tail).map_err(SessionStoreError::from)?;
-    let incoming_tail_prefix_revision =
-        transcript_messages_digest(&incoming_tail[..previous_tail.len()])
-            .map_err(SessionStoreError::from)?;
-    Ok(previous_tail_revision == incoming_tail_prefix_revision)
 }
 
 /// Validate a runtime run-boundary snapshot.
@@ -740,5 +709,36 @@ pub trait SessionStore: Send + Sync {
     /// Check if a session exists.
     async fn exists(&self, id: &SessionId) -> Result<bool, SessionStoreError> {
         Ok(self.load(id).await?.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Message, SystemMessage, UserMessage};
+
+    #[test]
+    fn append_only_guard_rejects_leading_system_message_replacement() {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("original system")));
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let mut incoming = previous.clone();
+        let rewrite_result = incoming.replace_messages_internal(
+            vec![
+                Message::System(SystemMessage::new("rewritten system")),
+                Message::User(UserMessage::text("hello".to_string())),
+            ],
+            crate::TranscriptRewriteReason::new("unit-test"),
+        );
+        assert!(
+            rewrite_result.is_ok(),
+            "typed rewrite should be constructible: {rewrite_result:?}"
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
     }
 }

@@ -287,6 +287,8 @@ enum DirectStartTurnPersistence<'a> {
 struct StoreCheckpointer {
     store: Arc<dyn SessionStore>,
     blob_store: Arc<dyn BlobStore>,
+    event_store: Option<Arc<dyn EventStore>>,
+    projector: Option<Arc<SessionProjector>>,
     gate: Arc<CheckpointerGate>,
     last_saved_revision: std::sync::Mutex<Option<String>>,
 }
@@ -363,8 +365,105 @@ fn transcript_state_revision_extends(
     false
 }
 
+fn transcript_rewrite_store_error_to_session_error(error: SessionStoreError) -> SessionError {
+    match error {
+        SessionStoreError::TranscriptRevisionConflict {
+            expected, actual, ..
+        } => meerkat_core::TranscriptEditError::RevisionConflict { expected, actual }
+            .into_session_error(),
+        other => SessionError::Store(Box::new(other)),
+    }
+}
+
+fn transcript_rewrite_record_for_session(
+    session: &Session,
+    commit: &meerkat_core::TranscriptRewriteCommit,
+) -> Result<meerkat_core::TranscriptRewriteRecord, SessionError> {
+    let parent_body = session
+        .transcript_revision_body(&commit.parent_revision)
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to read parent transcript revision body for audit event: {err}"
+            )))
+        })?
+        .ok_or_else(|| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "missing parent transcript revision body {} for audit event",
+                commit.parent_revision
+            )))
+        })?;
+    let revision_body = session
+        .transcript_revision_body(&commit.revision)
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to read transcript revision body for audit event: {err}"
+            )))
+        })?
+        .ok_or_else(|| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "missing transcript revision body {} for audit event",
+                commit.revision
+            )))
+        })?;
+    meerkat_core::TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body).map_err(
+        |err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "transcript rewrite audit record validation failed: {err}"
+            )))
+        },
+    )
+}
+
+async fn append_transcript_rewrite_commit_events(
+    event_store: Option<&Arc<dyn EventStore>>,
+    projector: Option<&Arc<SessionProjector>>,
+    session: &Session,
+    commits: &[meerkat_core::TranscriptRewriteCommit],
+) -> Result<(), SessionError> {
+    let Some(event_store) = event_store else {
+        return Ok(());
+    };
+    if commits.is_empty() {
+        return Ok(());
+    }
+    let mut events = Vec::with_capacity(commits.len());
+    for commit in commits {
+        events.push(
+            meerkat_core::event::AgentEvent::TranscriptRewriteCommitted {
+                session_id: session.id().clone(),
+                record: transcript_rewrite_record_for_session(session, commit)?,
+            },
+        );
+    }
+    let seq = match event_store.append(session.id(), &events).await {
+        Ok(seq) => seq,
+        Err(error) => {
+            tracing::error!(
+                session_id = %session.id(),
+                revisions = ?commits.iter().map(|commit| commit.revision.as_str()).collect::<Vec<_>>(),
+                error = %error,
+                "failed to publish canonical transcript rewrite audit event after projection update"
+            );
+            return Err(SessionError::Store(Box::new(error)));
+        }
+    };
+    if let Some(projector) = projector
+        && let Err(error) = projector.resume(event_store.as_ref(), session.id()).await
+    {
+        tracing::warn!(
+            session_id = %session.id(),
+            seq,
+            error = %error,
+            "failed to project transcript rewrite commit event"
+        );
+    }
+    Ok(())
+}
+
 async fn save_session_projection_allowing_internal_rewrite(
     store: &dyn SessionStore,
+    event_store: Option<&Arc<dyn EventStore>>,
+    projector: Option<&Arc<SessionProjector>>,
     session: &Session,
 ) -> Result<(), SessionError> {
     let previous = store
@@ -416,11 +515,37 @@ async fn save_session_projection_allowing_internal_rewrite(
             .await
             .map_err(|err| SessionError::Store(Box::new(err)));
     }
-    Err(SessionError::Agent(
-        meerkat_core::error::AgentError::InternalError(
-            "checkpoint refused to persist unaudited internal transcript rewrite".to_string(),
-        ),
-    ))
+    for commit in &commits {
+        let rewritten = session_materialized_at_transcript_revision(session, &commit.revision)?;
+        store
+            .save_transcript_rewrite(&rewritten, commit)
+            .await
+            .map_err(transcript_rewrite_store_error_to_session_error)?;
+    }
+    if commits.last().map(|commit| commit.revision.as_str()) != Some(incoming_revision.as_str()) {
+        store
+            .save(session)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)))?;
+    }
+    let commit_records = commits
+        .iter()
+        .map(|commit| (*commit).clone())
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        append_transcript_rewrite_commit_events(event_store, projector, session, &commit_records)
+            .await
+    {
+        if let Err(rollback_error) = store.save_authoritative_projection(&previous).await {
+            tracing::error!(
+                session_id = %session.id(),
+                error = %rollback_error,
+                "failed to roll back checkpoint transcript rewrite projection after audit append failure"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -464,8 +589,13 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
                 return;
             }
         }
-        if let Err(e) =
-            save_session_projection_allowing_internal_rewrite(self.store.as_ref(), &persisted).await
+        if let Err(e) = save_session_projection_allowing_internal_rewrite(
+            self.store.as_ref(),
+            self.event_store.as_ref(),
+            self.projector.as_ref(),
+            &persisted,
+        )
+        .await
         {
             tracing::warn!("Host-mode checkpoint failed: {e}");
         } else if let Ok(mut last_saved_revision) = self.last_saved_revision.lock() {
@@ -1715,8 +1845,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if commits.is_empty() {
             return Ok(session);
         }
-        self.append_transcript_rewrite_commit_events(&session, commits)
-            .await?;
+        let previous = if let Some(runtime_store) = self.runtime_store.as_ref() {
+            Self::load_runtime_session_snapshot_for_session(runtime_store, session.id()).await?
+        } else {
+            self.store
+                .load(session.id())
+                .await
+                .map_err(|err| SessionError::Store(Box::new(err)))?
+        };
         if let Some(runtime_store) = self.runtime_store.as_ref() {
             for commit in commits {
                 let rewritten =
@@ -1792,7 +1928,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 self.store
                     .save_transcript_rewrite(&rewritten, commit)
                     .await
-                    .map_err(Self::transcript_rewrite_store_error_to_session_error)?;
+                    .map_err(transcript_rewrite_store_error_to_session_error)?;
             }
             if commits.last().map(|commit| commit.revision.as_str())
                 != Some(incoming_revision.as_str())
@@ -1803,21 +1939,58 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map_err(|err| SessionError::Store(Box::new(err)))?;
             }
         }
+        if let Err(error) = append_transcript_rewrite_commit_events(
+            self.event_store.as_ref(),
+            self.projector.as_ref(),
+            &session,
+            commits,
+        )
+        .await
+        {
+            if let Some(previous) = previous.as_ref() {
+                if let Some(runtime_store) = self.runtime_store.as_ref() {
+                    match serde_json::to_vec(previous) {
+                        Ok(session_snapshot) => {
+                            if let Err(rollback_error) = runtime_store
+                                .commit_session_snapshot(
+                                    &Self::runtime_id_for_session(previous.id()),
+                                    SessionDelta { session_snapshot },
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    session_id = %previous.id(),
+                                    error = %rollback_error,
+                                    "failed to roll back runtime transcript rewrite snapshot after audit append failure"
+                                );
+                            }
+                        }
+                        Err(rollback_error) => {
+                            tracing::error!(
+                                session_id = %previous.id(),
+                                error = %rollback_error,
+                                "failed to serialize previous runtime transcript snapshot for rollback"
+                            );
+                        }
+                    }
+                }
+                if let Err(rollback_error) =
+                    self.store.save_authoritative_projection(previous).await
+                {
+                    tracing::error!(
+                        session_id = %previous.id(),
+                        error = %rollback_error,
+                        "failed to roll back transcript rewrite projection after audit append failure"
+                    );
+                }
+            }
+            return Err(error);
+        }
         if converge_live {
             self.converge_live_session_after_transcript_rewrite(&session)
                 .await?;
         }
         Ok(session)
-    }
-
-    fn transcript_rewrite_store_error_to_session_error(error: SessionStoreError) -> SessionError {
-        match error {
-            SessionStoreError::TranscriptRevisionConflict {
-                expected, actual, ..
-            } => meerkat_core::TranscriptEditError::RevisionConflict { expected, actual }
-                .into_session_error(),
-            other => SessionError::Store(Box::new(other)),
-        }
     }
 
     async fn converge_live_session_after_transcript_rewrite(
@@ -1856,90 +2029,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
         Ok(replacement)
-    }
-
-    async fn append_transcript_rewrite_commit_events(
-        &self,
-        session: &Session,
-        commits: &[meerkat_core::TranscriptRewriteCommit],
-    ) -> Result<(), SessionError> {
-        let Some(event_store) = self.event_store.as_ref() else {
-            return Ok(());
-        };
-        if commits.is_empty() {
-            return Ok(());
-        }
-        let mut events = Vec::with_capacity(commits.len());
-        for commit in commits {
-            events.push(
-                meerkat_core::event::AgentEvent::TranscriptRewriteCommitted {
-                    session_id: session.id().clone(),
-                    record: self.transcript_rewrite_record(session, commit)?,
-                },
-            );
-        }
-        let seq = match event_store.append(session.id(), &events).await {
-            Ok(seq) => seq,
-            Err(error) => {
-                tracing::error!(
-                    session_id = %session.id(),
-                    revisions = ?commits.iter().map(|commit| commit.revision.as_str()).collect::<Vec<_>>(),
-                    error = %error,
-                    "failed to publish canonical transcript rewrite audit event before projection update"
-                );
-                return Err(SessionError::Store(Box::new(error)));
-            }
-        };
-        if let Some(projector) = self.projector.as_ref()
-            && let Err(error) = projector.resume(event_store.as_ref(), session.id()).await
-        {
-            tracing::warn!(
-                session_id = %session.id(),
-                seq,
-                error = %error,
-                "failed to project transcript rewrite commit event"
-            );
-        }
-        Ok(())
-    }
-
-    fn transcript_rewrite_record(
-        &self,
-        session: &Session,
-        commit: &meerkat_core::TranscriptRewriteCommit,
-    ) -> Result<meerkat_core::TranscriptRewriteRecord, SessionError> {
-        let parent_body = session
-            .transcript_revision_body(&commit.parent_revision)
-            .map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to read parent transcript revision body for audit event: {err}"
-                )))
-            })?
-            .ok_or_else(|| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "missing parent transcript revision body {} for audit event",
-                    commit.parent_revision
-                )))
-            })?;
-        let revision_body = session
-            .transcript_revision_body(&commit.revision)
-            .map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to read transcript revision body for audit event: {err}"
-                )))
-            })?
-            .ok_or_else(|| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "missing transcript revision body {} for audit event",
-                    commit.revision
-                )))
-            })?;
-        meerkat_core::TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body)
-            .map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "transcript rewrite audit record validation failed: {err}"
-                )))
-            })
     }
 
     pub async fn export_realtime_open_session_snapshot(
@@ -2790,11 +2879,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if *guard {
             return Ok(());
         }
-        if let Err(error) = self.store.save(&session).await {
+        if let Err(error) = save_session_projection_allowing_internal_rewrite(
+            self.store.as_ref(),
+            self.event_store.as_ref(),
+            self.projector.as_ref(),
+            &session,
+        )
+        .await
+        {
             drop(guard);
-            return Err(self
-                .fail_closed_runtime_projection_update(session.id(), error)
-                .await);
+            return match error {
+                SessionError::Store(store_error) => {
+                    let store_error = SessionStoreError::Internal(store_error.to_string());
+                    Err(self
+                        .fail_closed_runtime_projection_update(session.id(), store_error)
+                        .await)
+                }
+                other => {
+                    let store_error = SessionStoreError::Internal(other.to_string());
+                    Err(self
+                        .fail_closed_runtime_projection_update(session.id(), store_error)
+                        .await)
+                }
+            };
         }
         Ok(())
     }
@@ -3682,6 +3789,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let checkpointer = Arc::new(StoreCheckpointer {
             store: Arc::clone(&self.store),
             blob_store: Arc::clone(&self.blob_store),
+            event_store: self.event_store.clone(),
+            projector: self.projector.clone(),
             gate: Arc::clone(&gate),
             last_saved_revision: std::sync::Mutex::new(None),
         });
@@ -7217,6 +7326,8 @@ mod tests {
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
             blob_store: memory_blob_store(),
+            event_store: None,
+            projector: None,
             gate,
             last_saved_revision: std::sync::Mutex::new(None),
         };
@@ -7250,6 +7361,8 @@ mod tests {
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
             blob_store: memory_blob_store(),
+            event_store: None,
+            projector: None,
             gate: Arc::clone(&gate),
             last_saved_revision: std::sync::Mutex::new(None),
         };
@@ -7290,6 +7403,8 @@ mod tests {
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
             blob_store: memory_blob_store(),
+            event_store: None,
+            projector: None,
             gate,
             last_saved_revision: std::sync::Mutex::new(None),
         };

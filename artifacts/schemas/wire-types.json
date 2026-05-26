@@ -3094,6 +3094,10 @@
           "can_close_if_policy_allows": {
             "type": "boolean"
           },
+          "can_close_own_review_item": {
+            "default": false,
+            "type": "boolean"
+          },
           "can_close_parent": {
             "type": "boolean"
           },
@@ -3842,6 +3846,10 @@
             "type": "boolean"
           },
           "can_close_if_policy_allows": {
+            "type": "boolean"
+          },
+          "can_close_own_review_item": {
+            "default": false,
             "type": "boolean"
           },
           "can_close_parent": {
@@ -18437,6 +18445,10 @@
         "type": "boolean"
       },
       "can_close_if_policy_allows": {
+        "type": "boolean"
+      },
+      "can_close_own_review_item": {
+        "default": false,
         "type": "boolean"
       },
       "can_close_parent": {

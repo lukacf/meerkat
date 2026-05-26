@@ -247,8 +247,23 @@ impl WorkGraphService {
             .store
             .list_edges(&item.realm_id, &item.namespace)
             .await?;
+        let parent_items = if attention.projection_policy.include_parent_context {
+            self.store
+                .list_items(WorkItemFilter {
+                    realm_id: Some(item.realm_id.clone()),
+                    namespace: Some(item.namespace.clone()),
+                    include_terminal: true,
+                    ..WorkItemFilter::default()
+                })
+                .await?
+                .into_iter()
+                .map(|item| (item.id.clone(), item))
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
         Ok(AttentionProjectionResult {
-            projection: build_attention_projection(&attention, &item, &edges),
+            projection: build_attention_projection(&attention, &item, &edges, &parent_items),
         })
     }
 
@@ -839,18 +854,34 @@ fn build_attention_projection(
     attention: &WorkAttentionBinding,
     item: &WorkItem,
     edges: &[WorkEdge],
+    items_by_id: &BTreeMap<WorkItemId, WorkItem>,
 ) -> AttentionContextProjection {
-    let parent_refs = edges
+    let include_parent_context = attention.projection_policy.include_parent_context;
+    let parent_edges = edges
         .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Parent && edge.from_id == item.id)
-        .map(|edge| WorkItemRef {
-            realm_id: edge.realm_id.clone(),
-            namespace: edge.namespace.clone(),
-            item_id: edge.to_id.clone(),
-        })
-        .collect::<Vec<_>>();
+        .filter(|edge| edge.kind == WorkEdgeKind::Parent && edge.from_id == item.id);
+    let parent_refs = if include_parent_context {
+        parent_edges
+            .clone()
+            .map(|edge| WorkItemRef {
+                realm_id: edge.realm_id.clone(),
+                namespace: edge.namespace.clone(),
+                item_id: edge.to_id.clone(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let parent_items = if include_parent_context {
+        parent_edges
+            .filter_map(|edge| items_by_id.get(&edge.to_id))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let authority = projected_attention_authority(attention);
-    let (rendered, truncated) = bounded_attention_projection_text(attention, item, &authority);
+    let (rendered, truncated) =
+        bounded_attention_projection_text(attention, item, &authority, &parent_items);
     AttentionContextProjection {
         binding_id: attention.binding_id.clone(),
         work_ref: attention.work_ref.clone(),
@@ -880,6 +911,13 @@ fn projected_attention_authority(attention: &WorkAttentionBinding) -> ProjectedA
             crate::types::AttentionDelegatedAuthority::RequestClosure
                 | crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
         ) && !adversarial,
+        can_close_own_review_item: matches!(
+            attention.delegated_authority,
+            crate::types::AttentionDelegatedAuthority::CloseOwnReviewItem
+        ) && matches!(
+            attention.mode,
+            WorkAttentionMode::Review | WorkAttentionMode::Falsify
+        ),
         can_close_if_policy_allows: matches!(
             attention.delegated_authority,
             crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
@@ -895,6 +933,7 @@ fn bounded_attention_projection_text(
     attention: &WorkAttentionBinding,
     item: &WorkItem,
     authority: &ProjectedAttentionAuthority,
+    parent_items: &[&WorkItem],
 ) -> (String, bool) {
     let stance = match attention.mode {
         WorkAttentionMode::Pursue => "Advance this work item.",
@@ -907,9 +946,10 @@ fn bounded_attention_projection_text(
         WorkAttentionMode::Observe => "Use this as read-only context.",
     };
     let authority_text = format!(
-        "Authority: add_evidence={}, request_closure={}, close_if_policy_allows={}, close_parent={}",
+        "Authority: add_evidence={}, request_closure={}, close_own_review_item={}, close_if_policy_allows={}, close_parent={}",
         authority.can_add_evidence,
         authority.can_request_closure,
+        authority.can_close_own_review_item,
         authority.can_close_if_policy_allows,
         authority.can_close_parent
     );
@@ -930,6 +970,24 @@ fn bounded_attention_projection_text(
         rendered.push_str("Description:\n");
         rendered.push_str(description.trim());
         rendered.push('\n');
+    }
+    if !parent_items.is_empty() {
+        rendered.push_str("Parent context:\n");
+        for parent in parent_items {
+            rendered.push_str("- ");
+            rendered.push_str(parent.title.trim());
+            rendered.push_str(&format!(
+                " (id={}, status={:?}, revision={})\n",
+                parent.id, parent.status, parent.revision
+            ));
+            if let Some(description) = parent.description.as_deref()
+                && !description.trim().is_empty()
+            {
+                rendered.push_str("  ");
+                rendered.push_str(description.trim());
+                rendered.push('\n');
+            }
+        }
     }
     let max_chars =
         usize::try_from(attention.projection_policy.max_text_chars).unwrap_or(usize::MAX);

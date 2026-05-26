@@ -3110,6 +3110,15 @@ impl SessionRuntime {
             .await
             .map_err(workgraph_error_to_rpc)?
             .projection;
+        let scoped_surface = meerkat::WorkGraphToolSurface::with_attention_projection(
+            service.clone(),
+            projection.clone(),
+        );
+        let allowed_tools = scoped_surface
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
 
         self.ensure_runtime_executor(session_id).await?;
         let context_key = format!(
@@ -3133,6 +3142,10 @@ impl SessionRuntime {
             reason: "workgraph_attention".to_string(),
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: Some(binding_id.to_string()),
+            flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
+                allowed_tools: Some(allowed_tools),
+                blocked_tools: None,
+            }),
             context_append: Some(ConversationContextAppend {
                 key: context_key,
                 content: CoreRenderable::Text {

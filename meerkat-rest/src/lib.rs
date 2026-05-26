@@ -75,9 +75,9 @@ use meerkat_core::service::{
     SessionTranscriptRewriteRequest, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
-    FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
-    RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
+    AgentToolDispatcher, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore,
+    ContentInput, FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider,
+    RealmSelection, RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
     format_verbose_event,
 };
 #[cfg(feature = "mob")]
@@ -95,8 +95,7 @@ use tokio::sync::{broadcast, mpsc};
 
 #[cfg(feature = "mcp")]
 use meerkat::{
-    AgentToolDispatcher, McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter,
-    McpRouterAdapter,
+    McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter,
 };
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
@@ -4768,6 +4767,15 @@ async fn workgraph_attention_continuation_input(
         })
         .await?
         .projection;
+    let scoped_surface = meerkat::WorkGraphToolSurface::with_attention_projection(
+        state.workgraph_service.clone(),
+        projection.clone(),
+    );
+    let allowed_tools = scoped_surface
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
     let context_key = format!(
         "workgraph_attention:{}:{}:{}",
         projection.binding_id, projection.binding_revision, projection.item_revision
@@ -4791,6 +4799,10 @@ async fn workgraph_attention_continuation_input(
         reason: "workgraph_attention".to_string(),
         handling_mode: meerkat_core::types::HandlingMode::Steer,
         request_id: Some(binding_id.to_string()),
+        flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
+            allowed_tools: Some(allowed_tools),
+            blocked_tools: None,
+        }),
         context_append: Some(ConversationContextAppend {
             key: context_key,
             content: CoreRenderable::Text {
@@ -9629,7 +9641,7 @@ mod tests {
         )
         .await
         .expect_err("scoped binding should not resolve without its namespace");
-        let (target_session_id, _input) = workgraph_attention_continuation_input(
+        let (target_session_id, input) = workgraph_attention_continuation_input(
             &state,
             meerkat::AttentionBindingRequest {
                 binding_id: scoped_goal.attention.binding_id,
@@ -9640,6 +9652,15 @@ mod tests {
         .await
         .expect("scoped continuation input");
         assert_eq!(target_session_id, scoped_session_id);
+        let meerkat_runtime::Input::Continuation(continuation) = input else {
+            unreachable!("attention continuation should build a continuation input");
+        };
+        let allowed_tools = continuation
+            .flow_tool_overlay
+            .and_then(|overlay| overlay.allowed_tools)
+            .expect("attention continuation should carry scoped tool overlay");
+        assert!(allowed_tools.contains(&"workgraph_add_evidence".to_string()));
+        assert!(!allowed_tools.contains(&"workgraph_link".to_string()));
         let app = router(state);
 
         for descriptor in meerkat::workgraph_rest_path_catalog() {

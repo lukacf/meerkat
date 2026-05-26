@@ -1242,6 +1242,8 @@ pub struct AttentionContextProjection {
 pub struct ProjectedAttentionAuthority {
     pub can_add_evidence: bool,
     pub can_request_closure: bool,
+    #[serde(default)]
+    pub can_close_own_review_item: bool,
     pub can_close_if_policy_allows: bool,
     pub can_close_parent: bool,
 }

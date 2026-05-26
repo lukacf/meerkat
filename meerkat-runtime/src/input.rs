@@ -11,6 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     RuntimeTurnMetadata,
 };
 use meerkat_core::ops::{OpEvent, OperationId};
+use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::{
     HandlingMode, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticePeer,
 };
@@ -506,6 +507,9 @@ pub struct ContinuationInput {
     /// Optional request/correlation handle tied to the continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Optional per-turn tool visibility overlay for scoped continuations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
     /// Optional runtime-owned context projected into the next turn boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_append: Option<ConversationContextAppend>,
@@ -535,6 +539,7 @@ impl ContinuationInput {
             reason: "detached_background_op_completed".to_string(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            flow_tool_overlay: None,
             context_append: None,
         }
     }
@@ -1293,6 +1298,10 @@ mod tests {
             reason: "workgraph_attention".into(),
             handling_mode: HandlingMode::Steer,
             request_id: Some("binding-1".into()),
+            flow_tool_overlay: Some(TurnToolOverlay {
+                allowed_tools: Some(vec!["workgraph_add_evidence".into()]),
+                blocked_tools: None,
+            }),
             context_append: Some(ConversationContextAppend {
                 key: "workgraph_attention:binding-1:2:5".into(),
                 content: CoreRenderable::Text {
@@ -1308,6 +1317,20 @@ mod tests {
         assert_eq!(
             appends[0].source.as_deref(),
             Some("workgraph_attention:binding-1:2:5")
+        );
+        let metadata = crate::runtime_loop::for_input(
+            &input,
+            crate::ingress_types::RuntimeInputSemantics {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                peer_response_terminal_apply_intent: None,
+            },
+        );
+        assert_eq!(
+            metadata
+                .flow_tool_overlay
+                .and_then(|overlay| overlay.allowed_tools),
+            Some(vec!["workgraph_add_evidence".into()])
         );
     }
 
@@ -1669,6 +1692,7 @@ mod tests {
             reason: "continue".into(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            flow_tool_overlay: None,
             context_append: None,
         });
         assert_eq!(continuation.kind(), InputKind::Continuation);

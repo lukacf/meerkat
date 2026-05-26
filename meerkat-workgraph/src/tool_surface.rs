@@ -121,6 +121,9 @@ fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTre
         WorkAttentionMode::Observe => {}
         WorkAttentionMode::Review | WorkAttentionMode::Falsify => {
             allowed.insert("workgraph_add_evidence");
+            if projection.authority.can_close_own_review_item {
+                allowed.insert("workgraph_close");
+            }
         }
         WorkAttentionMode::Pursue => {
             allowed.extend([
@@ -280,5 +283,67 @@ mod tests {
             .await
             .expect_err("wrong scoped item should be denied");
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn attention_scoped_surface_allows_own_review_item_close_only() {
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000021")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "Review child".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Review,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::CloseOwnReviewItem,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        let projection = service
+            .attention_projection(crate::AttentionProjectionRequest {
+                binding_id: goal.attention.binding_id,
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("projection")
+            .projection;
+        assert!(projection.authority.can_close_own_review_item);
+        assert!(!projection.authority.can_close_parent);
+        let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
+        let names = surface
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert!(names.contains("workgraph_add_evidence"));
+        assert!(names.contains("workgraph_close"));
+        assert!(!names.contains("workgraph_link"));
+
+        let args = serde_json::value::RawValue::from_string(
+            json!({
+                "id": goal.item.id,
+                "expected_revision": goal.item.revision,
+                "status": "completed"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let outcome = surface
+            .dispatch(ToolCallView {
+                id: "call-3",
+                name: "workgraph_close",
+                args: &args,
+            })
+            .await
+            .expect("close own review item");
+        let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(value["item"]["status"].as_str(), Some("completed"));
     }
 }

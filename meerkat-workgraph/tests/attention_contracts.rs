@@ -6,10 +6,10 @@ use meerkat_workgraph::{
     AttentionBindingRequest, AttentionDelegatedAuthority, AttentionListRequest,
     AttentionPauseRequest, AttentionProjectionPolicy, AttentionProjectionRequest,
     AttentionReassignRequest, CreateWorkItemRequest, GoalAttentionTarget, GoalConfirmRequest,
-    GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest, WorkAttentionBinding,
-    WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode, WorkAttentionStatus,
-    WorkAttentionTarget, WorkCompletionPolicy, WorkEvidenceRef, WorkGraphService, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus,
+    GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest, LinkWorkItemsRequest,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
+    WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
+    WorkGraphService, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use serde_json::json;
 
@@ -412,6 +412,111 @@ async fn attention_projection_is_eligible_bounded_and_role_aware() {
         })
         .await
         .expect_err("paused attention fails closed");
+}
+
+#[tokio::test]
+async fn attention_projection_policy_controls_parent_context() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let parent = service
+        .create(CreateWorkItemRequest {
+            title: "Parent objective".to_string(),
+            description: Some("Build the whole feature safely.".to_string()),
+            ..CreateWorkItemRequest::default()
+        })
+        .await
+        .expect("create parent");
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000011").expect("valid session id");
+
+    let with_parent = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Review child".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session {
+                session_id: session_id.clone(),
+            },
+            mode: WorkAttentionMode::Review,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy {
+                max_text_chars: 4096,
+                include_parent_context: true,
+            },
+        })
+        .await
+        .expect("create goal with parent context");
+    service
+        .link(LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: WorkEdgeKind::Parent,
+            from_id: with_parent.item.id.clone(),
+            to_id: parent.id.clone(),
+        })
+        .await
+        .expect("link parent");
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: with_parent.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("projection with parent context")
+        .projection;
+    assert_eq!(projection.parent_refs.len(), 1);
+    assert!(projection.text.rendered.contains("Parent context:"));
+    assert!(projection.text.rendered.contains("Parent objective"));
+    assert!(
+        projection
+            .text
+            .rendered
+            .contains("Build the whole feature safely.")
+    );
+
+    let without_parent = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Review child without parent".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Review,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy {
+                max_text_chars: 4096,
+                include_parent_context: false,
+            },
+        })
+        .await
+        .expect("create goal without parent context");
+    service
+        .link(LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: WorkEdgeKind::Parent,
+            from_id: without_parent.item.id.clone(),
+            to_id: parent.id,
+        })
+        .await
+        .expect("link parent for suppressed projection");
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: without_parent.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("projection without parent context")
+        .projection;
+    assert!(projection.parent_refs.is_empty());
+    assert!(!projection.text.rendered.contains("Parent context:"));
+    assert!(!projection.text.rendered.contains("Parent objective"));
 }
 
 #[tokio::test]

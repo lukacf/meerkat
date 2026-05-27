@@ -66,6 +66,22 @@ impl SessionStore for MemoryStore {
         Ok(())
     }
 
+    async fn save_authoritative_projection_if_current_revision(
+        &self,
+        session: &Session,
+        expected_current_revision: Option<String>,
+    ) -> Result<(), SessionStoreError> {
+        let mut sessions = self.sessions.write().await;
+        let previous = sessions.get(session.id());
+        meerkat_core::session_store::authoritative_projection_current_revision_guard(
+            session,
+            previous,
+            expected_current_revision.as_deref(),
+        )?;
+        sessions.insert(session.id().clone(), session.clone());
+        Ok(())
+    }
+
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         let sessions = self.sessions.read().await;
         Ok(sessions.get(id).cloned())
@@ -106,6 +122,23 @@ impl SessionStore for MemoryStore {
         sessions.remove(id);
         Ok(())
     }
+
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let mut sessions = self.sessions.write().await;
+        let Some(previous) = sessions.get(id) else {
+            return Ok(false);
+        };
+        let previous_token = meerkat_core::session_store::session_projection_cas_token(previous)?;
+        if previous_token != expected_current_revision {
+            return Ok(false);
+        }
+        sessions.remove(id);
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +161,73 @@ mod tests {
         let loaded = store.load(&id).await?.ok_or("session not found")?;
         assert_eq!(loaded.id(), &id);
         assert_eq!(loaded.messages().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authoritative_projection_expected_revision_rejects_stale_writer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = MemoryStore::new();
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("base".to_string())));
+        store.save(&session).await?;
+        let expected_revision = session.transcript_revision()?;
+
+        let mut newer = session.clone();
+        newer.push(Message::User(UserMessage::text("newer".to_string())));
+        store.save(&newer).await?;
+
+        let mut stale_projection = session.clone();
+        stale_projection.push(Message::User(UserMessage::text("stale".to_string())));
+        let err = store
+            .save_authoritative_projection_if_current_revision(
+                &stale_projection,
+                Some(expected_revision),
+            )
+            .await
+            .expect_err("stale authoritative projection should be rejected");
+        assert!(matches!(
+            err,
+            SessionStoreError::TranscriptContinuityViolation { .. }
+        ));
+
+        let saved = store
+            .load(session.id())
+            .await?
+            .expect("session should remain saved");
+        assert_eq!(saved.messages().len(), newer.messages().len());
+        assert_eq!(saved.transcript_revision()?, newer.transcript_revision()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_if_current_revision_only_deletes_matching_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = MemoryStore::new();
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("base".to_string())));
+        store.save(&session).await?;
+        let stale_token = meerkat_core::session_store::session_projection_cas_token(&session)?;
+
+        let mut newer = session.clone();
+        newer.push(Message::User(UserMessage::text("newer".to_string())));
+        store.save(&newer).await?;
+        assert!(
+            !store
+                .delete_if_current_revision(session.id(), &stale_token)
+                .await?
+        );
+        assert!(store.load(session.id()).await?.is_some());
+
+        let current_token = meerkat_core::session_store::session_projection_cas_token(&newer)?;
+        assert!(
+            store
+                .delete_if_current_revision(session.id(), &current_token)
+                .await?
+        );
+        assert!(store.load(session.id()).await?.is_none());
         Ok(())
     }
 }

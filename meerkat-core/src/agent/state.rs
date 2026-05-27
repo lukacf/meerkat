@@ -298,6 +298,17 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
+    async fn save_session_best_effort(&mut self) {
+        self.sync_system_context_state_to_session();
+        if let Some(ref checkpointer) = self.checkpointer {
+            checkpointer.checkpoint(&self.session).await;
+            return;
+        }
+        if let Err(e) = self.store.save(&self.session).await {
+            tracing::warn!("Failed to save session: {}", e);
+        }
+    }
+
     /// Snapshot the runtime-backed turn-state authority.
     ///
     /// Pre-wave-a, a missing `turn_state_handle` fell through to a
@@ -1200,9 +1211,7 @@ where
             schema_warnings: self.extraction_state.take_schema_warnings(),
             skill_diagnostics: self.collect_skill_diagnostics().await,
         };
-        if let Err(e) = self.store.save(&self.session).await {
-            tracing::warn!("Failed to save session: {}", e);
-        }
+        self.save_session_best_effort().await;
         self.emit_extraction_failed_event(&extraction_error, event_tx.as_ref())
             .await;
         Ok(result)
@@ -2541,9 +2550,7 @@ where
                                     schema_warnings: self.extraction_state.take_schema_warnings(),
                                     skill_diagnostics: self.collect_skill_diagnostics().await,
                                 };
-                                if let Err(e) = self.store.save(&self.session).await {
-                                    tracing::warn!("Failed to save session: {}", e);
-                                }
+                                self.save_session_best_effort().await;
                                 self.emit_extraction_failed_event(
                                     &extraction_error,
                                     event_tx.as_ref(),
@@ -2581,9 +2588,7 @@ where
                             },
                         )?;
                         self.execute_turn_effects(&t, turn_count, &event_tx).await;
-                        if let Err(e) = self.store.save(&self.session).await {
-                            tracing::warn!("Failed to save session: {}", e);
-                        }
+                        self.save_session_best_effort().await;
                         if let Some(structured_output) = result.structured_output.clone() {
                             self.emit_extraction_succeeded_event(
                                 structured_output,
@@ -2696,9 +2701,7 @@ where
                                     run_id: run_id.clone(),
                                 })?;
                             self.execute_turn_effects(&t, turn_count, &event_tx).await;
-                            if let Err(e) = self.store.save(&self.session).await {
-                                tracing::warn!("Failed to save session: {}", e);
-                            }
+                            self.save_session_best_effort().await;
                             return self.build_result(turn_count + 1, tool_call_count).await;
                         }
 
@@ -2733,9 +2736,7 @@ where
                         self.execute_turn_effects(&t, turn_count, &event_tx).await;
 
                         // Save session
-                        if let Err(e) = self.store.save(&self.session).await {
-                            tracing::warn!("Failed to save session: {}", e);
-                        }
+                        self.save_session_best_effort().await;
 
                         return Ok(result);
                     }

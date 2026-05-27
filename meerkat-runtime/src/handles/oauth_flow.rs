@@ -1851,6 +1851,36 @@ mod tests {
             ))
         }
 
+        async fn clear_session_snapshot(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "clear_session_snapshot".to_string(),
+            ))
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _expected_current: &[u8],
+            _replacement: Vec<u8>,
+        ) -> Result<bool, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "replace_session_snapshot_if_current".to_string(),
+            ))
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _expected_current: &[u8],
+        ) -> Result<bool, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "clear_session_snapshot_if_current".to_string(),
+            ))
+        }
+
         async fn persist_input_state(
             &self,
             _runtime_id: &LogicalRuntimeId,

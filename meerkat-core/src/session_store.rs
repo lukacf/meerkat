@@ -18,6 +18,7 @@
 //! [`SessionStore`] and the [`append_only_save_guard`] helper.
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use crate::session::{SYSTEM_CONTEXT_SEPARATOR, SessionMeta};
 use crate::time_compat::SystemTime;
@@ -94,6 +95,16 @@ pub enum SessionStoreError {
     Internal(String),
 }
 
+/// Stable compare token for a full persisted session projection row.
+pub fn session_projection_cas_token(session: &Session) -> Result<String, SessionStoreError> {
+    let bytes = serde_json::to_vec(session).map_err(|err| {
+        SessionStoreError::Serialization(format!(
+            "failed to serialize session projection CAS token: {err}"
+        ))
+    })?;
+    Ok(format!("row-sha256:{:x}", Sha256::digest(bytes)))
+}
+
 /// Shared append-only guard for `SessionStore::save` implementations.
 ///
 /// Backends call this at the top of their `save` method with the new
@@ -111,42 +122,71 @@ pub fn append_only_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
 ) -> Result<(), SessionStoreError> {
-    let Some(previous) = previous else {
-        return Ok(());
-    };
-
     incoming
         .validate_transcript_history_state()
         .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: format!("incoming transcript history state is malformed: {err}"),
         })?;
-    let previous_had_history = previous
-        .transcript_history_state()
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: format!("previous transcript history state is malformed: {err}"),
-        })?
-        .is_some();
-    let incoming_has_history = incoming
-        .transcript_history_state()
-        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    let incoming_state = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: format!("incoming transcript history state is malformed: {err}"),
-        })?
-        .is_some();
+        }
+    })?;
+    if let Some(state) = incoming_state.as_ref()
+        && state.head != incoming_revision
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming transcript graph head {} does not match current message digest {incoming_revision}",
+                state.head
+            ),
+        });
+    }
+
+    let Some(previous) = previous else {
+        if incoming_state.is_some() {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: "incoming first save would seed transcript history state outside the rewrite/audit path"
+                    .to_string(),
+            });
+        }
+        validate_plain_save_transcript_history_preservation(
+            incoming,
+            None,
+            None,
+            incoming_state.as_ref(),
+        )?;
+        return Ok(());
+    };
+    let previous_state = previous.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        }
+    })?;
+    let previous_had_history = previous_state.is_some();
+    let incoming_has_history = incoming_state.is_some();
     if previous_had_history && !incoming_has_history {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: "incoming save would erase retained transcript history state".to_string(),
         });
     }
-
     let previous_revision =
         transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
-    let incoming_revision =
-        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
     if previous_revision == incoming_revision {
+        validate_plain_save_transcript_history_preservation(
+            incoming,
+            Some(previous),
+            previous_state.as_ref(),
+            incoming_state.as_ref(),
+        )?;
         return Ok(());
     }
 
@@ -156,13 +196,31 @@ pub fn append_only_save_guard(
         let incoming_prefix_revision = transcript_messages_digest(&incoming.messages()[..prev_len])
             .map_err(SessionStoreError::from)?;
         if incoming_prefix_revision == previous_revision {
+            validate_plain_save_transcript_history_preservation(
+                incoming,
+                Some(previous),
+                previous_state.as_ref(),
+                incoming_state.as_ref(),
+            )?;
             return Ok(());
         }
     }
     if incoming_preserves_conversation_tail_with_system_context_append(incoming, previous)? {
+        validate_plain_save_transcript_history_preservation(
+            incoming,
+            Some(previous),
+            previous_state.as_ref(),
+            incoming_state.as_ref(),
+        )?;
         return Ok(());
     }
     if incoming_preserves_prefix_after_transient_notice_cleanup(incoming, previous)? {
+        validate_plain_save_transcript_history_preservation(
+            incoming,
+            Some(previous),
+            previous_state.as_ref(),
+            incoming_state.as_ref(),
+        )?;
         return Ok(());
     }
     if new_len < prev_len {
@@ -181,12 +239,183 @@ pub fn append_only_save_guard(
     })
 }
 
+fn validate_plain_save_transcript_history_preservation(
+    incoming: &Session,
+    previous: Option<&Session>,
+    previous_state: Option<&TranscriptHistoryState>,
+    incoming_state: Option<&TranscriptHistoryState>,
+) -> Result<(), SessionStoreError> {
+    let Some(previous) = previous else {
+        if incoming_state.is_some() {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: "incoming first save would seed transcript history state outside the rewrite/audit path"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    };
+    if previous_state.is_none() && incoming_state.is_some() {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming append-only save would seed transcript history state outside the rewrite/audit path"
+                .to_string(),
+        });
+    }
+    let Some(previous_state) = previous_state else {
+        return Ok(());
+    };
+    let Some(incoming_state) = incoming_state else {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming append-only save would erase retained transcript history state"
+                .to_string(),
+        });
+    };
+    let previous_commits = previous_state.commits.as_slice();
+    let incoming_commits = incoming_state.commits.as_slice();
+    if incoming_commits != previous_commits {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming append-only save would change retained transcript rewrite commits"
+                .to_string(),
+        });
+    }
+    let retained_revisions_preserved =
+        transcript_revision_bodies_preserved(previous_state, incoming_state)?;
+    if retained_revisions_preserved
+        && incoming_state.revisions.len() == previous_state.revisions.len()
+        && incoming_state.head == previous_state.head
+    {
+        return Ok(());
+    }
+    if incoming_state.revisions.len() != previous_state.revisions.len() + 1
+        || !retained_revisions_preserved
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming append-only save would change retained transcript revision graph"
+                .to_string(),
+        });
+    }
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    let previous_revision =
+        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
+    if previous_state.head != previous_revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "previous transcript history head does not match persisted message digest"
+                .to_string(),
+        });
+    }
+    let added = &incoming_state.revisions[previous_state.revisions.len()];
+    if incoming_state.head != incoming_revision
+        || added.revision != incoming_revision
+        || added.parent_revision.as_deref() != Some(previous_state.head.as_str())
+        || transcript_messages_digest(&added.messages).map_err(SessionStoreError::from)?
+            != incoming_revision
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming append-only save would add a transcript revision body that is not the current append"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn transcript_revision_bodies_preserved(
+    previous_state: &TranscriptHistoryState,
+    incoming_state: &TranscriptHistoryState,
+) -> Result<bool, SessionStoreError> {
+    if incoming_state.revisions.len() < previous_state.revisions.len() {
+        return Ok(false);
+    }
+    previous_state
+        .revisions
+        .iter()
+        .zip(incoming_state.revisions.iter())
+        .map(|(previous, incoming)| {
+            Ok(previous.revision == incoming.revision
+                && previous.parent_revision == incoming.parent_revision
+                && previous.created_at == incoming.created_at
+                && transcript_messages_digest(&previous.messages)
+                    .map_err(SessionStoreError::from)?
+                    == transcript_messages_digest(&incoming.messages)
+                        .map_err(SessionStoreError::from)?)
+        })
+        .try_fold(true, |acc, preserved| {
+            preserved.map(|preserved| acc && preserved)
+        })
+}
+
+fn validate_rewrite_save_retains_previous_commits(
+    incoming: &Session,
+    previous: &Session,
+    incoming_state: &TranscriptHistoryState,
+) -> Result<(), SessionStoreError> {
+    let previous_state = previous.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        }
+    })?;
+    let Some(previous_state) = previous_state.as_ref() else {
+        return Ok(());
+    };
+    if incoming_state.commits.len() < previous_state.commits.len()
+        || incoming_state.commits[..previous_state.commits.len()] != previous_state.commits
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming rewrite save would drop retained transcript rewrite commits"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate that an authoritative projection write still targets the row that
+/// the caller proved continuity against.
+pub fn authoritative_projection_current_revision_guard(
+    incoming: &Session,
+    previous: Option<&Session>,
+    expected_current_revision: Option<&str>,
+) -> Result<(), SessionStoreError> {
+    let previous_token = previous.map(session_projection_cas_token).transpose()?;
+    if previous_token.as_deref() == expected_current_revision {
+        return Ok(());
+    }
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    Err(SessionStoreError::TranscriptContinuityViolation {
+        id: incoming.id().clone(),
+        previous_revision: previous_token.unwrap_or_else(|| "<missing>".to_string()),
+        incoming_revision,
+        reason: format!(
+            "authoritative projection expected persisted projection token {}, but current row has diverged",
+            expected_current_revision.unwrap_or("<missing>")
+        ),
+    })
+}
+
 fn incoming_preserves_conversation_tail_with_system_context_append(
     incoming: &Session,
     previous: &Session,
 ) -> Result<bool, SessionStoreError> {
-    let (previous_system, previous_tail) = split_single_leading_system(previous.messages());
-    let (incoming_system, incoming_tail) = split_single_leading_system(incoming.messages());
+    messages_preserve_conversation_tail_with_system_context_append(
+        incoming.messages(),
+        previous.messages(),
+    )
+}
+
+fn messages_preserve_conversation_tail_with_system_context_append(
+    incoming: &[Message],
+    previous: &[Message],
+) -> Result<bool, SessionStoreError> {
+    let (previous_system, previous_tail) = split_single_leading_system(previous);
+    let (incoming_system, incoming_tail) = split_single_leading_system(incoming);
     let Some(incoming_system) = incoming_system else {
         return Ok(false);
     };
@@ -281,8 +510,6 @@ pub fn run_boundary_snapshot_save_guard(
             let Some(previous) = previous else {
                 return Err(append_error);
             };
-            let previous_revision =
-                transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
             let incoming_revision =
                 transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
             let Some(state) = incoming.transcript_history_state().map_err(|err| {
@@ -294,11 +521,13 @@ pub fn run_boundary_snapshot_save_guard(
             else {
                 return Err(append_error);
             };
-            let Some(commits) = find_transcript_rewrite_commit_chain_extending(
+            validate_rewrite_save_retains_previous_commits(incoming, previous, &state)?;
+            let commits = find_transcript_rewrite_commit_chain_extending_session(
                 &state,
-                &previous_revision,
+                previous,
                 &incoming_revision,
-            ) else {
+            )?;
+            let Some(commits) = commits else {
                 return Err(append_error);
             };
             let Some(commit) = commits.first() else {
@@ -353,6 +582,151 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
         cursor = &commit.revision;
         chain.push(commit);
     }
+}
+
+/// Find a rewrite chain whose first parent may be an append-only continuation
+/// of a previously persisted snapshot.
+///
+/// Runtime-backed sessions can append messages in the runtime store before a
+/// core-owned compaction rewrite is checkpointed to the compatibility
+/// `SessionStore`. In that case the first rewrite commit's parent revision is
+/// not equal to the persisted row's digest, but its retained parent body proves
+/// a normal append path from that persisted row.
+pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
+    state: &'a TranscriptHistoryState,
+    previous: &Session,
+    incoming_revision: &str,
+) -> Result<Option<Vec<&'a TranscriptRewriteCommit>>, SessionStoreError> {
+    let previous_revision =
+        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
+    let mut chain = Vec::new();
+    let mut cursor = previous_revision.as_str();
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if incoming_revision == cursor {
+            return Ok(Some(chain));
+        }
+        if !visited.insert(cursor.to_string()) {
+            return Ok(None);
+        }
+
+        let Some(cursor_messages) = transcript_history_messages_for_revision(
+            state,
+            cursor,
+            &previous_revision,
+            previous.messages(),
+        ) else {
+            return Ok(None);
+        };
+        let mut selected = None;
+        for commit in &state.commits {
+            if !transcript_history_revision_extends(state, incoming_revision, &commit.revision) {
+                continue;
+            }
+            let parent_extends_cursor = commit.parent_revision == cursor
+                || revision_body_preserves_append_continuation_prefix(
+                    state,
+                    &commit.parent_revision,
+                    cursor_messages,
+                    cursor,
+                )?;
+            if parent_extends_cursor {
+                selected = Some(commit);
+                break;
+            }
+        }
+
+        let Some(commit) = selected else {
+            if revision_body_preserves_append_continuation_prefix(
+                state,
+                incoming_revision,
+                cursor_messages,
+                cursor,
+            )? {
+                return Ok(Some(chain));
+            }
+            return Ok(None);
+        };
+        cursor = &commit.revision;
+        chain.push(commit);
+    }
+}
+
+fn transcript_history_messages_for_revision<'a>(
+    state: &'a TranscriptHistoryState,
+    revision: &str,
+    previous_revision: &str,
+    previous_messages: &'a [Message],
+) -> Option<&'a [Message]> {
+    if revision == previous_revision {
+        return Some(previous_messages);
+    }
+    state
+        .revisions
+        .iter()
+        .find(|body| body.revision == revision)
+        .map(|body| body.messages.as_slice())
+}
+
+fn revision_body_preserves_append_continuation_prefix(
+    state: &TranscriptHistoryState,
+    revision: &str,
+    ancestor_messages: &[Message],
+    ancestor_revision: &str,
+) -> Result<bool, SessionStoreError> {
+    if revision == ancestor_revision {
+        return Ok(true);
+    }
+    let Some(body) = state
+        .revisions
+        .iter()
+        .find(|body| body.revision == revision)
+    else {
+        return Ok(false);
+    };
+    if body.messages.len() >= ancestor_messages.len() {
+        let prefix_revision = transcript_messages_digest(&body.messages[..ancestor_messages.len()])
+            .map_err(SessionStoreError::from)?;
+        if prefix_revision == ancestor_revision {
+            return Ok(true);
+        }
+    }
+    Ok(
+        messages_preserve_conversation_tail_with_system_context_append(
+            &body.messages,
+            ancestor_messages,
+        )? || messages_preserve_tail_after_leading_system_refresh(
+            &body.messages,
+            ancestor_messages,
+        )?,
+    )
+}
+
+fn messages_preserve_tail_after_leading_system_refresh(
+    incoming: &[Message],
+    previous: &[Message],
+) -> Result<bool, SessionStoreError> {
+    let (Some(Message::System(_)), Some(Message::System(_))) = (incoming.first(), previous.first())
+    else {
+        return Ok(false);
+    };
+    if incoming.len() < previous.len() {
+        return Ok(false);
+    }
+    let previous_tail_len = previous.len().saturating_sub(1);
+    if previous_tail_len == 0 {
+        return Ok(true);
+    }
+    let previous_tail_revision =
+        transcript_messages_digest(&previous[1..]).map_err(SessionStoreError::from)?;
+    let incoming_tail = &incoming[1..];
+    if incoming_tail.len() < previous_tail_len {
+        return Ok(false);
+    }
+    let incoming_tail_prefix_revision =
+        transcript_messages_digest(&incoming_tail[..previous_tail_len])
+            .map_err(SessionStoreError::from)?;
+    Ok(incoming_tail_prefix_revision == previous_tail_revision)
 }
 
 fn transcript_history_revision_extends(
@@ -415,6 +789,12 @@ pub fn transcript_rewrite_save_guard(
     previous: Option<&Session>,
     commit: &TranscriptRewriteCommit,
 ) -> Result<(), SessionStoreError> {
+    incoming
+        .validate_transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?;
     let Some(previous) = previous else {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
@@ -503,6 +883,7 @@ pub fn transcript_rewrite_save_guard(
             reason: "incoming rewrite did not persist a transcript revision graph".to_string(),
         });
     };
+    validate_rewrite_save_retains_previous_commits(incoming, previous, &incoming_state)?;
     validate_transcript_rewrite_commit_bodies(incoming, commit, &incoming_state)
 }
 
@@ -786,6 +1167,20 @@ pub trait SessionStore: Send + Sync {
         self.save(session).await
     }
 
+    /// Save an authoritative projection only if the persisted row is still the
+    /// revision that the caller already validated.
+    async fn save_authoritative_projection_if_current_revision(
+        &self,
+        session: &Session,
+        expected_current_revision: Option<String>,
+    ) -> Result<(), SessionStoreError> {
+        let _ = (session, expected_current_revision);
+        Err(SessionStoreError::Internal(
+            "save_authoritative_projection_if_current_revision is not supported by this SessionStore"
+                .to_string(),
+        ))
+    }
+
     /// Load a session by ID.
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError>;
 
@@ -794,6 +1189,14 @@ pub trait SessionStore: Send + Sync {
 
     /// Delete a session.
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError>;
+
+    /// Delete a compatibility projection only if it is still the revision that
+    /// the caller already validated as unsafe to expose.
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError>;
 
     /// Check if a session exists.
     async fn exists(&self, id: &SessionId) -> Result<bool, SessionStoreError> {
@@ -860,7 +1263,671 @@ mod tests {
     }
 
     #[test]
-    fn append_only_guard_accepts_transient_mcp_pending_notice_cleanup()
+    fn run_boundary_guard_accepts_compaction_after_uncheckpointed_runtime_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        previous.push(Message::Assistant(AssistantMessage {
+            content: "answer one".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let mut parent = previous.clone();
+        parent.set_system_prompt("refreshed runtime system projection".to_string());
+        parent.push(Message::User(UserMessage::text(
+            "runtime-only turn".to_string(),
+        )));
+        parent.push(Message::Assistant(AssistantMessage {
+            content: "runtime-only answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = parent.transcript_revision()?;
+
+        let mut incoming = parent.clone();
+        let mut replacement = vec![
+            parent.messages()[0].clone(),
+            Message::User(UserMessage::text("[Context compacted] summary".to_string())),
+        ];
+        replacement.extend_from_slice(&parent.messages()[1..]);
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange {
+                start: 0,
+                end: parent.messages().len(),
+            },
+            replacement,
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_compaction_with_retained_tail_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        previous.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![crate::types::AssistantBlock::Text {
+                text: "answer one".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+
+        let mut parent = previous.clone();
+        parent.set_system_prompt("refreshed runtime system projection".to_string());
+        parent.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::Comms,
+            "peer response queued",
+        )));
+        let parent_revision = parent.transcript_revision()?;
+
+        let mut incoming = parent.clone();
+        let mut replacement = vec![
+            parent.messages()[0].clone(),
+            Message::User(UserMessage::text("[Context compacted] summary".to_string())),
+        ];
+        replacement.extend_from_slice(&parent.messages()[1..]);
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange {
+                start: 0,
+                end: parent.messages().len(),
+            },
+            replacement,
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_commitless_history_parent_edge()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        let previous_revision = previous.transcript_revision()?;
+
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt("forged replacement system".to_string());
+        let incoming_revision = incoming.transcript_revision()?;
+        let history = TranscriptHistoryState {
+            head: incoming_revision.clone(),
+            commits: Vec::new(),
+            revisions: vec![
+                crate::TranscriptRevisionBody {
+                    revision: previous_revision,
+                    parent_revision: None,
+                    messages: previous.messages().to_vec(),
+                    created_at: previous.updated_at(),
+                },
+                crate::TranscriptRevisionBody {
+                    revision: incoming_revision,
+                    parent_revision: Some(previous.transcript_revision()?),
+                    messages: incoming.messages().to_vec(),
+                    created_at: incoming.updated_at(),
+                },
+            ],
+        };
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(history)?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. }
+                | SessionStoreError::MonotonicityViolation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_history_head_that_does_not_match_current_messages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+
+        let mut incoming = previous.clone();
+        incoming.push(Message::User(UserMessage::text("append".to_string())));
+        let poisoned_messages = vec![Message::User(UserMessage::text(
+            "unrelated poisoned history".to_string(),
+        ))];
+        let poisoned_revision = transcript_messages_digest(&poisoned_messages)?;
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: poisoned_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![crate::TranscriptRevisionBody {
+                    revision: poisoned_revision,
+                    parent_revision: None,
+                    messages: poisoned_messages,
+                    created_at: incoming.updated_at(),
+                }],
+            })?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        assert!(matches!(
+            append_only_save_guard(&incoming, None),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_new_rewrite_commits_on_plain_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let previous_revision = previous.transcript_revision()?;
+
+        let mut incoming = previous.clone();
+        let appended = Message::Assistant(AssistantMessage {
+            content: "plain append".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        });
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 1 },
+            vec![appended],
+            crate::TranscriptRewriteReason::new("forged-append"),
+            Some("unit-test".to_string()),
+            Some(previous_revision),
+        )?;
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_first_save_with_rewrite_commits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut incoming = Session::new();
+        incoming.push(Message::User(UserMessage::text("seed".to_string())));
+        let parent_messages = incoming.messages().to_vec();
+        let parent_updated_at = incoming.updated_at();
+        let parent_revision = incoming.transcript_revision()?;
+        let commit = incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "compacted seed".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+        let incoming_revision = incoming.transcript_revision()?;
+        let commit_parent_revision = commit.parent_revision.clone();
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: vec![commit],
+                revisions: vec![
+                    crate::TranscriptRevisionBody {
+                        revision: commit_parent_revision.clone(),
+                        parent_revision: None,
+                        messages: parent_messages,
+                        created_at: parent_updated_at,
+                    },
+                    crate::TranscriptRevisionBody {
+                        revision: incoming_revision,
+                        parent_revision: Some(commit_parent_revision),
+                        messages: incoming.messages().to_vec(),
+                        created_at: incoming.updated_at(),
+                    },
+                ],
+            })?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, None),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_rewrite_guard_rejects_poisoned_history_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let parent_revision = previous.transcript_revision()?;
+
+        let mut first = previous.clone();
+        let first_commit = first.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "compacted persisted".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("unit-test".to_string()),
+            Some(parent_revision),
+        )?;
+        let first_snapshot = first.clone();
+
+        first.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "uncommitted poisoned fork".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("poison"),
+            Some("unit-test".to_string()),
+            Some(first_commit.revision.clone()),
+        )?;
+        let mut poisoned_state = first
+            .transcript_history_state()?
+            .ok_or_else(|| "second rewrite should retain history state".to_string())?;
+        poisoned_state.head = first_commit.revision.clone();
+
+        let mut poisoned = first_snapshot;
+        poisoned.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(poisoned_state)?,
+        );
+
+        assert!(matches!(
+            transcript_rewrite_save_guard(&poisoned, Some(&previous), &first_commit),
+            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
+                if reason.contains("incoming transcript history state is malformed")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn authoritative_projection_guard_rejects_changed_persisted_revision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("persisted A".to_string())));
+        let expected_revision = previous.transcript_revision()?;
+
+        let mut current = previous.clone();
+        current.push(Message::Assistant(AssistantMessage {
+            content: "persisted B".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let mut incoming = previous.clone();
+        incoming.push(Message::User(UserMessage::text(
+            "incoming from A".to_string(),
+        )));
+
+        assert!(matches!(
+            authoritative_projection_current_revision_guard(
+                &incoming,
+                Some(&current),
+                Some(&expected_revision)
+            ),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_rewrite_commits_on_first_save()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut incoming = Session::new();
+        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
+        let parent_revision = incoming.transcript_revision()?;
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text("rewritten".to_string()))],
+            crate::TranscriptRewriteReason::new("forged-first-save"),
+            Some("unit-test".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, None),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_commitless_history_on_first_save()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut incoming = Session::new();
+        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![crate::TranscriptRevisionBody {
+                    revision: incoming_revision,
+                    parent_revision: None,
+                    messages: incoming.messages().to_vec(),
+                    created_at: incoming.updated_at(),
+                }],
+            })?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, None),
+            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
+                if reason.contains("first save would seed transcript history state")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_commitless_history_seed_on_plain_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let previous_revision = previous.transcript_revision()?;
+
+        let mut incoming = previous.clone();
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![
+                    crate::TranscriptRevisionBody {
+                        revision: previous_revision,
+                        parent_revision: None,
+                        messages: previous.messages().to_vec(),
+                        created_at: previous.updated_at(),
+                    },
+                    crate::TranscriptRevisionBody {
+                        revision: incoming_revision,
+                        parent_revision: Some(previous.transcript_revision()?),
+                        messages: incoming.messages().to_vec(),
+                        created_at: incoming.updated_at(),
+                    },
+                ],
+            })?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
+                if reason.contains("append-only save would seed transcript history state")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_new_rewrite_commits_on_system_context_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt(format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
+        ));
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: vec![TranscriptRewriteCommit {
+                    parent_revision: previous.transcript_revision()?,
+                    revision: incoming_revision.clone(),
+                    selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
+                    original_span_digest: transcript_messages_digest(&[])?,
+                    replacement_digest: transcript_messages_digest(&[])?,
+                    messages_before: previous.messages().len(),
+                    messages_after: incoming.messages().len(),
+                    reason: crate::TranscriptRewriteReason::new("forged"),
+                    actor: Some("unit-test".to_string()),
+                    committed_at: incoming.updated_at(),
+                }],
+                revisions: vec![crate::TranscriptRevisionBody {
+                    revision: incoming_revision,
+                    parent_revision: None,
+                    messages: incoming.messages().to_vec(),
+                    created_at: incoming.updated_at(),
+                }],
+            })?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_new_rewrite_commits_on_transient_notice_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::Comms,
+            "transient peer delivery notice",
+        )));
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+
+        let mut incoming = Session::new();
+        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append after notice cleanup".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: vec![TranscriptRewriteCommit {
+                    parent_revision: previous.transcript_revision()?,
+                    revision: incoming_revision.clone(),
+                    selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
+                    original_span_digest: transcript_messages_digest(&[])?,
+                    replacement_digest: transcript_messages_digest(&[])?,
+                    messages_before: previous.messages().len(),
+                    messages_after: incoming.messages().len(),
+                    reason: crate::TranscriptRewriteReason::new("forged"),
+                    actor: Some("unit-test".to_string()),
+                    committed_at: incoming.updated_at(),
+                }],
+                revisions: vec![crate::TranscriptRevisionBody {
+                    revision: incoming_revision,
+                    parent_revision: None,
+                    messages: incoming.messages().to_vec(),
+                    created_at: incoming.updated_at(),
+                }],
+            })?,
+        );
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_runtime_parent_with_inserted_message_before_tail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        previous.push(Message::Assistant(AssistantMessage {
+            content: "answer one".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let parent_messages = vec![
+            Message::System(SystemMessage::new("refreshed runtime system projection")),
+            Message::User(UserMessage::text(
+                "injected before retained tail".to_string(),
+            )),
+            previous.messages()[1].clone(),
+            previous.messages()[2].clone(),
+        ];
+        let parent_revision = transcript_messages_digest(&parent_messages)?;
+        let mut parent = previous.clone();
+        parent.apply_transcript_history_state(TranscriptHistoryState {
+            head: parent_revision.clone(),
+            commits: Vec::new(),
+            revisions: vec![crate::TranscriptRevisionBody {
+                revision: parent_revision,
+                parent_revision: None,
+                messages: parent_messages,
+                created_at: parent.updated_at(),
+            }],
+        })?;
+        let parent_revision = parent.transcript_revision()?;
+
+        let mut incoming = parent.clone();
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange {
+                start: 0,
+                end: parent.messages().len(),
+            },
+            vec![Message::User(UserMessage::text(
+                "[Context compacted] summary".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. }
+                | SessionStoreError::MonotonicityViolation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_forged_parent_edge_before_real_rewrite_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        previous.push(Message::Assistant(AssistantMessage {
+            content: "answer one".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let previous_revision = previous.transcript_revision()?;
+
+        let forged_parent_messages = vec![
+            Message::System(SystemMessage::new("refreshed runtime system projection")),
+            Message::User(UserMessage::text(
+                "forged insertion before retained tail".to_string(),
+            )),
+            previous.messages()[1].clone(),
+            previous.messages()[2].clone(),
+        ];
+        let forged_parent_revision = transcript_messages_digest(&forged_parent_messages)?;
+        let mut forged_parent = previous.clone();
+        forged_parent.apply_transcript_history_state(TranscriptHistoryState {
+            head: forged_parent_revision.clone(),
+            commits: Vec::new(),
+            revisions: vec![
+                crate::TranscriptRevisionBody {
+                    revision: previous_revision.clone(),
+                    parent_revision: None,
+                    messages: previous.messages().to_vec(),
+                    created_at: previous.updated_at(),
+                },
+                crate::TranscriptRevisionBody {
+                    revision: forged_parent_revision.clone(),
+                    parent_revision: Some(previous_revision),
+                    messages: forged_parent_messages,
+                    created_at: forged_parent.updated_at(),
+                },
+            ],
+        })?;
+
+        let mut incoming = forged_parent.clone();
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange {
+                start: 0,
+                end: forged_parent.messages().len(),
+            },
+            vec![Message::User(UserMessage::text(
+                "[Context compacted] forged branch".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(forged_parent_revision),
+        )?;
+
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. }
+                | SessionStoreError::MonotonicityViolation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_transient_mcp_pending_notice_cleanup_with_unaudited_commit()
     -> Result<(), crate::TranscriptEditError> {
         let mut previous = Session::new();
         previous.push(Message::User(UserMessage::text("hello".to_string())));
@@ -897,7 +1964,10 @@ mod tests {
         )?;
         incoming.push(Message::User(UserMessage::text("again".to_string())));
 
-        assert!(append_only_save_guard(&incoming, Some(&previous)).is_ok());
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
         Ok::<(), crate::TranscriptEditError>(())
     }
 
@@ -967,6 +2037,67 @@ mod tests {
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].revision, first.revision);
         assert_eq!(chain[1].revision, second.revision);
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_dropped_retained_rewrite_commits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut base = Session::new();
+        base.push(Message::User(UserMessage::text("turn one".to_string())));
+        base.push(Message::Assistant(AssistantMessage {
+            content: "verbose answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let base_revision = base.transcript_revision()?;
+
+        let mut previous = base.clone();
+        let _retained_commit = previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::Assistant(AssistantMessage {
+                content: "first compact answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                created_at: crate::types::message_timestamp_now(),
+            })],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("unit-test".to_string()),
+            Some(base_revision),
+        )?;
+        let previous_revision = previous.transcript_revision()?;
+
+        let mut incoming = previous.clone();
+        let new_commit = incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::Assistant(AssistantMessage {
+                content: "second compact answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                created_at: crate::types::message_timestamp_now(),
+            })],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("unit-test".to_string()),
+            Some(previous_revision),
+        )?;
+        let mut state = incoming
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("incoming rewrite should retain history"))?;
+        state.commits = vec![new_commit];
+        incoming.set_metadata(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state)?,
+        );
+
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
+                if reason.contains("drop retained transcript rewrite commits")
+        ));
         Ok(())
     }
 }

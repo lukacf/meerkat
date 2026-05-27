@@ -465,6 +465,29 @@ impl SessionStore for JsonlStore {
             .map_err(into_session_store_error)
     }
 
+    async fn save_authoritative_projection_if_current_revision(
+        &self,
+        session: &Session,
+        expected_current_revision: Option<String>,
+    ) -> Result<(), SessionStoreError> {
+        let _write_lock = self
+            .acquire_session_write_lock(session.id())
+            .await
+            .map_err(into_session_store_error)?;
+        let previous = self
+            .load_impl(session.id())
+            .await
+            .map_err(into_session_store_error)?;
+        meerkat_core::session_store::authoritative_projection_current_revision_guard(
+            session,
+            previous.as_ref(),
+            expected_current_revision.as_deref(),
+        )?;
+        self.save_impl(session)
+            .await
+            .map_err(into_session_store_error)
+    }
+
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         self.load_impl(id).await.map_err(into_session_store_error)
     }
@@ -477,6 +500,28 @@ impl SessionStore for JsonlStore {
 
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         self.delete_impl(id).await.map_err(into_session_store_error)
+    }
+
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let _write_lock = self
+            .acquire_session_write_lock(id)
+            .await
+            .map_err(into_session_store_error)?;
+        let Some(previous) = self.load_impl(id).await.map_err(into_session_store_error)? else {
+            return Ok(false);
+        };
+        let previous_token = meerkat_core::session_store::session_projection_cas_token(&previous)?;
+        if previous_token != expected_current_revision {
+            return Ok(false);
+        }
+        self.delete_impl(id)
+            .await
+            .map_err(into_session_store_error)?;
+        Ok(true)
     }
 }
 
@@ -821,6 +866,78 @@ mod tests {
             .await?
             .expect("session should remain saved");
         assert_eq!(saved.messages().len(), newer.messages().len());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_authoritative_projection_expected_revision_rejects_stale_writer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let first = JsonlStore::new(temp_dir.path().to_path_buf());
+        let second = JsonlStore::new(temp_dir.path().to_path_buf());
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("base".to_string())));
+        first.save(&session).await?;
+        let expected_revision = session.transcript_revision()?;
+
+        let mut newer = second.load(session.id()).await?.expect("session exists");
+        newer.push(Message::User(UserMessage::text("newer".to_string())));
+        second.save(&newer).await?;
+
+        let mut stale_projection = session.clone();
+        stale_projection.push(Message::User(UserMessage::text("stale".to_string())));
+        let err = first
+            .save_authoritative_projection_if_current_revision(
+                &stale_projection,
+                Some(expected_revision),
+            )
+            .await
+            .expect_err("stale authoritative projection should be rejected");
+        assert!(
+            matches!(err, SessionStoreError::TranscriptContinuityViolation { .. }),
+            "unexpected error: {err}"
+        );
+
+        let saved = first
+            .load(session.id())
+            .await?
+            .expect("session should remain saved");
+        assert_eq!(saved.messages().len(), newer.messages().len());
+        assert_eq!(saved.transcript_revision()?, newer.transcript_revision()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_delete_if_current_revision_only_deletes_matching_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let first = JsonlStore::new(temp_dir.path().to_path_buf());
+        let second = JsonlStore::new(temp_dir.path().to_path_buf());
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("base".to_string())));
+        first.save(&session).await?;
+        let stale_token = meerkat_core::session_store::session_projection_cas_token(&session)?;
+
+        let mut newer = second.load(session.id()).await?.expect("session exists");
+        newer.push(Message::User(UserMessage::text("newer".to_string())));
+        second.save(&newer).await?;
+
+        assert!(
+            !first
+                .delete_if_current_revision(session.id(), &stale_token)
+                .await?
+        );
+        assert!(first.load(session.id()).await?.is_some());
+
+        let current_token = meerkat_core::session_store::session_projection_cas_token(&newer)?;
+        assert!(
+            first
+                .delete_if_current_revision(session.id(), &current_token)
+                .await?
+        );
+        assert!(first.load(session.id()).await?.is_none());
         Ok(())
     }
 }

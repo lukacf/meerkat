@@ -96,6 +96,21 @@ fn gemini_api_key() -> Option<String> {
     first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
 }
 
+fn default_gemini_flow_smoke_model() -> &'static str {
+    meerkat_core::model_profile::catalog::default_model("gemini")
+        .expect("Gemini must have a catalog default model")
+}
+
+#[test]
+fn flow_runtime_smoke_gemini_default_tracks_catalog() {
+    assert_eq!(
+        default_gemini_flow_smoke_model(),
+        meerkat_core::model_profile::catalog::default_model("gemini")
+            .expect("Gemini must have a catalog default model")
+    );
+    assert_eq!(default_gemini_flow_smoke_model(), "gemini-3.5-flash");
+}
+
 #[derive(Clone, Debug)]
 struct FlowSmokeModels {
     lead: String,
@@ -141,7 +156,7 @@ fn flow_smoke_models() -> Option<FlowSmokeModels> {
             lead: "claude-haiku-4-5-20251001".to_string(),
             worker: "claude-haiku-4-5-20251001".to_string(),
             reviewer: "claude-haiku-4-5-20251001".to_string(),
-            analyst: "gemini-3.1-flash-lite-preview".to_string(),
+            analyst: default_gemini_flow_smoke_model().to_string(),
         }),
         (true, false) => Some(FlowSmokeModels {
             lead: "claude-haiku-4-5-20251001".to_string(),
@@ -150,10 +165,10 @@ fn flow_smoke_models() -> Option<FlowSmokeModels> {
             analyst: "claude-haiku-4-5-20251001".to_string(),
         }),
         (false, true) => Some(FlowSmokeModels {
-            lead: "gemini-3.1-flash-lite-preview".to_string(),
-            worker: "gemini-3.1-flash-lite-preview".to_string(),
-            reviewer: "gemini-3.1-flash-lite-preview".to_string(),
-            analyst: "gemini-3.1-flash-lite-preview".to_string(),
+            lead: default_gemini_flow_smoke_model().to_string(),
+            worker: default_gemini_flow_smoke_model().to_string(),
+            reviewer: default_gemini_flow_smoke_model().to_string(),
+            analyst: default_gemini_flow_smoke_model().to_string(),
         }),
         (false, false) => None,
     }

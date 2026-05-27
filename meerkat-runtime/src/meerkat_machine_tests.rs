@@ -3457,6 +3457,34 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             self.inner.load_session_snapshot(runtime_id).await
         }
 
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.clear_session_snapshot(runtime_id).await
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, crate::store::RuntimeStoreError> {
+            self.inner
+                .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                .await
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, crate::store::RuntimeStoreError> {
+            self.inner
+                .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -14793,6 +14821,34 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn clear_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner.clear_session_snapshot(runtime_id).await
+    }
+
+    async fn replace_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+        replacement: Vec<u8>,
+    ) -> Result<bool, crate::store::RuntimeStoreError> {
+        self.inner
+            .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+            .await
+    }
+
+    async fn clear_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+    ) -> Result<bool, crate::store::RuntimeStoreError> {
+        self.inner
+            .clear_session_snapshot_if_current(runtime_id, expected_current)
+            .await
     }
 
     async fn persist_input_state(

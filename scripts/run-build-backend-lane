@@ -66,7 +66,8 @@ case "${lane}" in
     # which duplicates `--workspace` and trips clap's "cannot be used
     # multiple times" guard. Expand the alias inline until the upstream
     # aliases are normalized to string form on `main`.
-    exec "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail
+    "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail
+    exec "${cargo_bin}" test -p meerkat-session --features session-store projection_continuity -- --quiet
     ;;
   test-all)
     if meerkat_buildbuddy_enabled; then

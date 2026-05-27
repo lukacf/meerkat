@@ -25,6 +25,33 @@ impl SessionStore for TestSessionStore {
         Ok(())
     }
 
+    async fn save_authoritative_projection(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionStoreError> {
+        self.sessions
+            .write()
+            .await
+            .insert(session.id().clone(), session.clone());
+        Ok(())
+    }
+
+    async fn save_authoritative_projection_if_current_revision(
+        &self,
+        session: &Session,
+        expected_current_revision: Option<String>,
+    ) -> Result<(), SessionStoreError> {
+        let mut sessions = self.sessions.write().await;
+        let previous = sessions.get(session.id());
+        meerkat_core::session_store::authoritative_projection_current_revision_guard(
+            session,
+            previous,
+            expected_current_revision.as_deref(),
+        )?;
+        sessions.insert(session.id().clone(), session.clone());
+        Ok(())
+    }
+
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         Ok(self.sessions.read().await.get(id).cloned())
     }
@@ -53,5 +80,22 @@ impl SessionStore for TestSessionStore {
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         self.sessions.write().await.remove(id);
         Ok(())
+    }
+
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let mut sessions = self.sessions.write().await;
+        let Some(previous) = sessions.get(id) else {
+            return Ok(false);
+        };
+        let previous_token = meerkat_core::session_store::session_projection_cas_token(previous)?;
+        if previous_token != expected_current_revision {
+            return Ok(false);
+        }
+        sessions.remove(id);
+        Ok(true)
     }
 }

@@ -193,6 +193,39 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, RuntimeStoreError>;
 
+    /// Remove the latest committed session snapshot for a runtime.
+    ///
+    /// This is used only as a fail-closed quarantine path after a compatibility
+    /// projection write rejects a runtime snapshot that was already staged as
+    /// runtime authority and the service cannot restore the previous snapshot.
+    async fn clear_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError>;
+
+    /// Replace the latest committed session snapshot only if it still matches
+    /// `expected_current`.
+    ///
+    /// Used by fail-closed recovery after a compatibility projection rejected
+    /// a runtime snapshot. Implementations must compare and write atomically so
+    /// recovery cannot overwrite a newer runtime-authoritative snapshot.
+    async fn replace_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+        replacement: Vec<u8>,
+    ) -> Result<bool, RuntimeStoreError>;
+
+    /// Remove the latest committed session snapshot only if it still matches
+    /// `expected_current`.
+    ///
+    /// This is the conditional variant of the fail-closed quarantine path.
+    async fn clear_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+    ) -> Result<bool, RuntimeStoreError>;
+
     /// Persist a single input state (for durable-before-ack).
     async fn persist_input_state(
         &self,

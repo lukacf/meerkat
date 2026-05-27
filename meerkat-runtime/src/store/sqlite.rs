@@ -5,9 +5,7 @@ mod inner {
     use std::path::{Path, PathBuf};
 
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
-    use meerkat_store::sqlite_store::{
-        begin_immediate_transaction, open_connection, write_session_snapshot_in_txn,
-    };
+    use meerkat_store::sqlite_store::{begin_immediate_transaction, open_connection};
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::LogicalRuntimeId;
@@ -259,14 +257,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
-                let session = serde_json::from_slice::<meerkat_core::Session>(
-                    &session_delta.session_snapshot,
-                )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let _: meerkat_core::Session =
+                    serde_json::from_slice(&session_delta.session_snapshot)
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
-                write_session_snapshot_in_txn(&tx, &session)
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -316,8 +311,6 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     } => RuntimeStoreError::TranscriptRevisionConflict { expected, actual },
                     other => RuntimeStoreError::WriteFailed(other.to_string()),
                 })?;
-                write_session_snapshot_in_txn(&tx, &incoming)
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -375,8 +368,6 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                         previous.as_ref(),
                     )
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                    write_session_snapshot_in_txn(&tx, session)
-                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                     if let Some(delta) = session_delta.as_ref() {
                         upsert_runtime_snapshot(&tx, &runtime_id, &delta.session_snapshot)?;
                     }
@@ -478,6 +469,97 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                tx.execute(
+                    "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, RuntimeStoreError> {
+            let _: meerkat_core::Session = serde_json::from_slice(&replacement)
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let expected_current = expected_current.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                if current.as_deref() != Some(expected_current.as_slice()) {
+                    return Ok(false);
+                }
+                upsert_runtime_snapshot(&tx, &runtime_id, &replacement)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let expected_current = expected_current.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                if current.as_deref() != Some(expected_current.as_slice()) {
+                    return Ok(false);
+                }
+                tx.execute(
+                    "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(true)
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -648,8 +730,10 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         use crate::input_state::StoredInputState;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+        use meerkat_core::session_store::SessionStore as _;
         use meerkat_core::types::{AssistantMessage, Message, StopReason, UserMessage};
         use meerkat_core::{Session, TranscriptRewriteReason, TranscriptRewriteSelection};
+        use meerkat_store::SqliteSessionStore;
 
         fn temp_store() -> (TempDir, SqliteRuntimeStore) {
             let dir = TempDir::new().unwrap();
@@ -757,6 +841,39 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     .await
                     .unwrap()
                     .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn commit_session_snapshot_does_not_write_session_projection_row() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let runtime_id = runtime_id();
+            let session = meerkat_core::Session::new();
+            let session_id = session.id().clone();
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&session).unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let session_store = SqliteSessionStore::open(path).unwrap();
+            assert!(
+                session_store.load(&session_id).await.unwrap().is_none(),
+                "runtime snapshot commits must not contaminate the SessionStore projection row before checkpoint continuity validation"
+            );
+            assert!(
+                store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_some()
             );
         }
 

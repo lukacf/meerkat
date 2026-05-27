@@ -253,6 +253,50 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(inner.sessions.get(&runtime_id.0).cloned())
     }
 
+    async fn clear_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        inner.sessions.remove(&runtime_id.0);
+        Ok(())
+    }
+
+    async fn replace_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+        replacement: Vec<u8>,
+    ) -> Result<bool, RuntimeStoreError> {
+        let _: meerkat_core::Session = serde_json::from_slice(&replacement)
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let mut inner = self.inner.lock().await;
+        let Some(current) = inner.sessions.get_mut(&runtime_id.0) else {
+            return Ok(false);
+        };
+        if current.as_slice() != expected_current {
+            return Ok(false);
+        }
+        *current = replacement;
+        Ok(true)
+    }
+
+    async fn clear_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+    ) -> Result<bool, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let Some(current) = inner.sessions.get(&runtime_id.0) else {
+            return Ok(false);
+        };
+        if current.as_slice() != expected_current {
+            return Ok(false);
+        }
+        inner.sessions.remove(&runtime_id.0);
+        Ok(true)
+    }
+
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,

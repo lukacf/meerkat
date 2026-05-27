@@ -230,6 +230,34 @@ impl RuntimeStore for FailPersistInputStore {
         self.inner.load_session_snapshot(runtime_id).await
     }
 
+    async fn clear_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner.clear_session_snapshot(runtime_id).await
+    }
+
+    async fn replace_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+        replacement: Vec<u8>,
+    ) -> Result<bool, RuntimeStoreError> {
+        self.inner
+            .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+            .await
+    }
+
+    async fn clear_session_snapshot_if_current(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_current: &[u8],
+    ) -> Result<bool, RuntimeStoreError> {
+        self.inner
+            .clear_session_snapshot_if_current(runtime_id, expected_current)
+            .await
+    }
+
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,

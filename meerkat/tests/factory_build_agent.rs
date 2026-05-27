@@ -1872,6 +1872,14 @@ impl SessionStore for TrackingSessionStore {
     async fn delete(&self, _id: &SessionId) -> Result<(), SessionStoreError> {
         Ok(())
     }
+
+    async fn delete_if_current_revision(
+        &self,
+        _id: &SessionId,
+        _expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError> {
+        Ok(false)
+    }
 }
 
 /// 12. `build_agent` with custom session store uses the provided store.

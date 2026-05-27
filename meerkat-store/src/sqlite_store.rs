@@ -320,6 +320,34 @@ impl SessionStore for SqliteSessionStore {
             .map_err(into_session_store_error)
     }
 
+    async fn save_authoritative_projection_if_current_revision(
+        &self,
+        session: &Session,
+        expected_current_revision: Option<String>,
+    ) -> Result<(), SessionStoreError> {
+        let path = self.path.clone();
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), SessionStoreError> {
+            let mut conn = open_connection(&path).map_err(into_session_store_error)?;
+            let tx = begin_immediate_transaction(&mut conn).map_err(into_session_store_error)?;
+            let previous = load_session_snapshot_in_txn(&tx, session.id())
+                .map_err(into_session_store_error)?;
+            meerkat_core::session_store::authoritative_projection_current_revision_guard(
+                &session,
+                previous.as_ref(),
+                expected_current_revision.as_deref(),
+            )?;
+            write_session_snapshot_in_txn(&tx, &session).map_err(into_session_store_error)?;
+            tx.commit()
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            Ok(())
+        })
+        .await
+        .map_err(StoreError::Join)
+        .map_err(into_session_store_error)?
+    }
+
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         self.load_impl(id).await.map_err(into_session_store_error)
     }
@@ -332,6 +360,49 @@ impl SessionStore for SqliteSessionStore {
 
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         self.delete_impl(id).await.map_err(into_session_store_error)
+    }
+
+    async fn delete_if_current_revision(
+        &self,
+        id: &SessionId,
+        expected_current_revision: &str,
+    ) -> Result<bool, SessionStoreError> {
+        let path = self.path.clone();
+        let session_id = id.clone();
+        let expected_current_revision = expected_current_revision.to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool, SessionStoreError> {
+            let mut conn = open_connection(&path).map_err(into_session_store_error)?;
+            let tx = begin_immediate_transaction(&mut conn).map_err(into_session_store_error)?;
+            let previous =
+                load_session_snapshot_in_txn(&tx, &session_id).map_err(into_session_store_error)?;
+            let Some(previous) = previous else {
+                tx.commit()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                return Ok(false);
+            };
+            let previous_token =
+                meerkat_core::session_store::session_projection_cas_token(&previous)?;
+            if previous_token != expected_current_revision {
+                tx.commit()
+                    .map_err(StoreError::from)
+                    .map_err(into_session_store_error)?;
+                return Ok(false);
+            }
+            tx.execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
+                params![session_id.to_string()],
+            )
+            .map_err(StoreError::from)
+            .map_err(into_session_store_error)?;
+            tx.commit()
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            Ok(true)
+        })
+        .await
+        .map_err(StoreError::Join)
+        .map_err(into_session_store_error)?
     }
 }
 
@@ -460,5 +531,79 @@ mod tests {
 
         let saved = first.load(session.id()).await.unwrap().unwrap();
         assert_eq!(saved.messages().len(), newer.messages().len());
+    }
+
+    #[tokio::test]
+    async fn authoritative_projection_expected_revision_rejects_stale_writer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let first = SqliteSessionStore::open(&path).unwrap();
+        let second = SqliteSessionStore::open(&path).unwrap();
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("base".to_string())));
+        first.save(&session).await.unwrap();
+        let expected_revision = session.transcript_revision().unwrap();
+
+        let mut newer = second.load(session.id()).await.unwrap().unwrap();
+        newer.push(Message::User(UserMessage::text("newer".to_string())));
+        second.save(&newer).await.unwrap();
+
+        let mut stale_projection = session.clone();
+        stale_projection.push(Message::User(UserMessage::text("stale".to_string())));
+        let err = first
+            .save_authoritative_projection_if_current_revision(
+                &stale_projection,
+                Some(expected_revision),
+            )
+            .await
+            .expect_err("stale authoritative projection should be rejected");
+        assert!(
+            matches!(err, SessionStoreError::TranscriptContinuityViolation { .. }),
+            "unexpected error: {err}"
+        );
+
+        let saved = first.load(session.id()).await.unwrap().unwrap();
+        assert_eq!(saved.messages().len(), newer.messages().len());
+        assert_eq!(
+            saved.transcript_revision().unwrap(),
+            newer.transcript_revision().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_if_current_revision_only_deletes_matching_projection() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let first = SqliteSessionStore::open(&path).unwrap();
+        let second = SqliteSessionStore::open(&path).unwrap();
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("base".to_string())));
+        first.save(&session).await.unwrap();
+        let stale_token =
+            meerkat_core::session_store::session_projection_cas_token(&session).unwrap();
+
+        let mut newer = second.load(session.id()).await.unwrap().unwrap();
+        newer.push(Message::User(UserMessage::text("newer".to_string())));
+        second.save(&newer).await.unwrap();
+
+        assert!(
+            !first
+                .delete_if_current_revision(session.id(), &stale_token)
+                .await
+                .unwrap()
+        );
+        assert!(first.load(session.id()).await.unwrap().is_some());
+
+        let current_token =
+            meerkat_core::session_store::session_projection_cas_token(&newer).unwrap();
+        assert!(
+            first
+                .delete_if_current_revision(session.id(), &current_token)
+                .await
+                .unwrap()
+        );
+        assert!(first.load(session.id()).await.unwrap().is_none());
     }
 }

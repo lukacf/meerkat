@@ -735,7 +735,10 @@ fn render_initial_rust_expr(expr: &Expr, ty: &TypeRef) -> String {
             };
             format!("Some({})", render_initial_rust_expr(inner, inner_ty))
         }
-        other => panic!("unsupported machine initial-state expression for Rust kernel: {other:?}"),
+        other => format!(
+            "compile_error!({:?})",
+            format!("unsupported machine initial-state expression for Rust kernel: {other:?}")
+        ),
     }
 }
 

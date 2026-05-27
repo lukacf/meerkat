@@ -841,10 +841,10 @@ mod tests {
             })
             .await
             .expect_err("same attention projection is stale after item mutation");
-        let ToolError::ExecutionFailed { message } = second else {
-            panic!("expected execution failure for stale item projection");
-        };
-        assert!(message.contains("item revision"));
+        assert!(matches!(
+            second,
+            ToolError::ExecutionFailed { ref message } if message.contains("item revision")
+        ));
     }
 
     #[tokio::test]
@@ -959,9 +959,9 @@ mod tests {
             })
             .await
             .expect_err("stale projection revision should fail closed");
-        let ToolError::ExecutionFailed { message } = err else {
-            panic!("expected execution failure for stale revision");
-        };
-        assert!(message.contains("revision"));
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { ref message } if message.contains("revision")
+        ));
     }
 }

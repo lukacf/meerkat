@@ -50,6 +50,7 @@ second surface-local execution loop.
 | `meerkat_models_catalog` | List available models with provider profiles and capabilities |
 | `meerkat_skills` | List or inspect available skills |
 | `meerkat_schedule_*` tools | Agent-facing schedule create/get/list/update/pause/resume/delete/occurrences tools |
+| `workgraph_*` tools | Agent-facing WorkGraph create/read/claim/update/link/evidence/close tools |
 | `meerkat_mcp_add` | Stage a live MCP server addition on an active session |
 | `meerkat_mcp_remove` | Stage a live MCP server removal on an active session |
 | `meerkat_mcp_reload` | Stage a live MCP server reload on an active session |
@@ -86,7 +87,8 @@ second surface-local execution loop.
 <Note>
 Default `rkat-mcp` builds are driven by the crate feature set. The base/default
 tool surface includes core session/config/history/blob/skills tools and
-schedule tools. Mob tools appear when the `mob` feature is compiled in.
+schedule and WorkGraph tools. Mob tools appear when the `mob` feature is
+compiled in.
 </Note>
 
 <Note>
@@ -666,7 +668,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": "0.6.19",
+  "contract_version": "0.6.23",
   "providers": [
     {
       "provider": "anthropic",

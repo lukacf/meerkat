@@ -9,16 +9,16 @@ use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
     AttentionContextProjection, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
-    AttentionProjectionRequest, AttentionProjectionResult, AttentionProjectionText,
-    AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
-    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
-    LinkWorkItemsRequest, ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode,
-    WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
-    WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
-    WorkStatus,
+    AttentionProjectionParentContext, AttentionProjectionRequest, AttentionProjectionResult,
+    AttentionProjectionText, AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
+    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
+    GoalStatusResult, LinkWorkItemsRequest, ProjectedAttentionAuthority, ReadyWorkFilter,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId,
+    WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind,
+    WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot,
+    WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
+    WorkOwnerKey, WorkOwnerKind, WorkStatus,
 };
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
@@ -1082,6 +1082,18 @@ fn build_attention_projection(
     } else {
         Vec::new()
     };
+    let parent_context = parent_items
+        .iter()
+        .map(|parent| AttentionProjectionParentContext {
+            work_ref: WorkItemRef {
+                realm_id: parent.realm_id.clone(),
+                namespace: parent.namespace.clone(),
+                item_id: parent.id.clone(),
+            },
+            status: parent.status,
+            revision: parent.revision,
+        })
+        .collect();
     let authority = projected_attention_authority(attention);
     let (rendered, truncated) =
         bounded_attention_projection_text(attention, item, &authority, &parent_items);
@@ -1092,6 +1104,7 @@ fn build_attention_projection(
         binding_revision: attention.machine_state.revision,
         item_revision: item.revision,
         parent_refs,
+        parent_context,
         evidence_refs: item.evidence_refs.clone(),
         authority,
         text: AttentionProjectionText {

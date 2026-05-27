@@ -64,6 +64,9 @@ This overview follows the generated OpenAPI artifact at
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/status` | Fetch current runtime state for a session |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
+| `GET` | `/sessions/{id}/transcript-revisions/{revision}` | Fetch a retained transcript revision |
+| `POST` | `/sessions/{id}/rewrite-transcript` | Commit a same-session transcript rewrite |
+| `POST` | `/sessions/{id}/restore-transcript-revision` | Restore a retained transcript revision in place |
 | `POST` | `/sessions/{id}/system_context` | Append staged runtime system context |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
 | `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
@@ -110,6 +113,7 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/mob/{id}/spawn-helper` | Spawn a helper into a mob (mob feature) |
 | `POST` | `/mob/{id}/fork-helper` | Fork a helper from an existing member (mob feature) |
 | `POST` | `/mob/{id}/wait-kickoff` | Wait for kickoff completion (mob feature) |
+| `POST` | `/mob/{id}/wire-members-batch` | Wire multiple mob members in one request (mob feature) |
 | `GET` | `/mob/{id}/members/{agent_identity}/status` | Read member status (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/cancel` | Force-cancel a member (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/respawn` | Respawn a member (mob feature) |
@@ -142,9 +146,10 @@ reserved for callback and MCP-backed dispatchers.
 </Note>
 
 <Note>
-WorkGraph REST endpoints are read-only observability/operator lookup. Agents
-create, claim, update, link, evidence, and close WorkGraph items through
-WorkGraph tools inside sessions.
+WorkGraph REST endpoints are observability/operator lookup, including
+goal-status and attention-list reads. Agents create, claim, update, link,
+evidence, and close WorkGraph items through WorkGraph tools inside sessions;
+goal and attention mutators stay on trusted in-process host authority.
 </Note>
 
 ## Request cancellation
@@ -313,32 +318,6 @@ Create and run a new session.
   Friendly metadata for peer discovery (name, description, labels).
 </ParamField>
 
-### GET /sessions/{id}/history
-
-Read committed transcript history for a session without changing the lightweight metadata shape of `GET /sessions/{id}`.
-
-Query parameters:
-
-- `offset` — skip this many messages from the start of the transcript
-- `limit` — cap the number of returned messages
-
-```json
-{
-  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-  "message_count": 8,
-  "offset": 0,
-  "limit": 50,
-  "has_more": false,
-  "messages": [
-    { "role": "system", "content": "You are a helpful assistant." },
-    { "role": "user", "content": "Hello" },
-    { "role": "assistant", "content": "Hi there." }
-  ]
-}
-```
-
-History is returned oldest-to-newest and reflects the last committed session snapshot only.
-
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
   Run-scoped hook overrides (see [Hooks](/guides/hooks)).
 </ParamField>
@@ -385,26 +364,6 @@ History is returned oldest-to-newest and reflects the last committed session sna
   Token usage breakdown.
 </ResponseField>
 
-<ResponseField name="usage.input_tokens" type="u64">
-  Input tokens consumed.
-</ResponseField>
-
-<ResponseField name="usage.output_tokens" type="u64">
-  Output tokens generated.
-</ResponseField>
-
-<ResponseField name="usage.total_tokens" type="u64">
-  Total tokens (input + output).
-</ResponseField>
-
-<ResponseField name="usage.cache_creation_tokens" type="u64 | null">
-  Cache creation tokens (provider-specific).
-</ResponseField>
-
-<ResponseField name="usage.cache_read_tokens" type="u64 | null">
-  Cache read tokens (provider-specific).
-</ResponseField>
-
 <ResponseField name="structured_output" type="object | null">
   Parsed structured output (when `output_schema` was provided).
 </ResponseField>
@@ -413,63 +372,81 @@ History is returned oldest-to-newest and reflects the last committed session sna
   Schema compatibility warnings per provider.
 </ResponseField>
 
-<Accordion title="Structured output example">
-  <CodeGroup>
-  ```json Request
-  {
-    "prompt": "Extract the capital of France",
-    "model": "claude-opus-4-6",
-    "output_schema": {
-      "schema": {
-        "type": "object",
-        "properties": {
-          "country": {"type": "string"},
-          "capital": {"type": "string"}
-        },
-        "required": ["country", "capital"]
-      },
-      "name": "capital_extraction",
-      "strict": false,
-      "compat": "lossy",
-      "format": "meerkat_v1"
-    },
-    "structured_output_retries": 2
-  }
-  ```
+### GET /sessions/{id}/history
 
-  ```json Response
-  {
-    "session_id": "01936f8a-7b2c-7000-8000-000000000002",
-    "text": "The capital of France is Paris.",
-    "turns": 1,
-    "tool_calls": 0,
-    "usage": {
-      "input_tokens": 80,
-      "output_tokens": 30,
-      "total_tokens": 110
-    },
-    "structured_output": {
-      "country": "France",
-      "capital": "Paris"
-    },
-    "schema_warnings": [
-      {
-        "provider": "gemini",
-        "path": "/properties/choice/oneOf",
-        "message": "Removed unsupported keyword 'oneOf'"
-      }
-    ]
-  }
-  ```
-  </CodeGroup>
+Read committed transcript history for a session without changing the lightweight metadata shape of `GET /sessions/{id}`.
 
-  When `output_schema` is provided, the `text` field remains the committed
-  main-turn assistant output. The extraction turn runs afterward and populates
-  `structured_output` on success or `extraction_error` on failure.
+Query parameters:
 
-  `output_schema` may be provided as a wrapper object (shown above) or as a raw
-  JSON Schema object. The wrapper enables explicit `compat`/`format` settings.
-</Accordion>
+- `offset` — skip this many messages from the start of the transcript
+- `limit` — cap the number of returned messages
+
+```json
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "message_count": 8,
+  "offset": 0,
+  "limit": 50,
+  "has_more": false,
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "Hello" },
+    { "role": "assistant", "content": "Hi there." }
+  ]
+}
+```
+
+History is returned oldest-to-newest and reflects the last committed session snapshot only.
+
+### GET /sessions/{id}/transcript-revisions/{revision}
+
+Fetch a retained transcript revision for the same session. The response uses the same
+message shape as `GET /sessions/{id}/history` and includes the requested revision id.
+
+### POST /sessions/{id}/rewrite-transcript
+
+Commit a same-session transcript rewrite against the current transcript head.
+
+```json Request
+{
+  "selection": {
+    "type": "message_range",
+    "start": 2,
+    "end": 3
+  },
+  "replacement": [
+    { "role": "assistant", "content": "Corrected answer" }
+  ],
+  "reason": {
+    "kind": "compaction",
+    "note": "remove accidental secret from transcript"
+  },
+  "expected_parent_revision": "rev-current",
+  "running_behavior": "reject"
+}
+```
+
+Returns the new transcript revision metadata. The rewrite is same-session only:
+it changes the durable session snapshot while preserving session identity.
+
+### POST /sessions/{id}/restore-transcript-revision
+
+Restore a retained transcript revision in place.
+
+```json Request
+{
+  "revision": "rev-earlier",
+  "reason": {
+    "kind": "restore",
+    "note": "restore before bad rewrite"
+  },
+  "expected_parent_revision": "rev-current",
+  "running_behavior": "reject"
+}
+```
+
+Returns the newly committed head revision that points back to the restored
+transcript content.
 
 ### GET /sessions
 
@@ -785,7 +762,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": "0.6.19",
+  "contract_version": "0.6.23",
   "providers": [
     {
       "provider": "anthropic",

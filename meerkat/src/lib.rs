@@ -217,8 +217,9 @@ pub use meerkat_workgraph::{
     WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
     WorkGraphStoreKind, WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter,
     WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
-    WorkStatus, handle_workgraph_tools_call, workgraph_attention_context_append,
-    workgraph_attention_continuation_key, workgraph_attention_supersession_key,
+    WorkStatus, handle_workgraph_tools_call, validate_workgraph_attention_projection_current,
+    workgraph_attention_context_append, workgraph_attention_continuation_key,
+    workgraph_attention_projection_from_overlay, workgraph_attention_supersession_key,
     workgraph_attention_turn_append, workgraph_rest_path_catalog,
     workgraph_rest_request_response_schema, workgraph_tools_list,
 };

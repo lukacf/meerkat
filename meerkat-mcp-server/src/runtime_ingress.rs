@@ -223,6 +223,7 @@ fn completion_outcome_is_mcp_apply_failure(outcome: &CompletionOutcome) -> bool 
 pub(crate) struct McpRuntimeIngressResources {
     pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub runtime_adapter: Arc<MeerkatMachine>,
+    pub workgraph_service: meerkat::WorkGraphService,
     pub config_runtime: Arc<ConfigRuntime>,
     pub realm_id: meerkat_core::connection::RealmId,
     pub instance_id: Option<String>,
@@ -237,6 +238,7 @@ pub(crate) struct McpRuntimeIngressResources {
 pub(crate) struct McpRuntimeIngressContext {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
+    workgraph_service: meerkat::WorkGraphService,
     config_runtime: Arc<ConfigRuntime>,
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
@@ -252,6 +254,7 @@ impl McpRuntimeIngressContext {
         Self {
             service: resources.service,
             runtime_adapter: resources.runtime_adapter,
+            workgraph_service: resources.workgraph_service,
             config_runtime: resources.config_runtime,
             realm_id: resources.realm_id,
             instance_id: resources.instance_id,
@@ -1114,6 +1117,22 @@ async fn apply_runtime_turn(
     run_id: meerkat_core::lifecycle::RunId,
     primitive: &RunPrimitive,
 ) -> Result<CoreApplyOutput, SessionError> {
+    if let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
+        meerkat::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
+    }) {
+        meerkat::validate_workgraph_attention_projection_current(
+            &context.workgraph_service,
+            &projection,
+        )
+        .await
+        .map_err(|error| SessionError::FailedWithData {
+            message: error.to_string(),
+            data: serde_json::json!({
+                "code": "STALE_WORKGRAPH_ATTENTION_PROJECTION"
+            }),
+        })?;
+    }
+
     if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
         return Err(SessionError::Agent(AgentError::InternalError(
             reason.to_string(),
@@ -1449,6 +1468,9 @@ mod tests {
         McpRuntimeIngressContext::new(McpRuntimeIngressResources {
             service: Arc::new(service),
             runtime_adapter,
+            workgraph_service: meerkat::WorkGraphService::new(Arc::new(
+                meerkat::MemoryWorkGraphStore::new(),
+            )),
             config_runtime: Arc::new(ConfigRuntime::new(
                 config_store,
                 temp.path().join("config-state.json"),

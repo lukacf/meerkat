@@ -1117,6 +1117,7 @@ class AttentionContextProjection:
     text: AttentionProjectionText
     work_ref: WorkItemRef
     evidence_refs: Optional[list[WorkEvidenceRef]] = None
+    parent_context: Optional[list[dict[str, Any]]] = None
     parent_refs: Optional[list[WorkItemRef]] = None
 
 

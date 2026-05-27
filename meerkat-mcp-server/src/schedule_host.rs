@@ -41,6 +41,7 @@ fn materialized_preload_skills(
 struct McpScheduleContext {
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    workgraph_service: meerkat::WorkGraphService,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
@@ -56,6 +57,7 @@ impl McpScheduleContext {
         Self {
             service: Arc::clone(&state.service),
             runtime_adapter: Arc::clone(&state.runtime_adapter),
+            workgraph_service: state.workgraph_service.clone(),
             config_runtime: Arc::clone(&state.config_runtime),
             realm_id: state.realm_id.clone(),
             instance_id: state.instance_id.clone(),
@@ -72,6 +74,7 @@ impl McpScheduleContext {
             runtime_ingress::McpRuntimeIngressResources {
                 service: Arc::clone(&self.service),
                 runtime_adapter: Arc::clone(&self.runtime_adapter),
+                workgraph_service: self.workgraph_service.clone(),
                 config_runtime: Arc::clone(&self.config_runtime),
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),

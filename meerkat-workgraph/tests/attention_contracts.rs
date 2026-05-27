@@ -13,8 +13,8 @@ use meerkat_workgraph::{
     WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
     WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
     WorkGraphError, WorkGraphEventFilter, WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus, workgraph_attention_continuation_key,
-    workgraph_attention_supersession_key,
+    WorkNamespace, WorkOwnerKey, WorkStatus, validate_workgraph_attention_projection_current,
+    workgraph_attention_continuation_key, workgraph_attention_supersession_key,
 };
 use serde_json::json;
 
@@ -986,6 +986,9 @@ async fn attention_projection_policy_controls_parent_context() {
         .expect("projection with parent context")
         .projection;
     assert_eq!(projection.parent_refs.len(), 1);
+    assert_eq!(projection.parent_context.len(), 1);
+    assert_eq!(projection.parent_context[0].revision, parent.revision);
+    assert_eq!(projection.parent_context[0].status, WorkStatus::Open);
     assert!(projection.text.rendered.contains("Parent context:"));
     assert!(projection.text.rendered.contains("Parent objective"));
     assert!(
@@ -1032,8 +1035,92 @@ async fn attention_projection_policy_controls_parent_context() {
         .expect("projection without parent context")
         .projection;
     assert!(projection.parent_refs.is_empty());
+    assert!(projection.parent_context.is_empty());
     assert!(!projection.text.rendered.contains("Parent context:"));
     assert!(!projection.text.rendered.contains("Parent objective"));
+}
+
+#[tokio::test]
+async fn attention_projection_currentness_detects_truncated_parent_context_staleness() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let parent = service
+        .create(CreateWorkItemRequest {
+            title: "Parent objective".to_string(),
+            description: Some("Original parent description beyond projection cap.".to_string()),
+            ..CreateWorkItemRequest::default()
+        })
+        .await
+        .expect("create parent");
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000061").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Tiny projection child".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Review,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy {
+                max_text_chars: 1,
+                include_parent_context: true,
+            },
+        })
+        .await
+        .expect("create goal");
+    service
+        .link(LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: WorkEdgeKind::Parent,
+            from_id: goal.item.id.clone(),
+            to_id: parent.id.clone(),
+        })
+        .await
+        .expect("link parent");
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("projection")
+        .projection;
+    assert_eq!(projection.text.rendered.chars().count(), 1);
+    assert_eq!(projection.parent_context[0].revision, parent.revision);
+
+    service
+        .update(UpdateWorkItemRequest {
+            id: parent.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: parent.revision,
+            title: Some("Updated parent objective".to_string()),
+            description: None,
+            priority: None,
+            completion_policy: None,
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("update parent");
+
+    let error = validate_workgraph_attention_projection_current(&service, &projection)
+        .await
+        .expect_err("old projection should be stale after parent revision changes");
+    assert!(
+        error
+            .to_string()
+            .contains("stale WorkGraph attention projection")
+    );
 }
 
 #[test]

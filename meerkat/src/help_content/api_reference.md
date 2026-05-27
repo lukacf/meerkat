@@ -296,7 +296,9 @@ non-interactive api-key login writes `dev:default_<provider>`.
 
 - `workgraph/get`, `workgraph/list`, `workgraph/ready`
 - `workgraph/snapshot`, `workgraph/events`
-- WorkGraph RPC is read-only observability. Agents mutate WorkGraph through
+- `workgraph/goal/status`, `workgraph/attention/list`
+- WorkGraph RPC is read-only observability, including goal and attention status
+  reads. Agents mutate WorkGraph through
   `workgraph_*` tools inside sessions.
 
 ### Skills, models, capabilities, runtime, approvals

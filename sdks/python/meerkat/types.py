@@ -521,6 +521,7 @@ class WorkItem(TypedDict, total=False):
     labels: list[str]
     owner: WorkGraphOwner
     claim: WorkGraphClaim
+    machine_state: dict[str, Any]
     revision: int
     due_at: str
     not_before: str

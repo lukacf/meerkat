@@ -1380,9 +1380,19 @@ pub struct AttentionContextProjection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parent_refs: Vec<WorkItemRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_context: Vec<AttentionProjectionParentContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<WorkEvidenceRef>,
     pub authority: ProjectedAttentionAuthority,
     pub text: AttentionProjectionText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AttentionProjectionParentContext {
+    pub work_ref: WorkItemRef,
+    pub status: WorkStatus,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

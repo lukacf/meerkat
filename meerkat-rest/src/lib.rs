@@ -192,6 +192,7 @@ struct RestRuntimeExecutorContext {
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    workgraph_service: WorkGraphService,
     realm: meerkat_core::RealmId,
     instance_id: Option<String>,
     backend: String,
@@ -586,6 +587,7 @@ impl AppState {
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
             session_service: self.session_service.clone(),
+            workgraph_service: self.workgraph_service.clone(),
             realm: self.realm.clone(),
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
@@ -1584,6 +1586,23 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        if let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
+            meerkat::workgraph_attention_projection_from_overlay(
+                metadata.flow_tool_overlay.as_ref(),
+            )
+        }) {
+            meerkat::validate_workgraph_attention_projection_current(
+                &self.context.workgraph_service,
+                &projection,
+            )
+            .await
+            .map_err(|error| {
+                CoreExecutorError::apply_failed_primitive_rejected(format!(
+                    "stale or inactive WorkGraph attention projection: {error}"
+                ))
+            })?;
+        }
+
         let prompt = primitive.extract_content_input();
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)

@@ -221,9 +221,11 @@ RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycl
 </Note>
 
 <Note>
-WorkGraph RPC methods are read-only observability. Programmatic hosts should
-inspect WorkGraph through `workgraph/get`, `list`, `ready`, `snapshot`, and
-`events`; agents mutate WorkGraph through the `workgraph_*` tools.
+WorkGraph RPC methods are observability only. Programmatic hosts should inspect
+WorkGraph through `workgraph/get`, `list`, `ready`, `snapshot`, `events`,
+`goal/status`, and `attention/list`; agents mutate WorkGraph through the
+`workgraph_*` tools. Goal and attention mutators stay on trusted in-process host
+authority, not the public RPC catalog.
 </Note>
 
 ## Protocol
@@ -277,9 +279,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.6.19"
+      "version": "0.6.23"
     },
-    "contract_version": "0.6.19",
+    "contract_version": "0.6.23",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -1247,7 +1249,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.6.19",
+    "contract_version": "0.6.23",
     "providers": [
       {
         "provider": "anthropic",

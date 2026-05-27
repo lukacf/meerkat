@@ -29,8 +29,8 @@ capability:
   attending to which work item, in which stance.
 - `MeerkatMachine` continues to own actual runtime admission, wake, turn
   execution, and context delivery.
-- `meerkat-mob` maps durable `AgentIdentity` bindings to the member's current
-  runtime/session binding. Core Meerkat never needs to name `MobId`.
+- `meerkat-mob` lowers durable `AgentIdentity` bindings into WorkGraph owner
+  keys. Core Meerkat never needs to name `MobId`.
 
 The key invariant:
 
@@ -269,6 +269,7 @@ struct AttentionContextProjection {
     mode: WorkAttentionMode,
     item_revision: u64,
     parent_refs: Vec<WorkItemRef>,
+    parent_context: Vec<AttentionProjectionParentContext>,
     evidence_refs: Vec<WorkEvidenceRef>,
     authority: ProjectedAttentionAuthority,
     text: AttentionProjectionText,
@@ -386,10 +387,12 @@ Reviewer attention:
   mode = Falsify
 ```
 
-`meerkat-mob` owns resolution from `AgentIdentity` to the member's current
-runtime/session binding. If a member respawns, the binding follows the durable
-identity. If the identity no longer resolves, runtime continuation fails closed
-until the mob restores or reassigns the binding.
+Current `meerkat-mob` support lowers `AgentIdentity` targets into durable
+owner-key attention targets. Session-level runtime continuation is still bound
+to concrete session targets and fails closed for unresolved lowered owners. A
+mob identity resolver can later bind durable member identity to the member's
+current runtime/session before invoking session-level continuation, but that
+resolver is not part of this branch.
 
 Mob docs should avoid saying the persisted mob owns "work" in the WorkGraph
 sense. Mob owns roster, wiring, member lifecycle, flows, and routing. WorkGraph

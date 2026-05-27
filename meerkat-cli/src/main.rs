@@ -1993,7 +1993,7 @@ enum WorkGraphCommands {
     },
     /// Create a goal item bound to a session attention target
     GoalCreate {
-        /// Session ID, session ref, or handle for the goal's attention binding
+        /// Session ID or realm-scoped session ref for the goal's attention binding
         session_id: String,
         /// Goal title
         title: String,
@@ -6266,11 +6266,18 @@ async fn handle_workgraph_command(
 
 async fn open_workgraph_service(scope: &RuntimeScope) -> anyhow::Result<meerkat::WorkGraphService> {
     let (_manifest, persistence) = create_persistence_bundle(scope).await?;
-    Ok(meerkat::WorkGraphService::with_scope(
+    Ok(scoped_workgraph_service(scope, &persistence))
+}
+
+fn scoped_workgraph_service(
+    scope: &RuntimeScope,
+    persistence: &PersistenceBundle,
+) -> meerkat::WorkGraphService {
+    meerkat::WorkGraphService::with_scope(
         persistence.workgraph_store(),
         scope.locator.realm.to_string(),
         meerkat::WorkNamespace::default(),
-    ))
+    )
 }
 
 fn parse_work_namespace(
@@ -6868,6 +6875,7 @@ struct CliRuntimeExecutor {
     persistent_service: Option<Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    workgraph_service: Option<meerkat::WorkGraphService>,
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
@@ -6920,6 +6928,27 @@ fn cli_terminal_pre_turn_context_appends(
             accepted_at,
         })
         .collect()
+}
+
+async fn validate_cli_workgraph_attention_primitive(
+    workgraph_service: Option<&meerkat::WorkGraphService>,
+    primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive,
+) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+    let Some(workgraph_service) = workgraph_service else {
+        return Ok(());
+    };
+    let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
+        meerkat::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
+    }) else {
+        return Ok(());
+    };
+    meerkat::validate_workgraph_attention_projection_current(workgraph_service, &projection)
+        .await
+        .map_err(|error| {
+            meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_primitive_rejected(
+                error.to_string(),
+            )
+        })
 }
 
 struct CliRuntimeBoundaryHandle {
@@ -7050,6 +7079,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
+        validate_cli_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive)
+            .await?;
         // Forward the primitive metadata carrier as the single runtime-authored
         // source for per-turn policy.
         let pre_turn_context_appends = cli_terminal_pre_turn_context_appends(&primitive);
@@ -8332,6 +8363,7 @@ async fn run_agent(
                 persistent_service: Some(service.clone()),
                 session_id: session_id.clone(),
                 runtime_adapter: runtime_adapter.clone(),
+                workgraph_service: Some(scoped_workgraph_service(scope, &persistence)),
                 event_tx: output_pipeline.event_sender(),
             });
             runtime_adapter
@@ -8950,6 +8982,7 @@ async fn resume_session_with_llm_override(
                 persistent_service: Some(service.clone()),
                 session_id: session_id.clone(),
                 runtime_adapter: resume_adapter.clone(),
+                workgraph_service: Some(scoped_workgraph_service(scope, &persistence)),
                 event_tx: output_pipeline.event_sender(),
             });
             resume_adapter
@@ -9159,6 +9192,7 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
     let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
         schedule_service.clone(),
     )) as Arc<dyn AgentToolDispatcher>);
+    let workgraph_service = scoped_workgraph_service(scope, &persistence);
     let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
         factory,
         config,
@@ -9186,6 +9220,7 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(CliScheduleSessionHost {
             service: Arc::clone(&service),
             runtime_adapter: Arc::clone(&runtime_adapter),
+            workgraph_service,
         });
         let shared_adapter = Arc::new(SharedScheduleTargetAdapter::new(
             schedule_service.clone(),
@@ -9385,6 +9420,7 @@ fn build_cli_schedule_mob_host(
 struct CliScheduleSessionHost {
     service: Arc<CliPersistentService>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    workgraph_service: meerkat::WorkGraphService,
 }
 
 const SCHEDULED_PROMPT_VISIBLE_COMPLETION_INSTRUCTION: &str = "This is a scheduled run. After completing any side effects, produce a concise user-visible status line. Do not intentionally return an empty response.";
@@ -9398,6 +9434,7 @@ impl CliScheduleSessionHost {
             persistent_service: Some(Arc::clone(&self.service)),
             session_id,
             runtime_adapter: Arc::clone(&self.runtime_adapter),
+            workgraph_service: Some(self.workgraph_service.clone()),
             event_tx: None,
         }
     }
@@ -13790,6 +13827,7 @@ default_model = "gemma"
             persistent_service: None,
             session_id: session_id.clone(),
             runtime_adapter: runtime_adapter.clone(),
+            workgraph_service: None,
             event_tx: pipeline.event_sender(),
         });
         runtime_adapter
@@ -13855,6 +13893,7 @@ default_model = "gemma"
             persistent_service: None,
             session_id: session_id.clone(),
             runtime_adapter: runtime_adapter.clone(),
+            workgraph_service: None,
             event_tx: pipeline.event_sender(),
         });
         runtime_adapter
@@ -14833,6 +14872,7 @@ default_model = "gemma"
             persistent_service: None,
             session_id: session_id.clone(),
             runtime_adapter,
+            workgraph_service: None,
             event_tx: Some(event_tx),
         };
         let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(
@@ -14888,6 +14928,7 @@ default_model = "gemma"
             persistent_service: None,
             session_id,
             runtime_adapter,
+            workgraph_service: None,
             event_tx: None,
         };
         let append_key = "peer_response_terminal:cli-peer:req-1";

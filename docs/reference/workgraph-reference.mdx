@@ -21,6 +21,7 @@ CLI and trusted in-process hosts add narrow goal and attention controls.
 | `description` | `string?` | Optional detail |
 | `status` | `WorkStatus` | Lifecycle status |
 | `priority` | `low | medium | high` | Priority |
+| `completion_policy` | `WorkCompletionPolicy` | Closure policy for goal-like work |
 | `labels` | `string[]` | Filtering and grouping labels |
 | `owner` | `WorkOwner?` | Intended owner or assignee |
 | `claim` | `WorkClaim?` | Active claim owner and optional lease |
@@ -47,6 +48,16 @@ CLI and trusted in-process hosts add narrow goal and attention controls.
 | `failed` | Terminal failure |
 
 Terminal items cannot be claimed.
+
+## Completion Policies
+
+| Policy | Meaning |
+|--------|---------|
+| `self_attest` | The assigned attention target can request closure directly |
+| `host_confirmed` | Host confirmation evidence is required before closure |
+| `principal_confirmed` | A named principal must confirm before closure |
+| `supervisor` | A supervisor owner key must authorize closure |
+| `reviewer_quorum` | The required reviewer threshold must be satisfied |
 
 ## Edge Kinds
 

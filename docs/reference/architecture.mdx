@@ -72,15 +72,19 @@ feature sets, not separate public binaries.
 | Wire contracts | `meerkat-contracts` | JSON-RPC, REST, and SDK-facing wire types plus generated schemas. |
 | Provider adapters | `meerkat-anthropic`, `meerkat-openai`, `meerkat-gemini` | Provider-specific request lowering, streaming, auth, model capabilities, images, and live support. |
 
-## Current 0.6.19 Snapshot
+## Architecture Snapshot
 
 Since the 0.6.5 live-adapter release, the architecture has gained several
 important surfaces and runtime fixes:
 
-- **WorkGraph** is now the sixth canonical machine and owns realm-scoped durable
-  commitments, dependencies, claims, evidence, ready-item derivation, and
-  host observability. CLI and trusted hosts add narrow goal and attention
-  controls.
+- **WorkGraph** now owns realm-scoped durable commitments, dependencies,
+  claims, evidence, ready-item derivation, host observability, and optional
+  goal attention bindings through `WorkAttentionLifecycleMachine`. CLI and
+  trusted hosts add narrow goal and attention controls; public REST/RPC expose
+  observability only.
+- **Transcript rewrite** keeps session identity stable while allowing audited
+  transcript-head rewrites through `session/rewrite_transcript`,
+  `session/transcript_revision`, and `session/restore_transcript_revision`.
 - **Auth/model routing** now includes Azure OpenAI, project-local CLI realms,
   binding fallback resolution, and `gemini-3.5-flash` as the recommended Gemini
   text model.

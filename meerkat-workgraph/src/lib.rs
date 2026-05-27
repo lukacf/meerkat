@@ -36,7 +36,8 @@ pub use store::{
 pub use surface::wire_workgraph_tools;
 pub use tool_surface::{
     WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkGraphToolSurface,
-    workgraph_attention_context_append, workgraph_attention_continuation_key,
+    validate_workgraph_attention_projection_current, workgraph_attention_context_append,
+    workgraph_attention_continuation_key, workgraph_attention_projection_from_overlay,
     workgraph_attention_supersession_key, workgraph_attention_turn_append,
 };
 pub use tools::{

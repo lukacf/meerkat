@@ -1,6 +1,6 @@
 # WASM Runtime API Surface
 
-## wasm_bindgen Exports (current as of 0.6.19)
+## wasm_bindgen Exports (current as of 0.6.23)
 
 The `meerkat-web-runtime` crate exposes the browser bootstrap, session, mob,
 auth, and subscription functions below via `#[wasm_bindgen]`. Names listed below

@@ -3116,6 +3116,27 @@
   },
   "AttentionContextProjection": {
     "$defs": {
+      "AttentionProjectionParentContext": {
+        "properties": {
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkStatus"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "work_ref",
+          "status",
+          "revision"
+        ],
+        "type": "object"
+      },
       "AttentionProjectionText": {
         "properties": {
           "rendered": {
@@ -3218,6 +3239,17 @@
           "item_id"
         ],
         "type": "object"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3246,6 +3278,12 @@
       },
       "mode": {
         "$ref": "#/$defs/WorkAttentionMode"
+      },
+      "parent_context": {
+        "items": {
+          "$ref": "#/$defs/AttentionProjectionParentContext"
+        },
+        "type": "array"
       },
       "parent_refs": {
         "items": {
@@ -3901,6 +3939,12 @@
           "mode": {
             "$ref": "#/$defs/WorkAttentionMode"
           },
+          "parent_context": {
+            "items": {
+              "$ref": "#/$defs/AttentionProjectionParentContext"
+            },
+            "type": "array"
+          },
           "parent_refs": {
             "items": {
               "$ref": "#/$defs/WorkItemRef"
@@ -3922,6 +3966,27 @@
           "item_revision",
           "authority",
           "text"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionParentContext": {
+        "properties": {
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkStatus"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "work_ref",
+          "status",
+          "revision"
         ],
         "type": "object"
       },
@@ -4027,6 +4092,17 @@
           "item_id"
         ],
         "type": "object"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",

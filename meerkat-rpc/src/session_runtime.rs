@@ -3053,15 +3053,18 @@ impl SessionRuntime {
     }
 
     pub fn workgraph_service(&self) -> meerkat::WorkGraphService {
-        let realm_id = self
-            .realm_id()
-            .map(|realm_id| realm_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
+        let realm_id = self.workgraph_realm_id();
         meerkat::WorkGraphService::with_scope(
             self.workgraph_store.clone(),
             realm_id,
             meerkat::WorkNamespace::default(),
         )
+    }
+
+    fn workgraph_realm_id(&self) -> String {
+        self.realm_id()
+            .map(|realm_id| realm_id.to_string())
+            .unwrap_or_else(|| "default".to_string())
     }
 
     pub async fn enqueue_workgraph_attention_continuation(
@@ -3076,8 +3079,25 @@ impl SessionRuntime {
 
         let service = self.workgraph_service();
         let binding_id = request.binding_id.clone();
+        let runtime_realm_id = self.workgraph_realm_id();
+        if let Some(request_realm_id) = request.realm_id.as_ref()
+            && request_realm_id != &runtime_realm_id
+        {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: format!(
+                    "work attention binding {binding_id} belongs to realm {request_realm_id}, not runtime realm {runtime_realm_id}"
+                ),
+                data: None,
+            });
+        }
+        let scoped_request = meerkat::AttentionBindingRequest {
+            binding_id: binding_id.clone(),
+            realm_id: Some(runtime_realm_id.clone()),
+            namespace: request.namespace.clone(),
+        };
         let binding = service
-            .attention_binding(request.clone())
+            .attention_binding(scoped_request.clone())
             .await
             .map_err(workgraph_error_to_rpc)?;
         match &binding.attention.target {
@@ -3107,8 +3127,8 @@ impl SessionRuntime {
         let projection = service
             .attention_projection(meerkat::AttentionProjectionRequest {
                 binding_id: binding_id.clone(),
-                realm_id: request.realm_id,
-                namespace: request.namespace,
+                realm_id: Some(runtime_realm_id),
+                namespace: scoped_request.namespace,
             })
             .await
             .map_err(workgraph_error_to_rpc)?
@@ -3136,7 +3156,7 @@ impl SessionRuntime {
                 correlation_id: None,
             },
             reason: "workgraph_attention".to_string(),
-            handling_mode: meerkat_core::types::HandlingMode::Steer,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             request_id: Some(binding_id.to_string()),
             flow_tool_overlay: Some(flow_tool_overlay),
             context_append: Some(meerkat::workgraph_attention_context_append(

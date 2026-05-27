@@ -28,15 +28,22 @@ import type {
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
-  WorkAttentionBinding,
+  AttentionDelegatedAuthority,
+  AttentionProjectionPolicy,
+  WorkAttentionMode,
   WorkAttentionStatus,
   WorkCompletionPolicy,
-  WorkOwnerKey,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
 export type { TurnTerminalCauseKind, Usage } from "./events.js";
-export type { WorkAttentionStatus, WorkCompletionPolicy } from "./generated/types.js";
+export type {
+  AttentionDelegatedAuthority,
+  AttentionProjectionPolicy,
+  WorkAttentionMode,
+  WorkAttentionStatus,
+  WorkCompletionPolicy,
+} from "./generated/types.js";
 
 declare const peerIdBrand: unique symbol;
 declare const peerCorrelationIdBrand: unique symbol;
@@ -993,6 +1000,12 @@ export interface WorkGraphOwnerKey {
   readonly id: string;
 }
 
+export interface WorkItemRef {
+  readonly realmId: string;
+  readonly namespace: string;
+  readonly itemId: string;
+}
+
 export interface WorkGraphOwner {
   readonly key: WorkGraphOwnerKey;
   readonly displayName?: string;
@@ -1075,7 +1088,20 @@ export interface WorkGraphGoalStatusRequest extends WorkGraphItemLookupOptions {
 
 export type WorkGraphAttentionTarget =
   | { readonly kind: "session"; readonly sessionId: string }
-  | { readonly kind: "loweredOwner"; readonly ownerKey: WorkOwnerKey };
+  | { readonly kind: "loweredOwner"; readonly ownerKey: WorkGraphOwnerKey };
+
+export interface WorkAttentionBinding {
+  readonly bindingId: string;
+  readonly createdAt: string;
+  readonly delegatedAuthority: AttentionDelegatedAuthority;
+  readonly machineState?: Record<string, unknown>;
+  readonly mode: WorkAttentionMode;
+  readonly projectionPolicy?: AttentionProjectionPolicy;
+  readonly status: WorkAttentionStatus;
+  readonly target: WorkGraphAttentionTarget;
+  readonly updatedAt: string;
+  readonly workRef: WorkItemRef;
+}
 
 export interface WorkGraphAttentionListRequest extends WorkGraphItemLookupOptions {
   readonly status?: WorkAttentionStatus;

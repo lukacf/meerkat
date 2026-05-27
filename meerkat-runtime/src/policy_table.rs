@@ -88,6 +88,7 @@ impl DefaultPolicyTable {
                 .flow_tool_overlay
                 .as_ref()
                 .is_some_and(|overlay| !overlay.dispatch_context.is_empty())
+            && continuation.reason != "workgraph_attention"
         {
             return pd(
                 ApplyMode::StageRunStart,
@@ -868,5 +869,55 @@ mod tests {
         assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+    }
+
+    #[test]
+    fn workgraph_attention_continuation_with_overlay_remains_ordinary_queue_work() {
+        use crate::identifiers::SupersessionKey;
+        use crate::input::{ContinuationInput, Input};
+        use meerkat_core::service::TurnToolOverlay;
+        use std::collections::BTreeMap;
+
+        let input = Input::Continuation(ContinuationInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: Some(crate::IdempotencyKey::new(
+                    "workgraph_attention:realm:namespace:binding:1:1:digest",
+                )),
+                supersession_key: Some(SupersessionKey::new(
+                    "workgraph_attention:realm:namespace:binding",
+                )),
+                correlation_id: None,
+            },
+            reason: "workgraph_attention".to_string(),
+            handling_mode: HandlingMode::Queue,
+            request_id: Some("binding".to_string()),
+            flow_tool_overlay: Some(TurnToolOverlay {
+                allowed_tools: Some(vec!["workgraph_add_evidence".to_string()]),
+                blocked_tools: None,
+                dispatch_context: BTreeMap::from([(
+                    "workgraph.attention_projection".to_string(),
+                    serde_json::json!({"binding_id": "binding"}),
+                )]),
+            }),
+            context_append: None,
+            turn_append: None,
+        });
+
+        let running_decision = DefaultPolicyTable::resolve(&input, false);
+        assert_eq!(
+            running_decision.routing_disposition,
+            RoutingDisposition::Queue
+        );
+        assert_eq!(running_decision.apply_mode, ApplyMode::StageRunStart);
+        assert_eq!(running_decision.wake_mode, WakeMode::WakeIfIdle);
+        assert_eq!(running_decision.drain_policy, DrainPolicy::QueueNextTurn);
     }
 }

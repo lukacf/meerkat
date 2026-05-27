@@ -1332,22 +1332,19 @@ describe("WorkGraph parsers", () => {
     );
   });
 
-  it("requires WorkGraph snapshot arrays instead of fabricating empty projections", () => {
-    assert.throws(
-      () =>
-        MeerkatClient.parseWorkGraphSnapshot({
-          realm_id: "homecore",
-          all_namespaces: false,
-          captured_at: timestamp,
-          items: [claimedItem],
-          edges: [],
-          ready_item_ids: [],
-        }),
-      (error) =>
-        error instanceof MeerkatError &&
-        error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("attention"),
-    );
+  it("defaults WorkGraph fields added after 0.6.23 for compatible older payloads", () => {
+    const { completion_policy: _completionPolicy, ...legacyItem } = claimedItem;
+    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
+      realm_id: "homecore",
+      all_namespaces: false,
+      captured_at: timestamp,
+      items: [legacyItem],
+      edges: [],
+      ready_item_ids: [],
+    });
+
+    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "self_attest" });
+    assert.deepEqual(snapshot.attention, []);
   });
 
   it("rejects malformed WorkGraph attention authority enums", () => {
@@ -2373,11 +2370,11 @@ describe("Parity wrappers", () => {
     assert.equal(listed.items[0].priority, "high");
     assert.equal(ready.items[0].status, "open");
     assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
-    assert.equal(snapshot.attention[0].binding_id, "attention-1");
+    assert.equal(snapshot.attention[0].bindingId, "attention-1");
     assert.equal(events.events[0].kind, "created");
     assert.equal(goal.item.id, "prep-dentist-ride");
-    assert.equal(goal.attention.binding_id, "attention-1");
-    assert.equal(attentionList.attention[0].binding_id, "attention-1");
+    assert.equal(goal.attention.bindingId, "attention-1");
+    assert.equal(attentionList.attention[0].bindingId, "attention-1");
     assert.deepEqual(calls.map((c) => c.method), [
       "workgraph/get",
       "workgraph/list",

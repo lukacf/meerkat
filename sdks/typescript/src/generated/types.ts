@@ -817,6 +817,7 @@ export interface AttentionContextProjection {
   evidence_refs?: WorkEvidenceRef[];
   item_revision: number;
   mode: WorkAttentionMode;
+  parent_context?: Record<string, unknown>[];
   parent_refs?: WorkItemRef[];
   text: AttentionProjectionText;
   work_ref: WorkItemRef;

@@ -56,14 +56,23 @@ For same-checkout multi-agent work, set distinct `RUST_LANE_ID` values when you
 want stable warm local output roots. Separate Git worktrees are isolated by path
 hash for both Cargo and BuildBuddy output roots.
 
-## Current 0.6.22 Release-Line Deltas
+## Current Branch Architecture Deltas
 
 When updating architecture docs or reviewing current code, do not stop at the
-0.6.5 live-adapter picture. The 0.6.22 line also includes:
+0.6.5 live-adapter picture. The current branch since 0.6.23 also includes:
 
-- `WorkGraphLifecycleMachine` as the sixth canonical machine, with
-  `meerkat-workgraph` owning durable work items, dependencies, claims, evidence,
-  ready derivation, snapshots, and read-only host surfaces.
+- `WorkGraphLifecycleMachine` and `WorkAttentionLifecycleMachine`, with
+  `meerkat-workgraph` owning durable work items, dependencies, claims,
+  evidence, ready derivation, snapshots, and goal attention binding
+  pause/resume/stop/supersession state.
+- WorkGraph attention/goals are WorkGraph-owned, optional-feature state:
+  public REST/RPC expose observability, CLI/trusted hosts expose narrow
+  session-bound goal controls, and core Meerkat must not grow a separate
+  generic `GoalLifecycleMachine`.
+- Same-session transcript rewrite (`session/rewrite_transcript`,
+  `session/transcript_revision`, `session/restore_transcript_revision`) updates
+  the transcript head through audited revisions without changing session
+  identity.
 - Azure OpenAI auth/backend support, project-local CLI realm defaults, HTML
   artifact output, typed transcript notices, provider-native search/image
   improvements, structured skill identity, and model-aware compaction defaults.
@@ -83,7 +92,7 @@ When updating architecture docs or reviewing current code, do not stop at the
   idempotency keys; otherwise the system has phantom or duplicate delivery.
 - Release/docs/SDK hardening: docs validation, version/schema freshness checks,
   BuildBuddy/Web SDK recovery lanes, Windows asset routing fixes, and current
-  contract/package examples at `0.6.22`.
+  contract/package examples at `0.6.23`.
 
 ## Runtime Dogma (first review lens)
 
@@ -144,9 +153,9 @@ lives in `meerkat-live`. For a deeper internal reference,
 `meerkat-contracts/src/wire/live.rs` are the authoritative surface;
 `docs/guides/realtime.mdx` is the user-facing Live Channels companion.
 
-## The 6-machine target
+## The 7-machine target
 
-Exactly six canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
+Exactly seven canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
 - **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification.
 - **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent and the realtime-binding plane were removed — live channels are caller-initiated via `live/*`, gated on each member's session-level `ModelCapabilities.realtime`.)
@@ -154,8 +163,9 @@ Exactly six canonical machines, each with a DSL source in `meerkat-machine-schem
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 - **AuthMachine** — auth/session authorization state that must remain machine-owned.
 - **WorkGraphLifecycleMachine** — realm-scoped durable commitment graph authority. Owns work item lifecycle, revision/CAS legality, dependency readiness, claim leases, terminal state, topology legality, and evidence revision handling.
+- **WorkAttentionLifecycleMachine** — WorkGraph attention/goal binding authority. Owns attention binding lifecycle, revision/CAS legality, and pause/resume/stop/supersession state transitions. `WorkGraphService` builds delegated authority projections, and runtime ingress validates projection currentness before scoped continuation execution.
 
-Plus five composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`.
+Plus six composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`, `workgraph_attention_bundle`.
 
 **Primary semantic authority lives in the catalog-generated machines.** Production modules are bridge shells around catalog-owned DSL bodies and crate-local bridging types. Handwritten `*_authority.rs` helpers that still exist are adapter mechanics, projections, planners, or sealed mutators, not competing semantic owners.
 
@@ -202,7 +212,7 @@ per-binding (ops registry membership, adapter ownership for a running channel).
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
 | `meerkat-memory` | Semantic memory stores and retrieval | Implements `MemoryStore` |
-| `meerkat-workgraph` | Realm-scoped durable WorkGraph store, service, lifecycle policy, tool surface, and read-only host surface helpers | `WorkGraphStore` |
+| `meerkat-workgraph` | Realm-scoped durable WorkGraph store, service, lifecycle policy, tool surface, host observability, and goal attention bindings | `WorkGraphStore` |
 | `meerkat-mob` | Multi-agent orchestration, member provisioning, flow runtime, **identity-first binding model, supervisor bridge** | `MobSessionService`, `MobProvisioner`, `MobMemberRuntimeBridge` |
 | `meerkat-mob-pack` | Mobpack archive format, signing, trust policies, validation | — |
 | `meerkat-mob-mcp` | MCP/operator mob surface plus agent-facing delegation tool surface | `MobMcpState`, `AgentMobToolSurfaceFactory` |
@@ -234,7 +244,7 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 For comprehensive file lists, see the matching reference. This is a minimal pointer index for the most common landmarks.
 
-- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 6 canonical machines)
+- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 7 canonical machines)
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter

@@ -25,7 +25,7 @@ use crate::JsonlStore;
 use crate::MachineSessionArchiveProtocol;
 use crate::{
     CreateSessionRequest, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
-    PersistentSessionService, RunResult, Session, SessionError, SessionId,
+    PersistentSessionService, RunResult, Session, SessionError, SessionId, WorkGraphService,
 };
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;
@@ -454,10 +454,25 @@ pub fn default_persistent_executor(
     Box::new(PersistentRuntimeExecutor::new(service, adapter, session_id))
 }
 
+pub fn default_persistent_executor_with_workgraph_service(
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    workgraph_service: WorkGraphService,
+) -> Box<dyn CoreExecutor> {
+    Box::new(PersistentRuntimeExecutor::new_with_workgraph_service(
+        service,
+        adapter,
+        session_id,
+        workgraph_service,
+    ))
+}
+
 pub struct PersistentRuntimeExecutor {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
+    workgraph_service: Option<WorkGraphService>,
 }
 
 struct PersistentRuntimeBoundaryHandle {
@@ -552,8 +567,40 @@ impl PersistentRuntimeExecutor {
             service,
             adapter,
             session_id,
+            workgraph_service: None,
         }
     }
+
+    pub fn new_with_workgraph_service(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        workgraph_service: WorkGraphService,
+    ) -> Self {
+        Self {
+            service,
+            adapter,
+            session_id,
+            workgraph_service: Some(workgraph_service),
+        }
+    }
+}
+
+async fn validate_workgraph_attention_primitive(
+    workgraph_service: Option<&WorkGraphService>,
+    primitive: &RunPrimitive,
+) -> Result<(), CoreExecutorError> {
+    let Some(workgraph_service) = workgraph_service else {
+        return Ok(());
+    };
+    let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
+        crate::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
+    }) else {
+        return Ok(());
+    };
+    crate::validate_workgraph_attention_projection_current(workgraph_service, &projection)
+        .await
+        .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))
 }
 
 fn pending_system_context_appends(
@@ -641,6 +688,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        validate_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive).await?;
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
                 reason.to_string(),
@@ -704,17 +752,26 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                     })?;
                     let service = Arc::clone(&self.service);
                     let adapter = Arc::clone(&self.adapter);
+                    let workgraph_service = self.workgraph_service.clone();
                     Box::pin(materialize_session(
                         &self.service,
                         &self.adapter,
                         session,
                         recovered.into_deferred_create_request(),
-                        move |session_id| {
-                            default_persistent_executor(
+                        move |session_id| match workgraph_service {
+                            Some(workgraph_service) => {
+                                default_persistent_executor_with_workgraph_service(
+                                    Arc::clone(&service),
+                                    Arc::clone(&adapter),
+                                    session_id,
+                                    workgraph_service,
+                                )
+                            }
+                            None => default_persistent_executor(
                                 Arc::clone(&service),
                                 Arc::clone(&adapter),
                                 session_id,
-                            )
+                            ),
                         },
                     ))
                     .await

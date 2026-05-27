@@ -123,13 +123,16 @@ It owns work item lifecycle, dependency readiness, claims/leases, evidence
 references, and event snapshots. It is optional and enabled through
 `enable_workgraph` / `tools.workgraph_enabled`.
 
-- Agents mutate WorkGraph through `workgraph_*` tools.
-- CLI/REST/RPC/SDK surfaces are read-only observability in v1.
-- CLI: `rkat workgraph list|show|ready|snapshot|events`.
+- Agents mutate WorkGraph items through `workgraph_*` tools.
+- CLI/REST/RPC/SDK expose WorkGraph observability. CLI and trusted in-process
+  hosts additionally expose narrow goal/attention controls.
+- CLI: `rkat workgraph list|show|ready|snapshot|events|goal-create|goal-status|goal-confirm|goal-close|attention-list|attention-pause|attention-resume`.
 - RPC: `workgraph/get`, `workgraph/list`, `workgraph/ready`,
-  `workgraph/snapshot`, `workgraph/events`.
+  `workgraph/snapshot`, `workgraph/events`, `workgraph/goal/status`,
+  `workgraph/attention/list`.
 - REST: `GET /workgraph/items`, `/workgraph/items/{id}`,
-  `/workgraph/ready`, `/workgraph/snapshot`, `/workgraph/events`.
+  `/workgraph/ready`, `/workgraph/snapshot`, `/workgraph/events`,
+  `POST /workgraph/goal/status`, `POST /workgraph/attention/list`.
 - Python/TypeScript SDKs expose typed read-only wrappers and session options
   `enable_workgraph` / `enableWorkGraph`.
 
@@ -137,16 +140,23 @@ Use WorkGraph for durable pending work, dependencies, claims, and evidence. Use
 Schedule for time and recurrence; use memory for retrieved knowledge; use comms
 for live messages.
 
-## Current 0.6.19 Surface Snapshot
+## Current Branch Surface Snapshot
 
-For platform integration answers, assume the current public line is `0.6.19`,
-not the old live-adapter/docs-refresh snapshot:
+For platform integration answers in this checkout, assume the current branch
+surface, not the old live-adapter/docs-refresh snapshot:
 
 - Default hosted text recommendations are OpenAI `gpt-5.5`, Anthropic
   `claude-opus-4-7`, and Gemini `gemini-3.5-flash`.
-- WorkGraph is available through agent `workgraph_*` tools plus read-only host
-  surfaces (`workgraph/list`, `ready`, `snapshot`, `events`, REST and SDK
-  equivalents).
+- WorkGraph is available through agent `workgraph_*` tools plus host
+  observability (`workgraph/list`, `ready`, `snapshot`, `events`,
+  `goal/status`, `attention/list`, REST and SDK equivalents). CLI and trusted
+  in-process hosts can create, confirm, close, pause, and resume narrow
+  session-bound goal attention bindings; public REST/RPC do not expose those
+  mutators.
+- Session transcript rewrite is same-session, append-audited state:
+  `session/rewrite_transcript`, `session/transcript_revision`, and
+  `session/restore_transcript_revision` update the transcript head without
+  changing session identity.
 - CLI runs default to project-local realms unless `--realm`, `--isolated`,
   `--context-root`, or `--state-root` says otherwise.
 - `rkat run --output html` / `--html` writes standalone HTML artifacts.
@@ -489,20 +499,20 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.6.19"
+meerkat = "0.6.23"
 
 # Single provider, minimal
-meerkat = { version = "0.6.19", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6.23", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "0.6.19", features = [
+meerkat = { version = "0.6.23", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live"
 ] }
 ```
 
-Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `sqlite-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`, `live`.
+Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `sqlite-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`, `workgraph`, `live`.
 
 Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include the normal shipping surfaces. The default `rkat` feature set does not include `memory-store`; memory capabilities appear only in binaries built with the memory-store feature. Custom binary builds:
 

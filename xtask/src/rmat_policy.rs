@@ -218,6 +218,9 @@ fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) 
         ("OccurrenceLifecycleMachine", "OccurrencesSuperseded", "ScheduleLifecycleMachine") => {
             "ConfirmOccurrencesSuperseded".to_string()
         }
+        ("WorkGraphLifecycleMachine", "Closed", "WorkAttentionLifecycleMachine") => {
+            "Stop".to_string()
+        }
         _ => format!("{producer}:{effect_variant}->{consumer}"),
     }
 }
@@ -526,6 +529,15 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
             // Both directions of the schedule_bundle seam are realised
             // via the same service driver path.
             vec!["meerkat-schedule/src/service.rs"]
+        }
+        ("WorkGraphLifecycleMachine", "WorkAttentionLifecycleMachine") => {
+            // Work item closure fans out to co-resident attention bindings via
+            // the WorkGraph service and commits the item/attention transition
+            // atomically through the store CAS helper.
+            vec![
+                "meerkat-workgraph/src/service.rs",
+                "meerkat-workgraph/src/store.rs",
+            ]
         }
         _ => vec![],
     }

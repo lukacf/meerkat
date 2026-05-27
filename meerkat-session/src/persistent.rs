@@ -237,6 +237,10 @@ fn control_error_into_session_error(err: SessionControlError) -> SessionError {
     }
 }
 
+fn runtime_backed_store_projection_can_recover_authority(session: &Session) -> bool {
+    session.session_metadata().is_some() || session.build_state().is_some()
+}
+
 fn is_durable_session_sync_unsupported(err: &SessionError) -> bool {
     matches!(
         err,
@@ -380,9 +384,6 @@ async fn find_transcript_rewrite_commit_chain_extending_session_with_storage_nor
     }
 
     for commit in state.commits.iter().rev() {
-        if !transcript_state_revision_extends(state, incoming_revision, &commit.revision) {
-            continue;
-        }
         let Some(commits) =
             meerkat_core::session_store::find_transcript_rewrite_commit_chain_extending_session(
                 state,
@@ -402,6 +403,19 @@ async fn find_transcript_rewrite_commit_chain_extending_session_with_storage_nor
         else {
             continue;
         };
+        let incoming_extends_commit =
+            transcript_state_revision_extends(state, incoming_revision, &commit.revision)
+                || transcript_revision_preserves_storage_normalized_append_prefix(
+                    blob_store,
+                    state,
+                    incoming_revision,
+                    incoming_messages,
+                    &revision_body.messages,
+                )
+                .await?;
+        if !incoming_extends_commit {
+            continue;
+        }
         if transcript_revision_preserves_storage_normalized_append_prefix(
             blob_store,
             state,
@@ -427,15 +441,19 @@ async fn transcript_revision_preserves_storage_normalized_append_prefix(
 ) -> Result<bool, SessionStoreError> {
     let mut revision_messages = if revision == state.head {
         current_messages.to_vec()
-    } else {
-        let Some(body) = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == revision)
-        else {
-            return Ok(false);
-        };
+    } else if let Some(body) = state
+        .revisions
+        .iter()
+        .find(|body| body.revision == revision)
+    {
         body.messages.clone()
+    } else if meerkat_core::transcript_messages_digest(current_messages)
+        .map_err(SessionStoreError::from)?
+        == revision
+    {
+        current_messages.to_vec()
+    } else {
+        return Ok(false);
     };
     let mut normalized_ancestor = ancestor_messages.to_vec();
     externalize_messages_from(blob_store, &mut normalized_ancestor, 0)
@@ -850,7 +868,10 @@ async fn save_session_projection_with_storage_normalization_bridge(
 ) -> Result<(), SessionStoreError> {
     match store.save(session).await {
         Ok(()) => Ok(()),
-        Err(error @ SessionStoreError::TranscriptContinuityViolation { .. }) => {
+        Err(
+            error @ (SessionStoreError::TranscriptContinuityViolation { .. }
+            | SessionStoreError::InvalidTranscriptRewrite { .. }),
+        ) => {
             let Some(previous) = store.load(session.id()).await? else {
                 return Err(error);
             };
@@ -873,6 +894,7 @@ async fn save_session_projection_with_storage_normalization_bridge(
             if normalized_revision == previous_revision {
                 if save_verified_transcript_history_projection(
                     store,
+                    blob_store,
                     session,
                     &normalized_previous,
                     previous_projection_token.clone(),
@@ -895,6 +917,7 @@ async fn save_session_projection_with_storage_normalization_bridge(
                 );
                 if save_verified_transcript_history_projection(
                     store,
+                    blob_store,
                     session,
                     &normalized_previous,
                     previous_projection_token.clone(),
@@ -919,6 +942,7 @@ async fn save_session_projection_with_storage_normalization_bridge(
 
 async fn save_verified_transcript_history_projection(
     store: &dyn SessionStore,
+    blob_store: &dyn BlobStore,
     session: &Session,
     previous: &Session,
     expected_current_revision: String,
@@ -957,6 +981,14 @@ async fn save_verified_transcript_history_projection(
     }
     if let Err(error) =
         meerkat_core::session_store::run_boundary_snapshot_save_guard(session, Some(previous))
+        && !transcript_revision_preserves_storage_normalized_append_prefix(
+            blob_store,
+            &state,
+            &incoming_revision,
+            session.messages(),
+            previous.messages(),
+        )
+        .await?
     {
         tracing::debug!(
             session_id = %session.id(),
@@ -1154,6 +1186,9 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// stored-only session is rebuilt at most once and archived snapshots
     /// cannot become writable again through rehydration races.
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    /// Runtime snapshots quarantined after rejecting a checkpoint may fall back
+    /// to the latest store projection for recovery in this service process.
+    quarantined_runtime_projection_fallbacks: Mutex<HashSet<SessionId>>,
 }
 
 /// Extract session labels from a metadata map.
@@ -1515,11 +1550,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let session = if let Some(runtime_store) = self.runtime_store.as_ref() {
             match Self::load_runtime_session_snapshot_for_session(runtime_store, id).await? {
                 Some(session) => Some(session),
-                None => self
-                    .store
-                    .load(id)
-                    .await
-                    .map_err(|e| SessionError::Store(Box::new(e)))?,
+                None => {
+                    let store_projection = self
+                        .store
+                        .load(id)
+                        .await
+                        .map_err(|e| SessionError::Store(Box::new(e)))?;
+                    match store_projection {
+                        Some(session)
+                            if runtime_backed_store_projection_can_recover_authority(&session)
+                                || self.runtime_projection_fallback_quarantined(id).await =>
+                        {
+                            Some(session)
+                        }
+                        _ => None,
+                    }
+                }
             }
         } else {
             self.store
@@ -2737,10 +2783,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             if commits.last().map(|commit| commit.revision.as_str())
                 != Some(incoming_revision.as_str())
             {
-                self.store
-                    .save(&session)
-                    .await
-                    .map_err(|err| SessionError::Store(Box::new(err)))?;
+                save_session_projection_after_verified_rewrite_chain(
+                    self.store.as_ref(),
+                    self.blob_store.as_ref(),
+                    &session,
+                    &incoming_revision,
+                )
+                .await
+                .map_err(|err| SessionError::Store(Box::new(err)))?;
             }
         }
         if converge_live {
@@ -3007,6 +3057,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
+            quarantined_runtime_projection_fallbacks: Mutex::new(HashSet::new()),
         }
     }
 
@@ -3880,34 +3931,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         error: SessionStoreError,
-        rejected_snapshot: Option<&[u8]>,
+        _rejected_snapshot: Option<&[u8]>,
     ) -> SessionError {
         tracing::error!(
             session_id = %id,
             error = %error,
             "session-store projection update failed after runtime authority commit; failing closed"
         );
-        let restore_error = match rejected_snapshot {
-            Some(rejected_snapshot) => self
-                .restore_runtime_snapshot_from_session_store_if_current(id, rejected_snapshot)
-                .await
-                .err(),
-            None => self
-                .restore_runtime_snapshot_from_session_store(id)
-                .await
-                .err(),
-        };
-        let quarantine_error = if restore_error.is_some() {
-            match rejected_snapshot {
-                Some(rejected_snapshot) => self
-                    .quarantine_runtime_session_snapshot_if_current(id, rejected_snapshot)
-                    .await
-                    .err(),
-                None => self.quarantine_runtime_session_snapshot(id).await.err(),
-            }
-        } else {
-            None
-        };
         match self.discard_live_session(id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(discard_error) => {
@@ -3917,18 +3947,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to discard live session after runtime-backed projection update failure"
                 );
             }
-        }
-        if let Some(restore_error) = restore_error {
-            if let Some(quarantine_error) = quarantine_error {
-                return SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    format!(
-                        "session-store projection update failed ({error}); runtime snapshot restore failed: {restore_error}; runtime snapshot quarantine also failed: {quarantine_error}"
-                    ),
-                ));
-            }
-            return SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "session-store projection update failed ({error}); runtime snapshot restore failed and runtime snapshot was quarantined: {restore_error}"
-            )));
         }
         SessionError::Store(Box::new(error))
     }
@@ -3966,23 +3984,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         SessionError::Store(Box::new(error))
     }
 
-    async fn quarantine_runtime_session_snapshot(
-        &self,
-        id: &SessionId,
-    ) -> Result<(), SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(());
-        };
-        runtime_store
-            .clear_session_snapshot(&Self::runtime_id_for_session(id))
-            .await
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to quarantine rejected runtime session snapshot: {error}"
-                )))
-            })
-    }
-
     async fn quarantine_runtime_session_snapshot_if_current(
         &self,
         id: &SessionId,
@@ -3999,7 +4000,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to quarantine rejected runtime session snapshot: {error}"
                 )))
             })?;
-        if !cleared {
+        if cleared {
+            self.quarantined_runtime_projection_fallbacks
+                .lock()
+                .await
+                .insert(id.clone());
+        } else {
             tracing::warn!(
                 session_id = %id,
                 "runtime snapshot changed before fail-closed quarantine; leaving newer runtime authority intact"
@@ -4008,137 +4014,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
-    async fn restore_runtime_snapshot_from_session_store(
-        &self,
-        id: &SessionId,
-    ) -> Result<(), SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(());
-        };
-        let session = match self.store.load(id).await {
-            Ok(Some(session)) => session,
-            Ok(None) => {
-                tracing::warn!(
-                    session_id = %id,
-                    "cannot restore runtime snapshot after projection failure because SessionStore row is missing"
-                );
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "cannot restore runtime snapshot after projection failure because SessionStore row {id} is missing"
-                    )),
-                ));
-            }
-            Err(error) => {
-                tracing::error!(
-                    session_id = %id,
-                    error = %error,
-                    "failed to load SessionStore row for runtime snapshot restore"
-                );
-                return Err(SessionError::Store(Box::new(error)));
-            }
-        };
-        let session_snapshot = match serde_json::to_vec(&session) {
-            Ok(session_snapshot) => session_snapshot,
-            Err(error) => {
-                tracing::error!(
-                    session_id = %id,
-                    error = %error,
-                    "failed to serialize SessionStore row for runtime snapshot restore"
-                );
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to serialize SessionStore row for runtime snapshot restore: {error}"
-                    )),
-                ));
-            }
-        };
-        runtime_store
-            .commit_session_snapshot(
-                &Self::runtime_id_for_session(id),
-                SessionDelta { session_snapshot },
-            )
+    async fn runtime_projection_fallback_quarantined(&self, id: &SessionId) -> bool {
+        self.quarantined_runtime_projection_fallbacks
+            .lock()
             .await
-            .map_err(|error| {
-                tracing::error!(
-                    session_id = %id,
-                    error = %error,
-                    "failed to restore runtime snapshot from SessionStore row after projection failure"
-                );
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to restore runtime snapshot from SessionStore row after projection failure: {error}"
-                )))
-            })
-    }
-
-    async fn restore_runtime_snapshot_from_session_store_if_current(
-        &self,
-        id: &SessionId,
-        rejected_snapshot: &[u8],
-    ) -> Result<(), SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(());
-        };
-        let session = match self.store.load(id).await {
-            Ok(Some(session)) => session,
-            Ok(None) => {
-                tracing::warn!(
-                    session_id = %id,
-                    "cannot restore runtime snapshot after projection failure because SessionStore row is missing"
-                );
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "cannot restore runtime snapshot after projection failure because SessionStore row {id} is missing"
-                    )),
-                ));
-            }
-            Err(error) => {
-                tracing::error!(
-                    session_id = %id,
-                    error = %error,
-                    "failed to load SessionStore row for runtime snapshot restore"
-                );
-                return Err(SessionError::Store(Box::new(error)));
-            }
-        };
-        let replacement = match serde_json::to_vec(&session) {
-            Ok(session_snapshot) => session_snapshot,
-            Err(error) => {
-                tracing::error!(
-                    session_id = %id,
-                    error = %error,
-                    "failed to serialize SessionStore row for runtime snapshot restore"
-                );
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to serialize SessionStore row for runtime snapshot restore: {error}"
-                    )),
-                ));
-            }
-        };
-        let restored = runtime_store
-            .replace_session_snapshot_if_current(
-                &Self::runtime_id_for_session(id),
-                rejected_snapshot,
-                replacement,
-            )
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    session_id = %id,
-                    error = %error,
-                    "failed to conditionally restore runtime snapshot from SessionStore row after projection failure"
-                );
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to conditionally restore runtime snapshot from SessionStore row after projection failure: {error}"
-                )))
-            })?;
-        if !restored {
-            tracing::warn!(
-                session_id = %id,
-                "runtime snapshot changed before fail-closed restore; leaving newer runtime authority intact"
-            );
-        }
-        Ok(())
+            .contains(id)
     }
 
     async fn fail_closed_runtime_projection_preflight(
@@ -9306,6 +9186,7 @@ mod tests {
 
         let saved = save_verified_transcript_history_projection(
             store.as_ref(),
+            memory_blob_store().as_ref(),
             &incoming,
             &previous,
             previous_revision.clone(),
@@ -13365,7 +13246,7 @@ mod tests {
 
         let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         recovery_store
-            .save(&stale_partial_graph)
+            .save_authoritative_projection_if_current_revision(&stale_partial_graph, None)
             .await
             .expect("seed stale partial graph projection");
         let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
@@ -13630,7 +13511,7 @@ mod tests {
 
         let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         recovery_store
-            .save(&stale_projection)
+            .save_authoritative_projection_if_current_revision(&stale_projection, None)
             .await
             .expect("seed stale projection before second rewrite");
         let recovery_dir = tempfile::tempdir().expect("recovery tempdir");

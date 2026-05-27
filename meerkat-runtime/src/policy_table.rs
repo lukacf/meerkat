@@ -90,7 +90,7 @@ impl DefaultPolicyTable {
                 .is_some_and(|overlay| !overlay.dispatch_context.is_empty())
         {
             return pd(
-                ApplyMode::StageRunBoundary,
+                ApplyMode::StageRunStart,
                 if runtime_idle {
                     WakeMode::WakeIfIdle
                 } else {

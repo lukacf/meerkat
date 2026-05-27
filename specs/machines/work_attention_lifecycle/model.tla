@@ -114,13 +114,13 @@ StopPaused(expected_revision, at_utc_ms) ==
 
 
 Next ==
-    \/ \E expected_revision \in 0..2 : \E until_utc_ms \in OptionU64Values : PauseActive(expected_revision, until_utc_ms)
-    \/ \E expected_revision \in 0..2 : \E until_utc_ms \in OptionU64Values : PausePaused(expected_revision, until_utc_ms)
-    \/ \E expected_revision \in 0..2 : ResumePaused(expected_revision)
-    \/ \E expected_revision \in 0..2 : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E at_utc_ms \in 0..2 : SupersedeActive(expected_revision, arg_superseded_by_binding_key, at_utc_ms)
-    \/ \E expected_revision \in 0..2 : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E at_utc_ms \in 0..2 : SupersedePaused(expected_revision, arg_superseded_by_binding_key, at_utc_ms)
-    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : StopActive(expected_revision, at_utc_ms)
-    \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : StopPaused(expected_revision, at_utc_ms)
+    \/ \E expected_revision \in {revision} : \E until_utc_ms \in OptionU64Values : PauseActive(expected_revision, until_utc_ms)
+    \/ \E expected_revision \in {revision} : \E until_utc_ms \in OptionU64Values : PausePaused(expected_revision, until_utc_ms)
+    \/ \E expected_revision \in {revision} : ResumePaused(expected_revision)
+    \/ \E expected_revision \in {revision} : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E at_utc_ms \in 0..2 : SupersedeActive(expected_revision, arg_superseded_by_binding_key, at_utc_ms)
+    \/ \E expected_revision \in {revision} : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E at_utc_ms \in 0..2 : SupersedePaused(expected_revision, arg_superseded_by_binding_key, at_utc_ms)
+    \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : StopActive(expected_revision, at_utc_ms)
+    \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : StopPaused(expected_revision, at_utc_ms)
     \/ TerminalStutter
 
 live_has_no_terminal_time == (((phase # "Active") /\ (phase # "Paused")) \/ (terminal_at_utc_ms = None))

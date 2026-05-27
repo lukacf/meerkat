@@ -250,12 +250,14 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
     }
     let attention_policy =
         meerkat_runtime::DefaultPolicyTable::resolve(&attention_continuation, true);
+    assert_eq!(attention_policy.apply_mode, ApplyMode::StageRunStart);
     assert_eq!(attention_policy.drain_policy, DrainPolicy::QueueNextTurn);
     let attention_semantics =
         meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_input(
             &attention_policy,
             &attention_continuation,
         );
+    assert_eq!(attention_semantics.boundary, RunApplyBoundary::RunStart);
     assert_eq!(
         attention_semantics.execution_kind,
         RuntimeExecutionKind::ContentTurn

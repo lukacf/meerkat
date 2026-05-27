@@ -48,7 +48,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Released`
 - `Blocked`
 - `LinkValidated`
-- `Closed`(terminal_state: WorkLifecycleState)
+- `Closed`(terminal_state: WorkLifecycleState, at_utc_ms: u64)
 - `EvidenceAdded`
 
 ## Helpers

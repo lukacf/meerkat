@@ -4164,7 +4164,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 let Some(ty) = binding_types.get(binding.as_str()) else {
                     return self.machine_transition_name(instance_id, transition);
                 };
-                let domain = self.binding_domain_for_type(ty);
+                let domain = self.binding_domain_for_binding(instance_id, binding.as_str(), ty);
                 push_fmt(&mut prefix, format_args!("\\E {local} \\in {domain} : "));
             }
             let args = transition
@@ -4193,6 +4193,21 @@ impl<'a> CompositionTlaCompiler<'a> {
             | TypeRef::Option(_)
             | TypeRef::Map(_, _) => domain_constant_name(ty),
         }
+    }
+
+    fn binding_domain_for_binding(&self, instance_id: &str, binding: &str, ty: &TypeRef) -> String {
+        if binding == "expected_revision"
+            && matches!(ty, TypeRef::U64)
+            && self
+                .machine(instance_id)
+                .state
+                .fields
+                .iter()
+                .any(|field| field.name.as_str() == "revision" && matches!(field.ty, TypeRef::U64))
+        {
+            return format!("{{{}}}", self.field_var(instance_id, "revision"));
+        }
+        self.binding_domain_for_type(ty)
     }
 
     fn machine_vars(&self) -> Vec<String> {
@@ -4877,7 +4892,13 @@ impl<'a> CompositionTlaCompiler<'a> {
     }
 
     fn render_entry_packet_admissibility_helpers(&self, out: &mut String) {
-        if self.schema.entry_inputs.is_empty() {
+        if self.schema.entry_inputs.is_empty()
+            && !self
+                .schema
+                .witnesses
+                .iter()
+                .any(|witness| !witness.preload_inputs.is_empty())
+        {
             return;
         }
 
@@ -5263,37 +5284,43 @@ impl<'a> CompositionTlaCompiler<'a> {
                 continue;
             }
 
+            pushln!(
+                out,
+                "    LET next_script_input == IF Len(witness_remaining_script_inputs) > 0 THEN Head(witness_remaining_script_inputs) ELSE witness_current_script_input"
+            );
+            pushln!(
+                out,
+                "        next_remaining_script_inputs == IF Len(witness_remaining_script_inputs) > 0 THEN Tail(witness_remaining_script_inputs) ELSE <<>>"
+            );
+            pushln!(out, "    IN");
             pushln!(out, "    /\\ witness_current_script_input # None");
             writeln!(
                 out,
                 "    /\\ ~(witness_current_script_input \\in SeqElements(pending_inputs))"
             )
             .expect("write to string");
-            pushln!(
-                out,
-                "    /\\ EntryPacketAdmissible(Head(witness_remaining_script_inputs))"
-            );
+            pushln!(out, "    /\\ EntryPacketAdmissible(next_script_input)");
             pushln!(out, "    /\\ Len(pending_inputs) = 0");
             pushln!(out, "    /\\ Len(pending_routes) = 0");
             pushln!(out, "    /\\ Len(witness_remaining_script_inputs) > 0");
             writeln!(
                 out,
-                "    /\\ pending_inputs' = Append(pending_inputs, Head(witness_remaining_script_inputs))"
+                "    /\\ pending_inputs' = Append(pending_inputs, next_script_input)"
             )
             .expect("write to string");
             writeln!(
                 out,
-                "    /\\ observed_inputs' = observed_inputs \\cup {{Head(witness_remaining_script_inputs)}}"
+                "    /\\ observed_inputs' = observed_inputs \\cup {{next_script_input}}"
             )
             .expect("write to string");
             writeln!(
                 out,
-                "    /\\ witness_current_script_input' = Head(witness_remaining_script_inputs)"
+                "    /\\ witness_current_script_input' = next_script_input"
             )
             .expect("write to string");
             writeln!(
                 out,
-                "    /\\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)"
+                "    /\\ witness_remaining_script_inputs' = next_remaining_script_inputs"
             )
             .expect("write to string");
             writeln!(out, "    /\\ model_step_count' = model_step_count + 1")
@@ -5863,10 +5890,12 @@ impl<'a> CompositionTlaCompiler<'a> {
                                 tla_ident(&route.name),
                                 tla_ident(&binding.to_field)
                             );
-                            owner_context_quantifiers.push(format!(
-                                "{var_name} \\in {}",
-                                render_type_domain_expr(&target_field.ty)
-                            ));
+                            let domain = self.binding_domain_for_binding(
+                                route.to.machine.as_str(),
+                                binding.to_field.as_str(),
+                                &target_field.ty,
+                            );
+                            owner_context_quantifiers.push(format!("{var_name} \\in {domain}"));
                             var_name
                         } else {
                             "\"owner_val\"".to_string()
@@ -6210,7 +6239,7 @@ impl<'a> MachineTlaCompiler<'a> {
                     let Some(ty) = binding_types.get(binding.as_str()) else {
                         return String::new();
                     };
-                    let domain = self.binding_domain_for_type(ty);
+                    let domain = self.binding_domain_for_binding(binding.as_str(), ty);
                     let local = binding_env
                         .get(binding.as_str())
                         .cloned()
@@ -6695,6 +6724,21 @@ impl<'a> MachineTlaCompiler<'a> {
             | TypeRef::Option(_)
             | TypeRef::Map(_, _) => domain_constant_name(ty),
         }
+    }
+
+    fn binding_domain_for_binding(&self, binding: &str, ty: &TypeRef) -> String {
+        if binding == "expected_revision"
+            && matches!(ty, TypeRef::U64)
+            && self
+                .schema
+                .state
+                .fields
+                .iter()
+                .any(|field| field.name.as_str() == "revision" && matches!(field.ty, TypeRef::U64))
+        {
+            return "{revision}".into();
+        }
+        self.binding_domain_for_type(ty)
     }
 
     fn compile_updates(

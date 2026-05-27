@@ -750,6 +750,34 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         //
         // =========================================================================
+        // WorkAttentionLifecycleMachine
+        // =========================================================================
+        (
+            "WorkAttentionLifecycleMachine",
+            "AttentionPaused",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph attention pause effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkAttentionLifecycleMachine",
+            "AttentionResumed",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph attention resume effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkAttentionLifecycleMachine",
+            "AttentionSuperseded",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph attention supersession effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkAttentionLifecycleMachine",
+            "AttentionStopped",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph attention stop effect retained inside the WorkGraph service projection path",
+        ),
+        //
+        // =========================================================================
         // AuthMachine — per-binding auth lease lifecycle (dogma #43/#44 resolved)
         // =========================================================================
         (

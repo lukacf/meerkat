@@ -263,7 +263,7 @@ machine! {
             Released,
             Blocked,
             LinkValidated,
-            Closed { terminal_state: WorkLifecycleState },
+            Closed { terminal_state: WorkLifecycleState, at_utc_ms: u64 },
             EvidenceAdded,
         }
 
@@ -344,7 +344,7 @@ machine! {
         disposition Released => local,
         disposition Blocked => local,
         disposition LinkValidated => local,
-        disposition Closed => local,
+        disposition Closed => routed [WorkAttentionLifecycleMachine],
         disposition EvidenceAdded => local,
 
         transition CreateOpen {
@@ -591,7 +591,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Completed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Completed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseInProgressCompleted {
@@ -605,7 +605,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Completed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Completed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseBlockedCompleted {
@@ -619,7 +619,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Completed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Completed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseOpenCancelled {
@@ -633,7 +633,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Cancelled
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Cancelled, at_utc_ms: at_utc_ms }
         }
 
         transition CloseInProgressCancelled {
@@ -647,7 +647,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Cancelled
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Cancelled, at_utc_ms: at_utc_ms }
         }
 
         transition CloseBlockedCancelled {
@@ -661,7 +661,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Cancelled
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Cancelled, at_utc_ms: at_utc_ms }
         }
 
         transition CloseOpenFailed {
@@ -675,7 +675,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Failed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Failed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseInProgressFailed {
@@ -689,7 +689,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Failed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Failed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseBlockedFailed {
@@ -703,7 +703,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Failed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Failed, at_utc_ms: at_utc_ms }
         }
 
         transition AddEvidenceOpen {

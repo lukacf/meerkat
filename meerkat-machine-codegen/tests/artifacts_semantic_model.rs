@@ -1,10 +1,14 @@
 #![allow(clippy::expect_used)]
 
 use meerkat_core::turn_execution_authority::ContentShape;
-use meerkat_machine_codegen::{render_machine_ci_cfg, render_machine_semantic_model};
+use meerkat_machine_codegen::{
+    render_composition_semantic_model, render_machine_ci_cfg, render_machine_semantic_model,
+};
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_work_attention_lifecycle_machine as work_attention_machine,
 };
+use meerkat_machine_schema::catalog::workgraph_attention_bundle_composition;
 use meerkat_machine_schema::{NamedTypeBinding, RustTypeAtom};
 
 fn tool_filter_override_line(rendered: &str) -> &str {
@@ -303,4 +307,36 @@ fn mob_semantic_model_is_identity_and_runtime_native() {
     // (MobMachine) and realtime attachment (MeerkatMachine).
     assert!(rendered.contains("SessionIdValues"));
     assert!(!rendered.contains("MeerkatIdValues"));
+}
+
+#[test]
+fn machine_semantic_model_binds_expected_revision_to_current_revision() {
+    let rendered = render_machine_semantic_model(&work_attention_machine());
+
+    assert!(
+        rendered.contains(r"\E expected_revision \in {revision} : \E until_utc_ms"),
+        "CAS revision witnesses must be sampled from the current machine revision, not a stale finite Nat range:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(r"\E expected_revision \in 0..2"),
+        "expected_revision must not use the generic numeric sample domain:\n{rendered}"
+    );
+}
+
+#[test]
+fn composition_route_owner_expected_revision_uses_target_revision() {
+    let rendered = render_composition_semantic_model(&workgraph_attention_bundle_composition());
+
+    assert!(
+        rendered.contains(
+            r"\E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :"
+        ),
+        "route-provided CAS revision witnesses must be sampled from the target machine revision:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(
+            r"\E route_owner_ctx_work_item_close_stops_attention_expected_revision \in NatValues"
+        ),
+        "route-provided expected_revision must not use the generic numeric domain:\n{rendered}"
+    );
 }

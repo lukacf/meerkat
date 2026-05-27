@@ -4,6 +4,7 @@ use super::{
     compositions::{
         auth_lease_bundle_composition, meerkat_mob_seam_composition, schedule_bundle_composition,
         schedule_mob_bundle_composition, schedule_runtime_bundle_composition,
+        workgraph_attention_bundle_composition,
     },
     dsl::{
         dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
@@ -441,6 +442,25 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
             &[scenario(
                 "auth-lease-lifecycle-publication",
                 "AuthMachine acquire, refresh, reauth, release, wake, and lifecycle transitions publish through the explicit auth lease handoff protocol",
+            )],
+        ),
+        composition_manifest_from_schema(
+            &workgraph_attention_bundle_composition(),
+            &[
+                anchor(
+                    "workgraph_attention_service_close",
+                    "meerkat-workgraph/src/service.rs",
+                    "WorkGraph service close path realizes the canonical WorkGraph Closed to WorkAttention Stop route with an atomic item-and-attention CAS update",
+                ),
+                anchor(
+                    "workgraph_attention_bundle_schema",
+                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "formal WorkGraph item closure to WorkAttention stop composition",
+                ),
+            ],
+            &[scenario(
+                "close-stops-attention",
+                "terminal WorkGraph item closure routes to WorkAttention Stop so live goal attention bindings cannot survive their target item",
             )],
         ),
     ]

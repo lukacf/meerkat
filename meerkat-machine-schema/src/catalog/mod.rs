@@ -9,7 +9,7 @@ use crate::{RustBinding, identity::MachineId};
 pub use compositions::{
     auth_lease_bundle_composition, compat_composition_schemas, meerkat_mob_seam_composition,
     schedule_bundle_composition, schedule_mob_bundle_composition,
-    schedule_runtime_bundle_composition,
+    schedule_runtime_bundle_composition, workgraph_attention_bundle_composition,
 };
 pub use coverage::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
@@ -55,6 +55,7 @@ pub fn canonical_composition_schemas() -> Vec<CompositionSchema> {
         schedule_runtime_bundle_composition(),
         schedule_mob_bundle_composition(),
         auth_lease_bundle_composition(),
+        workgraph_attention_bundle_composition(),
     ]
 }
 

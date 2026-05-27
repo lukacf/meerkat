@@ -10,8 +10,9 @@ Use this guide when an agent should coordinate durable work across sessions,
 compaction, restarts, schedules, or multiple agents.
 
 <Note>
-Agents write WorkGraph through tools. RPC, REST, and CLI are read-only
-observability surfaces in v1.
+Agents write general WorkGraph items through tools. RPC and REST are public
+observability surfaces; the CLI also has narrow session-goal and attention
+controls for trusted local operators.
 </Note>
 
 ## Create Work
@@ -128,9 +129,10 @@ agent should be able to claim the item.
 
 ## Observe From Host Surfaces
 
-Operators and UIs can inspect WorkGraph without mutating it:
+Operators and UIs can inspect WorkGraph without broad graph mutation:
 
-- CLI: `rkat workgraph list`, `show`, `ready`, `snapshot`, `events`
+- CLI: `rkat workgraph list`, `show`, `ready`, `snapshot`, `events`; plus
+  narrow `goal-*` and `attention-*` controls for session-bound goals
 - REST: `GET /workgraph/items`, `/workgraph/ready`, `/workgraph/snapshot`,
   `/workgraph/events`, plus public `POST /workgraph/goal/status` and
   `/workgraph/attention/list` observability routes
@@ -138,8 +140,9 @@ Operators and UIs can inspect WorkGraph without mutating it:
   `workgraph/snapshot`, `workgraph/events`, plus public
   `workgraph/goal/status` and `workgraph/attention/list` observability methods
 
-Goal and attention mutation APIs are trusted in-process host/runtime authority;
-they are not part of the public REST or JSON-RPC catalogs.
+Goal and attention mutation APIs are trusted in-process host/runtime authority.
+The CLI exposes only the local session-first subset it can complete safely;
+public REST and JSON-RPC keep these as observability-only.
 
 ## Agent Instruction Manual
 

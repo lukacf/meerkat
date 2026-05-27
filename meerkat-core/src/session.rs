@@ -355,22 +355,20 @@ fn validate_transcript_tool_result_shape(messages: &[Message]) -> Result<(), Tra
             }
         }
 
-        if let Message::Assistant(_) = message {
-            let tool_use_ids = assistant_tool_use_ids(message);
-            if tool_use_ids.is_empty() {
-                continue;
-            }
-            let Some(next) = messages.get(index + 1) else {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "assistant tool-use message {index} has no following tool_results"
-                )));
-            };
-            if !matches!(next, Message::ToolResults { .. }) {
-                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "assistant tool-use message {index} is followed by {}, not tool_results",
-                    message_role_name(next)
-                )));
-            }
+        let tool_use_ids = assistant_tool_use_ids(message);
+        if tool_use_ids.is_empty() {
+            continue;
+        }
+        let Some(next) = messages.get(index + 1) else {
+            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                "assistant tool-use message {index} has no following tool_results"
+            )));
+        };
+        if !matches!(next, Message::ToolResults { .. }) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                "assistant tool-use message {index} is followed by {}, not tool_results",
+                message_role_name(next)
+            )));
         }
     }
     Ok(())
@@ -3754,27 +3752,36 @@ mod tests {
         )));
 
         let parent_revision = session.transcript_revision().expect("parent revision");
-        let replacement = Message::BlockAssistant(BlockAssistantMessage::new(
-            vec![
-                AssistantBlock::Text {
-                    text: "compacted assistant trace".to_string(),
-                    meta: None,
-                },
-                AssistantBlock::ToolUse {
-                    id: "toolu_trace".to_string(),
-                    name: "trace_probe".to_string(),
-                    args: serde_json::value::RawValue::from_string(r#"{"path":"N-3"}"#.to_string())
+        let replacement = vec![
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
+                    AssistantBlock::Text {
+                        text: "compacted assistant trace".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "toolu_trace".to_string(),
+                        name: "trace_probe".to_string(),
+                        args: serde_json::value::RawValue::from_string(
+                            r#"{"path":"N-3"}"#.to_string(),
+                        )
                         .expect("valid tool args"),
-                    meta: None,
-                },
-            ],
-            StopReason::ToolUse,
-        ));
+                        meta: None,
+                    },
+                ],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "toolu_trace".to_string(),
+                "trace complete".to_string(),
+                false,
+            )]),
+        ];
 
         let commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![replacement],
+                replacement,
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
                 Some(parent_revision.clone()),
@@ -3803,6 +3810,43 @@ mod tests {
             &parent[1],
             Message::BlockAssistant(assistant)
                 if block_assistant_text(assistant).contains("original assistant trace")
+        ));
+    }
+
+    #[test]
+    fn transcript_rewrite_rejects_trailing_block_assistant_tool_call() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "plain answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = session.transcript_revision().expect("parent revision");
+
+        let err = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "lookup".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                ))],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect_err("rewrite should reject trailing unresolved block-assistant tool call");
+        assert!(matches!(
+            err,
+            TranscriptEditError::InvalidTranscriptShape(_)
         ));
     }
 

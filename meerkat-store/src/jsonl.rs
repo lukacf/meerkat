@@ -6,9 +6,8 @@ use crate::error::into_session_store_error;
 use crate::index::SqliteSessionIndex;
 use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
+use fs4::fs_std::FileExt;
 use meerkat_core::{Session, SessionId, SessionMeta};
-use nix::errno::Errno;
-use nix::fcntl::{Flock, FlockArg};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +21,13 @@ const SESSION_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_WRITE_LOCK_POLL: Duration = Duration::from_millis(10);
 
 struct SessionWriteLock {
-    _lock: Flock<std::fs::File>,
+    file: std::fs::File,
+}
+
+impl Drop for SessionWriteLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 /// File-based session store using JSONL format
@@ -263,16 +268,15 @@ impl JsonlStore {
             let start = Instant::now();
 
             loop {
-                match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-                    Ok(mut lock) => {
-                        lock.seek(SeekFrom::Start(0))?;
-                        lock.set_len(0)?;
-                        writeln!(lock, "pid={}", std::process::id())?;
-                        lock.sync_all()?;
-                        return Ok(SessionWriteLock { _lock: lock });
+                match file.try_lock_exclusive() {
+                    Ok(()) => {
+                        file.seek(SeekFrom::Start(0))?;
+                        file.set_len(0)?;
+                        writeln!(file, "pid={}", std::process::id())?;
+                        file.sync_all()?;
+                        return Ok(SessionWriteLock { file });
                     }
-                    Err((returned, errno)) if errno == Errno::EWOULDBLOCK => {
-                        file = returned;
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         if start.elapsed() >= SESSION_WRITE_LOCK_TIMEOUT {
                             return Err(StoreError::Internal(format!(
                                 "timed out acquiring JSONL session write lock for {id}"
@@ -280,9 +284,9 @@ impl JsonlStore {
                         }
                         std::thread::sleep(SESSION_WRITE_LOCK_POLL);
                     }
-                    Err((_returned, errno)) => {
+                    Err(err) => {
                         return Err(StoreError::Internal(format!(
-                            "failed to acquire JSONL session write lock for {id}: {errno}"
+                            "failed to acquire JSONL session write lock for {id}: {err}"
                         )));
                     }
                 }

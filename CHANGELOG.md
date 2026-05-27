@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.25] - 2026-05-27
+
+Meerkat 0.6.25 is a release packaging hotfix for Windows native assets.
+
+### Fixed
+
+- **Cross-platform JSONL session write locks** — replaces the Unix-only
+  `nix::fcntl` JSONL session lock with a portable `fs4` file lock so hosted
+  BuildBuddy Windows release builds compile the session store.
+
 ## [0.6.24] - 2026-05-27
 
 Meerkat 0.6.24 adds same-session transcript rewrite/restore flows and

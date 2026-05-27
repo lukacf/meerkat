@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.24] - 2026-05-27
+
+Meerkat 0.6.24 adds same-session transcript rewrite/restore flows and
+WorkGraph-backed goal attention surfaces.
+
 ### Added
 
+- **Same-session transcript rewrites** (#739) — adds durable transcript
+  rewrite revision history, restore support, canonical audit events, and
+  REST/RPC/Rust/Python/TypeScript/Web SDK surfaces for rewrite, revision, and
+  restore flows while preserving full assistant block traces.
 - **WorkGraph goals and attention bindings** (#740) — adds high-level goal
   creation/status flows, attention-bound continuations, scoped WorkGraph tool
   authority, and REST/RPC/CLI/SDK observability for goal and attention state.

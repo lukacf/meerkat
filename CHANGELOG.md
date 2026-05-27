@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-05-27
+
+Meerkat 0.6.26 fixes runtime-backed mob session continuity after transcript
+rewrite and checkpoint projection failures.
+
+### Fixed
+
+- **Mob runtime session continuity** (#741) — preserves runtime authority
+  across transcript rewrite projections, bridges storage-normalized append
+  histories after media externalization, and keeps checkpoint quarantine from
+  promoting unrelated store-only session projections.
+
 ## [0.6.25] - 2026-05-27
 
 Meerkat 0.6.25 is a release packaging hotfix for Windows native assets.

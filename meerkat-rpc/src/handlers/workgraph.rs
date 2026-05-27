@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use meerkat::{
-    ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter, WorkGraphSnapshotFilter, WorkItemFilter,
-    WorkItemId, WorkNamespace,
+    AttentionListRequest, GoalStatusRequest, ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter,
+    WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -25,7 +25,7 @@ pub struct WorkGraphIdParams {
 
 fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse {
     match error {
-        WorkGraphError::NotFound { .. } => {
+        WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => {
             RpcResponse::error(id, error::INVALID_PARAMS, error.to_string())
         }
         WorkGraphError::StaleRevision { .. }
@@ -62,6 +62,45 @@ pub async fn handle_get(
         .await
     {
         Ok(item) => RpcResponse::success(id, item),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_goal_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: GoalStatusRequest = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    match runtime.workgraph_service().goal_status(request).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+pub async fn handle_attention_list(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let request: AttentionListRequest = match params {
+        Some(raw) => match serde_json::from_str(raw.get()) {
+            Ok(filter) => filter,
+            Err(error) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid params: {error}"),
+                );
+            }
+        },
+        None => AttentionListRequest::default(),
+    };
+    match runtime.workgraph_service().list_attention(request).await {
+        Ok(result) => RpcResponse::success(id, result),
         Err(error) => map_workgraph_error(id, error),
     }
 }

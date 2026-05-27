@@ -171,6 +171,40 @@ MCP_CONFIG_ALIAS_TYPES = [
     "McpHttpTransport",
 ]
 
+WORKGRAPH_RPC_CONTRACT_TYPES = [
+    "AttentionBindingRequest",
+    "AttentionBindingResult",
+    "AttentionContextProjection",
+    "AttentionListRequest",
+    "AttentionListResult",
+    "AttentionProjectionPolicy",
+    "AttentionProjectionRequest",
+    "AttentionProjectionResult",
+    "AttentionProjectionText",
+    "AttentionReassignRequest",
+    "GoalStatusRequest",
+    "GoalStatusResult",
+    "ProjectedAttentionAuthority",
+    "WorkAttentionBinding",
+    "WorkItem",
+    "WorkItemRef",
+]
+
+WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES = [
+    "AttentionDelegatedAuthority",
+    "GoalAttentionTarget",
+    "WorkAttentionMode",
+    "WorkAttentionStatus",
+    "WorkAttentionTarget",
+    "WorkCompletionPolicy",
+    "WorkOwnerKind",
+]
+
+WORKGRAPH_RPC_CONTRACT_HELPER_TYPES = [
+    "WorkEvidenceRef",
+    "WorkOwnerKey",
+]
+
 MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireMemberRef",
     "WireMobBackendKind",
@@ -200,6 +234,7 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
 ]
 
 MOB_RPC_CONTRACT_HELPER_TYPES = [
+    "PublicTurnToolOverlay",
     "MobDefinitionInput",
     "MobBackendConfigInput",
     "MobEventRouterConfigInput",
@@ -240,6 +275,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireMobProfile",
         "WireMobToolConfig",
         "WireResolvedModelCapabilities",
+        "PublicTurnToolOverlay",
     ]
 )
 
@@ -369,6 +405,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         *MCP_CONFIG_HELPER_TYPES,
         *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
+        *WORKGRAPH_RPC_CONTRACT_TYPES,
+        *WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
+        *WORKGRAPH_RPC_CONTRACT_HELPER_TYPES,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
     }
@@ -990,6 +1029,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
+    for name in WORKGRAPH_RPC_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
+    for name in WORKGRAPH_RPC_CONTRACT_HELPER_TYPES:
+        append_python_contract_dataclass(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
@@ -1169,6 +1212,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireContentInput", wire_schema, "Wire-safe content input.")
     for name in MOB_RPC_CONTRACT_ALIAS_TYPES:
         append_python_alias(name, wire_schema, f"Mob RPC helper wire type for {name}.")
+    for name in WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"WorkGraph RPC helper wire type for {name}.")
     append_python_alias("McpLiveOperation", wire_schema, "Shared operation kind for live MCP operations.")
     append_python_alias("McpLiveOpStatus", wire_schema, "Shared status for live MCP operations.")
     for name in MCP_CONFIG_ALIAS_TYPES:
@@ -1441,6 +1486,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
+    for name in WORKGRAPH_RPC_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
+    for name in WORKGRAPH_RPC_CONTRACT_HELPER_TYPES:
+        append_typescript_contract_interface(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_interface("ScheduleIdParams", params_schema)
@@ -1450,6 +1499,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireContentBlock", wire_schema)
     append_typescript_alias("WireContentInput", wire_schema)
     for name in MOB_RPC_CONTRACT_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES:
         append_typescript_alias(name, wire_schema)
     append_typescript_alias("McpLiveOperation", wire_schema)
     append_typescript_alias("McpLiveOpStatus", wire_schema)

@@ -2799,6 +2799,1431 @@
     "title": "EventEnvelope",
     "type": "object"
   },
+  "AttentionBindingRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id"
+    ],
+    "title": "AttentionBindingRequest",
+    "type": "object"
+  },
+  "AttentionBindingResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      }
+    },
+    "required": [
+      "attention"
+    ],
+    "title": "AttentionBindingResult",
+    "type": "object"
+  },
+  "AttentionContextProjection": {
+    "$defs": {
+      "AttentionProjectionParentContext": {
+        "properties": {
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkStatus"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "work_ref",
+          "status",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionText": {
+        "properties": {
+          "rendered": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title",
+          "rendered",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "ProjectedAttentionAuthority": {
+        "properties": {
+          "can_add_evidence": {
+            "type": "boolean"
+          },
+          "can_close_if_policy_allows": {
+            "type": "boolean"
+          },
+          "can_close_own_review_item": {
+            "default": false,
+            "type": "boolean"
+          },
+          "can_close_parent": {
+            "type": "boolean"
+          },
+          "can_request_closure": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "can_add_evidence",
+          "can_request_closure",
+          "can_close_if_policy_allows",
+          "can_close_parent"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkEvidenceRef": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority": {
+        "$ref": "#/$defs/ProjectedAttentionAuthority"
+      },
+      "binding_id": {
+        "type": "string"
+      },
+      "binding_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "evidence_refs": {
+        "items": {
+          "$ref": "#/$defs/WorkEvidenceRef"
+        },
+        "type": "array"
+      },
+      "item_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "mode": {
+        "$ref": "#/$defs/WorkAttentionMode"
+      },
+      "parent_context": {
+        "items": {
+          "$ref": "#/$defs/AttentionProjectionParentContext"
+        },
+        "type": "array"
+      },
+      "parent_refs": {
+        "items": {
+          "$ref": "#/$defs/WorkItemRef"
+        },
+        "type": "array"
+      },
+      "text": {
+        "$ref": "#/$defs/AttentionProjectionText"
+      },
+      "work_ref": {
+        "$ref": "#/$defs/WorkItemRef"
+      }
+    },
+    "required": [
+      "binding_id",
+      "work_ref",
+      "mode",
+      "binding_revision",
+      "item_revision",
+      "authority",
+      "text"
+    ],
+    "title": "AttentionContextProjection",
+    "type": "object"
+  },
+  "AttentionContinueOutcome": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "accepted",
+      "deduplicated",
+      "rejected"
+    ],
+    "title": "AttentionContinueOutcome",
+    "type": "string"
+  },
+  "AttentionContinueResult": {
+    "$defs": {
+      "AttentionContinueOutcome": {
+        "enum": [
+          "accepted",
+          "deduplicated",
+          "rejected"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "existing_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "input_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "outcome": {
+        "$ref": "#/$defs/AttentionContinueOutcome"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "outcome"
+    ],
+    "title": "AttentionContinueResult",
+    "type": "object"
+  },
+  "AttentionDelegatedAuthority": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "add_evidence",
+      "close_own_review_item",
+      "request_closure",
+      "close_if_policy_allows"
+    ],
+    "title": "AttentionDelegatedAuthority",
+    "type": "string"
+  },
+  "AttentionListRequest": {
+    "$defs": {
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "target": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "title": "AttentionListRequest",
+    "type": "object"
+  },
+  "AttentionListResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "items": {
+          "$ref": "#/$defs/WorkAttentionBinding"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "attention"
+    ],
+    "title": "AttentionListResult",
+    "type": "object"
+  },
+  "AttentionPauseRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "until": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision"
+    ],
+    "title": "AttentionPauseRequest",
+    "type": "object"
+  },
+  "AttentionProjectionPolicy": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "include_parent_context": {
+        "default": true,
+        "type": "boolean"
+      },
+      "max_text_chars": {
+        "default": 4096,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "title": "AttentionProjectionPolicy",
+    "type": "object"
+  },
+  "AttentionProjectionRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id"
+    ],
+    "title": "AttentionProjectionRequest",
+    "type": "object"
+  },
+  "AttentionProjectionResult": {
+    "$defs": {
+      "AttentionContextProjection": {
+        "properties": {
+          "authority": {
+            "$ref": "#/$defs/ProjectedAttentionAuthority"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "binding_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/$defs/WorkEvidenceRef"
+            },
+            "type": "array"
+          },
+          "item_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "parent_context": {
+            "items": {
+              "$ref": "#/$defs/AttentionProjectionParentContext"
+            },
+            "type": "array"
+          },
+          "parent_refs": {
+            "items": {
+              "$ref": "#/$defs/WorkItemRef"
+            },
+            "type": "array"
+          },
+          "text": {
+            "$ref": "#/$defs/AttentionProjectionText"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "mode",
+          "binding_revision",
+          "item_revision",
+          "authority",
+          "text"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionParentContext": {
+        "properties": {
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkStatus"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "work_ref",
+          "status",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionText": {
+        "properties": {
+          "rendered": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title",
+          "rendered",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "ProjectedAttentionAuthority": {
+        "properties": {
+          "can_add_evidence": {
+            "type": "boolean"
+          },
+          "can_close_if_policy_allows": {
+            "type": "boolean"
+          },
+          "can_close_own_review_item": {
+            "default": false,
+            "type": "boolean"
+          },
+          "can_close_parent": {
+            "type": "boolean"
+          },
+          "can_request_closure": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "can_add_evidence",
+          "can_request_closure",
+          "can_close_if_policy_allows",
+          "can_close_parent"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkEvidenceRef": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "projection": {
+        "$ref": "#/$defs/AttentionContextProjection"
+      }
+    },
+    "required": [
+      "projection"
+    ],
+    "title": "AttentionProjectionResult",
+    "type": "object"
+  },
+  "AttentionProjectionText": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "rendered": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "title",
+      "rendered",
+      "truncated"
+    ],
+    "title": "AttentionProjectionText",
+    "type": "object"
+  },
+  "AttentionReassignRequest": {
+    "$defs": {
+      "GoalAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "target": {
+        "$ref": "#/$defs/GoalAttentionTarget"
+      }
+    },
+    "required": [
+      "binding_id",
+      "target"
+    ],
+    "title": "AttentionReassignRequest",
+    "type": "object"
+  },
+  "AttentionResumeRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision"
+    ],
+    "title": "AttentionResumeRequest",
+    "type": "object"
+  },
   "BridgeAck": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -8562,6 +9987,2859 @@
     },
     "title": "ExecutionPlacementIdentity",
     "type": "object"
+  },
+  "GoalAttentionTarget": {
+    "$defs": {
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "session",
+            "type": "string"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "GoalAttentionTarget"
+  },
+  "GoalConfirmRequest": {
+    "$defs": {
+      "WorkEvidenceRef": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "evidence": {
+        "$ref": "#/$defs/WorkEvidenceRef"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision",
+      "evidence"
+    ],
+    "title": "GoalConfirmRequest",
+    "type": "object"
+  },
+  "GoalConfirmResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItem": {
+        "properties": {
+          "claim": {
+            "anyOf": [
+              {
+                "properties": {
+                  "claimed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "lease_expires_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "owner": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "owner",
+                  "claimed_at"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "external_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "machine_state": {
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
+            "type": "object"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "not_before": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "properties": {
+                  "display_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snoozed_until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "open",
+              "in_progress",
+              "blocked",
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "terminal_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "realm_id",
+          "namespace",
+          "title",
+          "status",
+          "completion_policy",
+          "priority",
+          "machine_state",
+          "revision",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      },
+      "item": {
+        "$ref": "#/$defs/WorkItem"
+      }
+    },
+    "required": [
+      "item",
+      "attention"
+    ],
+    "title": "GoalConfirmResult",
+    "type": "object"
+  },
+  "GoalCreateRequest": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "GoalAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkCompletionPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "host_confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "principal_confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "supervisor",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "reviewer_quorum",
+                "type": "string"
+              },
+              "threshold": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "threshold"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "completion_policy": {
+        "$ref": "#/$defs/WorkCompletionPolicy",
+        "default": {
+          "kind": "self_attest"
+        }
+      },
+      "delegated_authority": {
+        "$ref": "#/$defs/AttentionDelegatedAuthority",
+        "default": "add_evidence"
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mode": {
+        "$ref": "#/$defs/WorkAttentionMode",
+        "default": "pursue"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "projection_policy": {
+        "$ref": "#/$defs/AttentionProjectionPolicy",
+        "default": {
+          "include_parent_context": true,
+          "max_text_chars": 4096
+        }
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "target": {
+        "$ref": "#/$defs/GoalAttentionTarget"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "title",
+      "target"
+    ],
+    "title": "GoalCreateRequest",
+    "type": "object"
+  },
+  "GoalCreateResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItem": {
+        "properties": {
+          "claim": {
+            "anyOf": [
+              {
+                "properties": {
+                  "claimed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "lease_expires_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "owner": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "owner",
+                  "claimed_at"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "external_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "machine_state": {
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
+            "type": "object"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "not_before": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "properties": {
+                  "display_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snoozed_until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "open",
+              "in_progress",
+              "blocked",
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "terminal_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "realm_id",
+          "namespace",
+          "title",
+          "status",
+          "completion_policy",
+          "priority",
+          "machine_state",
+          "revision",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      },
+      "item": {
+        "$ref": "#/$defs/WorkItem"
+      }
+    },
+    "required": [
+      "item",
+      "attention"
+    ],
+    "title": "GoalCreateResult",
+    "type": "object"
+  },
+  "GoalRequestCloseRequest": {
+    "$defs": {
+      "GoalTerminalStatus": {
+        "enum": [
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "$ref": "#/$defs/GoalTerminalStatus",
+        "default": "completed"
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision"
+    ],
+    "title": "GoalRequestCloseRequest",
+    "type": "object"
+  },
+  "GoalRequestCloseResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItem": {
+        "properties": {
+          "claim": {
+            "anyOf": [
+              {
+                "properties": {
+                  "claimed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "lease_expires_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "owner": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "owner",
+                  "claimed_at"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "external_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "machine_state": {
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
+            "type": "object"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "not_before": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "properties": {
+                  "display_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snoozed_until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "open",
+              "in_progress",
+              "blocked",
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "terminal_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "realm_id",
+          "namespace",
+          "title",
+          "status",
+          "completion_policy",
+          "priority",
+          "machine_state",
+          "revision",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      },
+      "item": {
+        "$ref": "#/$defs/WorkItem"
+      }
+    },
+    "required": [
+      "item",
+      "attention"
+    ],
+    "title": "GoalRequestCloseResult",
+    "type": "object"
+  },
+  "GoalStatusRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "binding_id"
+    ],
+    "title": "GoalStatusRequest",
+    "type": "object"
+  },
+  "GoalStatusResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItem": {
+        "properties": {
+          "claim": {
+            "anyOf": [
+              {
+                "properties": {
+                  "claimed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "lease_expires_at": {
+                    "format": "date-time",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "owner": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "owner",
+                  "claimed_at"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "external_refs": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "machine_state": {
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
+            "type": "object"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "not_before": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "properties": {
+                  "display_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snoozed_until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "open",
+              "in_progress",
+              "blocked",
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "terminal_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "realm_id",
+          "namespace",
+          "title",
+          "status",
+          "completion_policy",
+          "priority",
+          "machine_state",
+          "revision",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      },
+      "item": {
+        "$ref": "#/$defs/WorkItem"
+      }
+    },
+    "required": [
+      "item",
+      "attention"
+    ],
+    "title": "GoalStatusResult",
+    "type": "object"
+  },
+  "GoalTerminalStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "completed",
+      "cancelled",
+      "failed"
+    ],
+    "title": "GoalTerminalStatus",
+    "type": "string"
   },
   "HelpExecutionMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -14550,6 +18828,231 @@
       }
     ],
     "title": "PeerTransport"
+  },
+  "ProjectedAttentionAuthority": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "can_add_evidence": {
+        "type": "boolean"
+      },
+      "can_close_if_policy_allows": {
+        "type": "boolean"
+      },
+      "can_close_own_review_item": {
+        "default": false,
+        "type": "boolean"
+      },
+      "can_close_parent": {
+        "type": "boolean"
+      },
+      "can_request_closure": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "can_add_evidence",
+      "can_request_closure",
+      "can_close_if_policy_allows",
+      "can_close_parent"
+    ],
+    "title": "ProjectedAttentionAuthority",
+    "type": "object"
+  },
+  "PublicGoalCompletionPolicy": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "self_attest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "PublicGoalCompletionPolicy"
+  },
+  "PublicGoalCreateRequest": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "GoalAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PublicGoalCompletionPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "completion_policy": {
+        "$ref": "#/$defs/PublicGoalCompletionPolicy",
+        "default": {
+          "kind": "self_attest"
+        }
+      },
+      "delegated_authority": {
+        "$ref": "#/$defs/AttentionDelegatedAuthority",
+        "default": "add_evidence"
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mode": {
+        "$ref": "#/$defs/WorkAttentionMode",
+        "default": "pursue"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "projection_policy": {
+        "$ref": "#/$defs/AttentionProjectionPolicy",
+        "default": {
+          "include_parent_context": true,
+          "max_text_chars": 4096
+        }
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "target": {
+        "$ref": "#/$defs/GoalAttentionTarget"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "title",
+      "target"
+    ],
+    "title": "PublicGoalCreateRequest",
+    "type": "object"
+  },
+  "PublicGoalRequestCloseRequest": {
+    "$defs": {
+      "GoalTerminalStatus": {
+        "enum": [
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "$ref": "#/$defs/GoalTerminalStatus",
+        "default": "completed"
+      }
+    },
+    "required": [
+      "binding_id",
+      "expected_revision"
+    ],
+    "title": "PublicGoalRequestCloseRequest",
+    "type": "object"
   },
   "RealtimeAudioChunk": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -36282,6 +40785,537 @@
     "title": "WireUsage",
     "type": "object"
   },
+  "WorkAttentionBinding": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "created_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "delegated_authority": {
+        "$ref": "#/$defs/AttentionDelegatedAuthority"
+      },
+      "machine_state": {
+        "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+        "default": {
+          "lifecycle_phase": "active",
+          "paused_until_utc_ms": null,
+          "revision": 1,
+          "superseded_by_binding_key": null,
+          "terminal_at_utc_ms": null
+        }
+      },
+      "mode": {
+        "$ref": "#/$defs/WorkAttentionMode"
+      },
+      "projection_policy": {
+        "$ref": "#/$defs/AttentionProjectionPolicy",
+        "default": {
+          "include_parent_context": true,
+          "max_text_chars": 4096
+        }
+      },
+      "status": {
+        "$ref": "#/$defs/WorkAttentionStatus"
+      },
+      "target": {
+        "$ref": "#/$defs/WorkAttentionTarget"
+      },
+      "updated_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "work_ref": {
+        "$ref": "#/$defs/WorkItemRef"
+      }
+    },
+    "required": [
+      "binding_id",
+      "work_ref",
+      "target",
+      "mode",
+      "status",
+      "delegated_authority",
+      "created_at",
+      "updated_at"
+    ],
+    "title": "WorkAttentionBinding",
+    "type": "object"
+  },
+  "WorkAttentionBindingId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "string",
+    "type": "string"
+  },
+  "WorkAttentionMode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "pursue",
+      "coordinate",
+      "review",
+      "falsify",
+      "judge",
+      "observe"
+    ],
+    "title": "WorkAttentionMode",
+    "type": "string"
+  },
+  "WorkAttentionStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "state": {
+            "const": "active",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "state": {
+            "const": "paused",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "state": {
+            "const": "superseded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "state": {
+            "const": "stopped",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WorkAttentionStatus"
+  },
+  "WorkAttentionTarget": {
+    "$defs": {
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "session",
+            "type": "string"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "lowered_owner",
+            "type": "string"
+          },
+          "owner_key": {
+            "$ref": "#/$defs/WorkOwnerKey"
+          }
+        },
+        "required": [
+          "kind",
+          "owner_key"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WorkAttentionTarget"
+  },
+  "WorkCompletionPolicy": {
+    "$defs": {
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "self_attest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "host_confirmed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "principal_confirmed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "supervisor",
+            "type": "string"
+          },
+          "owner_key": {
+            "$ref": "#/$defs/WorkOwnerKey"
+          }
+        },
+        "required": [
+          "kind",
+          "owner_key"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "reviewer_quorum",
+            "type": "string"
+          },
+          "threshold": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "threshold"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WorkCompletionPolicy"
+  },
   "WorkGraphEventsResponse": {
     "$defs": {
       "WorkGraphEvent": {
@@ -36331,7 +41365,9 @@
           "blocked",
           "closed",
           "linked",
-          "evidence_added"
+          "evidence_added",
+          "attention_created",
+          "attention_updated"
         ],
         "type": "string"
       }
@@ -36382,6 +41418,94 @@
               },
               {
                 "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -36578,6 +41702,7 @@
           "namespace",
           "title",
           "status",
+          "completion_policy",
           "priority",
           "machine_state",
           "revision",
@@ -36604,6 +41729,237 @@
   },
   "WorkGraphSnapshot": {
     "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WorkEdge": {
         "properties": {
           "created_at": {
@@ -36678,6 +42034,94 @@
               }
             ]
           },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -36871,6 +42315,7 @@
           "namespace",
           "title",
           "status",
+          "completion_policy",
           "priority",
           "machine_state",
           "revision",
@@ -36878,12 +42323,63 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "all_namespaces": {
         "type": "boolean"
+      },
+      "attention": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/WorkAttentionBinding"
+        },
+        "type": "array"
       },
       "captured_at": {
         "format": "date-time",
@@ -36965,6 +42461,94 @@
           },
           {
             "type": "null"
+          }
+        ]
+      },
+      "completion_policy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "host_confirmed"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "principal_confirmed"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "supervisor"
+              },
+              "owner_key": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "principal",
+                      "agent",
+                      "session",
+                      "mob",
+                      "label"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "reviewer_quorum"
+              },
+              "threshold": {
+                "format": "uint16",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "threshold"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -37161,6 +42745,7 @@
       "namespace",
       "title",
       "status",
+      "completion_policy",
       "priority",
       "machine_state",
       "revision",
@@ -37168,6 +42753,27 @@
       "updated_at"
     ],
     "title": "WorkItem",
+    "type": "object"
+  },
+  "WorkItemRef": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "item_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": "string"
+      },
+      "realm_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "realm_id",
+      "namespace",
+      "item_id"
+    ],
+    "title": "WorkItemRef",
     "type": "object"
   }
 }

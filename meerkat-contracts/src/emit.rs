@@ -206,7 +206,43 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ExecutionPlacementIdentity": schema_for!(meerkat_core::ExecutionPlacementIdentity),
         "ScheduleListResult": schema_for!(crate::wire::ScheduleListResult),
         "ScheduleOccurrencesResult": schema_for!(crate::wire::ScheduleOccurrencesResult),
+        "AttentionBindingRequest": schema_for!(meerkat_workgraph::AttentionBindingRequest),
+        "AttentionBindingResult": schema_for!(meerkat_workgraph::AttentionBindingResult),
+        "AttentionDelegatedAuthority": schema_for!(meerkat_workgraph::AttentionDelegatedAuthority),
+        "AttentionContinueOutcome": schema_for!(meerkat_workgraph::AttentionContinueOutcome),
+        "AttentionContinueResult": schema_for!(meerkat_workgraph::AttentionContinueResult),
+        "AttentionListRequest": schema_for!(meerkat_workgraph::AttentionListRequest),
+        "AttentionListResult": schema_for!(meerkat_workgraph::AttentionListResult),
+        "AttentionPauseRequest": schema_for!(meerkat_workgraph::AttentionPauseRequest),
+        "AttentionResumeRequest": schema_for!(meerkat_workgraph::AttentionResumeRequest),
+        "AttentionContextProjection": schema_for!(meerkat_workgraph::AttentionContextProjection),
+        "AttentionProjectionPolicy": schema_for!(meerkat_workgraph::AttentionProjectionPolicy),
+        "AttentionProjectionRequest": schema_for!(meerkat_workgraph::AttentionProjectionRequest),
+        "AttentionProjectionResult": schema_for!(meerkat_workgraph::AttentionProjectionResult),
+        "AttentionProjectionText": schema_for!(meerkat_workgraph::AttentionProjectionText),
+        "AttentionReassignRequest": schema_for!(meerkat_workgraph::AttentionReassignRequest),
+        "GoalAttentionTarget": schema_for!(meerkat_workgraph::GoalAttentionTarget),
+        "GoalConfirmRequest": schema_for!(meerkat_workgraph::GoalConfirmRequest),
+        "GoalConfirmResult": schema_for!(meerkat_workgraph::GoalConfirmResult),
+        "GoalCreateRequest": schema_for!(meerkat_workgraph::GoalCreateRequest),
+        "GoalCreateResult": schema_for!(meerkat_workgraph::GoalCreateResult),
+        "GoalRequestCloseRequest": schema_for!(meerkat_workgraph::GoalRequestCloseRequest),
+        "GoalRequestCloseResult": schema_for!(meerkat_workgraph::GoalRequestCloseResult),
+        "GoalTerminalStatus": schema_for!(meerkat_workgraph::GoalTerminalStatus),
+        "GoalStatusRequest": schema_for!(meerkat_workgraph::GoalStatusRequest),
+        "GoalStatusResult": schema_for!(meerkat_workgraph::GoalStatusResult),
+        "PublicGoalCompletionPolicy": schema_for!(meerkat_workgraph::PublicGoalCompletionPolicy),
+        "PublicGoalCreateRequest": schema_for!(meerkat_workgraph::PublicGoalCreateRequest),
+        "PublicGoalRequestCloseRequest": schema_for!(meerkat_workgraph::PublicGoalRequestCloseRequest),
+        "ProjectedAttentionAuthority": schema_for!(meerkat_workgraph::ProjectedAttentionAuthority),
+        "WorkAttentionBinding": schema_for!(meerkat_workgraph::WorkAttentionBinding),
+        "WorkAttentionBindingId": schema_for!(meerkat_workgraph::WorkAttentionBindingId),
+        "WorkAttentionMode": schema_for!(meerkat_workgraph::WorkAttentionMode),
+        "WorkAttentionStatus": schema_for!(meerkat_workgraph::WorkAttentionStatus),
+        "WorkAttentionTarget": schema_for!(meerkat_workgraph::WorkAttentionTarget),
+        "WorkCompletionPolicy": schema_for!(meerkat_workgraph::WorkCompletionPolicy),
         "WorkItem": schema_for!(meerkat_workgraph::WorkItem),
+        "WorkItemRef": schema_for!(meerkat_workgraph::WorkItemRef),
         "WorkGraphSnapshot": schema_for!(meerkat_workgraph::WorkGraphSnapshot),
         "WorkGraphItemsResponse": schema_for!(meerkat_workgraph::WorkGraphItemsResponse),
         "WorkGraphEventsResponse": schema_for!(meerkat_workgraph::WorkGraphEventsResponse),
@@ -674,6 +710,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     fn rest_manual_components() -> Map<String, Value> {
         let mut components = Map::new();
         let json_value = schema_ref("JsonValue");
+        let public_turn_tool_overlay = schema_ref("PublicTurnToolOverlay");
         let content_input = serde_json::json!({
             "oneOf": [
                 { "type": "string" },
@@ -707,6 +744,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 "type": "object",
                 "additionalProperties": true
             }),
+        );
+        components.insert(
+            "WorkStatus".to_string(),
+            schema_for!(meerkat_workgraph::WorkStatus).into(),
         );
         components.insert(
             "ListSessionsResponse".to_string(),
@@ -761,6 +802,28 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                     ),
                 ],
                 vec!["config", "generation"],
+            ),
+        );
+        components.insert(
+            "PublicTurnToolOverlay".to_string(),
+            closed_object_schema(
+                vec![
+                    (
+                        "allowed_tools",
+                        nullable(serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" }
+                        })),
+                    ),
+                    (
+                        "blocked_tools",
+                        nullable(serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" }
+                        })),
+                    ),
+                ],
+                vec![],
             ),
         );
         components.insert(
@@ -839,7 +902,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                             "items": json_value
                         }),
                     ),
-                    ("flow_tool_overlay", json_value.clone()),
+                    ("flow_tool_overlay", public_turn_tool_overlay),
                     ("additional_instructions", string_array),
                 ],
                 vec!["session_id", "prompt"],
@@ -1099,10 +1162,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     }
 
     fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
-        if let Some(response_schema) =
-            meerkat_workgraph::workgraph_rest_response_schema(path, method)
+        if let Some((request_schema, response_schema)) =
+            meerkat_workgraph::workgraph_rest_request_response_schema(path, method)
         {
-            return RestOperationContract::json(response_schema);
+            return match request_schema {
+                Some(request_schema) => {
+                    RestOperationContract::with_json_request(request_schema, response_schema)
+                }
+                None => RestOperationContract::json(response_schema),
+            };
         }
 
         match (path, method) {
@@ -1292,6 +1360,65 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             .collect()
     }
 
+    fn rest_query_parameter(name: &str, schema: Value) -> Value {
+        serde_json::json!({
+            "name": name,
+            "in": "query",
+            "required": false,
+            "schema": schema,
+        })
+    }
+
+    fn rest_workgraph_query_parameters(path: &str, method: &str) -> Vec<Value> {
+        if method != "get" {
+            return Vec::new();
+        }
+        let string = || serde_json::json!({ "type": "string" });
+        let boolean = || serde_json::json!({ "type": "boolean" });
+        let integer = || serde_json::json!({ "type": "integer", "format": "int64" });
+        let string_array = || {
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" }
+            })
+        };
+        let work_status_array = || {
+            serde_json::json!({
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/WorkStatus" }
+            })
+        };
+        match path {
+            "/workgraph/items" | "/workgraph/snapshot" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+                rest_query_parameter("all_namespaces", boolean()),
+                rest_query_parameter("statuses", work_status_array()),
+                rest_query_parameter("labels", string_array()),
+                rest_query_parameter("include_terminal", boolean()),
+                rest_query_parameter("limit", integer()),
+            ],
+            "/workgraph/items/{id}" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+            ],
+            "/workgraph/ready" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+                rest_query_parameter("labels", string_array()),
+                rest_query_parameter("limit", integer()),
+            ],
+            "/workgraph/events" => vec![
+                rest_query_parameter("realm_id", string()),
+                rest_query_parameter("namespace", string()),
+                rest_query_parameter("all_namespaces", boolean()),
+                rest_query_parameter("after_seq", integer()),
+                rest_query_parameter("limit", integer()),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     fn rest_responses(contract: RestOperationContract) -> Value {
         serde_json::json!({
             "200": {
@@ -1341,7 +1468,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                             Value::String(description.to_string()),
                         );
                     }
-                    let parameters = rest_path_parameters(path.path);
+                    let mut parameters = rest_path_parameters(path.path);
+                    parameters.extend(rest_workgraph_query_parameters(path.path, operation.method));
                     if !parameters.is_empty() {
                         operation_map.insert("parameters".to_string(), Value::Array(parameters));
                     }
@@ -1996,6 +2124,31 @@ mod tests {
             Some("#/components/schemas/SessionDetailsResponse")
         );
 
+        let workgraph_items = &rest_openapi["paths"]["/workgraph/items"]["get"];
+        let workgraph_item_query_names = workgraph_items["parameters"]
+            .as_array()
+            .expect("workgraph items parameters")
+            .iter()
+            .filter(|parameter| {
+                parameter.get("in").and_then(serde_json::Value::as_str) == Some("query")
+            })
+            .filter_map(|parameter| parameter.get("name").and_then(serde_json::Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        for expected in [
+            "realm_id",
+            "namespace",
+            "all_namespaces",
+            "statuses",
+            "labels",
+            "include_terminal",
+            "limit",
+        ] {
+            assert!(
+                workgraph_item_query_names.contains(expected),
+                "WorkGraph items REST OpenAPI must expose query parameter {expected}"
+            );
+        }
+
         for descriptor in meerkat_workgraph::workgraph_rest_path_catalog() {
             for catalog_operation in descriptor.operations {
                 let operation = &rest_openapi["paths"][descriptor.path][catalog_operation.method];
@@ -2010,6 +2163,18 @@ mod tests {
                     catalog_operation.method,
                     descriptor.path
                 );
+                if let Some(request_schema) = catalog_operation.request_schema {
+                    let expected_request = format!("#/components/schemas/{request_schema}");
+                    assert_eq!(
+                        operation
+                            .pointer("/requestBody/content/application~1json/schema/$ref")
+                            .and_then(serde_json::Value::as_str),
+                        Some(expected_request.as_str()),
+                        "{} {} must expose its generated REST request body",
+                        catalog_operation.method,
+                        descriptor.path
+                    );
+                }
             }
         }
 
@@ -2228,6 +2393,114 @@ mod tests {
                 );
             }
         }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_workgraph_rpc_contract_names_resolve_to_exported_schemas() {
+        let output_dir = temp_output_dir("typed-workgraph-rpc-catalog-resolution");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let exported_contracts = ["params.json", "wire-types.json"]
+            .into_iter()
+            .flat_map(|file| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(output_dir.join(file)).unwrap()).unwrap();
+                value
+                    .as_object()
+                    .expect("schema artifact is an object")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let rpc_methods: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rpc-methods.json")).unwrap())
+                .unwrap();
+
+        for method in rpc_methods["methods"].as_array().expect("methods array") {
+            let Some(name) = method["name"].as_str() else {
+                continue;
+            };
+            if !(name.starts_with("workgraph/goal/") || name.starts_with("workgraph/attention/")) {
+                continue;
+            }
+            for field in ["params_type", "result_type"] {
+                let Some(contract_name) = method.get(field).and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                assert!(
+                    exported_contracts.contains(contract_name),
+                    "{name} advertises {field}={contract_name}, but no emitted schema exports that contract"
+                );
+            }
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_workgraph_goal_attention_contracts_are_exported() {
+        let output_dir = temp_output_dir("workgraph-goal-attention-contracts");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let contracts = wire_types.as_object().expect("wire-types object");
+        for expected in [
+            "AttentionBindingRequest",
+            "AttentionBindingResult",
+            "AttentionContinueOutcome",
+            "AttentionContinueResult",
+            "AttentionDelegatedAuthority",
+            "AttentionContextProjection",
+            "AttentionListRequest",
+            "AttentionListResult",
+            "AttentionPauseRequest",
+            "AttentionProjectionPolicy",
+            "AttentionProjectionRequest",
+            "AttentionProjectionResult",
+            "AttentionProjectionText",
+            "AttentionReassignRequest",
+            "GoalAttentionTarget",
+            "GoalConfirmRequest",
+            "GoalConfirmResult",
+            "GoalCreateRequest",
+            "GoalCreateResult",
+            "GoalRequestCloseRequest",
+            "GoalRequestCloseResult",
+            "GoalTerminalStatus",
+            "GoalStatusRequest",
+            "GoalStatusResult",
+            "PublicGoalCompletionPolicy",
+            "PublicGoalCreateRequest",
+            "PublicGoalRequestCloseRequest",
+            "ProjectedAttentionAuthority",
+            "WorkAttentionBinding",
+            "WorkAttentionBindingId",
+            "WorkAttentionMode",
+            "WorkAttentionStatus",
+            "WorkAttentionTarget",
+            "WorkCompletionPolicy",
+            "WorkItemRef",
+        ] {
+            assert!(
+                contracts.contains_key(expected),
+                "missing WorkGraph goal/attention schema {expected}"
+            );
+        }
+
+        let goal_create = contracts
+            .get("GoalCreateRequest")
+            .expect("GoalCreateRequest schema");
+        assert!(
+            goal_create
+                .pointer("/properties/target")
+                .is_some_and(|target| target.to_string().contains("GoalAttentionTarget")),
+            "goal create must use the narrow host target contract"
+        );
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

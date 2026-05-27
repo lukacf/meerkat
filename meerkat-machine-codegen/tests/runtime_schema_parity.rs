@@ -3,7 +3,8 @@
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine_production_schema, dsl_meerkat_machine, dsl_meerkat_machine_production_schema,
     dsl_mob_machine, dsl_mob_machine_production_schema, dsl_occurrence_lifecycle_machine,
-    dsl_schedule_lifecycle_machine, dsl_workgraph_lifecycle_machine,
+    dsl_schedule_lifecycle_machine, dsl_work_attention_lifecycle_machine,
+    dsl_workgraph_lifecycle_machine,
     meerkat_machine::{MeerkatMachineInput, MeerkatMachineInputVariant},
     meerkat_machine_runtime_internal_input_variants,
     mob_machine::{MobMachineInput, MobMachineInputVariant},
@@ -97,8 +98,8 @@ fn schema_shape_mismatches_for_schemas(
     mismatches
 }
 
-fn phase1_schema_parity_cases() -> [SchemaParityCase; 6] {
-    [
+fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
+    vec![
         SchemaParityCase {
             machine: "MeerkatMachine",
             catalog_schema: dsl_meerkat_machine_production_schema,
@@ -130,6 +131,12 @@ fn phase1_schema_parity_cases() -> [SchemaParityCase; 6] {
             catalog_schema: dsl_workgraph_lifecycle_machine,
             production_schema:
                 meerkat_workgraph::machine_schema_exports::workgraph_lifecycle_schema,
+        },
+        SchemaParityCase {
+            machine: "WorkAttentionLifecycleMachine",
+            catalog_schema: dsl_work_attention_lifecycle_machine,
+            production_schema:
+                meerkat_workgraph::machine_schema_exports::work_attention_lifecycle_schema,
         },
     ]
 }

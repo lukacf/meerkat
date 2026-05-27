@@ -38,6 +38,10 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    AttentionListRequest,
+    AttentionListResult,
+    GoalStatusRequest,
+    GoalStatusResult,
     LiveRefreshResult,
     LiveRefreshStatus,
     McpServerConfig,
@@ -50,6 +54,7 @@ from .generated.types import (
     MobTurnStartParams,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
+    PublicTurnToolOverlay,
     WireAuthBindingRef,
     WireBudgetSplitPolicy,
     WireContentInput,
@@ -1328,6 +1333,15 @@ class MeerkatClient:
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
 
+    async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
+        return await self._request("workgraph/goal/status", _wire_params(params))
+
+    async def list_workgraph_attention(
+        self,
+        params: AttentionListRequest | None = None,
+    ) -> AttentionListResult:
+        return await self._request("workgraph/attention/list", _wire_params(params or {}))
+
     async def mcp_add(
         self,
         session_id: str,
@@ -1829,7 +1843,7 @@ class MeerkatClient:
         prompt: WireContentInput,
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
+        flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -2447,7 +2461,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
+        flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -2463,7 +2477,7 @@ class MeerkatClient:
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
         if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = flow_tool_overlay
+            params["flow_tool_overlay"] = _wire_value(flow_tool_overlay)
         if additional_instructions is not None:
             params["additional_instructions"] = additional_instructions
         if keep_alive is not None:
@@ -2491,7 +2505,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
+        flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -2514,7 +2528,7 @@ class MeerkatClient:
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
         if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = flow_tool_overlay
+            params["flow_tool_overlay"] = _wire_value(flow_tool_overlay)
         if additional_instructions is not None:
             params["additional_instructions"] = additional_instructions
         if keep_alive is not None:

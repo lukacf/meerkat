@@ -2804,6 +2804,7 @@ capabilities = [{capability_values}]
         let starting_state = SessionSystemContextState {
             pending: vec![initial_pending.clone()],
             applied: Vec::new(),
+            active_turn_pending_keys: std::collections::BTreeSet::new(),
             seen: std::collections::BTreeMap::from([(
                 "ctx-initial".to_string(),
                 SeenSystemContextKey {
@@ -2812,11 +2813,11 @@ capabilities = [{capability_values}]
                     state: SeenSystemContextState::Pending,
                 },
             )]),
-            active_turn_pending_keys: Default::default(),
         };
         let agent_state = SessionSystemContextState {
             pending: Vec::new(),
             applied: vec![initial_pending.clone()],
+            active_turn_pending_keys: std::collections::BTreeSet::new(),
             seen: std::collections::BTreeMap::from([(
                 "ctx-initial".to_string(),
                 SeenSystemContextKey {
@@ -2825,7 +2826,6 @@ capabilities = [{capability_values}]
                     state: SeenSystemContextState::Applied,
                 },
             )]),
-            active_turn_pending_keys: Default::default(),
         };
         let current_registry_state = SessionSystemContextState {
             pending: vec![initial_pending, concurrent_pending.clone()],

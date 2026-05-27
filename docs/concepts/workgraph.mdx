@@ -46,8 +46,8 @@ topology.
 - evidence references
 - event history and current-state projections
 
-Machines and services own these semantics. Tools and read-only host surfaces
-act on or observe that state; they do not reinterpret it.
+Machines and services own these semantics. Tools and host surfaces act on or
+observe that state; they do not reinterpret it.
 
 ## Boundaries
 
@@ -68,9 +68,11 @@ that every group is semantically meaningful.
 
 ## Surfaces
 
-Agents mutate WorkGraph through WorkGraph tools. Host APIs, REST, and CLI expose
-read-only observability so humans and UIs can inspect items, ready work,
-snapshots, and events.
+Agents mutate general WorkGraph items through WorkGraph tools. Host APIs, REST,
+and CLI expose observability so humans and UIs can inspect items, ready work,
+snapshots, events, goal status, and attention bindings. CLI and trusted
+in-process hosts additionally expose narrow session-goal attention controls;
+public REST/RPC remain observational for those controls.
 
 ## See Also
 

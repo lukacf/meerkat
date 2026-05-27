@@ -28,10 +28,22 @@ import type {
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
+  AttentionDelegatedAuthority,
+  AttentionProjectionPolicy,
+  WorkAttentionMode,
+  WorkAttentionStatus,
+  WorkCompletionPolicy,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
 export type { TurnTerminalCauseKind, Usage } from "./events.js";
+export type {
+  AttentionDelegatedAuthority,
+  AttentionProjectionPolicy,
+  WorkAttentionMode,
+  WorkAttentionStatus,
+  WorkCompletionPolicy,
+} from "./generated/types.js";
 
 declare const peerIdBrand: unique symbol;
 declare const peerCorrelationIdBrand: unique symbol;
@@ -977,13 +989,21 @@ export type WorkGraphEventKind =
   | "blocked"
   | "closed"
   | "linked"
-  | "evidence_added";
+  | "evidence_added"
+  | "attention_created"
+  | "attention_updated";
 
 export type WorkGraphOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
 
 export interface WorkGraphOwnerKey {
   readonly kind: WorkGraphOwnerKind;
   readonly id: string;
+}
+
+export interface WorkItemRef {
+  readonly realmId: string;
+  readonly namespace: string;
+  readonly itemId: string;
 }
 
 export interface WorkGraphOwner {
@@ -1018,9 +1038,11 @@ export interface WorkItem {
   readonly description?: string;
   readonly status: WorkGraphStatus;
   readonly priority: WorkGraphPriority;
+  readonly completionPolicy: WorkCompletionPolicy;
   readonly labels: readonly string[];
   readonly owner?: WorkGraphOwner;
   readonly claim?: WorkGraphClaim;
+  readonly machineState: Record<string, unknown>;
   readonly revision: number;
   readonly dueAt?: string;
   readonly notBefore?: string;
@@ -1055,6 +1077,41 @@ export interface WorkItemListResult {
   readonly items: readonly WorkItem[];
 }
 
+export interface WorkGraphGoalResult {
+  readonly item: WorkItem;
+  readonly attention: WorkAttentionBinding;
+}
+
+export interface WorkGraphGoalStatusRequest extends WorkGraphItemLookupOptions {
+  readonly bindingId: string;
+}
+
+export type WorkGraphAttentionTarget =
+  | { readonly kind: "session"; readonly sessionId: string }
+  | { readonly kind: "loweredOwner"; readonly ownerKey: WorkGraphOwnerKey };
+
+export interface WorkAttentionBinding {
+  readonly bindingId: string;
+  readonly createdAt: string;
+  readonly delegatedAuthority: AttentionDelegatedAuthority;
+  readonly machineState?: Record<string, unknown>;
+  readonly mode: WorkAttentionMode;
+  readonly projectionPolicy?: AttentionProjectionPolicy;
+  readonly status: WorkAttentionStatus;
+  readonly target: WorkGraphAttentionTarget;
+  readonly updatedAt: string;
+  readonly workRef: WorkItemRef;
+}
+
+export interface WorkGraphAttentionListRequest extends WorkGraphItemLookupOptions {
+  readonly status?: WorkAttentionStatus;
+  readonly target?: WorkGraphAttentionTarget;
+}
+
+export interface WorkGraphAttentionListResult {
+  readonly attention: readonly WorkAttentionBinding[];
+}
+
 export interface WorkGraphEventsResult {
   readonly events: readonly WorkGraphEvent[];
 }
@@ -1067,6 +1124,7 @@ export interface WorkGraphSnapshot {
   readonly eventHighWaterMark?: number;
   readonly items: readonly WorkItem[];
   readonly edges: readonly WorkGraphEdge[];
+  readonly attention: readonly WorkAttentionBinding[];
   readonly readyItemIds: readonly string[];
 }
 

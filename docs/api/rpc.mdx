@@ -174,6 +174,8 @@ subset.
 | `workgraph/ready` | WorkGraph | List ready WorkGraph items (workgraph feature) |
 | `workgraph/snapshot` | WorkGraph | Read a WorkGraph observability snapshot (workgraph feature) |
 | `workgraph/events` | WorkGraph | Read WorkGraph event history (workgraph feature) |
+| `workgraph/goal/status` | WorkGraph | Read goal and attention status (workgraph feature) |
+| `workgraph/attention/list` | WorkGraph | List attention bindings, optionally filtered by status (workgraph feature) |
 | `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
@@ -199,6 +201,9 @@ subset.
 | `realm/list` | Realm | List realm summaries |
 | `realm/get` | Realm | Get full realm connection set |
 
+WorkGraph goal and attention mutation methods require trusted in-process
+host/session authority and are not part of the public JSON-RPC catalog.
+
 <Note>
 Generated assistant images use the same surface-neutral history and blob APIs as other blob-backed artifacts. Read `session/history`, find assistant blocks with `block_type: "image"`, then call `blob/get` with `data.blob_ref.blob_id` to retrieve the base64 payload.
 </Note>
@@ -216,9 +221,11 @@ RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycl
 </Note>
 
 <Note>
-WorkGraph RPC methods are read-only observability. Programmatic hosts should
-inspect WorkGraph through `workgraph/get`, `list`, `ready`, `snapshot`, and
-`events`; agents mutate WorkGraph through the `workgraph_*` tools.
+WorkGraph RPC methods are observability only. Programmatic hosts should inspect
+WorkGraph through `workgraph/get`, `list`, `ready`, `snapshot`, `events`,
+`goal/status`, and `attention/list`; agents mutate WorkGraph through the
+`workgraph_*` tools. Goal and attention mutators stay on trusted in-process host
+authority, not the public RPC catalog.
 </Note>
 
 ## Protocol
@@ -272,9 +279,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.6.19"
+      "version": "0.6.23"
     },
-    "contract_version": "0.6.19",
+    "contract_version": "0.6.23",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -1242,7 +1249,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.6.19",
+    "contract_version": "0.6.23",
     "providers": [
       {
         "provider": "anthropic",

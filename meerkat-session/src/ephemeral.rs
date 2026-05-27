@@ -5379,6 +5379,7 @@ mod runtime_turn_metadata_tests {
                         Some(TurnToolOverlay {
                             allowed_tools: Some(vec!["flow_tool".to_string()]),
                             blocked_tools: None,
+                            dispatch_context: Default::default(),
                         }),
                         vec![PendingSystemContextAppend {
                             text: "must not leak before setup succeeds".to_string(),

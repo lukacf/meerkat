@@ -37,6 +37,7 @@ pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
+pub mod work_attention_lifecycle;
 pub mod workgraph_lifecycle;
 
 use crate::identity::InputVariantId;
@@ -77,6 +78,9 @@ pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurrence_lifecycle";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
+pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
+pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::work_attention_lifecycle";
 
 fn with_production_rust_binding(
     mut schema: MachineSchema,
@@ -1071,6 +1075,19 @@ pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
         .attach_to(workgraph_lifecycle::WorkGraphLifecycleMachineState::schema())
 }
 
+pub fn dsl_work_attention_lifecycle_machine() -> MachineSchema {
+    work_attention_lifecycle_schema_metadata()
+        .attach_to(work_attention_lifecycle::WorkAttentionLifecycleMachineState::schema())
+}
+
+pub fn dsl_work_attention_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_work_attention_lifecycle_machine(),
+        WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
 pub fn dsl_work_graph_lifecycle_machine() -> MachineSchema {
     dsl_workgraph_lifecycle_machine()
 }
@@ -1080,6 +1097,19 @@ pub fn dsl_workgraph_lifecycle_machine_production_schema() -> MachineSchema {
         dsl_workgraph_lifecycle_machine(),
         WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE,
         WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn work_attention_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string("WorkAttentionBindingKey"),
+            NamedTypeBinding::string_enum(
+                "WorkAttentionLifecycleState",
+                &["Active", "Paused", "Superseded", "Stopped"],
+            ),
+        ],
+        vec![],
     )
 }
 
@@ -1104,6 +1134,16 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "WorkEdgeKind",
                 &["Blocks", "Parent", "Related", "Supersedes", "DerivedFrom"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkCompletionPolicy",
+                &[
+                    "SelfAttest",
+                    "HostConfirmed",
+                    "PrincipalConfirmed",
+                    "Supervisor",
+                    "ReviewerQuorum",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "WorkOwnerKind",

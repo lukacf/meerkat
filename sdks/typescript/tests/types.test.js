@@ -1250,6 +1250,7 @@ describe("WorkGraph parsers", () => {
     title: "Prep A for non-preferred dentist car",
     status: "in_progress",
     priority: "high",
+    completion_policy: { kind: "host_confirmed" },
     labels: ["autism-support", "dentist"],
     owner: {
       key: { kind: "agent", id: "homecore-kapellmeister" },
@@ -1259,6 +1260,7 @@ describe("WorkGraph parsers", () => {
       owner: { key: { kind: "agent", id: "homecore-kapellmeister" } },
       claimed_at: timestamp,
     },
+    machine_state: { lifecycle_phase: "claimed", revision: 4 },
     revision: 4,
     created_at: timestamp,
     updated_at: timestamp,
@@ -1284,12 +1286,14 @@ describe("WorkGraph parsers", () => {
           created_at: timestamp,
         },
       ],
+      attention: [],
       ready_item_ids: ["prep-dentist-ride"],
     });
 
     assert.equal(snapshot.realmId, "homecore");
     assert.equal(snapshot.items[0].owner?.key.kind, "agent");
     assert.equal(snapshot.items[0].claim?.owner.key.id, "homecore-kapellmeister");
+    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "host_confirmed" });
     assert.equal(snapshot.edges[0].kind, "blocks");
     assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
   });
@@ -1304,6 +1308,7 @@ describe("WorkGraph parsers", () => {
           captured_at: timestamp,
           items: [{ ...claimedItem, status: undefined }],
           edges: [],
+          attention: [],
           ready_item_ids: [],
         }),
       (error) =>
@@ -1327,7 +1332,37 @@ describe("WorkGraph parsers", () => {
     );
   });
 
-  it("requires WorkGraph snapshot arrays instead of fabricating empty projections", () => {
+  it("defaults WorkGraph fields added after 0.6.23 for compatible older payloads", () => {
+    const { completion_policy: _completionPolicy, ...legacyItem } = claimedItem;
+    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
+      realm_id: "homecore",
+      all_namespaces: false,
+      captured_at: timestamp,
+      items: [legacyItem],
+      edges: [],
+      ready_item_ids: [],
+    });
+
+    assert.deepEqual(snapshot.items[0].completionPolicy, { kind: "self_attest" });
+    assert.deepEqual(snapshot.attention, []);
+  });
+
+  it("rejects malformed WorkGraph attention authority enums", () => {
+    const attention = {
+      binding_id: "attention-1",
+      target: { kind: "session", session_id: "session-1" },
+      work_ref: {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+      },
+      mode: "pursue",
+      status: { state: "active" },
+      delegated_authority: "request_closure",
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+
     assert.throws(
       () =>
         MeerkatClient.parseWorkGraphSnapshot({
@@ -1336,12 +1371,55 @@ describe("WorkGraph parsers", () => {
           captured_at: timestamp,
           items: [claimedItem],
           edges: [],
+          attention: [{ ...attention, mode: "not_a_mode" }],
+          ready_item_ids: [],
         }),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        String(error.message).includes("ready item ids"),
+        String(error.message).includes("invalid mode"),
     );
+    assert.throws(
+      () =>
+        MeerkatClient.parseWorkGraphSnapshot({
+          realm_id: "homecore",
+          all_namespaces: false,
+          captured_at: timestamp,
+          items: [claimedItem],
+          edges: [],
+          attention: [{ ...attention, delegated_authority: "not_authority" }],
+          ready_item_ids: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("delegated_authority"),
+    );
+  });
+
+  it("parses WorkGraph attention lifecycle events", () => {
+    const result = MeerkatClient.parseWorkGraphEventArray([
+      {
+        seq: 43,
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+        kind: "attention_created",
+        at: timestamp,
+        payload: { attention: { binding_id: "attention-1" } },
+      },
+      {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+        kind: "attention_updated",
+        at: timestamp,
+      },
+    ]);
+
+    assert.equal(result[0].kind, "attention_created");
+    assert.equal(result[0].payload.attention.binding_id, "attention-1");
+    assert.equal(result[1].kind, "attention_updated");
   });
 });
 
@@ -2195,12 +2273,30 @@ describe("Parity wrappers", () => {
       title: "Prep A for non-preferred dentist car",
       status: "open",
       priority: "high",
+      completion_policy: { kind: "self_attest" },
       labels: ["autism-support", "dentist"],
+      machine_state: { lifecycle_phase: "open", revision: 1 },
       revision: 1,
       created_at: timestamp,
       updated_at: timestamp,
       external_refs: [{ kind: "calendar_event", id: "dentist-visit" }],
       evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
+    };
+    const attention = {
+      binding_id: "attention-1",
+      target: { kind: "session", session_id: "session-1" },
+      work_ref: {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+      },
+      mode: "pursue",
+      status: { state: "active" },
+      delegated_authority: "request_closure",
+      projection_policy: { include_parent_context: true, max_text_chars: 12000 },
+      machine_state: { revision: 1 },
+      created_at: timestamp,
+      updated_at: timestamp,
     };
     client.request = async (method, params) => {
       calls.push({ method, params });
@@ -2219,6 +2315,7 @@ describe("Parity wrappers", () => {
           event_high_water_mark: 7,
           items: [item],
           edges: [],
+          attention: [attention],
           ready_item_ids: ["prep-dentist-ride"],
         };
       }
@@ -2234,6 +2331,12 @@ describe("Parity wrappers", () => {
             payload: {},
           }],
         };
+      }
+      if (method === "workgraph/goal/status") {
+        return { item, attention };
+      }
+      if (method === "workgraph/attention/list") {
+        return { attention: [attention] };
       }
       throw new Error(`unexpected method ${method}`);
     };
@@ -2252,18 +2355,34 @@ describe("Parity wrappers", () => {
       namespace: "family/appointments",
     });
     const events = await client.listWorkGraphEvents({ realmId: "homecore", limit: 10 });
+    const goal = await client.getWorkGraphGoalStatus({
+      realmId: "homecore",
+      namespace: "family/appointments",
+      bindingId: "attention-1",
+    });
+    const attentionList = await client.listWorkGraphAttention({
+      realmId: "homecore",
+      status: { state: "active" },
+      target: { kind: "session", sessionId: "session-1" },
+    });
 
     assert.equal(fetched.id, "prep-dentist-ride");
     assert.equal(listed.items[0].priority, "high");
     assert.equal(ready.items[0].status, "open");
     assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
+    assert.equal(snapshot.attention[0].bindingId, "attention-1");
     assert.equal(events.events[0].kind, "created");
+    assert.equal(goal.item.id, "prep-dentist-ride");
+    assert.equal(goal.attention.bindingId, "attention-1");
+    assert.equal(attentionList.attention[0].bindingId, "attention-1");
     assert.deepEqual(calls.map((c) => c.method), [
       "workgraph/get",
       "workgraph/list",
       "workgraph/ready",
       "workgraph/snapshot",
       "workgraph/events",
+      "workgraph/goal/status",
+      "workgraph/attention/list",
     ]);
     assert.deepEqual(calls[0].params, {
       id: "prep-dentist-ride",
@@ -2272,6 +2391,16 @@ describe("Parity wrappers", () => {
     });
     assert.deepEqual(calls[1].params, { realm_id: "homecore", limit: 5 });
     assert.deepEqual(calls[2].params, { namespace: "family/appointments", limit: 3 });
+    assert.deepEqual(calls[5].params, {
+      binding_id: "attention-1",
+      realm_id: "homecore",
+      namespace: "family/appointments",
+    });
+    assert.deepEqual(calls[6].params, {
+      realm_id: "homecore",
+      status: { state: "active" },
+      target: { kind: "session", session_id: "session-1" },
+    });
   });
 
   it("adds wrappers for mob events, batch spawn, and profile CRUD", async () => {

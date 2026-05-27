@@ -534,6 +534,7 @@ impl MeerkatMcpState {
             runtime_ingress::McpRuntimeIngressResources {
                 service: Arc::clone(&self.service),
                 runtime_adapter: Arc::clone(&self.runtime_adapter),
+                workgraph_service: self.workgraph_service.clone(),
                 config_runtime: Arc::clone(&self.config_runtime),
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
@@ -1222,6 +1223,7 @@ impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
         Self {
             allowed_tools: value.allowed_tools,
             blocked_tools: value.blocked_tools,
+            dispatch_context: Default::default(),
         }
     }
 }

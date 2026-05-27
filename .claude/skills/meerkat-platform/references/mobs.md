@@ -239,7 +239,7 @@ authority and session-scoped wiring are injected at build time.
 | CLI `run` / `run --resume` | `mob_*` tools in prompt-driven runs when mob tools are enabled | Primary CLI mob UX |
 | CLI `rkat mob ...` | helper/artifact commands | Secondary operational surface |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
-| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; generic `mob/tools` / `mob/call` escape hatches are absent in 0.6.19 |
+| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; generic `mob/tools` / `mob/call` escape hatches are absent in 0.6.23 |
 | REST | session HTTP endpoints plus mob helpers | `/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff |
 | MCP | `meerkat_*` session tools plus `meerkat_mob_*` public tools, including `meerkat_mob_wait_ready` and profile CRUD | typed public mob control plane for host access |
 | Python SDK | `Mob` class via `create_mob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |

@@ -1,13 +1,14 @@
 ---
 title: "WorkGraph Reference"
-description: "WorkGraph item fields, statuses, edges, evidence, tools, and read-only host surfaces."
+description: "WorkGraph item fields, statuses, edges, evidence, tools, and host surfaces."
 icon: "list-tree"
 ---
 
 # WorkGraph Reference
 
-WorkGraph is an optional realm-scoped subsystem. Agents mutate it through tools.
-Host RPC, REST, and CLI expose read-only observability/operator lookup.
+WorkGraph is an optional realm-scoped subsystem. Agents mutate general work
+items through tools. Public RPC and REST expose observability/operator lookup.
+CLI and trusted in-process hosts add narrow goal and attention controls.
 
 ## WorkItem
 
@@ -20,6 +21,7 @@ Host RPC, REST, and CLI expose read-only observability/operator lookup.
 | `description` | `string?` | Optional detail |
 | `status` | `WorkStatus` | Lifecycle status |
 | `priority` | `low | medium | high` | Priority |
+| `completion_policy` | `WorkCompletionPolicy` | Closure policy for goal-like work |
 | `labels` | `string[]` | Filtering and grouping labels |
 | `owner` | `WorkOwner?` | Intended owner or assignee |
 | `claim` | `WorkClaim?` | Active claim owner and optional lease |
@@ -46,6 +48,16 @@ Host RPC, REST, and CLI expose read-only observability/operator lookup.
 | `failed` | Terminal failure |
 
 Terminal items cannot be claimed.
+
+## Completion Policies
+
+| Policy | Meaning |
+|--------|---------|
+| `self_attest` | The assigned attention target can request closure directly |
+| `host_confirmed` | Host confirmation evidence is required before closure |
+| `principal_confirmed` | A named principal must confirm before closure |
+| `supervisor` | A supervisor owner key must authorize closure |
+| `reviewer_quorum` | The required reviewer threshold must be satisfied |
 
 ## Edge Kinds
 
@@ -105,7 +117,7 @@ Evidence refs are pointers. WorkGraph does not own the artifact content.
 | `workgraph_link` | Add a graph edge |
 | `workgraph_add_evidence` | Add an evidence reference |
 
-## Read-Only RPC
+## RPC
 
 | Method | Purpose |
 |--------|---------|
@@ -114,10 +126,14 @@ Evidence refs are pointers. WorkGraph does not own the artifact content.
 | `workgraph/ready` | List ready items |
 | `workgraph/snapshot` | Read graph snapshot |
 | `workgraph/events` | Read event history |
+| `workgraph/goal/status` | Read goal and attention status |
+| `workgraph/attention/list` | List attention bindings |
 
-Mutating WorkGraph RPC methods are intentionally absent in v1.
+General WorkGraph item mutation remains tool-owned. The goal and attention
+mutation methods are trusted host-control methods and are not part of the public
+REST or JSON-RPC catalog.
 
-## Read-Only REST
+## REST
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -126,11 +142,15 @@ Mutating WorkGraph RPC methods are intentionally absent in v1.
 | `GET` | `/workgraph/ready` | List ready items |
 | `GET` | `/workgraph/snapshot` | Read graph snapshot |
 | `GET` | `/workgraph/events` | Read event history |
+| `POST` | `/workgraph/goal/status` | Read goal and attention status |
+| `POST` | `/workgraph/attention/list` | List attention bindings |
 
-Common query parameters: `realm_id`, `namespace`, `all_namespaces`,
-`statuses`, `labels`, `include_terminal`, `limit`, and `after_seq` for events.
+The `GET` routes use query parameters such as `realm_id`, `namespace`,
+`all_namespaces`, `statuses`, `labels`, `include_terminal`, `limit`, and
+`after_seq` for events. The `POST /workgraph/goal/status` and
+`POST /workgraph/attention/list` routes accept JSON request bodies.
 
-## Read-Only CLI
+## CLI
 
 ```bash
 rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
@@ -138,6 +158,13 @@ rkat workgraph show <ID> [--namespace <NS>] [--json]
 rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
 rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
+rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode <MODE>] [--completion-policy self-attest|host-confirmed] [--json]
+rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
+rkat workgraph goal-confirm <BINDING_ID> --expected-revision <N> --kind <KIND> --id <ID> [--namespace <NS>] [--label <TEXT>] [--summary <TEXT>] [--json]
+rkat workgraph goal-close <BINDING_ID> --expected-revision <N> [--status completed|cancelled|failed] [--namespace <NS>] [--json]
+rkat workgraph attention-list [--namespace <NS>] [--status <STATUS>] [--json]
+rkat workgraph attention-pause <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
+rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 ```
 
 CLI commands use the same realm flags as other `rkat` commands.

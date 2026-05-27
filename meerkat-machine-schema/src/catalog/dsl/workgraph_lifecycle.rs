@@ -124,6 +124,29 @@ pub enum WorkEdgeKind {
     DerivedFrom,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCompletionPolicy {
+    #[default]
+    SelfAttest,
+    HostConfirmed,
+    PrincipalConfirmed,
+    Supervisor,
+    ReviewerQuorum,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -143,6 +166,9 @@ machine! {
             due_at_utc_ms: Option<u64>,
             not_before_utc_ms: Option<u64>,
             snoozed_until_utc_ms: Option<u64>,
+            completion_policy: Enum<WorkCompletionPolicy>,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            completion_reviewer_quorum_threshold: Option<u64>,
             terminal_at_utc_ms: Option<u64>,
             evidence_count: u64,
         }
@@ -160,6 +186,9 @@ machine! {
             due_at_utc_ms = None,
             not_before_utc_ms = None,
             snoozed_until_utc_ms = None,
+            completion_policy = WorkCompletionPolicy::SelfAttest,
+            completion_supervisor_owner_key = None,
+            completion_reviewer_quorum_threshold = None,
             terminal_at_utc_ms = None,
             evidence_count = 0,
         }
@@ -181,12 +210,18 @@ machine! {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
+                completion_policy: Enum<WorkCompletionPolicy>,
+                completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                completion_reviewer_quorum_threshold: Option<u64>,
                 unresolved_blocker_count: u64,
             },
             CreateBlocked {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
+                completion_policy: Enum<WorkCompletionPolicy>,
+                completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                completion_reviewer_quorum_threshold: Option<u64>,
                 unresolved_blocker_count: u64,
             },
             Update {
@@ -194,6 +229,9 @@ machine! {
                 due_at_utc_ms: Option<u64>,
                 not_before_utc_ms: Option<u64>,
                 snoozed_until_utc_ms: Option<u64>,
+                completion_policy: Enum<WorkCompletionPolicy>,
+                completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                completion_reviewer_quorum_threshold: Option<u64>,
                 unresolved_blocker_count: u64,
             },
             Claim {
@@ -225,7 +263,7 @@ machine! {
             Released,
             Blocked,
             LinkValidated,
-            Closed { terminal_state: WorkLifecycleState },
+            Closed { terminal_state: WorkLifecycleState, at_utc_ms: u64 },
             EvidenceAdded,
         }
 
@@ -261,80 +299,149 @@ machine! {
                 || self.claim_owner_key == None
         }
 
+        helper completion_policy_payload_valid(
+            policy: WorkCompletionPolicy,
+            supervisor_owner_key: Option<WorkOwnerKey>,
+            reviewer_quorum_threshold: Option<u64>
+        ) -> bool {
+            if policy == WorkCompletionPolicy::Supervisor {
+                supervisor_owner_key != None && reviewer_quorum_threshold == None
+            } else {
+                if policy == WorkCompletionPolicy::ReviewerQuorum {
+                    supervisor_owner_key == None
+                        && reviewer_quorum_threshold != None
+                        && reviewer_quorum_threshold.get("value") > 0
+                } else {
+                    supervisor_owner_key == None && reviewer_quorum_threshold == None
+                }
+            }
+        }
+
+        invariant supervisor_policy_has_owner {
+            self.completion_policy != WorkCompletionPolicy::Supervisor
+                || self.completion_supervisor_owner_key != None
+        }
+
+        invariant non_supervisor_policy_has_no_owner {
+            self.completion_policy == WorkCompletionPolicy::Supervisor
+                || self.completion_supervisor_owner_key == None
+        }
+
+        invariant reviewer_quorum_policy_has_positive_threshold {
+            self.completion_policy != WorkCompletionPolicy::ReviewerQuorum
+                || (self.completion_reviewer_quorum_threshold != None
+                    && self.completion_reviewer_quorum_threshold.get("value") > 0)
+        }
+
+        invariant non_reviewer_quorum_policy_has_no_threshold {
+            self.completion_policy == WorkCompletionPolicy::ReviewerQuorum
+                || self.completion_reviewer_quorum_threshold == None
+        }
+
         disposition Created => local,
         disposition Updated => local,
         disposition Claimed => local,
         disposition Released => local,
         disposition Blocked => local,
         disposition LinkValidated => local,
-        disposition Closed => local,
+        disposition Closed => routed [WorkAttentionLifecycleMachine],
         disposition EvidenceAdded => local,
 
         transition CreateOpen {
-            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Absent }
+            guard "completion_policy_payload_valid" {
+                completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
             update {
                 self.revision = 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+                self.completion_policy = completion_policy;
+                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to Open
             emit Created
         }
 
         transition CreateBlocked {
-            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input CreateBlocked { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Absent }
+            guard "completion_policy_payload_valid" {
+                completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
             update {
                 self.revision = 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+                self.completion_policy = completion_policy;
+                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to Blocked
             emit Created
         }
 
         transition UpdateOpen {
-            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "completion_policy_payload_valid" {
+                completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
             update {
                 self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+                self.completion_policy = completion_policy;
+                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to Open
             emit Updated
         }
 
         transition UpdateInProgress {
-            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "completion_policy_payload_valid" {
+                completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
             update {
                 self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+                self.completion_policy = completion_policy;
+                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to InProgress
             emit Updated
         }
 
         transition UpdateBlocked {
-            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count }
+            on input Update { expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "completion_policy_payload_valid" {
+                completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
+            }
             update {
                 self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
+                self.completion_policy = completion_policy;
+                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to Blocked
             emit Updated
@@ -433,6 +540,7 @@ machine! {
             on input RefreshEligibility { unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Open }
             update {
+                self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to Open
@@ -442,6 +550,7 @@ machine! {
             on input RefreshEligibility { unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::InProgress }
             update {
+                self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to InProgress
@@ -451,6 +560,7 @@ machine! {
             on input RefreshEligibility { unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Blocked }
             update {
+                self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to Blocked
@@ -484,7 +594,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Completed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Completed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseInProgressCompleted {
@@ -498,7 +608,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Completed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Completed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseBlockedCompleted {
@@ -512,7 +622,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Completed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Completed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseOpenCancelled {
@@ -526,7 +636,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Cancelled
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Cancelled, at_utc_ms: at_utc_ms }
         }
 
         transition CloseInProgressCancelled {
@@ -540,7 +650,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Cancelled
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Cancelled, at_utc_ms: at_utc_ms }
         }
 
         transition CloseBlockedCancelled {
@@ -554,7 +664,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Cancelled
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Cancelled, at_utc_ms: at_utc_ms }
         }
 
         transition CloseOpenFailed {
@@ -568,7 +678,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Failed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Failed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseInProgressFailed {
@@ -582,7 +692,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Failed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Failed, at_utc_ms: at_utc_ms }
         }
 
         transition CloseBlockedFailed {
@@ -596,7 +706,7 @@ machine! {
                 self.terminal_at_utc_ms = Some(at_utc_ms);
             }
             to Failed
-            emit Closed { terminal_state: self.lifecycle_phase }
+            emit Closed { terminal_state: WorkLifecycleState::Failed, at_utc_ms: at_utc_ms }
         }
 
         transition AddEvidenceOpen {
@@ -724,6 +834,12 @@ struct WorkGraphLifecycleMachineStateWire {
     due_at_utc_ms: Option<u64>,
     not_before_utc_ms: Option<u64>,
     snoozed_until_utc_ms: Option<u64>,
+    #[serde(default)]
+    completion_policy: WorkCompletionPolicy,
+    #[serde(default)]
+    completion_supervisor_owner_key: Option<WorkOwnerKey>,
+    #[serde(default)]
+    completion_reviewer_quorum_threshold: Option<u64>,
     terminal_at_utc_ms: Option<u64>,
     evidence_count: u64,
 }
@@ -744,6 +860,9 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
             due_at_utc_ms: state.due_at_utc_ms,
             not_before_utc_ms: state.not_before_utc_ms,
             snoozed_until_utc_ms: state.snoozed_until_utc_ms,
+            completion_policy: state.completion_policy,
+            completion_supervisor_owner_key: state.completion_supervisor_owner_key.clone(),
+            completion_reviewer_quorum_threshold: state.completion_reviewer_quorum_threshold,
             terminal_at_utc_ms: state.terminal_at_utc_ms,
             evidence_count: state.evidence_count,
         }
@@ -766,6 +885,9 @@ impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState
             due_at_utc_ms: wire.due_at_utc_ms,
             not_before_utc_ms: wire.not_before_utc_ms,
             snoozed_until_utc_ms: wire.snoozed_until_utc_ms,
+            completion_policy: wire.completion_policy,
+            completion_supervisor_owner_key: wire.completion_supervisor_owner_key,
+            completion_reviewer_quorum_threshold: wire.completion_reviewer_quorum_threshold,
             terminal_at_utc_ms: wire.terminal_at_utc_ms,
             evidence_count: wire.evidence_count,
         }

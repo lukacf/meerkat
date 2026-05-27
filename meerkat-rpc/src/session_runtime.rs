@@ -85,6 +85,26 @@ use meerkat::session_runtime::staged_promotion::{
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
 
+fn workgraph_error_to_rpc(error: meerkat::WorkGraphError) -> RpcError {
+    let code = match error {
+        meerkat::WorkGraphError::UnsupportedBackend(_) => {
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        }
+        meerkat::WorkGraphError::Store(_) => error::INTERNAL_ERROR,
+        meerkat::WorkGraphError::NotFound { .. }
+        | meerkat::WorkGraphError::AttentionNotFound { .. }
+        | meerkat::WorkGraphError::StaleRevision { .. }
+        | meerkat::WorkGraphError::Conflict(_)
+        | meerkat::WorkGraphError::InvalidTransition(_)
+        | meerkat::WorkGraphError::InvalidInput(_) => error::INVALID_PARAMS,
+    };
+    RpcError {
+        code,
+        message: error.to_string(),
+        data: None,
+    }
+}
+
 // W2-A: surface-agnostic LiveOpenPrecheckError + precheck_identity +
 // apply_precheck_gates moved to `meerkat::session_runtime::errors` and
 // `meerkat::session_runtime::live_orchestration`. RPC keeps a re-export
@@ -1474,6 +1494,8 @@ impl SessionRuntime {
                 .or_else(|| ov.model.as_ref().and(provider_hint))
                 .and_then(|provider| parse_provider_override(provider).ok())
         });
+        let flow_tool_overlay =
+            flow_tool_overlay.map(meerkat_core::service::TurnToolOverlay::without_dispatch_context);
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
@@ -3031,15 +3053,148 @@ impl SessionRuntime {
     }
 
     pub fn workgraph_service(&self) -> meerkat::WorkGraphService {
-        let realm_id = self
-            .realm_id()
-            .map(|realm_id| realm_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
+        let realm_id = self.workgraph_realm_id();
         meerkat::WorkGraphService::with_scope(
             self.workgraph_store.clone(),
             realm_id,
             meerkat::WorkNamespace::default(),
         )
+    }
+
+    fn workgraph_realm_id(&self) -> String {
+        self.realm_id()
+            .map(|realm_id| realm_id.to_string())
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub async fn enqueue_workgraph_attention_continuation(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        request: meerkat::AttentionBindingRequest,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        use meerkat_runtime::identifiers::SupersessionKey;
+        use meerkat_runtime::input::{
+            ContinuationInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+        };
+
+        let service = self.workgraph_service();
+        let binding_id = request.binding_id.clone();
+        let runtime_realm_id = self.workgraph_realm_id();
+        if let Some(request_realm_id) = request.realm_id.as_ref()
+            && request_realm_id != &runtime_realm_id
+        {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: format!(
+                    "work attention binding {binding_id} belongs to realm {request_realm_id}, not runtime realm {runtime_realm_id}"
+                ),
+                data: None,
+            });
+        }
+        let scoped_request = meerkat::AttentionBindingRequest {
+            binding_id: binding_id.clone(),
+            realm_id: Some(runtime_realm_id.clone()),
+            namespace: request.namespace.clone(),
+        };
+        let binding = service
+            .attention_binding(scoped_request.clone())
+            .await
+            .map_err(workgraph_error_to_rpc)?;
+        match &binding.attention.target {
+            meerkat::WorkAttentionTarget::Session { session_id: target }
+                if target == session_id => {}
+            meerkat::WorkAttentionTarget::Session { session_id: target } => {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "work attention binding {binding_id} targets session {target}, not {session_id}"
+                    ),
+                    data: None,
+                });
+            }
+            meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "work attention binding {binding_id} targets lowered owner {}, not a session",
+                        owner_key.canonical()
+                    ),
+                    data: None,
+                });
+            }
+        }
+
+        let projection = service
+            .attention_projection(meerkat::AttentionProjectionRequest {
+                binding_id: binding_id.clone(),
+                realm_id: Some(runtime_realm_id),
+                namespace: scoped_request.namespace,
+            })
+            .await
+            .map_err(workgraph_error_to_rpc)?
+            .projection;
+        let flow_tool_overlay =
+            meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
+
+        let input_id = InputId::new();
+        let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
+        let supersession_key = meerkat::workgraph_attention_supersession_key(&projection);
+        let idempotency_key = attention_key.clone();
+        let context_key = idempotency_key.clone();
+        let input = Input::Continuation(ContinuationInput {
+            header: InputHeader {
+                id: input_id,
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(idempotency_key)),
+                supersession_key: Some(SupersessionKey::new(supersession_key)),
+                correlation_id: None,
+            },
+            reason: "workgraph_attention".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            request_id: Some(binding_id.to_string()),
+            flow_tool_overlay: Some(flow_tool_overlay),
+            context_append: Some(meerkat::workgraph_attention_context_append(
+                context_key,
+                &projection,
+            )),
+            turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
+        });
+        let adapter = Arc::clone(&self.runtime_adapter);
+        self.accept_runtime_input_with_active_admission(&adapter, session_id, input)
+            .await
+    }
+
+    pub async fn enqueue_workgraph_attention_binding_continuation(
+        self: &Arc<Self>,
+        request: meerkat::AttentionBindingRequest,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        let binding_id = request.binding_id.clone();
+        let binding = self
+            .workgraph_service()
+            .attention_binding(request.clone())
+            .await
+            .map_err(workgraph_error_to_rpc)?;
+        let session_id = match binding.attention.target {
+            meerkat::WorkAttentionTarget::Session { session_id } => session_id,
+            meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "work attention binding {binding_id} targets lowered owner {}, not a session",
+                        owner_key.canonical()
+                    ),
+                    data: None,
+                });
+            }
+        };
+        self.enqueue_workgraph_attention_continuation(&session_id, request)
+            .await
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
@@ -4834,9 +4989,7 @@ impl SessionRuntime {
         }
 
         let pre_turn_context_appends = match primitive {
-            RunPrimitive::StagedInput(staged)
-                if primitive.is_peer_response_terminal_context_and_run() =>
-            {
+            RunPrimitive::StagedInput(staged) if !staged.context_appends.is_empty() => {
                 pending_system_context_appends(&staged.context_appends)
             }
             _ => Vec::new(),
@@ -11185,6 +11338,102 @@ mod tests {
             meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         )
+    }
+
+    fn make_runtime_with_workgraph_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+    ) -> SessionRuntime {
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let schedule_store: Arc<dyn meerkat::ScheduleStore> =
+            Arc::new(meerkat::DisabledScheduleStore);
+        let workgraph_store: Arc<dyn meerkat::WorkGraphStore> =
+            Arc::new(meerkat::MemoryWorkGraphStore::new());
+        SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new_with_subsystem_stores(
+                session_store,
+                Some(runtime_store),
+                blob_store,
+                schedule_store,
+                workgraph_store,
+            ),
+            crate::router::NotificationSink::noop(),
+        )
+    }
+
+    #[tokio::test]
+    async fn workgraph_attention_continue_queues_runtime_continuation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime_with_workgraph_store(temp_factory(&temp), 10);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        runtime.set_default_llm_client(Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        })));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create session");
+        let goal = runtime
+            .workgraph_service()
+            .create_goal(meerkat::GoalCreateRequest {
+                realm_id: None,
+                namespace: Some(meerkat::WorkNamespace::new("scoped-goals").expect("namespace")),
+                title: "Keep pursuing the goal".to_string(),
+                description: Some("Injected as bounded WorkGraph attention context.".to_string()),
+                target: meerkat::GoalAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                mode: meerkat::WorkAttentionMode::Pursue,
+                completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: meerkat::AttentionDelegatedAuthority::RequestClosure,
+                projection_policy: meerkat::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create workgraph goal");
+
+        let request = meerkat::AttentionBindingRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: Some(meerkat::WorkNamespace::new("scoped-goals").expect("namespace")),
+        };
+        let runtime_for_first = Arc::clone(&runtime);
+        let first_request = request.clone();
+        let first = tokio::spawn(async move {
+            runtime_for_first
+                .enqueue_workgraph_attention_binding_continuation(first_request)
+                .await
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let retry = runtime
+            .enqueue_workgraph_attention_binding_continuation(request)
+            .await
+            .expect("retry attention continuation");
+        release.notify_one();
+        let outcome = first
+            .await
+            .expect("join first continuation")
+            .expect("enqueue attention continuation");
+        assert!(
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. })
+                || matches!(retry, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "one attention continuation should enter runtime admission: first={outcome:?}, retry={retry:?}"
+        );
+        assert!(
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Deduplicated { .. })
+                || matches!(retry, meerkat_runtime::AcceptOutcome::Deduplicated { .. }),
+            "retry of the same attention projection should be idempotency-deduplicated: first={outcome:?}, retry={retry:?}"
+        );
     }
 
     #[test]

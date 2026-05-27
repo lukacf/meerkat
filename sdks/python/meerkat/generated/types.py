@@ -678,7 +678,7 @@ class MobTurnStartParams:
     auth_binding: Optional[WireAuthBindingRef] = None
     clear_auth_binding: Optional[bool] = None
     clear_provider_params: Optional[bool] = None
-    flow_tool_overlay: Optional[dict[str, Any]] = None
+    flow_tool_overlay: Optional[PublicTurnToolOverlay] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
     model: Optional[str] = None
@@ -877,6 +877,13 @@ class MobStreamCloseResult:
     already_closed: bool
     closed: bool
     stream_id: str
+
+
+@dataclass
+class PublicTurnToolOverlay:
+    """Public caller-safe per-turn tool overlay."""
+    allowed_tools: Optional[list[str]] = None
+    blocked_tools: Optional[list[str]] = None
 
 
 @dataclass
@@ -1083,6 +1090,178 @@ class MobReconcileFailureWire:
     agent_identity: str
     error: str
     stage: WireMobReconcileStage
+
+
+@dataclass
+class AttentionBindingRequest:
+    """Wire payload for AttentionBindingRequest."""
+    binding_id: str
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class AttentionBindingResult:
+    """Wire payload for AttentionBindingResult."""
+    attention: WorkAttentionBinding
+
+
+@dataclass
+class AttentionContextProjection:
+    """Wire payload for AttentionContextProjection."""
+    authority: ProjectedAttentionAuthority
+    binding_id: str
+    binding_revision: int
+    item_revision: int
+    mode: WorkAttentionMode
+    text: AttentionProjectionText
+    work_ref: WorkItemRef
+    evidence_refs: Optional[list[WorkEvidenceRef]] = None
+    parent_context: Optional[list[dict[str, Any]]] = None
+    parent_refs: Optional[list[WorkItemRef]] = None
+
+
+@dataclass
+class AttentionListRequest:
+    """Wire payload for AttentionListRequest."""
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+    status: Optional[WorkAttentionStatus] = None
+    target: Optional[WorkAttentionTarget] = None
+
+
+@dataclass
+class AttentionListResult:
+    """Wire payload for AttentionListResult."""
+    attention: list[WorkAttentionBinding]
+
+
+@dataclass
+class AttentionProjectionPolicy:
+    """Wire payload for AttentionProjectionPolicy."""
+    include_parent_context: Optional[bool] = None
+    max_text_chars: Optional[int] = None
+
+
+@dataclass
+class AttentionProjectionRequest:
+    """Wire payload for AttentionProjectionRequest."""
+    binding_id: str
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class AttentionProjectionResult:
+    """Wire payload for AttentionProjectionResult."""
+    projection: AttentionContextProjection
+
+
+@dataclass
+class AttentionProjectionText:
+    """Wire payload for AttentionProjectionText."""
+    rendered: str
+    title: str
+    truncated: bool
+
+
+@dataclass
+class AttentionReassignRequest:
+    """Wire payload for AttentionReassignRequest."""
+    binding_id: str
+    target: GoalAttentionTarget
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class GoalStatusRequest:
+    """Wire payload for GoalStatusRequest."""
+    binding_id: str
+    namespace: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class GoalStatusResult:
+    """Wire payload for GoalStatusResult."""
+    attention: WorkAttentionBinding
+    item: WorkItem
+
+
+@dataclass
+class ProjectedAttentionAuthority:
+    """Wire payload for ProjectedAttentionAuthority."""
+    can_add_evidence: bool
+    can_close_if_policy_allows: bool
+    can_close_parent: bool
+    can_request_closure: bool
+    can_close_own_review_item: Optional[bool] = None
+
+
+@dataclass
+class WorkAttentionBinding:
+    """Wire payload for WorkAttentionBinding."""
+    binding_id: str
+    created_at: str
+    delegated_authority: AttentionDelegatedAuthority
+    mode: WorkAttentionMode
+    status: WorkAttentionStatus
+    target: WorkAttentionTarget
+    updated_at: str
+    work_ref: WorkItemRef
+    machine_state: Optional[dict[str, Any]] = None
+    projection_policy: Optional[AttentionProjectionPolicy] = None
+
+
+@dataclass
+class WorkItem:
+    """Wire payload for WorkItem."""
+    completion_policy: dict[str, Any]
+    created_at: str
+    id: str
+    machine_state: dict[str, Any]
+    namespace: str
+    priority: Literal['low', 'medium', 'high']
+    realm_id: str
+    revision: int
+    status: Literal['open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed']
+    title: str
+    updated_at: str
+    claim: Optional[dict[str, Any]] = None
+    description: Optional[str] = None
+    due_at: Optional[str] = None
+    evidence_refs: Optional[list[dict[str, Any]]] = None
+    external_refs: Optional[list[dict[str, Any]]] = None
+    labels: Optional[list[str]] = None
+    not_before: Optional[str] = None
+    owner: Optional[dict[str, Any]] = None
+    snoozed_until: Optional[str] = None
+    terminal_at: Optional[str] = None
+
+
+@dataclass
+class WorkItemRef:
+    """Wire payload for WorkItemRef."""
+    item_id: str
+    namespace: str
+    realm_id: str
+
+
+@dataclass
+class WorkEvidenceRef:
+    """Wire payload for WorkEvidenceRef."""
+    id: str
+    kind: str
+    label: Optional[str] = None
+    summary: Optional[str] = None
+
+
+@dataclass
+class WorkOwnerKey:
+    """Wire payload for WorkOwnerKey."""
+    id: str
+    kind: WorkOwnerKind
 
 
 @dataclass
@@ -2746,6 +2925,69 @@ MobStepOutputFormatInput = Literal['json', 'text']
 
 # Closed wire stage for a per-identity `mob/reconcile` failure.
 WireMobReconcileStage = Literal['spawn', 'retire']
+
+# WorkGraph RPC helper wire type for AttentionDelegatedAuthority.
+AttentionDelegatedAuthority = Literal['add_evidence', 'close_own_review_item', 'request_closure', 'close_if_policy_allows']
+
+# WorkGraph RPC helper wire type for GoalAttentionTarget.
+class GoalAttentionTargetSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[str]
+
+GoalAttentionTarget = GoalAttentionTargetSession
+
+# WorkGraph RPC helper wire type for WorkAttentionMode.
+WorkAttentionMode = Literal['pursue', 'coordinate', 'review', 'falsify', 'judge', 'observe']
+
+# WorkGraph RPC helper wire type for WorkAttentionStatus.
+class WorkAttentionStatusActive(TypedDict, total=False):
+    state: Required[Literal['active']]
+
+class WorkAttentionStatusPaused(TypedDict, total=False):
+    state: Required[Literal['paused']]
+    until: NotRequired[str]
+
+class WorkAttentionStatusSuperseded(TypedDict, total=False):
+    state: Required[Literal['superseded']]
+
+class WorkAttentionStatusStopped(TypedDict, total=False):
+    state: Required[Literal['stopped']]
+
+WorkAttentionStatus = WorkAttentionStatusActive | WorkAttentionStatusPaused | WorkAttentionStatusSuperseded | WorkAttentionStatusStopped
+
+# WorkGraph RPC helper wire type for WorkAttentionTarget.
+class WorkAttentionTargetSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[str]
+
+class WorkAttentionTargetLoweredOwner(TypedDict, total=False):
+    kind: Required[Literal['lowered_owner']]
+    owner_key: Required[WorkOwnerKey]
+
+WorkAttentionTarget = WorkAttentionTargetSession | WorkAttentionTargetLoweredOwner
+
+# WorkGraph RPC helper wire type for WorkCompletionPolicy.
+class WorkCompletionPolicySelfAttest(TypedDict, total=False):
+    kind: Required[Literal['self_attest']]
+
+class WorkCompletionPolicyHostConfirmed(TypedDict, total=False):
+    kind: Required[Literal['host_confirmed']]
+
+class WorkCompletionPolicyPrincipalConfirmed(TypedDict, total=False):
+    kind: Required[Literal['principal_confirmed']]
+
+class WorkCompletionPolicySupervisor(TypedDict, total=False):
+    kind: Required[Literal['supervisor']]
+    owner_key: Required[WorkOwnerKey]
+
+class WorkCompletionPolicyReviewerQuorum(TypedDict, total=False):
+    kind: Required[Literal['reviewer_quorum']]
+    threshold: Required[int]
+
+WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHostConfirmed | WorkCompletionPolicyPrincipalConfirmed | WorkCompletionPolicySupervisor | WorkCompletionPolicyReviewerQuorum
+
+# WorkGraph RPC helper wire type for WorkOwnerKind.
+WorkOwnerKind = Literal['principal', 'agent', 'session', 'mob', 'label']
 
 # Shared operation kind for live MCP operations.
 McpLiveOperation = Literal['add', 'remove', 'reload']

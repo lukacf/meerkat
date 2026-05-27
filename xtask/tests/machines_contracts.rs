@@ -356,7 +356,7 @@ fn row22_kernel_public_api_contract_rejects_legacy_exports() {
 }
 
 #[test]
-fn kernel_generated_inventory_is_canonical_six_only() {
+fn kernel_generated_inventory_is_canonical_seven_only() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");
     let generated_mod = root.join("meerkat-machine-kernels/src/generated/mod.rs");
@@ -368,6 +368,7 @@ fn kernel_generated_inventory_is_canonical_six_only() {
         "mob",
         "occurrence_lifecycle",
         "schedule_lifecycle",
+        "work_attention_lifecycle",
         "work_graph_lifecycle",
     ] {
         assert!(

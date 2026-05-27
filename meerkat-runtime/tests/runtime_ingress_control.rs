@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
+};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::lifecycle::{InputId, RunId, RuntimeExecutionKind};
 use meerkat_core::ops::{OpEvent, OperationId};
+use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_runtime::completion::CompletionOutcome;
 use meerkat_runtime::input::{
@@ -224,6 +227,40 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
     assert_eq!(
         continuation_policy.routing_disposition,
         RoutingDisposition::Steer
+    );
+
+    let mut attention_continuation =
+        Input::Continuation(ContinuationInput::detached_background_op_completed());
+    if let Input::Continuation(continuation) = &mut attention_continuation {
+        continuation.turn_append = Some(ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::Text {
+                text: "attention turn".to_string(),
+            },
+        });
+        continuation.flow_tool_overlay = Some(TurnToolOverlay {
+            dispatch_context: [(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!(true),
+            )]
+            .into_iter()
+            .collect(),
+            ..TurnToolOverlay::default()
+        });
+    }
+    let attention_policy =
+        meerkat_runtime::DefaultPolicyTable::resolve(&attention_continuation, true);
+    assert_eq!(attention_policy.apply_mode, ApplyMode::StageRunStart);
+    assert_eq!(attention_policy.drain_policy, DrainPolicy::QueueNextTurn);
+    let attention_semantics =
+        meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_input(
+            &attention_policy,
+            &attention_continuation,
+        );
+    assert_eq!(attention_semantics.boundary, RunApplyBoundary::RunStart);
+    assert_eq!(
+        attention_semantics.execution_kind,
+        RuntimeExecutionKind::ContentTurn
     );
 
     let operation = Input::Operation(OperationInput {

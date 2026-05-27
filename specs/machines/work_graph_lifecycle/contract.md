@@ -19,13 +19,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `due_at_utc_ms`: `Option<u64>`
 - `not_before_utc_ms`: `Option<u64>`
 - `snoozed_until_utc_ms`: `Option<u64>`
+- `completion_policy`: `WorkCompletionPolicy`
+- `completion_supervisor_owner_key`: `Option<WorkOwnerKey>`
+- `completion_reviewer_quorum_threshold`: `Option<u64>`
 - `terminal_at_utc_ms`: `Option<u64>`
 - `evidence_count`: `u64`
 
 ## Inputs
-- `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
-- `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
-- `Update`(expected_revision: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, unresolved_blocker_count: u64)
+- `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
+- `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
+- `Update`(expected_revision: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
 - `Claim`(expected_revision: u64, owner_key: WorkOwnerKey, now_utc_ms: u64, lease_expires_at_utc_ms: Option<u64>)
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
@@ -45,8 +48,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Released`
 - `Blocked`
 - `LinkValidated`
-- `Closed`(terminal_state: WorkLifecycleState)
+- `Closed`(terminal_state: WorkLifecycleState, at_utc_ms: u64)
 - `EvidenceAdded`
+
+## Helpers
+- `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
 
 ## Invariants
 - `absent_has_zero_revision`
@@ -56,41 +62,52 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `claim_only_in_progress`
 - `blocked_has_no_claim`
 - `terminal_has_no_claim`
+- `supervisor_policy_has_owner`
+- `non_supervisor_policy_has_no_owner`
+- `reviewer_quorum_policy_has_positive_threshold`
+- `non_reviewer_quorum_policy_has_no_threshold`
 
 ## Transitions
 ### `CreateOpen`
 - From: `Absent`
-- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `CreateOpen`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count)
+- Guards:
+  - `completion_policy_payload_valid`
 - Emits: `Created`
 - To: `Open`
 
 ### `CreateBlocked`
 - From: `Absent`
-- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `CreateBlocked`(due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count)
+- Guards:
+  - `completion_policy_payload_valid`
 - Emits: `Created`
 - To: `Blocked`
 
 ### `UpdateOpen`
 - From: `Open`
-- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count)
 - Guards:
   - ``
+  - `completion_policy_payload_valid`
 - Emits: `Updated`
 - To: `Open`
 
 ### `UpdateInProgress`
 - From: `InProgress`
-- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count)
 - Guards:
   - ``
+  - `completion_policy_payload_valid`
 - Emits: `Updated`
 - To: `InProgress`
 
 ### `UpdateBlocked`
 - From: `Blocked`
-- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, unresolved_blocker_count)
+- On: `Update`(expected_revision, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count)
 - Guards:
   - ``
+  - `completion_policy_payload_valid`
 - Emits: `Updated`
 - To: `Blocked`
 

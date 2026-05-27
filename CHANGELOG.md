@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **WorkGraph goals and attention bindings** (#740) — adds high-level goal
+  creation/status flows, attention-bound continuations, scoped WorkGraph tool
+  authority, and REST/RPC/CLI/SDK observability for goal and attention state.
+
+### Changed
+
+- **WorkGraph machine authority reference** (#740) — documents WorkGraph
+  attention as a canonical lifecycle machine and composition protocol, including
+  scoped continuation, projection currentness, and goal completion policy
+  behavior.
+
 ## [0.6.23] - 2026-05-22
 
 Meerkat 0.6.23 is a mob runtime hotfix release for nonblocking observation,
@@ -1863,7 +1876,33 @@ Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime o
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.6.23...HEAD
+[0.6.23]: https://github.com/lukacf/meerkat/compare/v0.6.22...v0.6.23
+[0.6.22]: https://github.com/lukacf/meerkat/compare/v0.6.21...v0.6.22
+[0.6.21]: https://github.com/lukacf/meerkat/compare/v0.6.20...v0.6.21
+[0.6.20]: https://github.com/lukacf/meerkat/compare/v0.6.19...v0.6.20
+[0.6.19]: https://github.com/lukacf/meerkat/compare/v0.6.18...v0.6.19
+[0.6.18]: https://github.com/lukacf/meerkat/compare/v0.6.17...v0.6.18
+[0.6.17]: https://github.com/lukacf/meerkat/compare/v0.6.16...v0.6.17
+[0.6.16]: https://github.com/lukacf/meerkat/compare/v0.6.15...v0.6.16
+[0.6.15]: https://github.com/lukacf/meerkat/compare/v0.6.14...v0.6.15
+[0.6.14]: https://github.com/lukacf/meerkat/compare/v0.6.13...v0.6.14
+[0.6.13]: https://github.com/lukacf/meerkat/compare/v0.6.12...v0.6.13
+[0.6.12]: https://github.com/lukacf/meerkat/compare/v0.6.11...v0.6.12
+[0.6.11]: https://github.com/lukacf/meerkat/compare/v0.6.10...v0.6.11
+[0.6.10]: https://github.com/lukacf/meerkat/compare/v0.6.9...v0.6.10
+[0.6.9]: https://github.com/lukacf/meerkat/compare/v0.6.8...v0.6.9
+[0.6.8]: https://github.com/lukacf/meerkat/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/lukacf/meerkat/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/lukacf/meerkat/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/lukacf/meerkat/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/lukacf/meerkat/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/lukacf/meerkat/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/lukacf/meerkat/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/lukacf/meerkat/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/lukacf/meerkat/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/lukacf/meerkat/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/lukacf/meerkat/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/lukacf/meerkat/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/lukacf/meerkat/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/lukacf/meerkat/compare/v0.4.7...v0.4.8

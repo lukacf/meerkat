@@ -4,6 +4,83 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionListRequest": {
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkAttentionTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "AttentionListRequest",
+        "type": "object"
+      },
+      "AttentionListResult": {
+        "properties": {
+          "attention": {
+            "items": {
+              "$ref": "#/components/schemas/WorkAttentionBinding"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "attention"
+        ],
+        "title": "AttentionListResult",
+        "type": "object"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
         "enum": [
@@ -2232,6 +2309,46 @@
         ],
         "type": "object"
       },
+      "GoalStatusRequest": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "binding_id"
+        ],
+        "title": "GoalStatusRequest",
+        "type": "object"
+      },
+      "GoalStatusResult": {
+        "properties": {
+          "attention": {
+            "$ref": "#/components/schemas/WorkAttentionBinding"
+          },
+          "item": {
+            "$ref": "#/components/schemas/WorkItem"
+          }
+        },
+        "required": [
+          "item",
+          "attention"
+        ],
+        "title": "GoalStatusResult",
+        "type": "object"
+      },
       "HandlingMode": {
         "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
         "enum": [
@@ -3533,6 +3650,39 @@
           }
         ]
       },
+      "PublicTurnToolOverlay": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blocked_tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
@@ -3652,7 +3802,7 @@
             "type": "string"
           },
           "flow_tool_overlay": {
-            "$ref": "#/components/schemas/JsonValue"
+            "$ref": "#/components/schemas/PublicTurnToolOverlay"
           },
           "hooks_override": {
             "$ref": "#/components/schemas/JsonValue"
@@ -8103,6 +8253,209 @@
         ],
         "type": "object"
       },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/components/schemas/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/components/schemas/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/components/schemas/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/components/schemas/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/components/schemas/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/components/schemas/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/components/schemas/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WorkEdge": {
         "properties": {
           "created_at": {
@@ -8192,7 +8545,9 @@
           "blocked",
           "closed",
           "linked",
-          "evidence_added"
+          "evidence_added",
+          "attention_created",
+          "attention_updated"
         ],
         "type": "string"
       },
@@ -8230,6 +8585,13 @@
         "properties": {
           "all_namespaces": {
             "type": "boolean"
+          },
+          "attention": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkAttentionBinding"
+            },
+            "type": "array"
           },
           "captured_at": {
             "format": "date-time",
@@ -8310,6 +8672,94 @@
               },
               {
                 "type": "null"
+              }
+            ]
+          },
+          "completion_policy": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "self_attest"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "host_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "principal_confirmed"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "supervisor"
+                  },
+                  "owner_key": {
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "principal",
+                          "agent",
+                          "session",
+                          "mob",
+                          "label"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "owner_key"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "reviewer_quorum"
+                  },
+                  "threshold": {
+                    "format": "uint16",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "threshold"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -8506,6 +8956,7 @@
           "namespace",
           "title",
           "status",
+          "completion_policy",
           "priority",
           "machine_state",
           "revision",
@@ -8513,6 +8964,63 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      },
+      "WorkStatus": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "title": "WorkStatus",
+        "type": "string"
       }
     }
   },
@@ -10934,9 +11442,91 @@
         "summary": "List available skills"
       }
     },
+    "/workgraph/attention/list": {
+      "post": {
+        "operationId": "post_workgraph_attention_list",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttentionListRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionListResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "List WorkGraph attention bindings"
+      }
+    },
     "/workgraph/events": {
       "get": {
         "operationId": "get_workgraph_events",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_namespaces",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -10962,9 +11552,112 @@
         "summary": "List WorkGraph events"
       }
     },
+    "/workgraph/goal/status": {
+      "post": {
+        "operationId": "post_workgraph_goal_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalStatusResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Read WorkGraph goal item and attention status"
+      }
+    },
     "/workgraph/items": {
       "get": {
         "operationId": "get_workgraph_items",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_namespaces",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "statuses",
+            "required": false,
+            "schema": {
+              "items": {
+                "$ref": "#/components/schemas/WorkStatus"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "labels",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_terminal",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -11001,6 +11694,22 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -11031,6 +11740,44 @@
     "/workgraph/ready": {
       "get": {
         "operationId": "get_workgraph_ready",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "labels",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -11059,6 +11806,71 @@
     "/workgraph/snapshot": {
       "get": {
         "operationId": "get_workgraph_snapshot",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "realm_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_namespaces",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "statuses",
+            "required": false,
+            "schema": {
+              "items": {
+                "$ref": "#/components/schemas/WorkStatus"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "labels",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_terminal",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {

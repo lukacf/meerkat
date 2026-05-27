@@ -1296,18 +1296,31 @@ impl MethodRouter {
             "schedule/call" => {
                 handlers::schedule::handle_call(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/get" => {
                 handlers::workgraph::handle_get(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
+            "workgraph/goal/status" => {
+                handlers::workgraph::handle_goal_status(id, params, self.runtime.clone()).await
+            }
+            #[cfg(feature = "workgraph")]
+            "workgraph/attention/list" => {
+                handlers::workgraph::handle_attention_list(id, params, self.runtime.clone()).await
+            }
+            #[cfg(feature = "workgraph")]
             "workgraph/list" => {
                 handlers::workgraph::handle_list(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/ready" => {
                 handlers::workgraph::handle_ready(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/snapshot" => {
                 handlers::workgraph::handle_snapshot(id, params, self.runtime.clone()).await
             }
+            #[cfg(feature = "workgraph")]
             "workgraph/events" => {
                 handlers::workgraph::handle_events(id, params, self.runtime.clone()).await
             }

@@ -12,6 +12,68 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_work_graph_lifecycle_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkCompletionPolicy {
+    #[default]
+    #[serde(rename = "SelfAttest")]
+    SelfAttest,
+    #[serde(rename = "HostConfirmed")]
+    HostConfirmed,
+    #[serde(rename = "PrincipalConfirmed")]
+    PrincipalConfirmed,
+    #[serde(rename = "Supervisor")]
+    Supervisor,
+    #[serde(rename = "ReviewerQuorum")]
+    ReviewerQuorum,
+}
+impl WorkCompletionPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SelfAttest => "SelfAttest",
+            Self::HostConfirmed => "HostConfirmed",
+            Self::PrincipalConfirmed => "PrincipalConfirmed",
+            Self::Supervisor => "Supervisor",
+            Self::ReviewerQuorum => "ReviewerQuorum",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkCompletionPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SelfAttest" => Ok(Self::SelfAttest),
+            "HostConfirmed" => Ok(Self::HostConfirmed),
+            "PrincipalConfirmed" => Ok(Self::PrincipalConfirmed),
+            "Supervisor" => Ok(Self::Supervisor),
+            "ReviewerQuorum" => Ok(Self::ReviewerQuorum),
+            other => Err(format!("invalid WorkCompletionPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkCompletionPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkCompletionPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -261,6 +323,9 @@ pub struct State {
     pub due_at_utc_ms: Option<u64>,
     pub not_before_utc_ms: Option<u64>,
     pub snoozed_until_utc_ms: Option<u64>,
+    pub completion_policy: WorkCompletionPolicy,
+    pub completion_supervisor_owner_key: Option<WorkOwnerKey>,
+    pub completion_reviewer_quorum_threshold: Option<u64>,
     pub terminal_at_utc_ms: Option<u64>,
     pub evidence_count: u64,
 }
@@ -278,6 +343,9 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
+        pub completion_policy: WorkCompletionPolicy,
+        pub completion_supervisor_owner_key: Option<WorkOwnerKey>,
+        pub completion_reviewer_quorum_threshold: Option<u64>,
         pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -285,6 +353,9 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
+        pub completion_policy: WorkCompletionPolicy,
+        pub completion_supervisor_owner_key: Option<WorkOwnerKey>,
+        pub completion_reviewer_quorum_threshold: Option<u64>,
         pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -293,6 +364,9 @@ pub mod inputs {
         pub due_at_utc_ms: Option<u64>,
         pub not_before_utc_ms: Option<u64>,
         pub snoozed_until_utc_ms: Option<u64>,
+        pub completion_policy: WorkCompletionPolicy,
+        pub completion_supervisor_owner_key: Option<WorkOwnerKey>,
+        pub completion_reviewer_quorum_threshold: Option<u64>,
         pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -412,6 +486,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Closed {
         pub terminal_state: WorkLifecycleState,
+        pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EvidenceAdded {}
@@ -557,6 +632,9 @@ pub fn initial_state() -> State {
         due_at_utc_ms: None,
         not_before_utc_ms: None,
         snoozed_until_utc_ms: None,
+        completion_policy: WorkCompletionPolicy::SelfAttest,
+        completion_supervisor_owner_key: None,
+        completion_reviewer_quorum_threshold: None,
         terminal_at_utc_ms: None,
         evidence_count: 0,
     }

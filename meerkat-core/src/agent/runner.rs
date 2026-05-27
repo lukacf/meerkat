@@ -222,6 +222,7 @@ where
     ) -> Result<(), ToolScopeStageError> {
         let handle = self.tool_scope.handle();
         if let Some(overlay) = overlay {
+            let dispatch_context = overlay.dispatch_context;
             let allow = overlay
                 .allowed_tools
                 .map(|tools| tools.into_iter().collect::<HashSet<_>>());
@@ -231,7 +232,9 @@ where
                 .into_iter()
                 .collect::<HashSet<_>>();
             handle.set_turn_overlay(allow, deny)?;
+            self.turn_tool_dispatch_metadata = dispatch_context;
         } else {
+            self.turn_tool_dispatch_metadata.clear();
             handle.clear_turn_overlay();
         }
         Ok(())
@@ -1069,7 +1072,8 @@ where
         }
 
         self.tool_dispatch_context =
-            crate::ToolDispatchContext::from_current_turn_input(&run_prompt_input);
+            crate::ToolDispatchContext::from_current_turn_input(&run_prompt_input)
+                .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -1147,7 +1151,8 @@ where
             return Err(err);
         }
 
-        self.tool_dispatch_context = crate::ToolDispatchContext::from_current_turn_input(&prompt);
+        self.tool_dispatch_context = crate::ToolDispatchContext::from_current_turn_input(&prompt)
+            .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 

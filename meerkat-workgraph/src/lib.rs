@@ -20,10 +20,11 @@ mod tools;
 mod types;
 
 pub use error::WorkGraphError;
-pub use machine::WorkGraphMachine;
+pub use machine::{WorkAttentionMachine, WorkGraphMachine};
 pub use rest_contract::{
     WORKGRAPH_REST_PATHS, WorkGraphRestOperationDescriptor, WorkGraphRestPathDescriptor,
-    WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_response_schema,
+    WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
+    workgraph_rest_response_schema,
 };
 pub use service::WorkGraphService;
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,19 +34,35 @@ pub use store::{
     WorkGraphStoreKind,
 };
 pub use surface::wire_workgraph_tools;
-pub use tool_surface::WorkGraphToolSurface;
+pub use tool_surface::{
+    WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkGraphToolSurface,
+    validate_workgraph_attention_projection_current, workgraph_attention_context_append,
+    workgraph_attention_continuation_key, workgraph_attention_projection_from_overlay,
+    workgraph_attention_supersession_key, workgraph_attention_turn_append,
+};
 pub use tools::{
     CAPABILITY_UNAVAILABLE as WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
     INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,
     WorkGraphToolError, handle_workgraph_tools_call, workgraph_tools_list,
 };
 pub use types::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ExternalWorkRef, LinkWorkItemsRequest, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
-    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse, WorkGraphMachineState,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId,
-    WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
+    AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
+    AttentionContextProjection, AttentionContinueOutcome, AttentionContinueResult,
+    AttentionDelegatedAuthority, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
+    AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
+    AttentionProjectionText, AttentionReassignRequest, AttentionResumeRequest,
+    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, ExternalWorkRef,
+    GoalAttentionTarget, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
+    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
+    GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest, ProjectedAttentionAuthority,
+    PublicGoalCompletionPolicy, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
+    ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus,
+    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
+    WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphItemsResponse,
+    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
+    WorkStatus,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =
@@ -104,6 +121,12 @@ pub mod machine_schema_exports {
     pub fn workgraph_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::workgraph_lifecycle_schema_metadata().attach_to(
             crate::machines::workgraph_lifecycle::WorkGraphLifecycleMachineState::schema(),
+        )
+    }
+
+    pub fn work_attention_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::work_attention_lifecycle_schema_metadata().attach_to(
+            crate::machines::work_attention_lifecycle::WorkAttentionLifecycleMachineState::schema(),
         )
     }
 }

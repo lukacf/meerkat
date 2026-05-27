@@ -189,6 +189,10 @@ impl SessionService for MockSessionService {
         })
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
     async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
         Ok(Vec::new())
     }
@@ -199,10 +203,6 @@ impl SessionService for MockSessionService {
             notifier.notify_waiters();
         }
         Ok(())
-    }
-
-    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
-        Ok(self.sessions.read().await.contains_key(id))
     }
 }
 

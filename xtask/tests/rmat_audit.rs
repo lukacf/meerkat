@@ -392,6 +392,32 @@ fn legacy_rmat_read_seam_script_is_removed() {
 }
 
 #[test]
+fn rmat_policy_knows_workgraph_attention_route() {
+    let policy = AuditPolicy::load();
+    let rule = policy
+        .routed_effect_realizations
+        .iter()
+        .find(|rule| {
+            rule.producer_machine == "WorkGraphLifecycleMachine"
+                && rule.effect_variant == "Closed"
+                && rule.consumer_machine == "WorkAttentionLifecycleMachine"
+        })
+        .expect("WorkGraph close to attention stop route rule");
+
+    assert_eq!(rule.consumer_input, "Stop");
+    assert!(
+        rule.allowed_paths
+            .contains(&"meerkat-workgraph/src/service.rs"),
+        "{rule:#?}"
+    );
+    assert!(
+        rule.allowed_paths
+            .contains(&"meerkat-workgraph/src/store.rs"),
+        "{rule:#?}"
+    );
+}
+
+#[test]
 fn suppression_must_be_local_not_file_wide() {
     let dir = tempdir().expect("tempdir");
     write_file(

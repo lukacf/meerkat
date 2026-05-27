@@ -491,6 +491,18 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "WorkGraphEventFilter",
                 "WorkGraphEventsResult",
             ),
+            RpcMethodDescriptor::typed(
+                "workgraph/goal/status",
+                "Read WorkGraph goal item and attention status",
+                "GoalStatusRequest",
+                "GoalStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/attention/list",
+                "List WorkGraph attention bindings",
+                "AttentionListRequest",
+                "AttentionListResult",
+            ),
         ]);
     }
 
@@ -1069,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn workgraph_rpc_surface_is_read_only_observability() {
+    fn workgraph_rpc_surface_exposes_observability_and_narrow_goal_control() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         for supported in [
             "workgraph/get",
@@ -1077,10 +1089,12 @@ mod tests {
             "workgraph/ready",
             "workgraph/snapshot",
             "workgraph/events",
+            "workgraph/goal/status",
+            "workgraph/attention/list",
         ] {
             assert!(
                 methods.iter().any(|m| m == supported),
-                "read-only WorkGraph RPC method must be advertised: {supported}"
+                "WorkGraph RPC method must be advertised: {supported}"
             );
         }
         for retired in [
@@ -1091,6 +1105,12 @@ mod tests {
             "workgraph/close",
             "workgraph/link",
             "workgraph/add_evidence",
+            "workgraph/goal/create",
+            "workgraph/goal/confirm",
+            "workgraph/goal/request_close",
+            "workgraph/attention/pause",
+            "workgraph/attention/resume",
+            "workgraph/attention/continue",
         ] {
             assert!(
                 !methods.iter().any(|m| m == retired),

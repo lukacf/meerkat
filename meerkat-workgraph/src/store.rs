@@ -6,14 +6,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 #[cfg(not(target_arch = "wasm32"))]
-use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::WorkGraphError;
-use crate::WorkGraphMachine;
 use crate::types::{
+    AttentionListRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus,
     WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
     WorkNamespace,
 };
+use crate::{WorkAttentionMachine, WorkGraphMachine};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
@@ -75,6 +78,14 @@ pub trait WorkGraphStore: Send + Sync {
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError>;
 
+    async fn update_item_and_attention_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        item_event: WorkGraphEvent,
+        attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError>;
+
     async fn get_item(
         &self,
         realm_id: &str,
@@ -84,11 +95,54 @@ pub trait WorkGraphStore: Send + Sync {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError>;
 
+    async fn insert_goal(
+        &self,
+        _item: WorkItem,
+        _item_event: WorkGraphEvent,
+        _attention: WorkAttentionBinding,
+        _attention_event: WorkGraphEvent,
+    ) -> Result<(WorkItem, WorkAttentionBinding), WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn update_attention_cas(
+        &self,
+        _attention: WorkAttentionBinding,
+        _expected_previous_revision: u64,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn get_attention(
+        &self,
+        _realm_id: &str,
+        _namespace: &WorkNamespace,
+        _binding_id: &WorkAttentionBindingId,
+    ) -> Result<Option<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn list_attention(
+        &self,
+        _filter: AttentionListRequest,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
     async fn insert_edge(
         &self,
         edge: WorkEdge,
         event: WorkGraphEvent,
     ) -> Result<WorkEdge, WorkGraphError>;
+
+    async fn insert_edge_validated(
+        &self,
+        _edge: WorkEdge,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
 
     async fn list_edges(
         &self,
@@ -133,6 +187,16 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         Err(unsupported(self.kind()))
     }
 
+    async fn update_item_and_attention_cas(
+        &self,
+        _item: WorkItem,
+        _expected_previous_revision: u64,
+        _item_event: WorkGraphEvent,
+        _attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
     async fn get_item(
         &self,
         _realm_id: &str,
@@ -146,7 +210,50 @@ impl WorkGraphStore for DisabledWorkGraphStore {
         Err(unsupported(self.kind()))
     }
 
+    async fn insert_goal(
+        &self,
+        _item: WorkItem,
+        _item_event: WorkGraphEvent,
+        _attention: WorkAttentionBinding,
+        _attention_event: WorkGraphEvent,
+    ) -> Result<(WorkItem, WorkAttentionBinding), WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn update_attention_cas(
+        &self,
+        _attention: WorkAttentionBinding,
+        _expected_previous_revision: u64,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn get_attention(
+        &self,
+        _realm_id: &str,
+        _namespace: &WorkNamespace,
+        _binding_id: &WorkAttentionBindingId,
+    ) -> Result<Option<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn list_attention(
+        &self,
+        _filter: AttentionListRequest,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
     async fn insert_edge(
+        &self,
+        _edge: WorkEdge,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn insert_edge_validated(
         &self,
         _edge: WorkEdge,
         _event: WorkGraphEvent,
@@ -182,6 +289,7 @@ pub struct MemoryWorkGraphStore {
 #[derive(Default)]
 struct MemoryWorkGraphState {
     items: BTreeMap<(String, WorkNamespace, WorkItemId), WorkItem>,
+    attention: BTreeMap<(String, WorkNamespace, WorkAttentionBindingId), WorkAttentionBinding>,
     edges: Vec<WorkEdge>,
     events: Vec<WorkGraphEvent>,
     next_event_seq: i64,
@@ -280,6 +388,162 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         Ok(items)
     }
 
+    async fn insert_goal(
+        &self,
+        item: WorkItem,
+        item_event: WorkGraphEvent,
+        attention: WorkAttentionBinding,
+        attention_event: WorkGraphEvent,
+    ) -> Result<(WorkItem, WorkAttentionBinding), WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        let mut guard = self.inner.write().await;
+        let item_key = item_key(&item.realm_id, &item.namespace, &item.id);
+        if guard.items.contains_key(&item_key) {
+            return Err(WorkGraphError::Conflict(format!(
+                "work item {} already exists",
+                item.id
+            )));
+        }
+        let attention_key = attention_key(
+            &attention.work_ref.realm_id,
+            &attention.work_ref.namespace,
+            &attention.binding_id,
+        );
+        if guard.attention.contains_key(&attention_key) {
+            return Err(WorkGraphError::Conflict(format!(
+                "work attention binding {} already exists",
+                attention.binding_id
+            )));
+        }
+        guard.items.insert(item_key, item.clone());
+        guard.attention.insert(attention_key, attention.clone());
+        guard.append_event(item_event);
+        guard.append_event(attention_event);
+        Ok((item, attention))
+    }
+
+    async fn update_attention_cas(
+        &self,
+        attention: WorkAttentionBinding,
+        expected_previous_revision: u64,
+        event: WorkGraphEvent,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        let mut guard = self.inner.write().await;
+        let key = attention_key(
+            &attention.work_ref.realm_id,
+            &attention.work_ref.namespace,
+            &attention.binding_id,
+        );
+        let Some(current) = guard.attention.get(&key) else {
+            return Err(WorkGraphError::not_found(
+                attention.work_ref.realm_id.clone(),
+                attention.work_ref.namespace.clone(),
+                attention.work_ref.item_id.clone(),
+            ));
+        };
+        if current.machine_state.revision != expected_previous_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: attention.work_ref.item_id.clone(),
+                expected: expected_previous_revision,
+                actual: current.machine_state.revision,
+            });
+        }
+        guard.attention.insert(key, attention.clone());
+        guard.append_event(event);
+        Ok(attention)
+    }
+
+    async fn update_item_and_attention_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        item_event: WorkGraphEvent,
+        attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        let mut guard = self.inner.write().await;
+        let key = item_key(&item.realm_id, &item.namespace, &item.id);
+        let Some(current) = guard.items.get(&key) else {
+            return Err(WorkGraphError::not_found(
+                item.realm_id.clone(),
+                item.namespace.clone(),
+                item.id.clone(),
+            ));
+        };
+        if current.revision != expected_previous_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: item.id.clone(),
+                expected: expected_previous_revision,
+                actual: current.revision,
+            });
+        }
+        for (attention, expected_revision, _) in &attention_updates {
+            let key = attention_key(
+                &attention.work_ref.realm_id,
+                &attention.work_ref.namespace,
+                &attention.binding_id,
+            );
+            let Some(current) = guard.attention.get(&key) else {
+                return Err(WorkGraphError::not_found(
+                    attention.work_ref.realm_id.clone(),
+                    attention.work_ref.namespace.clone(),
+                    attention.work_ref.item_id.clone(),
+                ));
+            };
+            if current.machine_state.revision != *expected_revision {
+                return Err(WorkGraphError::StaleRevision {
+                    id: attention.work_ref.item_id.clone(),
+                    expected: *expected_revision,
+                    actual: current.machine_state.revision,
+                });
+            }
+        }
+        guard.items.insert(key, item.clone());
+        guard.append_event(item_event);
+        for (attention, _, event) in attention_updates {
+            let key = attention_key(
+                &attention.work_ref.realm_id,
+                &attention.work_ref.namespace,
+                &attention.binding_id,
+            );
+            guard.attention.insert(key, attention);
+            guard.append_event(event);
+        }
+        Ok(item)
+    }
+
+    async fn get_attention(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        binding_id: &WorkAttentionBindingId,
+    ) -> Result<Option<WorkAttentionBinding>, WorkGraphError> {
+        let guard = self.inner.read().await;
+        Ok(guard
+            .attention
+            .get(&attention_key(realm_id, namespace, binding_id))
+            .cloned())
+    }
+
+    async fn list_attention(
+        &self,
+        filter: AttentionListRequest,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        let guard = self.inner.read().await;
+        let mut bindings = guard
+            .attention
+            .values()
+            .filter(|binding| attention_matches_filter(binding, &filter))
+            .cloned()
+            .collect::<Vec<_>>();
+        bindings.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.binding_id.cmp(&right.binding_id))
+        });
+        Ok(bindings)
+    }
+
     async fn insert_edge(
         &self,
         edge: WorkEdge,
@@ -289,6 +553,35 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         if guard.edges.iter().any(|existing| existing == &edge) {
             return Err(duplicate_edge_error(&edge));
         }
+        guard.edges.push(edge.clone());
+        guard.append_event(event);
+        Ok(edge)
+    }
+
+    async fn insert_edge_validated(
+        &self,
+        edge: WorkEdge,
+        event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        let mut guard = self.inner.write().await;
+        if guard.edges.iter().any(|existing| existing == &edge) {
+            return Err(duplicate_edge_error(&edge));
+        }
+        let existing_edges = guard
+            .edges
+            .iter()
+            .filter(|existing| {
+                existing.realm_id == edge.realm_id && existing.namespace == edge.namespace
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let existing_items = guard
+            .items
+            .values()
+            .filter(|item| item.realm_id == edge.realm_id && item.namespace == edge.namespace)
+            .cloned()
+            .collect::<Vec<_>>();
+        WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
         guard.edges.push(edge.clone());
         guard.append_event(event);
         Ok(edge)
@@ -343,6 +636,14 @@ fn item_key(
     (realm_id.to_string(), namespace.clone(), id.clone())
 }
 
+fn attention_key(
+    realm_id: &str,
+    namespace: &WorkNamespace,
+    id: &WorkAttentionBindingId,
+) -> (String, WorkNamespace, WorkAttentionBindingId) {
+    (realm_id.to_string(), namespace.clone(), id.clone())
+}
+
 fn item_matches_filter(item: &WorkItem, filter: &WorkItemFilter) -> bool {
     if let Some(realm_id) = &filter.realm_id
         && &item.realm_id != realm_id
@@ -365,6 +666,53 @@ fn item_matches_filter(item: &WorkItem, filter: &WorkItemFilter) -> bool {
         .labels
         .iter()
         .all(|label| item.labels.contains(label))
+}
+
+fn attention_matches_filter(binding: &WorkAttentionBinding, filter: &AttentionListRequest) -> bool {
+    if let Some(realm_id) = &filter.realm_id
+        && &binding.work_ref.realm_id != realm_id
+    {
+        return false;
+    }
+    if let Some(namespace) = &filter.namespace
+        && &binding.work_ref.namespace != namespace
+    {
+        return false;
+    }
+    if let Some(target) = &filter.target
+        && &binding.target != target
+    {
+        return false;
+    }
+    if let Some(status) = &filter.status
+        && !attention_status_matches_filter(&binding.status, status)
+    {
+        return false;
+    }
+    true
+}
+
+fn attention_status_matches_filter(
+    actual: &crate::types::WorkAttentionStatus,
+    filter: &crate::types::WorkAttentionStatus,
+) -> bool {
+    use crate::types::WorkAttentionStatus;
+
+    match (actual, filter) {
+        (WorkAttentionStatus::Active, WorkAttentionStatus::Active)
+        | (WorkAttentionStatus::Superseded, WorkAttentionStatus::Superseded)
+        | (WorkAttentionStatus::Stopped, WorkAttentionStatus::Stopped) => true,
+        (WorkAttentionStatus::Paused { .. }, WorkAttentionStatus::Paused { until: None }) => true,
+        (
+            WorkAttentionStatus::Paused {
+                until: Some(actual_until),
+            },
+            WorkAttentionStatus::Paused {
+                until: Some(filter_until),
+            },
+        ) => actual_until == filter_until,
+        _ => false,
+    }
 }
 
 fn event_matches_filter(event: &WorkGraphEvent, filter: &WorkGraphEventFilter) -> bool {
@@ -413,6 +761,8 @@ impl SqliteWorkGraphStore {
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             tx.execute("DELETE FROM workgraph_edges", [])
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            tx.execute("DELETE FROM workgraph_attention", [])
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
 
             let events = {
                 let mut stmt = tx
@@ -431,6 +781,7 @@ impl SqliteWorkGraphStore {
             for event in events {
                 replay_event_tx(&tx, &event)?;
             }
+            normalize_attention_for_terminal_items_tx(&tx)?;
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))
         })
@@ -531,6 +882,141 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         self.with_connection(|conn| list_sqlite_items(conn, &filter))
     }
 
+    async fn insert_goal(
+        &self,
+        item: WorkItem,
+        item_event: WorkGraphEvent,
+        attention: WorkAttentionBinding,
+        attention_event: WorkGraphEvent,
+    ) -> Result<(WorkItem, WorkAttentionBinding), WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            insert_item_tx(&tx, &item)?;
+            insert_attention_tx(&tx, &attention)?;
+            insert_event_tx(&tx, &item_event)?;
+            insert_event_tx(&tx, &attention_event)?;
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok((item, attention))
+        })
+    }
+
+    async fn update_attention_cas(
+        &self,
+        attention: WorkAttentionBinding,
+        expected_previous_revision: u64,
+        event: WorkGraphEvent,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let changed = update_attention_tx(&tx, &attention, expected_previous_revision)?;
+            if changed == 0 {
+                let actual = current_attention_revision_tx(
+                    &tx,
+                    &attention.work_ref.realm_id,
+                    &attention.work_ref.namespace,
+                    &attention.binding_id,
+                )?;
+                return match actual {
+                    Some(actual) => Err(WorkGraphError::StaleRevision {
+                        id: attention.work_ref.item_id,
+                        expected: expected_previous_revision,
+                        actual,
+                    }),
+                    None => Err(WorkGraphError::not_found(
+                        attention.work_ref.realm_id,
+                        attention.work_ref.namespace,
+                        attention.work_ref.item_id,
+                    )),
+                };
+            }
+            insert_event_tx(&tx, &event)?;
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(attention)
+        })
+    }
+
+    async fn update_item_and_attention_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        item_event: WorkGraphEvent,
+        attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+    ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let changed = update_item_tx(&tx, &item, expected_previous_revision)?;
+            if changed == 0 {
+                let actual = current_revision_tx(&tx, &item.realm_id, &item.namespace, &item.id)?;
+                return match actual {
+                    Some(actual) => Err(WorkGraphError::StaleRevision {
+                        id: item.id,
+                        expected: expected_previous_revision,
+                        actual,
+                    }),
+                    None => Err(WorkGraphError::not_found(
+                        item.realm_id,
+                        item.namespace,
+                        item.id,
+                    )),
+                };
+            }
+            insert_event_tx(&tx, &item_event)?;
+            for (attention, expected_revision, event) in &attention_updates {
+                let changed = update_attention_tx(&tx, attention, *expected_revision)?;
+                if changed == 0 {
+                    let actual = current_attention_revision_tx(
+                        &tx,
+                        &attention.work_ref.realm_id,
+                        &attention.work_ref.namespace,
+                        &attention.binding_id,
+                    )?;
+                    return match actual {
+                        Some(actual) => Err(WorkGraphError::StaleRevision {
+                            id: attention.work_ref.item_id.clone(),
+                            expected: *expected_revision,
+                            actual,
+                        }),
+                        None => Err(WorkGraphError::not_found(
+                            attention.work_ref.realm_id.clone(),
+                            attention.work_ref.namespace.clone(),
+                            attention.work_ref.item_id.clone(),
+                        )),
+                    };
+                }
+                insert_event_tx(&tx, event)?;
+            }
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(item)
+        })
+    }
+
+    async fn get_attention(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        binding_id: &WorkAttentionBindingId,
+    ) -> Result<Option<WorkAttentionBinding>, WorkGraphError> {
+        self.with_connection(|conn| select_attention(conn, realm_id, namespace, binding_id))
+    }
+
+    async fn list_attention(
+        &self,
+        filter: AttentionListRequest,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        self.with_connection(|conn| list_sqlite_attention(conn, &filter))
+    }
+
     async fn insert_edge(
         &self,
         edge: WorkEdge,
@@ -540,6 +1026,34 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let tx = conn
                 .transaction()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            insert_edge_tx(&tx, &edge)?;
+            insert_event_tx(&tx, &event)?;
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(edge)
+        })
+    }
+
+    async fn insert_edge_validated(
+        &self,
+        edge: WorkEdge,
+        event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let existing_edges = list_sqlite_edges(&tx, &edge.realm_id, &edge.namespace)?;
+            let existing_items = list_sqlite_items(
+                &tx,
+                &WorkItemFilter {
+                    realm_id: Some(edge.realm_id.clone()),
+                    namespace: Some(edge.namespace.clone()),
+                    include_terminal: true,
+                    ..WorkItemFilter::default()
+                },
+            )?;
+            WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
             insert_edge_tx(&tx, &edge)?;
             insert_event_tx(&tx, &event)?;
             tx.commit()
@@ -579,6 +1093,18 @@ fn init_sqlite_schema(conn: &Connection) -> Result<(), WorkGraphError> {
         );
         CREATE INDEX IF NOT EXISTS idx_workgraph_items_realm_namespace_updated
             ON workgraph_items (realm_id, namespace, updated_at_utc);
+
+        CREATE TABLE IF NOT EXISTS workgraph_attention (
+            realm_id TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            binding_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL,
+            attention_json TEXT NOT NULL,
+            PRIMARY KEY (realm_id, namespace, binding_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workgraph_attention_realm_namespace_updated
+            ON workgraph_attention (realm_id, namespace, updated_at_utc);
 
         CREATE TABLE IF NOT EXISTS workgraph_edges (
             realm_id TEXT NOT NULL,
@@ -690,6 +1216,100 @@ fn current_revision_tx(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn insert_attention_tx(
+    tx: &Transaction<'_>,
+    attention: &WorkAttentionBinding,
+) -> Result<(), WorkGraphError> {
+    let json =
+        serde_json::to_string(attention).map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    tx.execute(
+        "INSERT INTO workgraph_attention
+            (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            attention.work_ref.realm_id,
+            attention.work_ref.namespace.as_str(),
+            attention.binding_id.as_str(),
+            attention.machine_state.revision,
+            attention.updated_at.to_rfc3339(),
+            json,
+        ],
+    )
+    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn update_attention_tx(
+    tx: &Transaction<'_>,
+    attention: &WorkAttentionBinding,
+    expected_previous_revision: u64,
+) -> Result<usize, WorkGraphError> {
+    let json =
+        serde_json::to_string(attention).map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    tx.execute(
+        "UPDATE workgraph_attention
+            SET revision = ?4, updated_at_utc = ?5, attention_json = ?6
+          WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3 AND revision = ?7",
+        params![
+            attention.work_ref.realm_id,
+            attention.work_ref.namespace.as_str(),
+            attention.binding_id.as_str(),
+            attention.machine_state.revision,
+            attention.updated_at.to_rfc3339(),
+            json,
+            expected_previous_revision,
+        ],
+    )
+    .map_err(|err| WorkGraphError::Store(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn upsert_attention_tx(
+    tx: &Transaction<'_>,
+    attention: &WorkAttentionBinding,
+) -> Result<(), WorkGraphError> {
+    let json =
+        serde_json::to_string(attention).map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    tx.execute(
+        "INSERT INTO workgraph_attention
+            (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(realm_id, namespace, binding_id) DO UPDATE SET
+            revision = excluded.revision,
+            updated_at_utc = excluded.updated_at_utc,
+            attention_json = excluded.attention_json",
+        params![
+            attention.work_ref.realm_id,
+            attention.work_ref.namespace.as_str(),
+            attention.binding_id.as_str(),
+            attention.machine_state.revision,
+            attention.updated_at.to_rfc3339(),
+            json,
+        ],
+    )
+    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn current_attention_revision_tx(
+    tx: &Transaction<'_>,
+    realm_id: &str,
+    namespace: &WorkNamespace,
+    binding_id: &WorkAttentionBindingId,
+) -> Result<Option<u64>, WorkGraphError> {
+    tx.query_row(
+        "SELECT revision FROM workgraph_attention
+         WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3",
+        params![realm_id, namespace.as_str(), binding_id.as_str()],
+        |row| row.get::<_, u64>(0),
+    )
+    .optional()
+    .map_err(|err| WorkGraphError::Store(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn insert_edge_tx(tx: &Transaction<'_>, edge: &WorkEdge) -> Result<(), WorkGraphError> {
     let json = serde_json::to_string(edge).map_err(|err| WorkGraphError::Store(err.to_string()))?;
     tx.execute(
@@ -790,6 +1410,47 @@ fn list_sqlite_items(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn select_attention(
+    conn: &Connection,
+    realm_id: &str,
+    namespace: &WorkNamespace,
+    binding_id: &WorkAttentionBindingId,
+) -> Result<Option<WorkAttentionBinding>, WorkGraphError> {
+    conn.query_row(
+        "SELECT attention_json FROM workgraph_attention
+         WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3",
+        params![realm_id, namespace.as_str(), binding_id.as_str()],
+        |row| row_json(row, 0),
+    )
+    .optional()
+    .map_err(|err| WorkGraphError::Store(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn list_sqlite_attention(
+    conn: &Connection,
+    filter: &AttentionListRequest,
+) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT attention_json FROM workgraph_attention
+             ORDER BY updated_at_utc ASC, binding_id ASC",
+        )
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| row_json::<WorkAttentionBinding>(row, 0))
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    let mut bindings = Vec::new();
+    for row in rows {
+        let binding = row.map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        if attention_matches_filter(&binding, filter) {
+            bindings.push(binding);
+        }
+    }
+    Ok(bindings)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn list_sqlite_edges(
     conn: &Connection,
     realm_id: &str,
@@ -850,6 +1511,10 @@ fn replay_event_tx(tx: &Transaction<'_>, event: &WorkGraphEvent) -> Result<(), W
             let edge = payload_field::<WorkEdge>(event, "edge")?;
             insert_edge_tx(tx, &edge)
         }
+        WorkGraphEventKind::AttentionCreated | WorkGraphEventKind::AttentionUpdated => {
+            let attention = payload_field::<WorkAttentionBinding>(event, "attention")?;
+            upsert_attention_tx(tx, &attention)
+        }
         WorkGraphEventKind::Created
         | WorkGraphEventKind::Updated
         | WorkGraphEventKind::Claimed
@@ -861,6 +1526,54 @@ fn replay_event_tx(tx: &Transaction<'_>, event: &WorkGraphEvent) -> Result<(), W
             upsert_item_tx(tx, &item)
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_attention_for_terminal_items_tx(tx: &Transaction<'_>) -> Result<(), WorkGraphError> {
+    let bindings = {
+        let mut stmt = tx
+            .prepare("SELECT attention_json FROM workgraph_attention")
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row_json::<WorkAttentionBinding>(row, 0))
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let mut bindings = Vec::new();
+        for row in rows {
+            bindings.push(row.map_err(|err| WorkGraphError::Store(err.to_string()))?);
+        }
+        bindings
+    };
+
+    for binding in bindings {
+        if matches!(
+            binding.status,
+            WorkAttentionStatus::Stopped | WorkAttentionStatus::Superseded
+        ) {
+            continue;
+        }
+        let item = tx
+            .query_row(
+                "SELECT item_json FROM workgraph_items
+                 WHERE realm_id = ?1 AND namespace = ?2 AND item_id = ?3",
+                params![
+                    binding.work_ref.realm_id,
+                    binding.work_ref.namespace.as_str(),
+                    binding.work_ref.item_id.as_str(),
+                ],
+                |row| row_json::<WorkItem>(row, 0),
+            )
+            .optional()
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let Some(item) = item else {
+            continue;
+        };
+        if item.status.is_terminal() {
+            let expected_revision = binding.machine_state.revision;
+            let stopped = WorkAttentionMachine::stop(binding, expected_revision, item.updated_at)?;
+            upsert_attention_tx(tx, &stopped)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -898,10 +1611,12 @@ mod tests {
 
     use crate::types::WorkEdge;
     use crate::{
-        ClaimWorkItemRequest, CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore,
-        WorkEdgeKind, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind,
-        WorkGraphService, WorkGraphStore, WorkItemFilter, WorkItemId, WorkNamespace, WorkOwner,
-        WorkOwnerKey, WorkStatus,
+        AttentionDelegatedAuthority, AttentionProjectionPolicy, ClaimWorkItemRequest,
+        CreateWorkItemRequest, GoalAttentionTarget, GoalCreateRequest, GoalRequestCloseRequest,
+        GoalTerminalStatus, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkAttentionMode,
+        WorkAttentionStatus, WorkCompletionPolicy, WorkEdgeKind, WorkGraphError, WorkGraphEvent,
+        WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService, WorkGraphStore, WorkItemFilter,
+        WorkItemId, WorkNamespace, WorkOwner, WorkOwnerKey, WorkStatus,
     };
 
     fn test_edge() -> WorkEdge {
@@ -942,6 +1657,7 @@ mod tests {
                 title: "default".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -959,6 +1675,7 @@ mod tests {
                 title: "other".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -1024,6 +1741,7 @@ mod tests {
                 title: "persist me".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -1056,6 +1774,7 @@ mod tests {
                 title: "legacy item".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -1143,6 +1862,7 @@ mod tests {
                 title: "blocker".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -1160,6 +1880,7 @@ mod tests {
                 title: "blocked".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -1219,6 +1940,67 @@ mod tests {
             .await
             .expect("rebuilt edges");
         assert_eq!(rebuilt_edges.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_event_replay_stops_attention_for_terminal_goal_items() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000045")
+            .expect("session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "terminal goal".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Pursue,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        service
+            .goal_request_close(GoalRequestCloseRequest {
+                binding_id: goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: goal.item.revision,
+                status: GoalTerminalStatus::Completed,
+            })
+            .await
+            .expect("close goal");
+
+        store
+            .with_connection(|conn| {
+                conn.execute("DELETE FROM workgraph_items", [])
+                    .map_err(|err| crate::WorkGraphError::Store(err.to_string()))?;
+                conn.execute("DELETE FROM workgraph_attention", [])
+                    .map_err(|err| crate::WorkGraphError::Store(err.to_string()))?;
+                Ok(())
+            })
+            .expect("clear projection");
+
+        store
+            .rebuild_projection_from_events()
+            .expect("rebuild projection");
+
+        let binding = store
+            .get_attention(
+                "realm",
+                &WorkNamespace::default(),
+                &goal.attention.binding_id,
+            )
+            .await
+            .expect("read binding")
+            .expect("rebuilt binding");
+        assert_eq!(binding.status, WorkAttentionStatus::Stopped);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

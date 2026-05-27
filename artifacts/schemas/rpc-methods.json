@@ -381,6 +381,18 @@
       "result_type": "WorkGraphEventsResult"
     },
     {
+      "description": "Read WorkGraph goal item and attention status",
+      "name": "workgraph/goal/status",
+      "params_type": "GoalStatusRequest",
+      "result_type": "GoalStatusResult"
+    },
+    {
+      "description": "List WorkGraph attention bindings",
+      "name": "workgraph/attention/list",
+      "params_type": "AttentionListRequest",
+      "result_type": "AttentionListResult"
+    },
+    {
       "description": "List available skills",
       "name": "skills/list"
     },

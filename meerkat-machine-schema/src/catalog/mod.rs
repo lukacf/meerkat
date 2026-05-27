@@ -9,7 +9,7 @@ use crate::{RustBinding, identity::MachineId};
 pub use compositions::{
     auth_lease_bundle_composition, compat_composition_schemas, meerkat_mob_seam_composition,
     schedule_bundle_composition, schedule_mob_bundle_composition,
-    schedule_runtime_bundle_composition,
+    schedule_runtime_bundle_composition, workgraph_attention_bundle_composition,
 };
 pub use coverage::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
@@ -44,6 +44,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_occurrence_lifecycle_machine(),
         dsl::dsl_auth_machine(),
         dsl::dsl_workgraph_lifecycle_machine(),
+        dsl::dsl_work_attention_lifecycle_machine(),
     ]
 }
 
@@ -54,6 +55,7 @@ pub fn canonical_composition_schemas() -> Vec<CompositionSchema> {
         schedule_runtime_bundle_composition(),
         schedule_mob_bundle_composition(),
         auth_lease_bundle_composition(),
+        workgraph_attention_bundle_composition(),
     ]
 }
 
@@ -88,6 +90,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "WorkGraphLifecycleMachine",
             dsl::WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE,
             dsl::WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "WorkAttentionLifecycleMachine",
+            dsl::WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE,
+            dsl::WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_MODULE,
         ),
     ]
 }

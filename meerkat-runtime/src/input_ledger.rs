@@ -50,6 +50,33 @@ impl InputLedger {
         None
     }
 
+    /// Accept with an idempotency key that only deduplicates active inputs.
+    ///
+    /// Some runtime-generated keep-alive inputs need duplicate suppression
+    /// while an earlier input is still live, but must be admissible again after
+    /// the earlier attempt reaches a terminal state.
+    pub fn accept_with_active_idempotency(
+        &mut self,
+        state: InputState,
+        key: IdempotencyKey,
+    ) -> Option<InputId> {
+        self.prune_terminal_dedup(Utc::now());
+        if let Some(existing_id) = self.idempotency_index.get(&key).cloned() {
+            if self
+                .states
+                .get(&existing_id)
+                .is_some_and(|state| !state.is_terminal())
+            {
+                return Some(existing_id);
+            }
+            self.idempotency_index.shift_remove(&key);
+        }
+        let input_id = state.input_id.clone();
+        self.idempotency_index.insert(key, input_id);
+        self.states.insert(state.input_id.clone(), state);
+        None
+    }
+
     /// Recover a durable InputState from persistent storage.
     ///
     /// Unlike `accept()`, this also rebuilds the idempotency index
@@ -200,6 +227,41 @@ mod tests {
         assert!(result.is_some()); // Duplicate — returns existing ID
         assert_eq!(result.unwrap(), id1);
         assert_eq!(ledger.len(), 1); // Only one entry
+    }
+
+    #[test]
+    fn active_idempotency_allows_retry_after_terminal_attempt() {
+        let mut ledger = InputLedger::new();
+        let key = IdempotencyKey::new("active-only");
+
+        let id1 = InputId::new();
+        let state1 = InputState::new_accepted(id1.clone());
+        assert!(
+            ledger
+                .accept_with_active_idempotency(state1, key.clone())
+                .is_none()
+        );
+
+        let id2 = InputId::new();
+        let state2 = InputState::new_accepted(id2.clone());
+        assert_eq!(
+            ledger.accept_with_active_idempotency(state2, key.clone()),
+            Some(id1.clone())
+        );
+
+        ledger
+            .get_mut(&id1)
+            .expect("first input state")
+            .terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
+        let id3 = InputId::new();
+        let state3 = InputState::new_accepted(id3.clone());
+        assert!(
+            ledger
+                .accept_with_active_idempotency(state3, key.clone())
+                .is_none(),
+            "terminal active-only keys must not block later retries"
+        );
+        assert_eq!(ledger.input_id_for_idempotency_key(&key), Some(id3));
     }
 
     #[test]

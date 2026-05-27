@@ -492,7 +492,7 @@ export interface MobTurnStartParams {
   auth_binding?: WireAuthBindingRef;
   clear_auth_binding?: boolean;
   clear_provider_params?: boolean;
-  flow_tool_overlay?: Record<string, unknown>;
+  flow_tool_overlay?: PublicTurnToolOverlay;
   keep_alive?: boolean;
   max_tokens?: number;
   mob_id: string;
@@ -641,6 +641,11 @@ export interface MobStreamCloseResult {
   already_closed: boolean;
   closed: boolean;
   stream_id: string;
+}
+
+export interface PublicTurnToolOverlay {
+  allowed_tools?: string[];
+  blocked_tools?: string[];
 }
 
 export interface MobDefinitionInput {
@@ -793,6 +798,142 @@ export interface MobReconcileFailureWire {
   agent_identity: string;
   error: string;
   stage: WireMobReconcileStage;
+}
+
+export interface AttentionBindingRequest {
+  binding_id: string;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface AttentionBindingResult {
+  attention: WorkAttentionBinding;
+}
+
+export interface AttentionContextProjection {
+  authority: ProjectedAttentionAuthority;
+  binding_id: string;
+  binding_revision: number;
+  evidence_refs?: WorkEvidenceRef[];
+  item_revision: number;
+  mode: WorkAttentionMode;
+  parent_context?: Record<string, unknown>[];
+  parent_refs?: WorkItemRef[];
+  text: AttentionProjectionText;
+  work_ref: WorkItemRef;
+}
+
+export interface AttentionListRequest {
+  namespace?: string;
+  realm_id?: string;
+  status?: WorkAttentionStatus;
+  target?: WorkAttentionTarget;
+}
+
+export interface AttentionListResult {
+  attention: WorkAttentionBinding[];
+}
+
+export interface AttentionProjectionPolicy {
+  include_parent_context?: boolean;
+  max_text_chars?: number;
+}
+
+export interface AttentionProjectionRequest {
+  binding_id: string;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface AttentionProjectionResult {
+  projection: AttentionContextProjection;
+}
+
+export interface AttentionProjectionText {
+  rendered: string;
+  title: string;
+  truncated: boolean;
+}
+
+export interface AttentionReassignRequest {
+  binding_id: string;
+  namespace?: string;
+  realm_id?: string;
+  target: GoalAttentionTarget;
+}
+
+export interface GoalStatusRequest {
+  binding_id: string;
+  namespace?: string;
+  realm_id?: string;
+}
+
+export interface GoalStatusResult {
+  attention: WorkAttentionBinding;
+  item: WorkItem;
+}
+
+export interface ProjectedAttentionAuthority {
+  can_add_evidence: boolean;
+  can_close_if_policy_allows: boolean;
+  can_close_own_review_item?: boolean;
+  can_close_parent: boolean;
+  can_request_closure: boolean;
+}
+
+export interface WorkAttentionBinding {
+  binding_id: string;
+  created_at: string;
+  delegated_authority: AttentionDelegatedAuthority;
+  machine_state?: Record<string, unknown>;
+  mode: WorkAttentionMode;
+  projection_policy?: AttentionProjectionPolicy;
+  status: WorkAttentionStatus;
+  target: WorkAttentionTarget;
+  updated_at: string;
+  work_ref: WorkItemRef;
+}
+
+export interface WorkItem {
+  claim?: Record<string, unknown>;
+  completion_policy: Record<string, unknown>;
+  created_at: string;
+  description?: string;
+  due_at?: string;
+  evidence_refs?: Record<string, unknown>[];
+  external_refs?: Record<string, unknown>[];
+  id: string;
+  labels?: string[];
+  machine_state: Record<string, unknown>;
+  namespace: string;
+  not_before?: string;
+  owner?: Record<string, unknown>;
+  priority: "low" | "medium" | "high";
+  realm_id: string;
+  revision: number;
+  snoozed_until?: string;
+  status: "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed";
+  terminal_at?: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface WorkItemRef {
+  item_id: string;
+  namespace: string;
+  realm_id: string;
+}
+
+export interface WorkEvidenceRef {
+  id: string;
+  kind: string;
+  label?: string;
+  summary?: string;
+}
+
+export interface WorkOwnerKey {
+  id: string;
+  kind: WorkOwnerKind;
 }
 
 export interface BridgeAck {
@@ -1213,6 +1354,74 @@ export type MobSpawnPolicyInput = MobSpawnPolicyInputNone | MobSpawnPolicyInputA
 export type MobStepOutputFormatInput = "json" | "text";
 
 export type WireMobReconcileStage = "spawn" | "retire";
+
+export type AttentionDelegatedAuthority = "add_evidence" | "close_own_review_item" | "request_closure" | "close_if_policy_allows";
+
+export interface GoalAttentionTargetSession {
+  kind: "session";
+  session_id: string;
+}
+
+export type GoalAttentionTarget = GoalAttentionTargetSession;
+
+export type WorkAttentionMode = "pursue" | "coordinate" | "review" | "falsify" | "judge" | "observe";
+
+export interface WorkAttentionStatusActive {
+  state: "active";
+}
+
+export interface WorkAttentionStatusPaused {
+  state: "paused";
+  until?: string;
+}
+
+export interface WorkAttentionStatusSuperseded {
+  state: "superseded";
+}
+
+export interface WorkAttentionStatusStopped {
+  state: "stopped";
+}
+
+export type WorkAttentionStatus = WorkAttentionStatusActive | WorkAttentionStatusPaused | WorkAttentionStatusSuperseded | WorkAttentionStatusStopped;
+
+export interface WorkAttentionTargetSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface WorkAttentionTargetLoweredOwner {
+  kind: "lowered_owner";
+  owner_key: WorkOwnerKey;
+}
+
+export type WorkAttentionTarget = WorkAttentionTargetSession | WorkAttentionTargetLoweredOwner;
+
+export interface WorkCompletionPolicySelfAttest {
+  kind: "self_attest";
+}
+
+export interface WorkCompletionPolicyHostConfirmed {
+  kind: "host_confirmed";
+}
+
+export interface WorkCompletionPolicyPrincipalConfirmed {
+  kind: "principal_confirmed";
+}
+
+export interface WorkCompletionPolicySupervisor {
+  kind: "supervisor";
+  owner_key: WorkOwnerKey;
+}
+
+export interface WorkCompletionPolicyReviewerQuorum {
+  kind: "reviewer_quorum";
+  threshold: number;
+}
+
+export type WorkCompletionPolicy = WorkCompletionPolicySelfAttest | WorkCompletionPolicyHostConfirmed | WorkCompletionPolicyPrincipalConfirmed | WorkCompletionPolicySupervisor | WorkCompletionPolicyReviewerQuorum;
+
+export type WorkOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
 
 export type McpLiveOperation = "add" | "remove" | "reload";
 

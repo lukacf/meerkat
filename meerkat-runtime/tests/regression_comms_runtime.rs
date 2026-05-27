@@ -607,20 +607,20 @@ async fn message_while_running_with_explicit_queue_stays_queued() {
     let interaction = make_message("peer-1", "hello");
     let input = runtime_input_for_interaction(&interaction, &rid());
 
-    // peer_message + running + explicit Queue → StageRunStart + no interrupt
+    // peer_message + running + explicit Queue -> StageRunStart + idle wake, no interrupt
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
         post_admission_signal_from_accept_outcome(&outcome, false),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 

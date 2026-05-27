@@ -298,11 +298,12 @@ Agents mutate WorkGraph through `workgraph_*` tools:
 | `workgraph_add_evidence` | Attach evidence references |
 | `workgraph_snapshot` / `workgraph_events` | Observe graph state and history |
 
-Host RPC, REST, and CLI expose read-only observability:
+Host RPC, REST, and SDKs expose WorkGraph observability. CLI and trusted
+in-process hosts also expose narrow goal/attention control:
 
-- RPC: `workgraph/get`, `workgraph/list`, `workgraph/ready`, `workgraph/snapshot`, `workgraph/events`
-- REST: `GET /workgraph/items`, `/workgraph/ready`, `/workgraph/snapshot`, `/workgraph/events`
-- CLI: `rkat workgraph list|show|ready|snapshot|events`
+- RPC: `workgraph/get`, `workgraph/list`, `workgraph/ready`, `workgraph/snapshot`, `workgraph/events`, `workgraph/goal/status`, `workgraph/attention/list`
+- REST: `GET /workgraph/items`, `/workgraph/ready`, `/workgraph/snapshot`, `/workgraph/events`, `POST /workgraph/goal/status`, `POST /workgraph/attention/list`
+- CLI: `rkat workgraph list|show|ready|snapshot|events|goal-create|goal-status|goal-confirm|goal-close|attention-list|attention-pause|attention-resume`
 
 When skills are enabled, `workgraph-workflow` is the companion skill for agent
 operating guidance. It is discoverable and loadable; it is not preloaded by

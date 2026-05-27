@@ -116,7 +116,8 @@ Hard CLI negatives: no `rkat sessions`, no `rkat resume`, no `rkat rpc`, no
 
 WorkGraph is a realm-scoped durable commitment graph. Agents mutate it through
 the `workgraph_*` tool family when `enable_workgraph` / `tools.workgraph_enabled`
-is active. Host surfaces are read-only:
+is active. Host REST/RPC/SDK surfaces provide observability, while CLI and
+trusted in-process hosts also expose narrow goal/attention controls:
 
 ```bash
 rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
@@ -124,13 +125,22 @@ rkat workgraph show <ID> [--namespace <NS>] [--json]
 rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
 rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
+rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
+rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
+rkat workgraph goal-confirm <BINDING_ID> --expected-revision <N> --kind <KIND> --id <ID> [--namespace <NS>] [--label <TEXT>] [--summary <TEXT>] [--json]
+rkat workgraph goal-close <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--status completed|cancelled|failed] [--json]
+rkat workgraph attention-list [--namespace <NS>] [--status active|paused|stopped|superseded] [--json]
+rkat workgraph attention-pause <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
+rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 ```
 
 RPC exposes `workgraph/get`, `workgraph/list`, `workgraph/ready`,
-`workgraph/snapshot`, and `workgraph/events`. REST exposes
+`workgraph/snapshot`, `workgraph/events`, `workgraph/goal/status`, and
+`workgraph/attention/list`. REST exposes
 `GET /workgraph/items`, `/workgraph/items/{id}`, `/workgraph/ready`,
-`/workgraph/snapshot`, and `/workgraph/events`. Python and TypeScript SDKs wrap
-the same read-only surface.
+`/workgraph/snapshot`, `/workgraph/events`, `POST /workgraph/goal/status`, and
+`POST /workgraph/attention/list`. Python and TypeScript SDKs wrap the same
+read-only observability surface.
 
 ### MCP CLI config surface
 

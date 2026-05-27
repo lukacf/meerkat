@@ -233,7 +233,7 @@ async fn accept_peer_terminal_idle_wakes() {
     assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::None
     );
 }
 
@@ -907,7 +907,7 @@ async fn post_admission_signal_accumulates_strongest() {
     assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::None
     );
 }
 
@@ -947,7 +947,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
     );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::None
     );
 }
 

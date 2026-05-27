@@ -2,7 +2,7 @@
 
 Python SDK for the [Meerkat](https://github.com/lukacf/meerkat) runtime.
 
-- **Contract version:** `0.6.3`
+- **Contract version:** `0.6.23`
 - **Python:** `>=3.10`
 - **Package:** `meerkat-sdk`
 
@@ -135,6 +135,8 @@ work through their WorkGraph tools; SDK callers inspect the current graph.
 - `await client.list_ready_workgraph_items(filter=None)`
 - `await client.get_workgraph_snapshot(filter=None)`
 - `await client.list_workgraph_events(filter=None)`
+- `await client.get_workgraph_goal_status(GoalStatusRequest(...))`
+- `await client.list_workgraph_attention(AttentionListRequest(...))`
 
 ### Mob runtime
 

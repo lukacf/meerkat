@@ -21,13 +21,14 @@ Canonical composition set:
   - `schedule_bundle`
   - `schedule_runtime_bundle`
   - `schedule_mob_bundle`
+  - `workgraph_attention_bundle`
 
 Status:
 
 - internal routes inside `MeerkatMachine` and `MobMachine` are no longer
   modeled as inter-machine compositions
 - `meerkat_mob_seam` is the sole inter-kernel composition
-- the retained perimeter compositions were audited during the two-kernel
+- the retained perimeter/workgraph compositions were audited during the two-kernel
   collapse:
   - `auth_lease_bundle` remains because it publishes auth lease lifecycle
     facts across the auth authority perimeter
@@ -36,6 +37,8 @@ Status:
     schedule/occurrence delivery protocol edges into the runtime perimeter
   - `schedule_mob_bundle` remains because it references only
     schedule/occurrence delivery protocol edges into the mob perimeter
+  - `workgraph_attention_bundle` remains because WorkGraph item lifecycle and
+    attention binding lifecycle are separate WorkGraph-owned authority surfaces
 
 Validation:
 

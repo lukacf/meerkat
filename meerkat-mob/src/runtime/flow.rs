@@ -1868,6 +1868,7 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
     Some(TurnToolOverlay {
         allowed_tools: step.allowed_tools.clone(),
         blocked_tools: step.blocked_tools.clone(),
+        dispatch_context: Default::default(),
     })
 }
 

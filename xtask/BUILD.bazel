@@ -532,6 +532,7 @@ rust_test(
         "//meerkat-mcp:package_runfiles",
         "//meerkat-mob:package_runfiles",
         "//meerkat-runtime:package_runfiles",
+        "//meerkat-workgraph:package_runfiles",
         "//test-fixtures/machine-dsl-tests:package_runfiles",
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",

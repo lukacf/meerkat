@@ -8643,6 +8643,34 @@
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
       },
+      "PublicTurnToolOverlay": {
+        "description": "Public caller-safe per-turn tool overlay.",
+        "properties": {
+          "allowed_tools": {
+            "default": null,
+            "description": "Optional allow-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "default": null,
+            "description": "Optional deny-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
@@ -8688,34 +8716,6 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
-      },
-      "TurnToolOverlay": {
-        "description": "Ephemeral per-turn tool overlay for flow-dispatched turns.",
-        "properties": {
-          "allowed_tools": {
-            "default": null,
-            "description": "Optional allow-list for this turn.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "blocked_tools": {
-            "default": null,
-            "description": "Optional deny-list for this turn.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
       },
       "WireAuthBindingRef": {
         "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
@@ -8919,7 +8919,7 @@
       "flow_tool_overlay": {
         "anyOf": [
           {
-            "$ref": "#/$defs/TurnToolOverlay"
+            "$ref": "#/$defs/PublicTurnToolOverlay"
           },
           {
             "type": "null"

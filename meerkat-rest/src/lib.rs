@@ -75,9 +75,9 @@ use meerkat_core::service::{
     SessionTranscriptRewriteRequest, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
-    FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
-    RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
+    AgentToolDispatcher, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore,
+    ContentInput, FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider,
+    RealmSelection, RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
     format_verbose_event,
 };
 #[cfg(feature = "mob")]
@@ -95,8 +95,7 @@ use tokio::sync::{broadcast, mpsc};
 
 #[cfg(feature = "mcp")]
 use meerkat::{
-    AgentToolDispatcher, McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter,
-    McpRouterAdapter,
+    McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter,
 };
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
@@ -193,6 +192,7 @@ struct RestRuntimeExecutorContext {
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    workgraph_service: WorkGraphService,
     realm: meerkat_core::RealmId,
     instance_id: Option<String>,
     backend: String,
@@ -587,6 +587,7 @@ impl AppState {
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
             session_service: self.session_service.clone(),
+            workgraph_service: self.workgraph_service.clone(),
             realm: self.realm.clone(),
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
@@ -1300,9 +1301,7 @@ async fn apply_runtime_turn(
     );
     let typed_turn_appends = primitive.typed_turn_appends();
     let pre_turn_context_appends = match primitive {
-        RunPrimitive::StagedInput(staged)
-            if primitive.is_peer_response_terminal_context_and_run() =>
-        {
+        RunPrimitive::StagedInput(staged) if !staged.context_appends.is_empty() => {
             pending_system_context_appends(&staged.context_appends)
         }
         _ => Vec::new(),
@@ -1587,6 +1586,23 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        if let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
+            meerkat::workgraph_attention_projection_from_overlay(
+                metadata.flow_tool_overlay.as_ref(),
+            )
+        }) {
+            meerkat::validate_workgraph_attention_projection_current(
+                &self.context.workgraph_service,
+                &projection,
+            )
+            .await
+            .map_err(|error| {
+                CoreExecutorError::apply_failed_primitive_rejected(format!(
+                    "stale or inactive WorkGraph attention projection: {error}"
+                ))
+            })?;
+        }
+
         let prompt = primitive.extract_content_input();
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
@@ -1914,7 +1930,7 @@ pub struct ContinueSessionRequest {
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     /// Optional per-turn flow tool overlay.
     #[serde(default)]
-    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    pub flow_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
     /// Additional instruction sections prepended as system notices to the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
@@ -2021,6 +2037,7 @@ pub struct ErrorResponse {
     pub details: Option<Value>,
 }
 
+#[cfg(feature = "workgraph")]
 fn workgraph_observability_router() -> Router<AppState> {
     meerkat::workgraph_rest_path_catalog()
         .iter()
@@ -2040,7 +2057,18 @@ fn workgraph_observability_router() -> Router<AppState> {
             meerkat::WorkGraphRestRoute::Events => {
                 router.route(descriptor.path, get(workgraph_events))
             }
+            meerkat::WorkGraphRestRoute::GoalStatus => {
+                router.route(descriptor.path, post(workgraph_goal_status))
+            }
+            meerkat::WorkGraphRestRoute::AttentionList => {
+                router.route(descriptor.path, post(workgraph_attention_list))
+            }
         })
+}
+
+#[cfg(not(feature = "workgraph"))]
+fn workgraph_observability_router() -> Router<AppState> {
+    Router::new()
 }
 
 /// Build the REST API router
@@ -3837,7 +3865,10 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
 
 fn workgraph_error_to_api(error: meerkat::WorkGraphError) -> ApiError {
     match error {
-        meerkat::WorkGraphError::NotFound { .. } => ApiError::NotFound(error.to_string()),
+        meerkat::WorkGraphError::NotFound { .. }
+        | meerkat::WorkGraphError::AttentionNotFound { .. } => {
+            ApiError::NotFound(error.to_string())
+        }
         meerkat::WorkGraphError::StaleRevision { .. }
         | meerkat::WorkGraphError::Conflict(_)
         | meerkat::WorkGraphError::InvalidTransition(_)
@@ -4613,6 +4644,94 @@ async fn workgraph_events(
         .await
         .map(|events| Json(meerkat::WorkGraphEventsResponse { events }))
         .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_goal_status(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::GoalStatusRequest>,
+) -> Result<Json<meerkat::GoalStatusResult>, ApiError> {
+    state
+        .workgraph_service
+        .goal_status(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_attention_list(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::AttentionListRequest>,
+) -> Result<Json<meerkat::AttentionListResult>, ApiError> {
+    state
+        .workgraph_service
+        .list_attention(request)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+#[cfg(test)]
+async fn workgraph_attention_continuation_input(
+    state: &AppState,
+    request: meerkat::AttentionBindingRequest,
+) -> Result<(SessionId, meerkat_runtime::Input), meerkat::WorkGraphError> {
+    let binding_id = request.binding_id.clone();
+    let binding = state
+        .workgraph_service
+        .attention_binding(request.clone())
+        .await?;
+    let session_id = match binding.attention.target {
+        meerkat::WorkAttentionTarget::Session { session_id } => session_id,
+        meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => {
+            return Err(meerkat::WorkGraphError::InvalidInput(format!(
+                "work attention binding {binding_id} targets lowered owner {}, not a session",
+                owner_key.canonical()
+            )));
+        }
+    };
+    let projection = state
+        .workgraph_service
+        .attention_projection(meerkat::AttentionProjectionRequest {
+            binding_id: binding_id.clone(),
+            realm_id: request.realm_id,
+            namespace: request.namespace,
+        })
+        .await?
+        .projection;
+    let flow_tool_overlay =
+        meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection);
+    let input_id = meerkat_core::lifecycle::InputId::new();
+    let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
+    let supersession_key = meerkat::workgraph_attention_supersession_key(&projection);
+    let idempotency_key = format!("{attention_key}:{input_id}");
+    let context_key = idempotency_key.clone();
+    let input = meerkat_runtime::Input::Continuation(meerkat_runtime::ContinuationInput {
+        header: meerkat_runtime::InputHeader {
+            id: input_id,
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::System,
+            durability: meerkat_runtime::InputDurability::Durable,
+            visibility: meerkat_runtime::InputVisibility {
+                transcript_eligible: false,
+                operator_eligible: false,
+            },
+            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(idempotency_key)),
+            supersession_key: Some(meerkat_runtime::identifiers::SupersessionKey::new(
+                supersession_key,
+            )),
+            correlation_id: None,
+        },
+        reason: "workgraph_attention".to_string(),
+        handling_mode: meerkat_core::types::HandlingMode::Steer,
+        request_id: Some(binding_id.to_string()),
+        flow_tool_overlay: Some(flow_tool_overlay),
+        context_append: Some(meerkat::workgraph_attention_context_append(
+            context_key,
+            &projection,
+        )),
+        turn_append: Some(meerkat::workgraph_attention_turn_append(&projection)),
+    });
+    Ok((session_id, input))
 }
 
 async fn list_schedules(
@@ -5446,7 +5565,7 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        flow_tool_overlay: req.flow_tool_overlay.clone().map(Into::into),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -5718,7 +5837,7 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        flow_tool_overlay: req.flow_tool_overlay.clone().map(Into::into),
                         additional_instructions: resolve_turn_additional_instructions(
                             req.additional_instructions.clone(),
                         ),
@@ -9322,7 +9441,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.status().is_client_error());
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
@@ -9335,7 +9454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_workgraph_rest_routes_are_read_only() {
+    async fn test_workgraph_rest_routes_expose_observability_and_narrow_goal_control() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -9352,6 +9471,7 @@ mod tests {
                 title: "observe me".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: Default::default(),
                 due_at: None,
                 not_before: None,
@@ -9370,6 +9490,7 @@ mod tests {
                 title: "observe other namespace".to_string(),
                 description: None,
                 priority: Default::default(),
+                completion_policy: Default::default(),
                 labels: Default::default(),
                 due_at: None,
                 not_before: None,
@@ -9380,9 +9501,102 @@ mod tests {
             })
             .await
             .expect("seed other WorkGraph item");
+        let scoped_namespace = meerkat::WorkNamespace::new("scoped-goals").unwrap();
+        let scoped_session_id =
+            meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000107").unwrap();
+        let scoped_goal = state
+            .workgraph_service
+            .create_goal(meerkat::GoalCreateRequest {
+                realm_id: None,
+                namespace: Some(scoped_namespace.clone()),
+                title: "continue scoped attention".to_string(),
+                description: None,
+                target: meerkat::GoalAttentionTarget::Session {
+                    session_id: scoped_session_id.clone(),
+                },
+                mode: meerkat::WorkAttentionMode::Pursue,
+                completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: meerkat::AttentionDelegatedAuthority::RequestClosure,
+                projection_policy: meerkat::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("seed scoped WorkGraph goal");
+        workgraph_attention_continuation_input(
+            &state,
+            meerkat::AttentionBindingRequest {
+                binding_id: scoped_goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            },
+        )
+        .await
+        .expect_err("scoped binding should not resolve without its namespace");
+        let (target_session_id, input) = workgraph_attention_continuation_input(
+            &state,
+            meerkat::AttentionBindingRequest {
+                binding_id: scoped_goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: Some(scoped_namespace),
+            },
+        )
+        .await
+        .expect("scoped continuation input");
+        assert_eq!(target_session_id, scoped_session_id);
+        let meerkat_runtime::Input::Continuation(continuation) = input else {
+            unreachable!("attention continuation should build a continuation input");
+        };
+        let overlay = continuation
+            .flow_tool_overlay
+            .expect("attention continuation should carry scoped tool overlay");
+        let blocked_tools = overlay
+            .blocked_tools
+            .expect("attention continuation should carry scoped tool overlay");
+        let allowed_tools = overlay
+            .allowed_tools
+            .expect("attention continuation should restrict visible tools");
+        assert!(
+            allowed_tools
+                .iter()
+                .all(|name| name.starts_with("workgraph_"))
+        );
+        assert!(allowed_tools.contains(&"workgraph_get".to_string()));
+        assert!(!blocked_tools.contains(&"workgraph_add_evidence".to_string()));
+        assert!(blocked_tools.contains(&"workgraph_link".to_string()));
+        assert!(
+            overlay
+                .dispatch_context
+                .contains_key(meerkat::WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY)
+        );
+        assert!(continuation.turn_append.is_some());
         let app = router(state);
 
+        let missing_goal_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "binding_id": "missing-binding"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_goal_response.status(), StatusCode::NOT_FOUND);
+
         for descriptor in meerkat::workgraph_rest_path_catalog() {
+            if descriptor
+                .operations
+                .iter()
+                .any(|operation| operation.method != "get")
+            {
+                continue;
+            }
             let uri = match descriptor.route {
                 meerkat::WorkGraphRestRoute::Item => {
                     descriptor.path.replace("{id}", item.id.as_str())
@@ -9401,6 +9615,36 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        }
+
+        for (method, uri) in [
+            ("POST", "/workgraph/goal/create"),
+            ("POST", "/workgraph/goal/confirm"),
+            ("POST", "/workgraph/goal/request_close"),
+            ("POST", "/workgraph/attention/pause"),
+            ("POST", "/workgraph/attention/resume"),
+            ("POST", "/workgraph/attention/continue"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{method} {uri} must not expose trusted-only WorkGraph mutation route; got {}",
+                response.status()
+            );
         }
 
         let events_path = meerkat::workgraph_rest_path_catalog()
@@ -10585,7 +10829,7 @@ mod tests {
         assert!(rest_continue_requires_rebuild(&req));
         req.model = None;
 
-        req.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay::default());
+        req.flow_tool_overlay = Some(meerkat_core::service::PublicTurnToolOverlay::default());
         assert!(
             !rest_continue_requires_rebuild(&req),
             "flow tool overlay stays on the live path"

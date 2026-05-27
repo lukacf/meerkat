@@ -472,12 +472,12 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Active,
-        revision: 0,
-        trigger_key: String::new(),
-        target_binding_key: String::new(),
-        misfire_policy: MisfirePolicy::default(),
-        overlap_policy: OverlapPolicy::default(),
-        missing_target_policy: MissingTargetPolicy::default(),
+        revision: 1,
+        trigger_key: "trigger-0".to_string(),
+        target_binding_key: "target-0".to_string(),
+        misfire_policy: MisfirePolicy::Skip,
+        overlap_policy: OverlapPolicy::SkipIfRunning,
+        missing_target_policy: MissingTargetPolicy::MarkMisfired,
         planning_cursor_utc_ms: None,
         next_occurrence_ordinal: 0,
         superseded_ack_ids: Default::default(),

@@ -1294,6 +1294,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
     let overlay = TurnToolOverlay {
         allowed_tools: Some(vec!["alpha".to_string()]),
         blocked_tools: Some(vec!["beta".to_string()]),
+        dispatch_context: Default::default(),
     };
     let turn = tokio::spawn(async move {
         service_clone
@@ -1326,6 +1327,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
     assert!(updates.contains(&Some(TurnToolOverlay {
         allowed_tools: Some(vec!["alpha".to_string()]),
         blocked_tools: Some(vec!["beta".to_string()]),
+        dispatch_context: Default::default(),
     })));
     assert_eq!(updates.last().cloned(), Some(None));
 }
@@ -1365,6 +1367,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                     Some(TurnToolOverlay {
                         allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
                         blocked_tools: Some(vec!["beta".to_string()]),
+                        dispatch_context: Default::default(),
                     }),
                     Vec::new(),
                     None,
@@ -1427,6 +1430,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
                     Some(TurnToolOverlay {
                         allowed_tools: Some(vec!["alpha".to_string()]),
                         blocked_tools: None,
+                        dispatch_context: Default::default(),
                     }),
                     Vec::new(),
                     None,
@@ -1449,6 +1453,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
         vec![Some(TurnToolOverlay {
             allowed_tools: Some(vec!["alpha".to_string()]),
             blocked_tools: None,
+            dispatch_context: Default::default(),
         })]
     );
 }

@@ -11,6 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     RuntimeTurnMetadata,
 };
 use meerkat_core::ops::{OpEvent, OperationId};
+use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::{
     HandlingMode, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticePeer,
 };
@@ -506,6 +507,15 @@ pub struct ContinuationInput {
     /// Optional request/correlation handle tied to the continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Optional per-turn tool visibility overlay for scoped continuations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Optional runtime-owned context projected into the next turn boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_append: Option<ConversationContextAppend>,
+    /// Optional runtime-owned turn append used to force a continuation turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_append: Option<ConversationAppend>,
 }
 
 impl ContinuationInput {
@@ -532,6 +542,9 @@ impl ContinuationInput {
             reason: "detached_background_op_completed".to_string(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            flow_tool_overlay: None,
+            context_append: None,
+            turn_append: None,
         }
     }
 }
@@ -886,7 +899,8 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
             ConversationAppendRole::SystemNotice,
             external_event_notice_renderable(e),
         ),
-        Input::Continuation(_) | Input::Operation(_) => return None,
+        Input::Continuation(continuation) => return continuation.turn_append.clone(),
+        Input::Operation(_) => return None,
     };
 
     Some(ConversationAppend { role, content })
@@ -894,6 +908,9 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
     let (projection, content) = match input {
+        Input::Continuation(continuation) => {
+            return continuation.context_append.clone();
+        }
         Input::Peer(peer) => {
             let projection = peer_projection_from_peer_input(peer)?;
             let content = peer_notice_renderable(peer)?;
@@ -1280,6 +1297,51 @@ mod tests {
     }
 
     #[test]
+    fn continuation_projection_can_carry_runtime_context_append() {
+        let input = Input::Continuation(ContinuationInput {
+            header: make_header(),
+            reason: "workgraph_attention".into(),
+            handling_mode: HandlingMode::Steer,
+            request_id: Some("binding-1".into()),
+            flow_tool_overlay: Some(TurnToolOverlay {
+                allowed_tools: Some(vec!["workgraph_add_evidence".into()]),
+                blocked_tools: None,
+                dispatch_context: Default::default(),
+            }),
+            context_append: Some(ConversationContextAppend {
+                key: "workgraph_attention:binding-1:2:5".into(),
+                content: CoreRenderable::Text {
+                    text: "WorkGraph attention projection".into(),
+                },
+            }),
+            turn_append: None,
+        });
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let appends = projection_to_pending_system_context_appends(input.id(), &projection);
+
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].text, "WorkGraph attention projection");
+        assert_eq!(
+            appends[0].source.as_deref(),
+            Some("workgraph_attention:binding-1:2:5")
+        );
+        let metadata = crate::runtime_loop::for_input(
+            &input,
+            crate::ingress_types::RuntimeInputSemantics {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                peer_response_terminal_apply_intent: None,
+            },
+        );
+        assert_eq!(
+            metadata
+                .flow_tool_overlay
+                .and_then(|overlay| overlay.allowed_tools),
+            Some(vec!["workgraph_add_evidence".into()])
+        );
+    }
+
+    #[test]
     fn steer_projection_falls_back_to_ordinary_peer_append() {
         let mut header = make_header();
         header.source = InputOrigin::Peer {
@@ -1637,6 +1699,9 @@ mod tests {
             reason: "continue".into(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            flow_tool_overlay: None,
+            context_append: None,
+            turn_append: None,
         });
         assert_eq!(continuation.kind(), InputKind::Continuation);
 

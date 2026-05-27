@@ -12,6 +12,20 @@ from typing import Any, Literal, NewType, NotRequired, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
+    AttentionBindingRequest as AttentionBindingRequest,
+    AttentionBindingResult as AttentionBindingResult,
+    AttentionContextProjection as AttentionContextProjection,
+    AttentionDelegatedAuthority as AttentionDelegatedAuthority,
+    AttentionListRequest as AttentionListRequest,
+    AttentionListResult as AttentionListResult,
+    AttentionProjectionPolicy as AttentionProjectionPolicy,
+    AttentionProjectionRequest as AttentionProjectionRequest,
+    AttentionProjectionResult as AttentionProjectionResult,
+    AttentionProjectionText as AttentionProjectionText,
+    AttentionReassignRequest as AttentionReassignRequest,
+    GoalAttentionTarget as GoalAttentionTarget,
+    GoalStatusRequest as GoalStatusRequest,
+    GoalStatusResult as GoalStatusResult,
     McpAddParams as McpAddParams,
     McpHttpConfig as McpHttpConfig,
     McpHttpServerConfig as McpHttpServerConfig,
@@ -63,6 +77,7 @@ from .generated.types import (
     MobWireMembersBatchParams as MobWireMembersBatchParams,
     MobWireMembersBatchResult as MobWireMembersBatchResult,
     MobWiringRulesInput as MobWiringRulesInput,
+    PublicTurnToolOverlay as PublicTurnToolOverlay,
     LiveChannelParams as LiveChannelParams,
     LiveCommitInputParams as LiveCommitInputParams,
     LiveInputChunkWire as LiveInputChunkWire,
@@ -153,6 +168,15 @@ from .generated.types import (
     RealtimeVideoChunk as RealtimeVideoChunk,
     RuntimeAcceptResult as RuntimeAcceptResult,
     RuntimeStateResult as RuntimeStateResult,
+    ProjectedAttentionAuthority as ProjectedAttentionAuthority,
+    WorkAttentionBinding as WorkAttentionBinding,
+    WorkAttentionMode as WorkAttentionMode,
+    WorkAttentionStatus as WorkAttentionStatus,
+    WorkAttentionTarget as WorkAttentionTarget,
+    WorkCompletionPolicy as WorkCompletionPolicy,
+    WorkItemRef as WorkItemRef,
+    WorkOwnerKey as WorkOwnerKey,
+    WorkOwnerKind as WorkOwnerKind,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
     WireAuthBindingRef as WireAuthBindingRef,
@@ -450,6 +474,8 @@ WorkGraphEventKind = Literal[
     "closed",
     "linked",
     "evidence_added",
+    "attention_created",
+    "attention_updated",
 ]
 WorkGraphOwnerKind = Literal["principal", "agent", "session", "mob", "label"]
 
@@ -491,9 +517,11 @@ class WorkItem(TypedDict, total=False):
     description: str
     status: WorkGraphStatus
     priority: WorkGraphPriority
+    completion_policy: WorkCompletionPolicy
     labels: list[str]
     owner: WorkGraphOwner
     claim: WorkGraphClaim
+    machine_state: dict[str, Any]
     revision: int
     due_at: str
     not_before: str
@@ -540,6 +568,7 @@ class WorkGraphSnapshot(TypedDict):
     event_high_water_mark: NotRequired[int]
     items: list[WorkItem]
     edges: list[WorkGraphEdge]
+    attention: list[WorkAttentionBinding]
     ready_item_ids: list[str]
 
 

@@ -298,8 +298,8 @@ Runtime env fallback order:
 
 ## WorkGraph
 
-`rkat workgraph` is read-only operator lookup for the active realm. Agents
-mutate WorkGraph through `workgraph_*` tools.
+`rkat workgraph` is operator lookup plus narrow goal/attention control for the
+active realm. Agents mutate ordinary WorkGraph items through `workgraph_*` tools.
 
 ```bash
 rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
@@ -307,4 +307,11 @@ rkat workgraph show <ID> [--namespace <NS>] [--json]
 rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
 rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
+rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
+rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
+rkat workgraph goal-confirm <BINDING_ID> --expected-revision <N> --kind <KIND> --id <ID> [--namespace <NS>] [--label <TEXT>] [--summary <TEXT>] [--json]
+rkat workgraph goal-close <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--status completed|cancelled|failed] [--json]
+rkat workgraph attention-list [--namespace <NS>] [--status active|paused|stopped|superseded] [--json]
+rkat workgraph attention-pause <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
+rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 ```

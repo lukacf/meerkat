@@ -157,9 +157,66 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "attention_contracts_test",
+    aliases = aliases(
+        package_name = "meerkat-workgraph",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "attention_contracts",
+    crate_root = "tests/attention_contracts.rs",
+    crate_features = [
+        "machine-schema-exports",
+        "schema",
+        "skills",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/workgraph-workflow/SKILL.md",
+    ],
+    srcs = [
+        "tests/attention_contracts.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.6.23",
+        "CARGO_BIN_NAME": "attention_contracts",
+        "CARGO_MANIFEST_DIR": "./meerkat-workgraph",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-workgraph",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-capabilities:meerkat_capabilities",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-skills:meerkat_skills",
+        "//meerkat-workgraph:meerkat_workgraph",
+    ] + all_crate_deps(
+        package_name = "meerkat-workgraph",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
+        ":attention_contracts_test",
         ":meerkat_workgraph_unit_test",
     ],
 )

@@ -988,6 +988,40 @@ pub struct TurnToolOverlay {
     /// Optional deny-list for this turn.
     #[serde(default)]
     pub blocked_tools: Option<Vec<String>>,
+    /// Tool-dispatch metadata visible only to dispatchers for this turn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub dispatch_context: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl TurnToolOverlay {
+    /// Return a caller-safe overlay by dropping runtime-owned dispatch metadata.
+    pub fn without_dispatch_context(mut self) -> Self {
+        self.dispatch_context.clear();
+        self
+    }
+}
+
+/// Public caller-safe per-turn tool overlay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PublicTurnToolOverlay {
+    /// Optional allow-list for this turn.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional deny-list for this turn.
+    #[serde(default)]
+    pub blocked_tools: Option<Vec<String>>,
+}
+
+impl From<PublicTurnToolOverlay> for TurnToolOverlay {
+    fn from(value: PublicTurnToolOverlay) -> Self {
+        Self {
+            allowed_tools: value.allowed_tools,
+            blocked_tools: value.blocked_tools,
+            dispatch_context: BTreeMap::new(),
+        }
+    }
 }
 
 /// Query parameters for listing sessions.

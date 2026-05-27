@@ -48,6 +48,7 @@ pub(crate) fn for_input(
         },
         Input::Continuation(continuation) => RuntimeTurnMetadata {
             handling_mode: Some(continuation.handling_mode),
+            flow_tool_overlay: continuation.flow_tool_overlay.clone(),
             ..Default::default()
         },
         Input::Peer(peer) => RuntimeTurnMetadata {
@@ -420,7 +421,7 @@ pub(crate) fn inputs_to_primitive(
 #[cfg(test)]
 fn fallback_unadmitted_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
     let policy = crate::policy_table::DefaultPolicyTable::resolve(input, true);
-    crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind())
+    crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(&policy, input)
 }
 
 #[cfg(test)]

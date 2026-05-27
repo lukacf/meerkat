@@ -2299,6 +2299,7 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "priority": "high",
         "labels": ["autism-support", "dentist"],
         "revision": 1,
+        "machine_state": {},
         "created_at": timestamp,
         "updated_at": timestamp,
         "external_refs": [{"kind": "calendar_event", "id": "dentist-visit"}],
@@ -2320,6 +2321,7 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
                 "event_high_water_mark": 7,
                 "items": [item],
                 "edges": [],
+                "attention": [],
                 "ready_item_ids": ["prep-dentist-ride"],
             }
         if method == "workgraph/events":
@@ -2336,6 +2338,10 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
                     }
                 ]
             }
+        if method == "workgraph/goal/status":
+            return {"item": item, "attention": {"binding_id": "attn-1"}}
+        if method == "workgraph/attention/list":
+            return {"attention": [{"binding_id": "attn-1"}]}
         raise AssertionError(f"unexpected method {method}")
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -2353,18 +2359,35 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         {"realm_id": "homecore", "namespace": "family/appointments"}
     )
     events = await client.list_workgraph_events({"realm_id": "homecore", "limit": 10})
+    goal = await client.get_workgraph_goal_status(
+        {"binding_id": "attn-1", "namespace": "family/appointments"}
+    )
+    attention = await client.list_workgraph_attention(
+        {
+            "realm_id": "homecore",
+            "status": {"state": "paused", "until": timestamp},
+            "target": {
+                "kind": "session",
+                "session_id": "019e63c2-0000-7000-8000-000000000030",
+            },
+        }
+    )
 
     assert fetched["id"] == "prep-dentist-ride"
     assert listed["items"][0]["priority"] == "high"
     assert ready["items"][0]["status"] == "open"
     assert snapshot["ready_item_ids"] == ["prep-dentist-ride"]
     assert events["events"][0]["kind"] == "created"
+    assert goal["attention"]["binding_id"] == "attn-1"
+    assert attention["attention"][0]["binding_id"] == "attn-1"
     assert [method for method, _ in calls] == [
         "workgraph/get",
         "workgraph/list",
         "workgraph/ready",
         "workgraph/snapshot",
         "workgraph/events",
+        "workgraph/goal/status",
+        "workgraph/attention/list",
     ]
     assert calls[0][1] == {
         "id": "prep-dentist-ride",
@@ -2373,6 +2396,18 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
     }
     assert calls[1][1] == {"realm_id": "homecore", "limit": 5}
     assert calls[2][1] == {"namespace": "family/appointments", "limit": 3}
+    assert calls[5][1] == {
+        "binding_id": "attn-1",
+        "namespace": "family/appointments",
+    }
+    assert calls[6][1] == {
+        "realm_id": "homecore",
+        "status": {"state": "paused", "until": timestamp},
+        "target": {
+            "kind": "session",
+            "session_id": "019e63c2-0000-7000-8000-000000000030",
+        },
+    }
 
 
 @pytest.mark.asyncio

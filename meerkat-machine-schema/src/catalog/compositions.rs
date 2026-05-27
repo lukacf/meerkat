@@ -11,11 +11,13 @@ use std::collections::BTreeMap;
 use crate::{
     ActorKind, ActorSchema, ClosurePolicy, CompositionDriver, CompositionDriverRustBinding,
     CompositionInvariant, CompositionInvariantKind, CompositionSchema, CompositionStateLimits,
-    CompositionTransactionPlan, CompositionWitness, DriverDispatchRoute, EffectHandoffProtocol,
-    EntryInput, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef,
-    HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
-    ProtocolHelperReturnShape, ProtocolRustBinding, Route, RouteBindingSource, RouteDelivery,
-    RouteFieldBinding, RouteTarget, RouteTargetKind, RouteVariantId, WatchedEffect,
+    CompositionTransactionPlan, CompositionWitness, CompositionWitnessField,
+    CompositionWitnessInput, CompositionWitnessTransition, CompositionWitnessTransitionOrder,
+    DriverDispatchRoute, EffectHandoffProtocol, EntryInput, Expr, FeedbackFieldBinding,
+    FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance,
+    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
+    RouteVariantId, WatchedEffect,
 };
 
 // Short-named typed-identity constructors used throughout this module.
@@ -28,8 +30,9 @@ use crate::{
 // hand-authored DSL-slug bug, never reachable from wire input.
 use crate::identity::{
     ActorId, CompositionDriverId, CompositionId, CompositionWitnessId, EffectVariantId,
-    EntryInputId, FieldId, InputVariantId, MachineId, MachineInstanceId, PhaseId, ProtocolId,
-    RouteId, StorePrimitiveId, TransactionPlanId, TransactionTriggerId, TransitionId,
+    EntryInputId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
+    PhaseId, ProtocolId, RouteId, StorePrimitiveId, TransactionPlanId, TransactionTriggerId,
+    TransitionId,
 };
 
 fn comp_id(s: &str) -> CompositionId {
@@ -70,6 +73,12 @@ fn ev_id(s: &str) -> EffectVariantId {
 }
 fn fld_id(s: &str) -> FieldId {
     FieldId::parse(s).expect("valid field slug")
+}
+fn enum_type_id(s: &str) -> EnumTypeId {
+    EnumTypeId::parse(s).expect("valid enum-type slug")
+}
+fn enum_variant_id(s: &str) -> EnumVariantId {
+    EnumVariantId::parse(s).expect("valid enum-variant slug")
 }
 fn route_id(s: &str) -> RouteId {
     RouteId::parse(s).expect("valid route slug")
@@ -643,6 +652,137 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
     }
 }
 
+pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: comp_id("workgraph_attention_bundle"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("workgraph"),
+                machine_name: mach_id("WorkGraphLifecycleMachine"),
+                actor: act_id("workgraph_authority"),
+            },
+            MachineInstance {
+                instance_id: mi_id("attention"),
+                machine_name: mach_id("WorkAttentionLifecycleMachine"),
+                actor: act_id("attention_authority"),
+            },
+        ],
+        actors: vec![
+            machine_actor("workgraph_authority"),
+            machine_actor("attention_authority"),
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![],
+        routes: vec![Route {
+            name: route_id("work_item_close_stops_attention"),
+            from_machine: mi_id("workgraph"),
+            effect_variant: ev_id("Closed"),
+            to: RouteTarget::new(
+                mi_id("attention"),
+                rv(RouteTargetKind::Input, "Stop"),
+            ),
+            bindings: vec![
+                bind("at_utc_ms", "at_utc_ms"),
+                owner_bind("expected_revision"),
+            ],
+            delivery: RouteDelivery::Immediate,
+        }],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![transaction_plan(
+            "transactional_close_stops_attention",
+            "close_work_item",
+            "terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding",
+            "WorkGraphStore::update_item_and_attention_cas",
+        )],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "closed_work_item_routes_to_attention_stop".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: mi_id("workgraph"),
+                    effect_variant: ev_id("Closed"),
+                    to_machine: mi_id("attention"),
+                    input_variant: rv(RouteTargetKind::Input, "Stop"),
+                },
+                statement: "terminal WorkGraph item closure stops co-resident attention bindings through the canonical WorkGraph-to-attention route".into(),
+                references_machines: vec![mi_id("workgraph"), mi_id("attention")],
+                references_actors: vec![act_id("workgraph_authority"), act_id("attention_authority")],
+            },
+            CompositionInvariant {
+                name: "attention_stop_originates_from_work_item_close".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: route_id("work_item_close_stops_attention"),
+                    to_machine: mi_id("attention"),
+                    input_variant: rv(RouteTargetKind::Input, "Stop"),
+                    from_machine: mi_id("workgraph"),
+                    effect_variant: ev_id("Closed"),
+                },
+                statement: "attention stop on terminal item closure is not ad hoc service-only mutation; it originates from the WorkGraph Closed effect route".into(),
+                references_machines: vec![mi_id("workgraph"), mi_id("attention")],
+                references_actors: vec![act_id("workgraph_authority"), act_id("attention_authority")],
+            },
+        ],
+        witnesses: vec![CompositionWitness {
+            name: witness_id("close_stops_attention_route"),
+            preload_inputs: vec![
+                witness_input(
+                    "workgraph",
+                    "CreateOpen",
+                    vec![
+                        witness_field("due_at_utc_ms", Expr::None),
+                        witness_field("not_before_utc_ms", Expr::None),
+                        witness_field("snoozed_until_utc_ms", Expr::None),
+                        witness_field(
+                            "completion_policy",
+                            named_variant("WorkCompletionPolicy", "SelfAttest"),
+                        ),
+                        witness_field("completion_supervisor_owner_key", Expr::None),
+                        witness_field("completion_reviewer_quorum_threshold", Expr::None),
+                        witness_field("unresolved_blocker_count", Expr::U64(0)),
+                    ],
+                ),
+                witness_input(
+                    "workgraph",
+                    "CloseCompleted",
+                    vec![
+                        witness_field("expected_revision", Expr::U64(1)),
+                        witness_field("at_utc_ms", Expr::U64(1)),
+                    ],
+                ),
+            ],
+            expected_routes: vec![route_id("work_item_close_stops_attention")],
+            expected_scheduler_rules: vec![],
+            expected_states: vec![],
+            expected_transitions: vec![
+                witness_transition("workgraph", "CreateOpen"),
+                witness_transition("workgraph", "CloseOpenCompleted"),
+                witness_transition("attention", "StopActive"),
+            ],
+            expected_transition_order: vec![CompositionWitnessTransitionOrder {
+                earlier: witness_transition("workgraph", "CloseOpenCompleted"),
+                later: witness_transition("attention", "StopActive"),
+            }],
+            state_limits: CompositionStateLimits {
+                step_limit: 8,
+                pending_input_limit: 8,
+                pending_route_limit: 8,
+                delivered_route_limit: 1,
+                emitted_effect_limit: 3,
+                seq_limit: 0,
+                set_limit: 0,
+                map_limit: 0,
+            },
+        }],
+        deep_domain_cardinality: 3,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        closed_world: true,
+    }
+}
+
 fn machine_actor(name: &str) -> ActorSchema {
     ActorSchema {
         name: act_id(name),
@@ -676,6 +816,46 @@ fn bind(to_field: &str, from_field: &str) -> RouteFieldBinding {
             from_field: fld_id(from_field),
             allow_named_alias: false,
         },
+    }
+}
+
+fn owner_bind(to_field: &str) -> RouteFieldBinding {
+    RouteFieldBinding {
+        to_field: fld_id(to_field),
+        source: RouteBindingSource::OwnerProvided,
+    }
+}
+
+fn witness_input(
+    machine: &str,
+    input_variant: &str,
+    fields: Vec<CompositionWitnessField>,
+) -> CompositionWitnessInput {
+    CompositionWitnessInput {
+        machine: mi_id(machine),
+        input_variant: iv_id(input_variant),
+        fields,
+    }
+}
+
+fn witness_field(field: &str, expr: Expr) -> CompositionWitnessField {
+    CompositionWitnessField {
+        field: fld_id(field),
+        expr,
+    }
+}
+
+fn witness_transition(machine: &str, transition: &str) -> CompositionWitnessTransition {
+    CompositionWitnessTransition {
+        machine: mi_id(machine),
+        transition: transition_id(transition),
+    }
+}
+
+fn named_variant(enum_name: &str, variant: &str) -> Expr {
+    Expr::NamedVariant {
+        enum_name: enum_type_id(enum_name),
+        variant: enum_variant_id(variant),
     }
 }
 

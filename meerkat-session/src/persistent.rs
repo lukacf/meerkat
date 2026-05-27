@@ -528,29 +528,30 @@ async fn save_session_projection_allowing_internal_rewrite(
             .save_transcript_rewrite(&rewritten, commit)
             .await
             .map_err(transcript_rewrite_store_error_to_session_error)?;
+        let commit_record = (*commit).clone();
+        if let Err(error) = append_transcript_rewrite_commit_events(
+            event_store,
+            projector,
+            session,
+            std::slice::from_ref(&commit_record),
+        )
+        .await
+        {
+            if let Err(rollback_error) = store.save_authoritative_projection(&previous).await {
+                tracing::error!(
+                    session_id = %session.id(),
+                    error = %rollback_error,
+                    "failed to roll back checkpoint transcript rewrite projection after audit append failure"
+                );
+            }
+            return Err(error);
+        }
     }
     if commits.last().map(|commit| commit.revision.as_str()) != Some(incoming_revision.as_str()) {
         store
             .save(session)
             .await
             .map_err(|err| SessionError::Store(Box::new(err)))?;
-    }
-    let commit_records = commits
-        .iter()
-        .map(|commit| (*commit).clone())
-        .collect::<Vec<_>>();
-    if let Err(error) =
-        append_transcript_rewrite_commit_events(event_store, projector, session, &commit_records)
-            .await
-    {
-        if let Err(rollback_error) = store.save_authoritative_projection(&previous).await {
-            tracing::error!(
-                session_id = %session.id(),
-                error = %rollback_error,
-                "failed to roll back checkpoint transcript rewrite projection after audit append failure"
-            );
-        }
-        return Err(error);
     }
     Ok(())
 }
@@ -1890,6 +1891,53 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             )),
                         ),
                     })?;
+                if let Err(error) = append_transcript_rewrite_commit_events(
+                    self.event_store.as_ref(),
+                    self.projector.as_ref(),
+                    &session,
+                    std::slice::from_ref(commit),
+                )
+                .await
+                {
+                    if let Some(previous) = previous.as_ref() {
+                        if let Some(runtime_store) = self.runtime_store.as_ref() {
+                            match serde_json::to_vec(previous) {
+                                Ok(session_snapshot) => {
+                                    if let Err(rollback_error) = runtime_store
+                                        .commit_session_snapshot(
+                                            &Self::runtime_id_for_session(previous.id()),
+                                            SessionDelta { session_snapshot },
+                                        )
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            session_id = %previous.id(),
+                                            error = %rollback_error,
+                                            "failed to roll back runtime transcript rewrite snapshot after audit append failure"
+                                        );
+                                    }
+                                }
+                                Err(rollback_error) => {
+                                    tracing::error!(
+                                        session_id = %previous.id(),
+                                        error = %rollback_error,
+                                        "failed to serialize previous runtime transcript snapshot for rollback"
+                                    );
+                                }
+                            }
+                        }
+                        if let Err(rollback_error) =
+                            self.store.save_authoritative_projection(previous).await
+                        {
+                            tracing::error!(
+                                session_id = %previous.id(),
+                                error = %rollback_error,
+                                "failed to roll back transcript rewrite projection after audit append failure"
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
             }
             let incoming_revision = meerkat_core::transcript_messages_digest(session.messages())
                 .map_err(|err| {
@@ -1936,6 +1984,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .save_transcript_rewrite(&rewritten, commit)
                     .await
                     .map_err(transcript_rewrite_store_error_to_session_error)?;
+                if let Err(error) = append_transcript_rewrite_commit_events(
+                    self.event_store.as_ref(),
+                    self.projector.as_ref(),
+                    &session,
+                    std::slice::from_ref(commit),
+                )
+                .await
+                {
+                    if let Some(previous) = previous.as_ref()
+                        && let Err(rollback_error) =
+                            self.store.save_authoritative_projection(previous).await
+                    {
+                        tracing::error!(
+                            session_id = %previous.id(),
+                            error = %rollback_error,
+                            "failed to roll back transcript rewrite projection after audit append failure"
+                        );
+                    }
+                    return Err(error);
+                }
             }
             if commits.last().map(|commit| commit.revision.as_str())
                 != Some(incoming_revision.as_str())
@@ -1945,53 +2013,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await
                     .map_err(|err| SessionError::Store(Box::new(err)))?;
             }
-        }
-        if let Err(error) = append_transcript_rewrite_commit_events(
-            self.event_store.as_ref(),
-            self.projector.as_ref(),
-            &session,
-            commits,
-        )
-        .await
-        {
-            if let Some(previous) = previous.as_ref() {
-                if let Some(runtime_store) = self.runtime_store.as_ref() {
-                    match serde_json::to_vec(previous) {
-                        Ok(session_snapshot) => {
-                            if let Err(rollback_error) = runtime_store
-                                .commit_session_snapshot(
-                                    &Self::runtime_id_for_session(previous.id()),
-                                    SessionDelta { session_snapshot },
-                                )
-                                .await
-                            {
-                                tracing::error!(
-                                    session_id = %previous.id(),
-                                    error = %rollback_error,
-                                    "failed to roll back runtime transcript rewrite snapshot after audit append failure"
-                                );
-                            }
-                        }
-                        Err(rollback_error) => {
-                            tracing::error!(
-                                session_id = %previous.id(),
-                                error = %rollback_error,
-                                "failed to serialize previous runtime transcript snapshot for rollback"
-                            );
-                        }
-                    }
-                }
-                if let Err(rollback_error) =
-                    self.store.save_authoritative_projection(previous).await
-                {
-                    tracing::error!(
-                        session_id = %previous.id(),
-                        error = %rollback_error,
-                        "failed to roll back transcript rewrite projection after audit append failure"
-                    );
-                }
-            }
-            return Err(error);
         }
         if converge_live {
             self.converge_live_session_after_transcript_rewrite(&session)

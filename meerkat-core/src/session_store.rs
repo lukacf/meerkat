@@ -162,6 +162,9 @@ pub fn append_only_save_guard(
     if incoming_preserves_conversation_tail_with_system_context_append(incoming, previous)? {
         return Ok(());
     }
+    if incoming_preserves_prefix_after_transient_notice_cleanup(incoming, previous)? {
+        return Ok(());
+    }
     if new_len < prev_len {
         return Err(SessionStoreError::MonotonicityViolation {
             id: incoming.id().clone(),
@@ -219,6 +222,45 @@ fn system_context_is_append(previous: Option<&str>, incoming: &str) -> bool {
         None => Some(incoming),
     };
     appended.is_some_and(|appended| appended.starts_with("[Runtime System Context]"))
+}
+
+fn incoming_preserves_prefix_after_transient_notice_cleanup(
+    incoming: &Session,
+    previous: &Session,
+) -> Result<bool, SessionStoreError> {
+    let previous_without_transient = previous
+        .messages()
+        .iter()
+        .filter(|message| !is_transient_system_notice(message))
+        .cloned()
+        .collect::<Vec<_>>();
+    if previous_without_transient.len() == previous.messages().len()
+        || incoming.messages().len() < previous_without_transient.len()
+    {
+        return Ok(false);
+    }
+    let previous_revision =
+        transcript_messages_digest(&previous_without_transient).map_err(SessionStoreError::from)?;
+    let incoming_prefix_revision =
+        transcript_messages_digest(&incoming.messages()[..previous_without_transient.len()])
+            .map_err(SessionStoreError::from)?;
+    Ok(previous_revision == incoming_prefix_revision)
+}
+
+fn is_transient_system_notice(message: &Message) -> bool {
+    let Message::SystemNotice(notice) = message else {
+        return false;
+    };
+    notice.kind == crate::types::SystemNoticeKind::McpPending
+        && notice.blocks.iter().all(|block| {
+            matches!(
+                block,
+                crate::types::SystemNoticeBlock::Mcp {
+                    persisted: false,
+                    ..
+                }
+            )
+        })
 }
 
 /// Validate a runtime run-boundary snapshot.
@@ -300,7 +342,8 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
             return None;
         }
         let commit = state.commits.iter().find(|commit| {
-            commit.parent_revision == cursor
+            (commit.parent_revision == cursor
+                || transcript_history_revision_extends(state, &commit.parent_revision, cursor))
                 && transcript_history_revision_extends(state, incoming_revision, &commit.revision)
         });
         let Some(commit) = commit else {
@@ -761,7 +804,10 @@ pub trait SessionStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{SystemMessage, UserMessage};
+    use crate::types::{
+        AssistantMessage, BlockAssistantMessage, StopReason, SystemMessage, SystemNoticeBlock,
+        SystemNoticeKind, SystemNoticeMessage, Usage, UserMessage,
+    };
 
     #[test]
     fn append_only_guard_rejects_leading_system_message_replacement() {
@@ -811,5 +857,116 @@ mod tests {
         incoming.set_system_prompt("base system".to_string());
 
         assert!(append_only_save_guard(&incoming, Some(&previous)).is_ok());
+    }
+
+    #[test]
+    fn append_only_guard_accepts_transient_mcp_pending_notice_cleanup()
+    -> Result<(), crate::TranscriptEditError> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+        previous.push(Message::SystemNotice(SystemNoticeMessage {
+            kind: SystemNoticeKind::McpPending,
+            body: Some("connecting".to_string()),
+            blocks: vec![SystemNoticeBlock::Mcp {
+                server_id: None,
+                operation: None,
+                phase: None,
+                persisted: false,
+                detail: Some("connecting".to_string()),
+                pending_sources: vec!["test-server".to_string()],
+            }],
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        previous.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![crate::types::AssistantBlock::Text {
+                text: "answer".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+
+        let mut incoming = previous.clone();
+        incoming.replace_messages_internal(
+            previous
+                .messages()
+                .iter()
+                .filter(|message| !matches!(message, Message::SystemNotice(_)))
+                .cloned()
+                .collect(),
+            crate::TranscriptRewriteReason::new("unit-test"),
+        )?;
+        incoming.push(Message::User(UserMessage::text("again".to_string())));
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok::<(), crate::TranscriptEditError>(())
+    }
+
+    #[test]
+    fn rewrite_chain_finder_crosses_normal_append_between_rewrites()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("first".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose first answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let original = session.transcript_revision()?;
+        let first = session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::Assistant(AssistantMessage {
+                content: "compact first answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                created_at: crate::types::message_timestamp_now(),
+            })],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("unit-test".to_string()),
+            Some(original.clone()),
+        )?;
+
+        session.push(Message::User(UserMessage::text("second".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "verbose second answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let bridge = session.transcript_revision()?;
+        assert_ne!(bridge, first.revision);
+
+        let second = session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
+            vec![Message::Assistant(AssistantMessage {
+                content: "compact second answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                created_at: crate::types::message_timestamp_now(),
+            })],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("unit-test".to_string()),
+            Some(bridge),
+        )?;
+        let state = session
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("missing transcript history state"))?;
+
+        let chain =
+            find_transcript_rewrite_commit_chain_extending(&state, &original, &second.revision)
+                .ok_or_else(|| {
+                    std::io::Error::other(
+                        "rewrite chain should extend through normal append bridge",
+                    )
+                })?;
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].revision, first.revision);
+        assert_eq!(chain[1].revision, second.revision);
+        Ok(())
     }
 }

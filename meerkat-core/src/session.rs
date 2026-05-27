@@ -355,15 +355,22 @@ fn validate_transcript_tool_result_shape(messages: &[Message]) -> Result<(), Tra
             }
         }
 
-        let tool_use_ids = assistant_tool_use_ids(message);
-        if !tool_use_ids.is_empty()
-            && let Some(next) = messages.get(index + 1)
-            && !matches!(next, Message::ToolResults { .. })
-        {
-            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                "assistant tool-use message {index} is followed by {}, not tool_results",
-                message_role_name(next)
-            )));
+        if let Message::Assistant(_) = message {
+            let tool_use_ids = assistant_tool_use_ids(message);
+            if tool_use_ids.is_empty() {
+                continue;
+            }
+            let Some(next) = messages.get(index + 1) else {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "assistant tool-use message {index} has no following tool_results"
+                )));
+            };
+            if !matches!(next, Message::ToolResults { .. }) {
+                return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                    "assistant tool-use message {index} is followed by {}, not tool_results",
+                    message_role_name(next)
+                )));
+            }
         }
     }
     Ok(())
@@ -3914,6 +3921,44 @@ mod tests {
                 Some(parent_revision),
             )
             .expect_err("rewrite should reject stranded tool results");
+        assert!(matches!(
+            err,
+            TranscriptEditError::InvalidTranscriptShape(_)
+        ));
+    }
+
+    #[test]
+    fn transcript_rewrite_rejects_trailing_assistant_tool_call() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "plain answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = session.transcript_revision().expect("parent revision");
+
+        let err = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::Assistant(AssistantMessage {
+                    content: String::new(),
+                    tool_calls: vec![crate::types::ToolCall::new(
+                        "toolu_1".to_string(),
+                        "lookup".to_string(),
+                        serde_json::json!({}),
+                    )],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect_err("rewrite should reject trailing unresolved tool call");
         assert!(matches!(
             err,
             TranscriptEditError::InvalidTranscriptShape(_)

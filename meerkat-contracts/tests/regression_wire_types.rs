@@ -7,10 +7,12 @@
 //!
 //! These catch silent renames and accidental field removals.
 
+#[cfg(feature = "schema")]
+use meerkat_contracts::emit::emit_all_schemas;
 use meerkat_contracts::{
     ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeInputChunk,
     WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage,
-    WireSessionSummary, WireUsage, emit::emit_all_schemas,
+    WireSessionSummary, WireUsage,
 };
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{

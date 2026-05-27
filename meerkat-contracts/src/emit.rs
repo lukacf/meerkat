@@ -746,6 +746,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             }),
         );
         components.insert(
+            "WorkStatus".to_string(),
+            schema_for!(meerkat_workgraph::WorkStatus).into(),
+        );
+        components.insert(
             "ListSessionsResponse".to_string(),
             object_schema(
                 vec![(

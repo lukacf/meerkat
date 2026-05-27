@@ -6,7 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 #[cfg(not(target_arch = "wasm32"))]
-use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::WorkGraphError;
 use crate::types::{
@@ -134,6 +136,14 @@ pub trait WorkGraphStore: Send + Sync {
         event: WorkGraphEvent,
     ) -> Result<WorkEdge, WorkGraphError>;
 
+    async fn insert_edge_validated(
+        &self,
+        _edge: WorkEdge,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
     async fn list_edges(
         &self,
         realm_id: &str,
@@ -236,6 +246,14 @@ impl WorkGraphStore for DisabledWorkGraphStore {
     }
 
     async fn insert_edge(
+        &self,
+        _edge: WorkEdge,
+        _event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn insert_edge_validated(
         &self,
         _edge: WorkEdge,
         _event: WorkGraphEvent,
@@ -535,6 +553,35 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         if guard.edges.iter().any(|existing| existing == &edge) {
             return Err(duplicate_edge_error(&edge));
         }
+        guard.edges.push(edge.clone());
+        guard.append_event(event);
+        Ok(edge)
+    }
+
+    async fn insert_edge_validated(
+        &self,
+        edge: WorkEdge,
+        event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        let mut guard = self.inner.write().await;
+        if guard.edges.iter().any(|existing| existing == &edge) {
+            return Err(duplicate_edge_error(&edge));
+        }
+        let existing_edges = guard
+            .edges
+            .iter()
+            .filter(|existing| {
+                existing.realm_id == edge.realm_id && existing.namespace == edge.namespace
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let existing_items = guard
+            .items
+            .values()
+            .filter(|item| item.realm_id == edge.realm_id && item.namespace == edge.namespace)
+            .cloned()
+            .collect::<Vec<_>>();
+        WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
         guard.edges.push(edge.clone());
         guard.append_event(event);
         Ok(edge)
@@ -979,6 +1026,34 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let tx = conn
                 .transaction()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            insert_edge_tx(&tx, &edge)?;
+            insert_event_tx(&tx, &event)?;
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(edge)
+        })
+    }
+
+    async fn insert_edge_validated(
+        &self,
+        edge: WorkEdge,
+        event: WorkGraphEvent,
+    ) -> Result<WorkEdge, WorkGraphError> {
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let existing_edges = list_sqlite_edges(&tx, &edge.realm_id, &edge.namespace)?;
+            let existing_items = list_sqlite_items(
+                &tx,
+                &WorkItemFilter {
+                    realm_id: Some(edge.realm_id.clone()),
+                    namespace: Some(edge.namespace.clone()),
+                    include_terminal: true,
+                    ..WorkItemFilter::default()
+                },
+            )?;
+            WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
             insert_edge_tx(&tx, &edge)?;
             insert_event_tx(&tx, &event)?;
             tx.commit()

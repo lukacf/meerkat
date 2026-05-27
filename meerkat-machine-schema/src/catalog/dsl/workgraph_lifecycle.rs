@@ -540,6 +540,7 @@ machine! {
             on input RefreshEligibility { unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Open }
             update {
+                self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to Open
@@ -549,6 +550,7 @@ machine! {
             on input RefreshEligibility { unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::InProgress }
             update {
+                self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to InProgress
@@ -558,6 +560,7 @@ machine! {
             on input RefreshEligibility { unresolved_blocker_count }
             guard { self.lifecycle_phase == Phase::Blocked }
             update {
+                self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
             }
             to Blocked

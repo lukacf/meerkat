@@ -1905,11 +1905,19 @@ impl EphemeralRuntimeDriver {
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
         state.idempotency_key = input.header().idempotency_key.clone();
+        let active_idempotency_only = matches!(
+            &input,
+            Input::Continuation(continuation) if continuation.reason == "workgraph_attention"
+        );
         if let Some(ref key) = input.header().idempotency_key {
-            if let Some(existing_id) = self
-                .ledger
-                .accept_with_idempotency(state.clone(), key.clone())
-            {
+            let existing_id = if active_idempotency_only {
+                self.ledger
+                    .accept_with_active_idempotency(state.clone(), key.clone())
+            } else {
+                self.ledger
+                    .accept_with_idempotency(state.clone(), key.clone())
+            };
+            if let Some(existing_id) = existing_id {
                 tracing::debug!(
                     work_id = ?input_id,
                     existing_id = ?existing_id,
@@ -2328,7 +2336,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::EphemeralRuntimeDriver;
-    use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
+    use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, SupersessionKey};
     use crate::input::{
         ContinuationInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         PeerConvention, PeerInput,
@@ -2379,6 +2387,30 @@ mod tests {
             reason: "test-continuation".to_string(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
+            flow_tool_overlay: None,
+            context_append: None,
+            turn_append: None,
+        })
+    }
+
+    fn workgraph_attention_continuation_input(idempotency_key: &str) -> Input {
+        Input::Continuation(ContinuationInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: Some(IdempotencyKey::new(idempotency_key)),
+                supersession_key: Some(SupersessionKey::new("workgraph_attention:binding")),
+                correlation_id: None,
+            },
+            reason: "workgraph_attention".to_string(),
+            handling_mode: HandlingMode::Steer,
+            request_id: Some("binding".to_string()),
             flow_tool_overlay: None,
             context_append: None,
             turn_append: None,
@@ -2505,6 +2537,42 @@ mod tests {
             driver.dsl_steer_lane(),
             vec![third_id],
             "terminal/superseded continuations must not dedupe future keep-alive turns",
+        );
+    }
+
+    #[tokio::test]
+    async fn workgraph_attention_idempotency_only_deduplicates_live_inputs() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("attention-idempotency"));
+        let key = "workgraph_attention:realm:namespace:binding:1:1:digest";
+
+        let first = workgraph_attention_continuation_input(key);
+        let first_id = first.id().clone();
+        let first_outcome = driver.accept_input(first).await.unwrap();
+        assert!(first_outcome.is_accepted());
+
+        let duplicate = workgraph_attention_continuation_input(key);
+        let duplicate_outcome = driver.accept_input(duplicate).await.unwrap();
+        assert!(
+            matches!(
+                duplicate_outcome,
+                crate::accept::AcceptOutcome::Deduplicated { ref existing_id, .. }
+                    if existing_id == &first_id
+            ),
+            "same attention projection should dedupe while the first input is live: {duplicate_outcome:?}"
+        );
+
+        driver.abandon_all_non_terminal(InputAbandonReason::Reset);
+        let retry = workgraph_attention_continuation_input(key);
+        let retry_id = retry.id().clone();
+        let retry_outcome = driver.accept_input(retry).await.unwrap();
+        assert!(
+            retry_outcome.is_accepted(),
+            "same attention projection should be admissible after the previous attempt is terminal"
+        );
+        assert_eq!(
+            driver.input_phase(&retry_id),
+            Some(InputLifecycleState::Queued)
         );
     }
 

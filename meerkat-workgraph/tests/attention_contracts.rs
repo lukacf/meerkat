@@ -12,8 +12,8 @@ use meerkat_workgraph::{
     GoalStatusRequest, GoalTerminalStatus, LinkWorkItemsRequest, UpdateWorkItemRequest,
     WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
     WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphEventFilter, WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef, WorkNamespace,
-    WorkOwnerKey, WorkStatus, workgraph_attention_continuation_key,
+    WorkGraphError, WorkGraphEventFilter, WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef,
+    WorkNamespace, WorkOwnerKey, WorkStatus, workgraph_attention_continuation_key,
     workgraph_attention_supersession_key,
 };
 use serde_json::json;
@@ -222,6 +222,98 @@ async fn goal_create_is_atomic_and_attention_status_is_service_owned() {
         .await
         .expect("list attention");
     assert_eq!(listed.attention.len(), 1);
+}
+
+#[tokio::test]
+async fn missing_attention_binding_is_not_found_not_invalid_input() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+
+    let error = service
+        .goal_status(GoalStatusRequest {
+            binding_id: WorkAttentionBindingId::new("missing-binding").expect("binding id"),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect_err("missing binding should be a missing resource");
+
+    assert!(matches!(error, WorkGraphError::AttentionNotFound { .. }));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn goal_attention_status_contract_is_identical_on_sqlite_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("workgraph.sqlite3");
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::SqliteWorkGraphStore::open(&path).expect("open sqlite workgraph store"),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000055").expect("valid session id");
+
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: Some("realm-sqlite".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            title: "Persist goal attention".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Review,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create sqlite goal");
+
+    let paused_until = Utc
+        .with_ymd_and_hms(2126, 5, 26, 12, 30, 0)
+        .single()
+        .expect("valid timestamp");
+    service
+        .pause_attention(AttentionPauseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-sqlite".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            expected_revision: goal.attention.machine_state.revision,
+            until: Some(paused_until),
+        })
+        .await
+        .expect("pause sqlite attention");
+
+    let listed = service
+        .list_attention(AttentionListRequest {
+            realm_id: Some("realm-sqlite".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            target: None,
+            status: Some(WorkAttentionStatus::Paused { until: None }),
+        })
+        .await
+        .expect("list paused sqlite attention");
+    assert_eq!(listed.attention.len(), 1);
+
+    service
+        .goal_request_close(GoalRequestCloseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-sqlite".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            expected_revision: goal.item.revision,
+            status: GoalTerminalStatus::Completed,
+        })
+        .await
+        .expect("close sqlite goal");
+
+    let status = service
+        .goal_status(GoalStatusRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: Some("realm-sqlite".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+        })
+        .await
+        .expect("sqlite goal status");
+    assert_eq!(status.attention.status, WorkAttentionStatus::Stopped);
 }
 
 #[tokio::test]
@@ -489,6 +581,51 @@ async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
         })
         .await
         .expect_err("reserved confirmation evidence is only accepted through goal_confirm");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
+async fn public_self_attest_confirm_rejects_reserved_completion_evidence() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000056").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Public self-attest".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create self-attest goal");
+
+    let err = service
+        .goal_confirm_public(GoalConfirmRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            principal: None,
+            trusted_principal: None,
+            evidence: WorkEvidenceRef {
+                kind: "host_confirmation".to_string(),
+                id: "spoofed".to_string(),
+                label: None,
+                summary: None,
+            },
+        })
+        .await
+        .expect_err("public self-attest cannot mint reserved trusted evidence");
     assert!(matches!(
         err,
         meerkat_workgraph::WorkGraphError::InvalidInput(_)

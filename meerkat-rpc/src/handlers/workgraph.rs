@@ -25,7 +25,7 @@ pub struct WorkGraphIdParams {
 
 fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse {
     match error {
-        WorkGraphError::NotFound { .. } => {
+        WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => {
             RpcResponse::error(id, error::INVALID_PARAMS, error.to_string())
         }
         WorkGraphError::StaleRevision { .. }

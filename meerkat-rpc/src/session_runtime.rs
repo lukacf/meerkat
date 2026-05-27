@@ -92,6 +92,7 @@ fn workgraph_error_to_rpc(error: meerkat::WorkGraphError) -> RpcError {
         }
         meerkat::WorkGraphError::Store(_) => error::INTERNAL_ERROR,
         meerkat::WorkGraphError::NotFound { .. }
+        | meerkat::WorkGraphError::AttentionNotFound { .. }
         | meerkat::WorkGraphError::StaleRevision { .. }
         | meerkat::WorkGraphError::Conflict(_)
         | meerkat::WorkGraphError::InvalidTransition(_)
@@ -3118,7 +3119,7 @@ impl SessionRuntime {
         let input_id = InputId::new();
         let attention_key = meerkat::workgraph_attention_continuation_key(&projection);
         let supersession_key = meerkat::workgraph_attention_supersession_key(&projection);
-        let idempotency_key = format!("{attention_key}:{input_id}");
+        let idempotency_key = attention_key.clone();
         let context_key = idempotency_key.clone();
         let input = Input::Continuation(ContinuationInput {
             header: InputHeader {
@@ -11404,17 +11405,14 @@ mod tests {
             .expect("join first continuation")
             .expect("enqueue attention continuation");
         assert!(
-            !matches!(outcome, meerkat_runtime::AcceptOutcome::Deduplicated { .. })
-                && !matches!(retry, meerkat_runtime::AcceptOutcome::Deduplicated { .. }),
-            "distinct attention continuation requests should not be idempotency-deduplicated: first={outcome:?}, retry={retry:?}"
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. })
+                || matches!(retry, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "one attention continuation should enter runtime admission: first={outcome:?}, retry={retry:?}"
         );
         assert!(
-            matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
-            "attention continuation should enter runtime admission: {outcome:?}"
-        );
-        assert!(
-            matches!(retry, meerkat_runtime::AcceptOutcome::Accepted { .. }),
-            "retry attention continuation should enter runtime admission with its own idempotency key: {retry:?}"
+            matches!(outcome, meerkat_runtime::AcceptOutcome::Deduplicated { .. })
+                || matches!(retry, meerkat_runtime::AcceptOutcome::Deduplicated { .. }),
+            "retry of the same attention projection should be idempotency-deduplicated: first={outcome:?}, retry={retry:?}"
         );
     }
 

@@ -16,7 +16,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Transaction Plans
-- `transactional_close_stops_attention` via `close_work_item` / `WorkGraphStore::update_item_and_attention_cas` — terminal work item close atomically stops every live attention binding for that item
+- `transactional_close_stops_attention` via `close_work_item` / `WorkGraphStore::update_item_and_attention_cas` — terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding
 
 ## Scheduler Rules
 - `(none)`

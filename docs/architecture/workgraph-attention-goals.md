@@ -333,10 +333,11 @@ not parent closure. A reviewer may close its own review child item and attach
 blocking or non-blocking evidence. The parent item closes only when its policy
 allows it.
 
-WorkGraph host surfaces expose observability plus narrow goal and attention
-controls. Trusted principal-gated goal policies still belong to in-process host
-authority; public REST/RPC clients use the self-attested goal contract and
-cannot smuggle principal authority through JSON.
+WorkGraph host surfaces expose observability; CLI and trusted in-process hosts
+add narrow goal and attention controls. Trusted principal-gated goal policies
+belong to in-process host authority. Public REST/RPC clients can inspect goal
+status and attention bindings, but cannot smuggle principal authority through
+JSON.
 
 ## Session-Only Shape
 
@@ -433,14 +434,14 @@ Suggested user-facing vocabulary:
 - `/goal <objective>`: create WorkGraph item plus session attention binding.
 - `/goal pause`: pause attention binding, not WorkGraph item.
 - `/goal resume`: reactivate attention binding if item is still non-terminal.
-- `/goal clear`: stop/supersede attention binding; item remains unless user
-  explicitly cancels it.
+- `/goal clear`: stop the attention binding; item remains unless user explicitly
+  cancels it. Supersession is reserved for future binding replacement flows.
 - `/goal status`: show attention status plus referenced WorkGraph item status.
 
 Suggested minimal host APIs:
 
-- `workgraph/goal/create`: transactionally create or reference a WorkGraph item
-  and create the initial attention binding.
+- `workgraph/goal/create`: transactionally create a WorkGraph item and its
+  initial attention binding.
 - `workgraph/goal/status`: return referenced item status plus attention status.
 - `workgraph/goal/confirm`: attach host/principal confirmation evidence.
 - `workgraph/goal/request_close`: request policy-gated item closure.

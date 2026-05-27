@@ -9008,6 +9008,19 @@
           "label"
         ],
         "type": "string"
+      },
+      "WorkStatus": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "title": "WorkStatus",
+        "type": "string"
       }
     }
   },

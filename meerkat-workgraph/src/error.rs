@@ -1,4 +1,4 @@
-use crate::types::{WorkItemId, WorkNamespace};
+use crate::types::{WorkAttentionBindingId, WorkItemId, WorkNamespace};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkGraphError {
@@ -7,6 +7,14 @@ pub enum WorkGraphError {
         realm_id: String,
         namespace: WorkNamespace,
         id: WorkItemId,
+    },
+    #[error(
+        "work attention binding {binding_id} not found in realm '{realm_id}' namespace '{namespace}'"
+    )]
+    AttentionNotFound {
+        realm_id: String,
+        namespace: WorkNamespace,
+        binding_id: WorkAttentionBindingId,
     },
     #[error("stale work item revision for {id}: expected {expected}, actual {actual}")]
     StaleRevision {
@@ -32,6 +40,18 @@ impl WorkGraphError {
             realm_id,
             namespace,
             id,
+        }
+    }
+
+    pub fn attention_not_found(
+        realm_id: String,
+        namespace: WorkNamespace,
+        binding_id: WorkAttentionBindingId,
+    ) -> Self {
+        Self::AttentionNotFound {
+            realm_id,
+            namespace,
+            binding_id,
         }
     }
 }

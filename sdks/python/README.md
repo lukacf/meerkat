@@ -135,8 +135,8 @@ work through their WorkGraph tools; SDK callers inspect the current graph.
 - `await client.list_ready_workgraph_items(filter=None)`
 - `await client.get_workgraph_snapshot(filter=None)`
 - `await client.list_workgraph_events(filter=None)`
-- `await client.get_workgraph_goal_status(binding_id, realm_id=None, namespace=None)`
-- `await client.list_workgraph_attention(filter=None)`
+- `await client.get_workgraph_goal_status(GoalStatusRequest(...))`
+- `await client.list_workgraph_attention(AttentionListRequest(...))`
 
 ### Mob runtime
 

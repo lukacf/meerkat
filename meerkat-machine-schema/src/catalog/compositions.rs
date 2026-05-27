@@ -692,7 +692,7 @@ pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
         transaction_plans: vec![transaction_plan(
             "transactional_close_stops_attention",
             "close_work_item",
-            "terminal work item close atomically stops every live attention binding for that item",
+            "terminal work item close atomically stops one co-resident live attention binding; production fan-out applies this transaction per binding",
             "WorkGraphStore::update_item_and_attention_cas",
         )],
         actor_priorities: vec![],

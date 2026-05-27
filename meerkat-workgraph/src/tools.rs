@@ -308,7 +308,7 @@ fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError
 
 fn map_error(error: WorkGraphError) -> WorkGraphToolError {
     let code = match error {
-        WorkGraphError::NotFound { .. } => NOT_FOUND,
+        WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => NOT_FOUND,
         WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => "conflict",
         WorkGraphError::InvalidTransition(_) => "invalid_transition",
         WorkGraphError::InvalidInput(_) => INVALID_ARGUMENTS,

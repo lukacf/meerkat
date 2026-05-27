@@ -228,24 +228,27 @@ RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
     /\ phase = "Open"
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
     /\ phase = "InProgress"
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
     /\ phase = "Blocked"
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
 
 
 ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==

@@ -768,7 +768,7 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "WorkAttentionLifecycleMachine",
             "AttentionSuperseded",
             SeamClassification::NoOwnerRealization,
-            "Local WorkGraph attention supersession effect retained inside the WorkGraph service projection path",
+            "Reserved WorkGraph attention supersession effect; no production supersession path is wired yet",
         ),
         (
             "WorkAttentionLifecycleMachine",

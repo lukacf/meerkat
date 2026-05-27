@@ -194,8 +194,8 @@ async listWorkGraphItems(filter?: WorkGraphItemFilter): Promise<WorkItemListResu
 async listReadyWorkGraphItems(filter?: WorkGraphReadyFilter): Promise<WorkItemListResult>
 async getWorkGraphSnapshot(filter?: WorkGraphSnapshotFilter): Promise<WorkGraphSnapshot>
 async listWorkGraphEvents(filter?: WorkGraphEventFilter): Promise<WorkGraphEventsResult>
-async getWorkGraphGoalStatus(bindingId: string, options?: WorkGraphGoalStatusOptions): Promise<WorkGraphGoalResult>
-async listWorkGraphAttention(filter?: WorkGraphAttentionFilter): Promise<WorkGraphAttentionListResult>
+async getWorkGraphGoalStatus(params: WorkGraphGoalStatusRequest): Promise<WorkGraphGoalResult>
+async listWorkGraphAttention(params?: WorkGraphAttentionListRequest): Promise<WorkGraphAttentionListResult>
 
 async readMobEvents(mobId: string, options?: MobEventsOptions): Promise<MobEventsResult>
 async spawnMobMembers(mobId: string, specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]>

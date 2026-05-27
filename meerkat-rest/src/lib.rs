@@ -3846,7 +3846,10 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
 
 fn workgraph_error_to_api(error: meerkat::WorkGraphError) -> ApiError {
     match error {
-        meerkat::WorkGraphError::NotFound { .. } => ApiError::NotFound(error.to_string()),
+        meerkat::WorkGraphError::NotFound { .. }
+        | meerkat::WorkGraphError::AttentionNotFound { .. } => {
+            ApiError::NotFound(error.to_string())
+        }
         meerkat::WorkGraphError::StaleRevision { .. }
         | meerkat::WorkGraphError::Conflict(_)
         | meerkat::WorkGraphError::InvalidTransition(_)
@@ -9547,6 +9550,25 @@ mod tests {
         );
         assert!(continuation.turn_append.is_some());
         let app = router(state);
+
+        let missing_goal_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/workgraph/goal/status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "binding_id": "missing-binding"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_goal_response.status(), StatusCode::NOT_FOUND);
 
         for descriptor in meerkat::workgraph_rest_path_catalog() {
             if descriptor

@@ -156,10 +156,11 @@ impl WorkGraphService {
             .get_attention(&realm_id, &namespace, &request.binding_id)
             .await?
             .ok_or_else(|| {
-                WorkGraphError::InvalidInput(format!(
-                    "work attention binding {} not found",
-                    request.binding_id
-                ))
+                WorkGraphError::attention_not_found(
+                    realm_id.clone(),
+                    namespace.clone(),
+                    request.binding_id.clone(),
+                )
             })?;
         Ok(AttentionBindingResult { attention })
     }
@@ -383,6 +384,12 @@ impl WorkGraphService {
                 completion_policy_name(&current.item.completion_policy)
             )));
         }
+        if is_reserved_confirmation_evidence_kind(&request.evidence.kind) {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "reserved completion evidence kind {} requires trusted in-process host authority",
+                request.evidence.kind
+            )));
+        }
         self.goal_confirm(request).await
     }
 
@@ -505,6 +512,23 @@ impl WorkGraphService {
             .realm_id
             .clone()
             .unwrap_or_else(|| self.default_realm_id.to_string());
+        let event_high_water_mark = self
+            .store
+            .list_events(WorkGraphEventFilter {
+                realm_id: Some(realm_id.clone()),
+                namespace: if filter.all_namespaces {
+                    None
+                } else {
+                    filter.namespace.clone()
+                },
+                all_namespaces: filter.all_namespaces,
+                after_seq: None,
+                limit: None,
+            })
+            .await?
+            .into_iter()
+            .filter_map(|event| event.seq)
+            .max();
         let items = self
             .store
             .list_items(WorkItemFilter {
@@ -564,23 +588,6 @@ impl WorkGraphService {
             .ready_item_ids_in_namespaces(&realm_id, &namespaces, &filter.labels, captured_at)
             .await?;
         ready_item_ids.retain(|id| included_item_ids.contains(id));
-        let event_high_water_mark = self
-            .store
-            .list_events(WorkGraphEventFilter {
-                realm_id: Some(realm_id.clone()),
-                namespace: if filter.all_namespaces {
-                    None
-                } else {
-                    filter.namespace.clone()
-                },
-                all_namespaces: filter.all_namespaces,
-                after_seq: None,
-                limit: None,
-            })
-            .await?
-            .into_iter()
-            .filter_map(|event| event.seq)
-            .max();
 
         Ok(WorkGraphSnapshot {
             realm_id,
@@ -753,20 +760,6 @@ impl WorkGraphService {
             to_id: request.to_id,
             created_at: now,
         };
-        let existing_edges = self
-            .store
-            .list_edges(&edge.realm_id, &edge.namespace)
-            .await?;
-        let existing_items = self
-            .store
-            .list_items(WorkItemFilter {
-                realm_id: Some(edge.realm_id.clone()),
-                namespace: Some(edge.namespace.clone()),
-                include_terminal: true,
-                ..WorkItemFilter::default()
-            })
-            .await?;
-        WorkGraphMachine::validate_link(&edge, &existing_items, &existing_edges)?;
         let event = WorkGraphEvent::graph(
             edge.realm_id.clone(),
             edge.namespace.clone(),
@@ -774,7 +767,7 @@ impl WorkGraphService {
             now,
             json!({ "edge": edge }),
         );
-        let inserted = self.store.insert_edge(edge, event).await?;
+        let inserted = self.store.insert_edge_validated(edge, event).await?;
         if inserted.kind == WorkEdgeKind::Blocks {
             self.best_effort_refresh_item_eligibility(
                 &inserted.realm_id,
@@ -1013,10 +1006,10 @@ impl WorkGraphService {
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
         let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges);
+        let expected_previous_revision = item.revision;
         if let Some((item, event)) =
             WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
         {
-            let expected_previous_revision = item.revision;
             self.store
                 .update_item_cas(item, expected_previous_revision, event)
                 .await?;
@@ -1537,6 +1530,14 @@ mod tests {
             event: WorkGraphEvent,
         ) -> Result<WorkEdge, crate::WorkGraphError> {
             self.inner.insert_edge(edge, event).await
+        }
+
+        async fn insert_edge_validated(
+            &self,
+            edge: WorkEdge,
+            event: WorkGraphEvent,
+        ) -> Result<WorkEdge, crate::WorkGraphError> {
+            self.inner.insert_edge_validated(edge, event).await
         }
 
         async fn list_edges(

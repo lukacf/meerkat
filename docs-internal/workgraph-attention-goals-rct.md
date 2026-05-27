@@ -2,7 +2,7 @@
 
 Source proposal: `docs/architecture/workgraph-attention-goals.md`
 
-Status: Implementation in progress; core WorkGraph attention, host surfaces, explicit runtime continuation, tool scoping, and mob lowering are wired. Automatic idle polling and full e2e/CI remain pending.
+Status: Implementation in progress; core WorkGraph attention, trusted host/CLI surfaces, explicit runtime continuation, tool scoping, and mob lowering are wired. Automatic idle polling, public REST/RPC mutation controls, and full e2e/CI remain pending.
 
 ## Requirements
 
@@ -11,9 +11,9 @@ Status: Implementation in progress; core WorkGraph attention, host surfaces, exp
 | TYPE-001 | WorkGraph exposes `WorkAttentionBindingId`, `WorkItemRef`, `WorkAttentionTarget`, `WorkAttentionMode`, `WorkAttentionStatus`, `AttentionDelegatedAuthority`, and `AttentionProjectionPolicy` as typed serializable contracts. | Round-trip tests and schema export include the new types. | VALIDATED |
 | TYPE-002 | `WorkCompletionPolicy` is a WorkGraph item property, not an attention binding property. | Work item contract and lifecycle tests prove completion policy is stored on the item and survives store round trip. | VALIDATED |
 | TYPE-003 | Timed pause is binding-local via `Paused { until }`; item `snoozed_until` is not used for attention pause. | Attention binding round-trip plus machine eligibility test proves paused bindings are ineligible without mutating the item. | VALIDATED |
-| CONTRACT-001 | Host goal creation is transactional: create or reference a WorkGraph item and create the initial attention binding. | Real service test for atomic store-level goal creation plus RPC/REST catalog/handler surface. | PUBLIC-VALIDATED |
+| CONTRACT-001 | Host goal creation is transactional: create a WorkGraph item and create the initial attention binding. | Real service test for atomic store-level goal creation plus trusted host/CLI surface. | HOST-VALIDATED |
 | CONTRACT-002 | Host goal status returns both referenced item status and attention status. | Real service test for `goal_status` plus RPC/REST catalog/handler surface. | PUBLIC-VALIDATED |
-| CONTRACT-003 | Host confirmation evidence and close request are policy-gated. | Real service and REST entrypoint tests for confirm/request-close success and denial. | PUBLIC-VALIDATED |
+| CONTRACT-003 | Host confirmation evidence and close request are policy-gated. | Real service and trusted host/CLI tests for confirm/request-close success and denial. | HOST-VALIDATED |
 | INV-001 | WorkGraph remains the only durable work truth owner; runtime does not store a parallel goal table. | Code search plus tests showing goal APIs use WorkGraph service/store. | SERVICE-VALIDATED |
 | INV-002 | Runtime remains the only admission/wake authority; WorkGraph attention only produces eligible projections. | Runtime integration test proves continuation goes through runtime `Input::Continuation` admission. | RUNTIME-SEAM-VALIDATED |
 | INV-003 | Core Meerkat does not name `AgentIdentity` or `MobId` for attention targets. | Type/API grep and mob lowering tests. | VALIDATED |
@@ -22,7 +22,7 @@ Status: Implementation in progress; core WorkGraph attention, host surfaces, exp
 | REQ-003 | Projections are typed, bounded, revisioned, and frame parent objective text as data rather than instruction priority. | Projection builder tests inspect structured output. | VALIDATED |
 | REQ-004 | Attention-aware WorkGraph tool filtering narrows permissions by mode and item scope after category/profile exposure. | Dispatcher/service authorization tests for pursue/review/falsify/judge/observe. | TOOL-SURFACE-PARTIAL |
 | REQ-005 | Mob lowers `AgentIdentity` attention targets to WorkGraph owner keys and resolves current runtime/session binding without leaking mob types into core. | Mob integration tests across respawn/reassign. | LOWERING-PARTIAL |
-| E2E-001 | Session-only `/goal` flow can create, continue, pause, resume, status, and complete through real public entrypoints. | CLI/RPC/REST real-entrypoint scenario. | PARTIAL; CLI host commands plus RPC/REST goal/attention/continue surfaces wired |
+| E2E-001 | Session-only `/goal` flow can create, continue, pause, resume, status, and complete through real entrypoints. | CLI/trusted-host scenario plus public RPC/REST observability checks. | PARTIAL; CLI host commands plus RPC/REST goal status and attention list observability are wired |
 | E2E-002 | Mob planner/coder/reviewer flow preserves specialized attention modes and prevents reviewer parent closure. | Mob real-entrypoint or integration scenario. | MISSING |
 
 ## Phase Plan
@@ -46,9 +46,9 @@ Done when service tests validate success and fail-closed behavior through `WorkG
 
 ### Phase 2: Host Surfaces
 
-- CONTRACT-001/002/003 and E2E-001: Expose the narrow host goal/attention APIs through real public entrypoints.
+- CONTRACT-001/002/003 and E2E-001: Expose narrow goal/attention observability through public RPC/REST and mutation controls through trusted host/CLI entrypoints.
 
-Done when a real REST/RPC/CLI entrypoint drives goal create/status/pause/resume/confirm/request-close.
+Done when real REST/RPC entrypoints expose goal status and attention list, and a trusted host/CLI entrypoint drives goal create/pause/resume/confirm/request-close without exposing principal authority through JSON.
 
 ### Phase 3: Runtime Handoff
 
@@ -71,7 +71,7 @@ Done when reviewer/falsifier modes cannot close parent work, and mob member atte
 
 ## Typed But Unwired
 
-- Automatic idle polling is not wired yet. Runtime continuation can be triggered explicitly through `workgraph/attention/continue`, which still routes through runtime admission and hidden `Input::Continuation`.
+- Automatic idle polling is not wired yet. Runtime continuation is currently a trusted in-process runtime operation that routes through admission and hidden `Input::Continuation`; `workgraph/attention/continue` is not exposed as a public REST/RPC method.
 - Stop/reassign/get attention controls are intentionally not public entrypoints yet; reassign remains a future/service-internal request shape.
 - Mob `AgentIdentity` lowering is implemented as a feature-owned helper; current-session binding rotation remains a mob integration follow-up.
 

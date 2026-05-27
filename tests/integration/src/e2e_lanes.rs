@@ -202,6 +202,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s84_mob_generated_image_comms_roundtrip, 84);
             scenario(e2e_smoke_s85_workgraph_homecore_agent_spine, 85);
             scenario(e2e_smoke_s86_mob_provider_image_relay_readout, 86);
+            scenario(e2e_smoke_s87_rpc_transcript_rewrite_revision_graph, 87);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -4005,6 +4006,25 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 test_target: "smoke_mob_generated_image_comms",
                 test_name: "e2e_smoke_s86_mob_provider_image_relay_readout",
                 features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        87 => Some(&Spec {
+            id: Some(87),
+            lane: Lane::Smoke,
+            title: "RPC transcript rewrite revision graph",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-rpc",
+                test_target: "live_smoke_rpc",
+                test_name: "e2e_scenario_87_transcript_rewrite_revision_graph",
+                features: &[],
                 all_features: false,
             },
         }),

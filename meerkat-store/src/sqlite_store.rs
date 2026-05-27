@@ -107,6 +107,23 @@ pub fn write_session_snapshot_in_txn(
     Ok(())
 }
 
+fn load_session_snapshot_in_txn(
+    tx: &Transaction<'_>,
+    id: &SessionId,
+) -> Result<Option<Session>, StoreError> {
+    tx.query_row(
+        "SELECT session_json FROM sessions WHERE session_id = ?1",
+        params![id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()?
+    .map(|bytes| {
+        meerkat_core::session_migrations::deserialize_session_migrating(&bytes)
+            .map_err(|err| StoreError::Internal(err.to_string()))
+    })
+    .transpose()
+}
+
 /// SQLite-backed session store with one connection per operation.
 pub struct SqliteSessionStore {
     path: PathBuf,
@@ -246,11 +263,58 @@ impl SessionStore for SqliteSessionStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         // F1 closure (wave-c C-H1): reject shrink-attempts at the trait
         // boundary before the row is overwritten on disk.
-        let previous = self
-            .load_impl(session.id())
-            .await
-            .map_err(into_session_store_error)?;
-        meerkat_core::session_store::append_only_save_guard(session, previous.as_ref())?;
+        let path = self.path.clone();
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), SessionStoreError> {
+            let mut conn = open_connection(&path).map_err(into_session_store_error)?;
+            let tx = begin_immediate_transaction(&mut conn).map_err(into_session_store_error)?;
+            let previous = load_session_snapshot_in_txn(&tx, session.id())
+                .map_err(into_session_store_error)?;
+            meerkat_core::session_store::append_only_save_guard(&session, previous.as_ref())?;
+            write_session_snapshot_in_txn(&tx, &session).map_err(into_session_store_error)?;
+            tx.commit()
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            Ok(())
+        })
+        .await
+        .map_err(StoreError::Join)
+        .map_err(into_session_store_error)?
+    }
+
+    async fn save_transcript_rewrite(
+        &self,
+        session: &Session,
+        commit: &meerkat_core::TranscriptRewriteCommit,
+    ) -> Result<(), SessionStoreError> {
+        let path = self.path.clone();
+        let session = session.clone();
+        let commit = commit.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), SessionStoreError> {
+            let mut conn = open_connection(&path).map_err(into_session_store_error)?;
+            let tx = begin_immediate_transaction(&mut conn).map_err(into_session_store_error)?;
+            let previous = load_session_snapshot_in_txn(&tx, session.id())
+                .map_err(into_session_store_error)?;
+            meerkat_core::session_store::transcript_rewrite_save_guard(
+                &session,
+                previous.as_ref(),
+                &commit,
+            )?;
+            write_session_snapshot_in_txn(&tx, &session).map_err(into_session_store_error)?;
+            tx.commit()
+                .map_err(StoreError::from)
+                .map_err(into_session_store_error)?;
+            Ok(())
+        })
+        .await
+        .map_err(StoreError::Join)
+        .map_err(into_session_store_error)?
+    }
+
+    async fn save_authoritative_projection(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionStoreError> {
         self.save_impl(session)
             .await
             .map_err(into_session_store_error)
@@ -275,7 +339,8 @@ impl SessionStore for SqliteSessionStore {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use meerkat_core::types::{Message, UserMessage};
+    use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, Message, UserMessage};
+    use meerkat_core::{StopReason, TranscriptRewriteReason, TranscriptRewriteSelection};
     use tempfile::TempDir;
 
     fn temp_store() -> (TempDir, SqliteSessionStore) {
@@ -343,5 +408,57 @@ mod tests {
         first.save(&session).await.unwrap();
         let loaded = second.load(session.id()).await.unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn save_transcript_rewrite_rejects_stale_parent_after_intervening_save() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let first = SqliteSessionStore::open(&path).unwrap();
+        let second = SqliteSessionStore::open(&path).unwrap();
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "original".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        )));
+        first.save(&session).await.unwrap();
+
+        let mut stale = first.load(session.id()).await.unwrap().unwrap();
+        let mut newer = second.load(session.id()).await.unwrap().unwrap();
+        newer.push(Message::User(UserMessage::text("intervening".to_string())));
+        second.save(&newer).await.unwrap();
+
+        let commit = stale
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "replacement".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                ))],
+                TranscriptRewriteReason::new("compaction"),
+                Some("test".to_string()),
+                None,
+            )
+            .unwrap();
+
+        let err = first
+            .save_transcript_rewrite(&stale, &commit)
+            .await
+            .expect_err("stale rewrite must not overwrite newer session state");
+        assert!(
+            matches!(err, SessionStoreError::TranscriptRevisionConflict { .. }),
+            "unexpected error: {err}"
+        );
+
+        let saved = first.load(session.id()).await.unwrap().unwrap();
+        assert_eq!(saved.messages().len(), newer.messages().len());
     }
 }

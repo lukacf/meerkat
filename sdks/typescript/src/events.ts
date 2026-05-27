@@ -476,6 +476,12 @@ export interface BackgroundJobCompletedEvent {
   readonly detail: string;
 }
 
+export interface TranscriptRewriteCommittedEvent {
+  readonly type: "transcript_rewrite_committed";
+  readonly sessionId: string;
+  readonly record: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Unknown / forward-compat
 // ---------------------------------------------------------------------------
@@ -528,6 +534,7 @@ export type AgentEvent =
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
+  | TranscriptRewriteCommittedEvent
   | MalformedEvent
   | UnknownEvent;
 
@@ -1231,6 +1238,14 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           ["completed", "failed", "aborted", "cancelled", "retired", "terminated"] as const,
         ),
         detail: requireStringField(raw, "detail"),
+      };
+    }
+    case "transcript_rewrite_committed": {
+      if (!isPlainRecord(raw.record)) throw new Error("record must be object");
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        record: raw.record,
       };
     }
 

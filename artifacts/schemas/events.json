@@ -1275,6 +1275,25 @@
           }
         ]
       },
+      "SystemTime": {
+        "properties": {
+          "nanos_since_epoch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs_since_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "secs_since_epoch",
+          "nanos_since_epoch"
+        ],
+        "type": "object"
+      },
       "ToolCallArguments": {
         "additionalProperties": true,
         "type": "object"
@@ -1472,6 +1491,155 @@
           "persisted"
         ],
         "type": "object"
+      },
+      "TranscriptRevisionBody": {
+        "description": "Immutable transcript revision body retained by the session-local graph.",
+        "properties": {
+          "created_at": {
+            "$ref": "#/$defs/SystemTime"
+          },
+          "messages": {
+            "items": true,
+            "type": "array"
+          },
+          "parent_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "messages",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteCommit": {
+        "description": "Immutable rewrite commit that advances a session transcript head.",
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed_at": {
+            "$ref": "#/$defs/SystemTime"
+          },
+          "messages_after": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages_before": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "original_span_digest": {
+            "type": "string"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/TranscriptRewriteReason"
+          },
+          "replacement_digest": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/$defs/TranscriptRewriteSelection"
+          }
+        },
+        "required": [
+          "parent_revision",
+          "revision",
+          "selection",
+          "original_span_digest",
+          "replacement_digest",
+          "messages_before",
+          "messages_after",
+          "reason",
+          "committed_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteReason": {
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteRecord": {
+        "description": "Self-contained append-only transcript rewrite record.",
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptRewriteCommit"
+          },
+          "parent_body": {
+            "$ref": "#/$defs/TranscriptRevisionBody"
+          },
+          "revision_body": {
+            "$ref": "#/$defs/TranscriptRevisionBody"
+          }
+        },
+        "required": [
+          "commit",
+          "parent_body",
+          "revision_body"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteSelection": {
+        "description": "A concrete transcript span selected for same-session rewrite.",
+        "oneOf": [
+          {
+            "description": "Replace messages in `[start, end)`.",
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -2480,6 +2648,27 @@
           "display_name",
           "terminal_status",
           "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A typed same-session transcript rewrite was durably committed.",
+        "properties": {
+          "record": {
+            "$ref": "#/$defs/TranscriptRewriteRecord"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "transcript_rewrite_committed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "record"
         ],
         "type": "object"
       }
@@ -3801,6 +3990,27 @@
               "detail"
             ],
             "type": "object"
+          },
+          {
+            "description": "A typed same-session transcript rewrite was durably committed.",
+            "properties": {
+              "record": {
+                "$ref": "#/$defs/TranscriptRewriteRecord"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "record"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4749,6 +4959,25 @@
           }
         ]
       },
+      "SystemTime": {
+        "properties": {
+          "nanos_since_epoch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs_since_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "secs_since_epoch",
+          "nanos_since_epoch"
+        ],
+        "type": "object"
+      },
       "ToolCallArguments": {
         "additionalProperties": true,
         "type": "object"
@@ -4947,6 +5176,155 @@
         ],
         "type": "object"
       },
+      "TranscriptRevisionBody": {
+        "description": "Immutable transcript revision body retained by the session-local graph.",
+        "properties": {
+          "created_at": {
+            "$ref": "#/$defs/SystemTime"
+          },
+          "messages": {
+            "items": true,
+            "type": "array"
+          },
+          "parent_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "messages",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteCommit": {
+        "description": "Immutable rewrite commit that advances a session transcript head.",
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed_at": {
+            "$ref": "#/$defs/SystemTime"
+          },
+          "messages_after": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages_before": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "original_span_digest": {
+            "type": "string"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/TranscriptRewriteReason"
+          },
+          "replacement_digest": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/$defs/TranscriptRewriteSelection"
+          }
+        },
+        "required": [
+          "parent_revision",
+          "revision",
+          "selection",
+          "original_span_digest",
+          "replacement_digest",
+          "messages_before",
+          "messages_after",
+          "reason",
+          "committed_at"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteReason": {
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteRecord": {
+        "description": "Self-contained append-only transcript rewrite record.",
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptRewriteCommit"
+          },
+          "parent_body": {
+            "$ref": "#/$defs/TranscriptRevisionBody"
+          },
+          "revision_body": {
+            "$ref": "#/$defs/TranscriptRevisionBody"
+          }
+        },
+        "required": [
+          "commit",
+          "parent_body",
+          "revision_body"
+        ],
+        "type": "object"
+      },
+      "TranscriptRewriteSelection": {
+        "description": "A concrete transcript span selected for same-session rewrite.",
+        "oneOf": [
+          {
+            "description": "Replace messages in `[start, end)`.",
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -5075,7 +5453,8 @@
       "interaction_failed",
       "stream_truncated",
       "tool_config_changed",
-      "background_job_completed"
+      "background_job_completed",
+      "transcript_rewrite_committed"
     ],
     "known_payloads": {
       "tool_config_changed": {

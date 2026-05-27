@@ -45,6 +45,27 @@ impl SessionStore for MemoryStore {
         Ok(())
     }
 
+    async fn save_transcript_rewrite(
+        &self,
+        session: &Session,
+        commit: &meerkat_core::TranscriptRewriteCommit,
+    ) -> Result<(), SessionStoreError> {
+        let mut sessions = self.sessions.write().await;
+        let previous = sessions.get(session.id());
+        meerkat_core::session_store::transcript_rewrite_save_guard(session, previous, commit)?;
+        sessions.insert(session.id().clone(), session.clone());
+        Ok(())
+    }
+
+    async fn save_authoritative_projection(
+        &self,
+        session: &Session,
+    ) -> Result<(), SessionStoreError> {
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(session.id().clone(), session.clone());
+        Ok(())
+    }
+
     async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         let sessions = self.sessions.read().await;
         Ok(sessions.get(id).cloned())

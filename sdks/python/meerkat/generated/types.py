@@ -65,6 +65,8 @@ class WireSessionMessage:
     """Canonical transcript message."""
     role: str = ''
     created_at: str = ''
+    kind: Optional[str] = None
+    body: Optional[str] = None
     content: Optional[WireContentInput] = None
     tool_calls: Optional[list[WireToolCall]] = None
     stop_reason: Optional[WireStopReason] = None

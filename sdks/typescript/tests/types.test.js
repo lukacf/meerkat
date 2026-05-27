@@ -86,6 +86,85 @@ describe("Contract Version", () => {
   });
 });
 
+describe("Transcript Rewrite Serialization", () => {
+  it("serializes edited parsed messages over their preserved raw payload", () => {
+    const parsed = MeerkatClient.parseSessionMessage({
+      role: "assistant",
+      content: "old",
+      created_at: "2026-05-26T10:00:00Z",
+      provider_trace_id: "trace-1",
+    });
+
+    const serialized = MeerkatClient.serializeTranscriptRewriteMessage({
+      ...parsed,
+      content: "new",
+    });
+
+    assert.deepEqual(serialized, {
+      role: "assistant",
+      content: "new",
+      created_at: "2026-05-26T10:00:00Z",
+      provider_trace_id: "trace-1",
+    });
+  });
+
+  it("serializes parsed block assistant messages back to wire-shaped blocks", () => {
+    const parsed = MeerkatClient.parseSessionMessage({
+      role: "block_assistant",
+      created_at: "2026-05-26T10:00:00Z",
+      blocks: [
+        {
+          block_type: "text",
+          data: {
+            text: "old",
+            source: "spoken",
+          },
+          provider_block_id: "block-1",
+        },
+      ],
+    });
+
+    const serialized = MeerkatClient.serializeTranscriptRewriteMessage({
+      ...parsed,
+      blocks: [{ ...parsed.blocks[0], text: "new" }],
+    });
+
+    assert.deepEqual(serialized, {
+      role: "block_assistant",
+      created_at: "2026-05-26T10:00:00Z",
+      blocks: [
+        {
+          block_type: "text",
+          data: {
+            text: "new",
+            source: "spoken",
+          },
+          provider_block_id: "block-1",
+        },
+      ],
+    });
+  });
+
+  it("serializes parsed system_notice messages with a single body alias", () => {
+    const parsed = MeerkatClient.parseSessionMessage({
+      role: "system_notice",
+      kind: "background_job",
+      body: "done",
+      created_at: "2026-05-26T10:00:00Z",
+    });
+
+    const serialized = MeerkatClient.serializeTranscriptRewriteMessage(parsed);
+
+    assert.deepEqual(serialized, {
+      role: "system_notice",
+      kind: "background_job",
+      body: "done",
+      created_at: "2026-05-26T10:00:00Z",
+    });
+    assert.equal(Object.hasOwn(serialized, "content"), false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Error hierarchy
 // ---------------------------------------------------------------------------
@@ -1083,6 +1162,40 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "malformed_event");
     assert.equal(event.rawType, "background_job_completed");
+    assert.deepEqual(event.raw, raw);
+  });
+
+  it("should parse transcript_rewrite_committed with typed record access", () => {
+    const record = {
+      commit: {
+        parent_revision: "rev-parent",
+        revision: "rev-next",
+      },
+      parent_body: { revision: "rev-parent" },
+      revision_body: { revision: "rev-next" },
+    };
+    const event = parseEvent({
+      type: "transcript_rewrite_committed",
+      session_id: "session-123",
+      record,
+    });
+
+    assert.equal(event.type, "transcript_rewrite_committed");
+    if (event.type === "transcript_rewrite_committed") {
+      assert.equal(event.sessionId, "session-123");
+      assert.deepEqual(event.record, record);
+    }
+  });
+
+  it("should reject transcript_rewrite_committed without record", () => {
+    const raw = {
+      type: "transcript_rewrite_committed",
+      session_id: "session-123",
+    };
+    const event = parseEvent(raw);
+
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "transcript_rewrite_committed");
     assert.deepEqual(event.raw, raw);
   });
 

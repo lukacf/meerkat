@@ -162,10 +162,17 @@ pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CommsToolMaterial, Core
 pub use meerkat_core::SessionServiceCommsExt;
 pub use meerkat_core::SessionServiceControlExt;
 pub use meerkat_core::SessionServiceHistoryExt;
+pub use meerkat_core::SessionServiceTranscriptEditExt;
 #[cfg(feature = "comms")]
 pub use meerkat_core::{
     CommsCommand, EventStream, InputSource, PeerDirectoryEntry, PeerDirectorySource, PeerName,
     SendError, SendReceipt, StreamError, StreamScope,
+};
+pub use meerkat_core::{
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionPage,
+    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    SessionTranscriptRewriteResult, TranscriptEditRunningBehavior, TranscriptRewriteCommit,
+    TranscriptRewriteReason, TranscriptRewriteRecord, TranscriptRewriteSelection,
 };
 
 // Re-export client types

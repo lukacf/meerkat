@@ -66,6 +66,10 @@ pub enum WireConversionError {
     /// exists. Carries the original debug payload for server logs.
     #[error("unknown wire provider variant: {debug}")]
     Provider { debug: String },
+    /// Public transcript rewrite message could not be converted into a core
+    /// transcript message.
+    #[error("invalid transcript rewrite message: {debug}")]
+    TranscriptMessage { debug: String },
     /// Wire degradation-reason is the explicit-Unknown sentinel; no inverse
     /// mapping exists.
     #[error("unknown wire degradation-reason variant: {debug}")]

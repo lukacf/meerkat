@@ -231,21 +231,37 @@ export interface SessionAssistantBlock {
    * for non-transcript block types.
    */
   readonly source?: string;
+  readonly raw?: Record<string, unknown>;
 }
 
 export interface SessionMessage {
   readonly role: string;
   readonly createdAt: string;
+  readonly kind?: string;
+  readonly body?: string;
   readonly content?: ContentInput;
   readonly toolCalls: readonly SessionToolCall[];
   readonly stopReason?: string;
   readonly blocks: readonly SessionAssistantBlock[];
   readonly results: readonly SessionToolResult[];
+  readonly raw?: Record<string, unknown>;
 }
 
 export interface SessionHistory {
   readonly sessionId: string;
   readonly sessionRef?: string;
+  readonly messageCount: number;
+  readonly offset: number;
+  readonly limit?: number;
+  readonly hasMore: boolean;
+  readonly messages: readonly SessionMessage[];
+}
+
+export interface SessionTranscriptRevision {
+  readonly sessionId: string;
+  readonly sessionRef?: string;
+  readonly revision: string;
+  readonly headRevision: string;
   readonly messageCount: number;
   readonly offset: number;
   readonly limit?: number;
@@ -295,6 +311,77 @@ export type TranscriptReplacement =
   | TranscriptUserContentBlockReplacement
   | TranscriptAssistantBlockReplacement
   | TranscriptToolResultContentBlockReplacement;
+
+/** Concrete transcript selection for same-session rewrite. */
+export interface TranscriptMessageRangeSelection {
+  readonly type: "message_range";
+  readonly start: number;
+  readonly end: number;
+}
+
+export type TranscriptRewriteSelection = TranscriptMessageRangeSelection;
+
+/** Machine-readable reason for a same-session transcript rewrite. */
+export interface TranscriptRewriteReason {
+  readonly kind: string;
+  readonly note?: string;
+}
+
+/** Public transcript message accepted by same-session rewrite APIs. */
+export type TranscriptRewriteMessage =
+  | {
+      readonly role: "system";
+      readonly content: string;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "system_notice";
+      readonly kind: string;
+      readonly body?: string;
+      readonly content?: string;
+      readonly blocks?: readonly Record<string, unknown>[];
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "user";
+      readonly content: ContentInput;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "assistant";
+      readonly content: string;
+      readonly tool_calls?: readonly SessionToolCall[];
+      readonly stop_reason?: string;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "block_assistant";
+      readonly blocks: readonly Record<string, unknown>[];
+      readonly stop_reason?: string;
+      readonly created_at?: string;
+    }
+  | {
+      readonly role: "tool_results";
+      readonly results: readonly Record<string, unknown>[];
+      readonly created_at?: string;
+    };
+
+export type TranscriptRewriteInputMessage = TranscriptRewriteMessage | SessionMessage;
+
+/** Options for same-session transcript rewrite APIs. */
+export interface TranscriptRewriteOptions extends TranscriptEditOptions {
+  readonly actor?: string;
+  readonly expectedParentRevision?: string;
+}
+
+/** Result of committing a same-session transcript rewrite. */
+export interface SessionTranscriptRewriteResult {
+  readonly sessionId: string;
+  readonly parentRevision: string;
+  readonly revision: string;
+  readonly messageCount: number;
+  readonly commit: Record<string, unknown>;
+}
 
 /** Result of creating a forked transcript branch. */
 export interface SessionForkResult {

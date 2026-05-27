@@ -286,6 +286,7 @@ impl EventStore for FileEventStore {
             .await?;
         file.write_all(lines.as_bytes()).await?;
         file.flush().await?;
+        file.sync_all().await?;
         Ok(last_allocated_seq)
     }
 

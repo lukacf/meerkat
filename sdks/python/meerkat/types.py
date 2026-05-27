@@ -713,6 +713,7 @@ class SessionAssistantBlock:
     # Lane provenance for ``transcript`` blocks (e.g. ``"spoken"``).
     # ``None`` for non-transcript block types.
     source: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,11 +722,14 @@ class SessionMessage:
 
     role: str = ""
     created_at: str = ""
+    kind: str | None = None
+    body: str | None = None
     content: ContentInput | None = None
     tool_calls: list[SessionToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)
     results: list[SessionToolResult] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,6 +738,21 @@ class SessionHistory:
 
     session_id: str = ""
     session_ref: str | None = None
+    message_count: int = 0
+    offset: int = 0
+    limit: int | None = None
+    has_more: bool = False
+    messages: list[SessionMessage] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTranscriptRevision:
+    """Paginated transcript page for a retained immutable revision."""
+
+    session_id: str = ""
+    session_ref: str | None = None
+    revision: str = ""
+    head_revision: str = ""
     message_count: int = 0
     offset: int = 0
     limit: int | None = None
@@ -778,6 +797,77 @@ TranscriptReplacement = (
 """Typed transcript replacement used to create an edited session fork."""
 
 
+class TranscriptMessageRangeSelection(TypedDict):
+    type: Literal["message_range"]
+    start: int
+    end: int
+
+
+TranscriptRewriteSelection = TranscriptMessageRangeSelection
+"""Concrete transcript selection for same-session rewrite."""
+
+
+class TranscriptRewriteReason(TypedDict):
+    kind: str
+    note: NotRequired[str]
+
+
+class TranscriptRewriteSystemMessage(TypedDict):
+    role: Literal["system"]
+    content: str
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteSystemNoticeMessage(TypedDict):
+    role: Literal["system_notice"]
+    kind: str
+    body: NotRequired[str]
+    content: NotRequired[str]
+    blocks: NotRequired[list[dict[str, Any]]]
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteUserMessage(TypedDict):
+    role: Literal["user"]
+    content: ContentInput
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteAssistantMessage(TypedDict):
+    role: Literal["assistant"]
+    content: str
+    tool_calls: NotRequired[list[dict[str, Any]]]
+    stop_reason: NotRequired[str]
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteBlockAssistantMessage(TypedDict):
+    role: Literal["block_assistant"]
+    blocks: list[dict[str, Any]]
+    stop_reason: NotRequired[str]
+    created_at: NotRequired[str]
+
+
+class TranscriptRewriteToolResultsMessage(TypedDict):
+    role: Literal["tool_results"]
+    results: list[dict[str, Any]]
+    created_at: NotRequired[str]
+
+
+TranscriptRewriteMessage = (
+    TranscriptRewriteSystemMessage
+    | TranscriptRewriteSystemNoticeMessage
+    | TranscriptRewriteUserMessage
+    | TranscriptRewriteAssistantMessage
+    | TranscriptRewriteBlockAssistantMessage
+    | TranscriptRewriteToolResultsMessage
+)
+"""Public transcript message accepted by same-session rewrite APIs."""
+
+TranscriptRewriteInputMessage = TranscriptRewriteMessage | SessionMessage
+"""Public rewrite input; accepts raw rewrite messages or SDK-read session messages."""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionForkResult:
     """Result of creating a forked transcript branch."""
@@ -786,6 +876,17 @@ class SessionForkResult:
     session_id: str = ""
     session_ref: str | None = None
     message_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTranscriptRewriteResult:
+    """Result of committing a same-session transcript rewrite."""
+
+    session_id: str = ""
+    parent_revision: str = ""
+    revision: str = ""
+    message_count: int = 0
+    commit: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

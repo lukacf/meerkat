@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Verify generated SDK artifacts match the committed schema/code generator.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+python3 tools/sdk-codegen/generate.py
+
+if ! git diff --quiet -- \
+    sdks/python/meerkat/generated \
+    sdks/typescript/src/generated \
+    sdks/web/src/generated; then
+    echo "SDK codegen freshness check FAILED"
+    echo "Run: python3 tools/sdk-codegen/generate.py"
+    echo "Then commit the updated generated SDK artifacts."
+    git diff --stat -- \
+        sdks/python/meerkat/generated \
+        sdks/typescript/src/generated \
+        sdks/web/src/generated
+    exit 1
+fi
+
+echo "SDK codegen freshness OK"

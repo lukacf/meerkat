@@ -110,6 +110,37 @@ async fn append_only_save_guard_rejects_shrink_attempt() {
     store.save(&extended).await.expect("extend must succeed");
 }
 
+#[tokio::test]
+async fn append_only_save_guard_rejects_equal_length_replacement() {
+    let store = MemoryStore::new();
+
+    let mut initial = Session::new();
+    initial.push(Message::User(meerkat_core::types::UserMessage::text(
+        "hello",
+    )));
+    store.save(&initial).await.expect("first save must succeed");
+
+    let mut replacement = Session::with_id(initial.id().clone());
+    replacement.push(Message::User(meerkat_core::types::UserMessage::text(
+        "rewritten",
+    )));
+    let err = store
+        .save(&replacement)
+        .await
+        .expect_err("equal-length replacement must not bypass transcript rewrite authority");
+
+    match err {
+        SessionStoreError::TranscriptContinuityViolation { id, .. } => {
+            assert_eq!(
+                &id,
+                initial.id(),
+                "error must name the session whose save was rejected"
+            );
+        }
+        other => panic!("expected TranscriptContinuityViolation, got {other:?}"),
+    }
+}
+
 /// Fork contract (F7 companion): `Session::fork_at` returns a distinct
 /// `SessionId`, so a "fork with a shorter history" is a new identity on
 /// a new event log, not a same-session shrink. Duplicates the stricter

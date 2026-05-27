@@ -255,6 +255,11 @@ export type SourceUuid = string;
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
 
+export interface SystemTime {
+  nanos_since_epoch: number;
+  secs_since_epoch: number;
+}
+
 export type ToolCallArguments = Record<string, unknown>;
 
 export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
@@ -293,6 +298,43 @@ export type ToolConfigChangedPayload = {
   status_info?: ToolConfigChangeStatus | null;
   target: string;
 };
+
+export type TranscriptRevisionBody = {
+  created_at: SystemTime;
+  messages: unknown[];
+  parent_revision?: string | null;
+  revision: string;
+};
+
+export type TranscriptRewriteCommit = {
+  actor?: string | null;
+  committed_at: SystemTime;
+  messages_after: number;
+  messages_before: number;
+  original_span_digest: string;
+  parent_revision: string;
+  reason: TranscriptRewriteReason;
+  replacement_digest: string;
+  revision: string;
+  selection: TranscriptRewriteSelection;
+};
+
+export type TranscriptRewriteReason = {
+  kind: string;
+  note?: string | null;
+};
+
+export interface TranscriptRewriteRecord {
+  commit: TranscriptRewriteCommit;
+  parent_body: TranscriptRevisionBody;
+  revision_body: TranscriptRevisionBody;
+}
+
+export interface TranscriptRewriteSelection {
+  end: number;
+  start: number;
+  type: "message_range";
+}
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 
@@ -544,6 +586,12 @@ export interface BackgroundJobCompletedEvent {
   type: "background_job_completed";
 }
 
+export interface TranscriptRewriteCommittedEvent {
+  record: TranscriptRewriteRecord;
+  session_id: SessionId;
+  type: "transcript_rewrite_committed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -578,7 +626,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "interaction_failed",
   "stream_truncated",
   "tool_config_changed",
-  "background_job_completed"
+  "background_job_completed",
+  "transcript_rewrite_committed"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -618,4 +667,5 @@ export type AgentEvent =
   InteractionFailedEvent |
   StreamTruncatedEvent |
   ToolConfigChangedEvent |
-  BackgroundJobCompletedEvent;
+  BackgroundJobCompletedEvent |
+  TranscriptRewriteCommittedEvent;

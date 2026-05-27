@@ -33,10 +33,15 @@ from .types import (
     RunResult,
     SessionForkResult,
     SessionHistory,
+    SessionTranscriptRevision,
+    SessionTranscriptRewriteResult,
     SkillKey,
     SkillRef,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
+    TranscriptRewriteInputMessage,
+    TranscriptRewriteReason,
+    TranscriptRewriteSelection,
 )
 
 if TYPE_CHECKING:
@@ -277,6 +282,21 @@ class Session:
             limit=limit,
         )
 
+    async def transcript_revision(
+        self,
+        revision: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevision:
+        """Read paginated transcript history for a retained revision."""
+        return await self._client.read_session_transcript_revision(  # noqa: SLF001
+            self._id,
+            revision,
+            offset=offset,
+            limit=limit,
+        )
+
     async def fork_at(
         self,
         message_index: int,
@@ -305,9 +325,49 @@ class Session:
             running_behavior=running_behavior,
         )
 
+    async def rewrite_transcript(
+        self,
+        selection: TranscriptRewriteSelection,
+        replacement: list[TranscriptRewriteInputMessage],
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed same-session transcript rewrite."""
+        return await self._client.rewrite_session_transcript(  # noqa: SLF001
+            self._id,
+            selection,
+            replacement,
+            reason,
+            actor=actor,
+            expected_parent_revision=expected_parent_revision,
+            running_behavior=running_behavior,
+        )
+
     async def subscribe_events(self) -> EventSubscription:
         """Open a standalone session-wide event subscription."""
         return await self._client.subscribe_session_events(self._id)  # noqa: SLF001
+
+    async def restore_transcript_revision(
+        self,
+        revision: str,
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed rewrite that restores a retained transcript revision."""
+        return await self._client.restore_session_transcript_revision(  # noqa: SLF001
+            self._id,
+            revision,
+            reason,
+            actor=actor,
+            expected_parent_revision=expected_parent_revision,
+            running_behavior=running_behavior,
+        )
 
     # -- Skills convenience ------------------------------------------------
 
@@ -492,6 +552,21 @@ class DeferredSession:
             limit=limit,
         )
 
+    async def transcript_revision(
+        self,
+        revision: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevision:
+        """Read paginated transcript history for a retained revision."""
+        return await self._client.read_session_transcript_revision(  # noqa: SLF001
+            self._id,
+            revision,
+            offset=offset,
+            limit=limit,
+        )
+
     async def fork_at(
         self,
         message_index: int,
@@ -517,6 +592,46 @@ class DeferredSession:
             self._id,
             message_index,
             replacement,
+            running_behavior=running_behavior,
+        )
+
+    async def rewrite_transcript(
+        self,
+        selection: TranscriptRewriteSelection,
+        replacement: list[TranscriptRewriteInputMessage],
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed same-session transcript rewrite."""
+        return await self._client.rewrite_session_transcript(  # noqa: SLF001
+            self._id,
+            selection,
+            replacement,
+            reason,
+            actor=actor,
+            expected_parent_revision=expected_parent_revision,
+            running_behavior=running_behavior,
+        )
+
+    async def restore_transcript_revision(
+        self,
+        revision: str,
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed rewrite that restores a retained transcript revision."""
+        return await self._client.restore_session_transcript_revision(  # noqa: SLF001
+            self._id,
+            revision,
+            reason,
+            actor=actor,
+            expected_parent_revision=expected_parent_revision,
             running_behavior=running_behavior,
         )
 

@@ -544,6 +544,14 @@ class BackgroundJobCompleted(Event):
     legacy_status: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptRewriteCommitted(Event):
+    """A same-session transcript rewrite was durably committed."""
+
+    session_id: str
+    record: dict[str, Any]
+
+
 # ---------------------------------------------------------------------------
 # Scoped streaming attribution
 # ---------------------------------------------------------------------------
@@ -629,6 +637,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "stream_truncated": StreamTruncated,
     "tool_config_changed": ToolConfigChanged,
     "background_job_completed": BackgroundJobCompleted,
+    "transcript_rewrite_committed": TranscriptRewriteCommitted,
 }
 
 
@@ -1043,6 +1052,11 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         if terminal_status not in _BACKGROUND_JOB_TERMINAL_STATUSES:
             raise ValueError("terminal_status must be a background job terminal status")
         _require_str(raw, "detail")
+        return
+    if event_type == "transcript_rewrite_committed":
+        _require_str(raw, "session_id")
+        if not isinstance(raw.get("record"), dict):
+            raise ValueError("record must be object")
         return
     if event_type == "tool_config_changed":
         payload = raw.get("payload")

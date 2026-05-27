@@ -128,6 +128,8 @@ import type {
   SessionListOptions,
   SessionMessage,
   SessionOptions,
+  SessionTranscriptRevision,
+  SessionTranscriptRewriteResult,
   SessionToolCall,
   SessionToolResult,
   SkillKey,
@@ -137,6 +139,11 @@ import type {
   SpawnSpec,
   TranscriptEditOptions,
   TranscriptReplacement,
+  TranscriptRewriteInputMessage,
+  TranscriptRewriteMessage,
+  TranscriptRewriteOptions,
+  TranscriptRewriteReason,
+  TranscriptRewriteSelection,
   UpdateScheduleRequest,
   TurnOptions,
   Usage,
@@ -786,6 +793,23 @@ export class MeerkatClient {
     return MeerkatClient.parseSessionHistory(raw);
   }
 
+  async readSessionTranscriptRevision(
+    sessionId: string,
+    revision: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevision> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      revision,
+      offset: options?.offset ?? 0,
+    };
+    if (options?.limit !== undefined) {
+      params.limit = options.limit;
+    }
+    const raw = await this.request("session/transcript_revision", params);
+    return MeerkatClient.parseSessionTranscriptRevision(raw);
+  }
+
   async forkSessionAt(
     sessionId: string,
     messageIndex: number,
@@ -818,6 +842,58 @@ export class MeerkatClient {
     }
     const raw = await this.request("session/fork_replace", params);
     return MeerkatClient.parseSessionForkResult(raw);
+  }
+
+  async rewriteSessionTranscript(
+    sessionId: string,
+    selection: TranscriptRewriteSelection,
+    replacement: readonly TranscriptRewriteInputMessage[],
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      selection,
+      replacement: replacement.map((message) =>
+        MeerkatClient.serializeTranscriptRewriteMessage(message),
+      ),
+      reason,
+    };
+    if (options?.actor !== undefined) {
+      params.actor = options.actor;
+    }
+    if (options?.expectedParentRevision !== undefined) {
+      params.expected_parent_revision = options.expectedParentRevision;
+    }
+    if (options?.runningBehavior !== undefined) {
+      params.running_behavior = options.runningBehavior;
+    }
+    const raw = await this.request("session/rewrite_transcript", params);
+    return MeerkatClient.parseSessionTranscriptRewriteResult(raw);
+  }
+
+  async restoreSessionTranscriptRevision(
+    sessionId: string,
+    revision: string,
+    reason: TranscriptRewriteReason,
+    options?: TranscriptRewriteOptions,
+  ): Promise<SessionTranscriptRewriteResult> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      revision,
+      reason,
+    };
+    if (options?.actor !== undefined) {
+      params.actor = options.actor;
+    }
+    if (options?.expectedParentRevision !== undefined) {
+      params.expected_parent_revision = options.expectedParentRevision;
+    }
+    if (options?.runningBehavior !== undefined) {
+      params.running_behavior = options.runningBehavior;
+    }
+    const raw = await this.request("session/restore_transcript_revision", params);
+    return MeerkatClient.parseSessionTranscriptRewriteResult(raw);
   }
 
   // -- Capabilities -------------------------------------------------------
@@ -3611,12 +3687,43 @@ export class MeerkatClient {
     };
   }
 
+  static parseSessionTranscriptRevision(
+    data: Record<string, unknown>,
+  ): SessionTranscriptRevision {
+    const rawMessages = Array.isArray(data.messages)
+      ? (data.messages as Array<Record<string, unknown>>)
+      : [];
+    return {
+      sessionId: String(data.session_id ?? ""),
+      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
+      revision: String(data.revision ?? ""),
+      headRevision: String(data.head_revision ?? ""),
+      messageCount: Number(data.message_count ?? 0),
+      offset: Number(data.offset ?? 0),
+      limit: data.limit != null ? Number(data.limit) : undefined,
+      hasMore: Boolean(data.has_more ?? false),
+      messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
+    };
+  }
+
   static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
     return {
       sourceSessionId: String(data.source_session_id ?? ""),
       sessionId: String(data.session_id ?? ""),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
       messageCount: Number(data.message_count ?? 0),
+    };
+  }
+
+  static parseSessionTranscriptRewriteResult(
+    data: Record<string, unknown>,
+  ): SessionTranscriptRewriteResult {
+    return {
+      sessionId: String(data.session_id ?? ""),
+      parentRevision: String(data.parent_revision ?? ""),
+      revision: String(data.revision ?? ""),
+      messageCount: Number(data.message_count ?? 0),
+      commit: (data.commit ?? {}) as Record<string, unknown>,
     };
   }
 
@@ -3672,6 +3779,8 @@ export class MeerkatClient {
     return {
       role,
       createdAt: String(data.created_at ?? ""),
+      kind: data.kind != null ? String(data.kind) : undefined,
+      body: data.body != null ? String(data.body) : undefined,
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
       toolCalls: rawToolCalls.map(
@@ -3690,6 +3799,88 @@ export class MeerkatClient {
           isError: Boolean(result.is_error ?? false),
         }),
       ),
+      raw: { ...data },
+    };
+  }
+
+  static serializeTranscriptRewriteMessage(
+    message: TranscriptRewriteInputMessage,
+  ): Record<string, unknown> {
+    const camel = message as SessionMessage;
+    if (camel.createdAt !== undefined) {
+      const payload: Record<string, unknown> = {
+        ...(camel.raw ?? {}),
+        role: camel.role,
+        created_at: camel.createdAt,
+      };
+      if (camel.kind !== undefined) {
+        payload.kind = camel.kind;
+      }
+      if (camel.role === "system_notice") {
+        delete payload.body;
+        delete payload.content;
+        if (camel.body !== undefined) {
+          payload.body = camel.body;
+        } else if (camel.content !== undefined) {
+          payload.content = camel.content;
+        }
+      } else {
+        if (camel.body !== undefined) {
+          payload.body = camel.body;
+        }
+        if (camel.content !== undefined) {
+          payload.content = camel.content;
+        }
+      }
+      if (camel.toolCalls?.length > 0) {
+        payload.tool_calls = camel.toolCalls.map((toolCall) => ({
+          id: toolCall.id,
+          name: toolCall.name,
+          args: toolCall.args,
+        }));
+      }
+      if (camel.stopReason !== undefined) {
+        payload.stop_reason = camel.stopReason;
+      }
+      if (camel.blocks?.length > 0) {
+        payload.blocks = camel.blocks.map((block) =>
+          MeerkatClient.serializeSessionAssistantBlock(block),
+        );
+      }
+      if (camel.results?.length > 0) {
+        payload.results = camel.results.map((result) => ({
+          tool_use_id: result.toolUseId,
+          content: result.content,
+          is_error: result.isError,
+        }));
+      }
+      return payload;
+    }
+    return { ...(message as TranscriptRewriteMessage) };
+  }
+
+  static serializeSessionAssistantBlock(block: SessionAssistantBlock): Record<string, unknown> {
+    const data: Record<string, unknown> = {
+      ...((block.raw?.data as Record<string, unknown> | undefined) ?? {}),
+    };
+    setIfDefined(data, "text", block.text);
+    setIfDefined(data, "id", block.id);
+    setIfDefined(data, "name", block.name);
+    setIfDefined(data, "args", block.args);
+    setIfDefined(data, "image_id", block.imageId);
+    if (block.blobId !== undefined) {
+      data.blob_ref = { blob_id: block.blobId };
+    }
+    setIfDefined(data, "media_type", block.mediaType);
+    setIfDefined(data, "width", block.width);
+    setIfDefined(data, "height", block.height);
+    setIfDefined(data, "revised_prompt", block.revisedPrompt);
+    setIfDefined(data, "meta", block.meta);
+    setIfDefined(data, "source", block.source);
+    return {
+      ...(block.raw ?? {}),
+      block_type: block.blockType,
+      data,
     };
   }
 
@@ -3759,6 +3950,7 @@ export class MeerkatClient {
       // Lane provenance for transcript blocks (typed enum on the wire,
       // serialized as a snake_case string — currently only "spoken").
       source: typeof blockData.source === "string" ? blockData.source : undefined,
+      raw: { ...data },
     };
   }
 

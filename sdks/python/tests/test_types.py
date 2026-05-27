@@ -3,6 +3,7 @@ import asyncio
 
 import base64
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, get_args, get_origin, get_type_hints
 
@@ -78,6 +79,7 @@ from meerkat.events import (
     SkillResolutionFailureReason,
     ToolConfigChanged,
     TextDelta,
+    TranscriptRewriteCommitted,
     ToolCallRequested,
     ToolExecutionCompleted,
     ToolResultReceived,
@@ -833,6 +835,82 @@ def test_parse_session_history_preserves_assistant_image_blocks():
     assert block.meta == {"provider": "open_ai", "target_model": "gpt-image-1"}
 
 
+def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
+    parsed = MeerkatClient._parse_session_message(
+        {
+            "role": "assistant",
+            "content": "old",
+            "created_at": "2026-05-26T10:00:00Z",
+            "provider_trace_id": "trace-1",
+        }
+    )
+
+    edited = replace(parsed, content="new")
+    serialized = MeerkatClient._serialize_transcript_rewrite_message(edited)
+
+    assert serialized == {
+        "role": "assistant",
+        "content": "new",
+        "created_at": "2026-05-26T10:00:00Z",
+        "provider_trace_id": "trace-1",
+    }
+
+
+def test_transcript_rewrite_serializes_block_assistant_blocks_to_wire_shape():
+    parsed = MeerkatClient._parse_session_message(
+        {
+            "role": "block_assistant",
+            "created_at": "2026-05-26T10:00:00Z",
+            "blocks": [
+                {
+                    "block_type": "text",
+                    "data": {"text": "old", "source": "spoken"},
+                    "provider_block_id": "block-1",
+                }
+            ],
+        }
+    )
+
+    edited = replace(
+        parsed,
+        blocks=[replace(parsed.blocks[0], text="new")],
+    )
+    serialized = MeerkatClient._serialize_transcript_rewrite_message(edited)
+
+    assert serialized == {
+        "role": "block_assistant",
+        "created_at": "2026-05-26T10:00:00Z",
+        "blocks": [
+            {
+                "block_type": "text",
+                "data": {"text": "new", "source": "spoken"},
+                "provider_block_id": "block-1",
+            }
+        ],
+    }
+
+
+def test_transcript_rewrite_serializes_system_notice_with_one_body_alias():
+    parsed = MeerkatClient._parse_session_message(
+        {
+            "role": "system_notice",
+            "kind": "background_job",
+            "body": "done",
+            "created_at": "2026-05-26T10:00:00Z",
+        }
+    )
+
+    serialized = MeerkatClient._serialize_transcript_rewrite_message(parsed)
+
+    assert serialized == {
+        "role": "system_notice",
+        "kind": "background_job",
+        "body": "done",
+        "created_at": "2026-05-26T10:00:00Z",
+    }
+    assert "content" not in serialized
+
+
 def test_skill_key_export():
     key = SkillKey(source_uuid="abc-123", skill_name="my-skill")
     assert key.source_uuid == "abc-123"
@@ -1408,6 +1486,38 @@ def test_background_job_completed_constructor_requires_terminal_status():
             display_name="sleep 2",
             detail="exit_code: 0",
         )
+
+
+def test_parse_transcript_rewrite_committed_exposes_record():
+    record = {
+        "commit": {
+            "parent_revision": "rev-parent",
+            "revision": "rev-next",
+        },
+        "parent_body": {"revision": "rev-parent"},
+        "revision_body": {"revision": "rev-next"},
+    }
+    event = parse_event({
+        "type": "transcript_rewrite_committed",
+        "session_id": "session-123",
+        "record": record,
+    })
+
+    assert isinstance(event, TranscriptRewriteCommitted)
+    assert event.session_id == "session-123"
+    assert event.record == record
+
+
+def test_parse_transcript_rewrite_committed_rejects_missing_record():
+    raw = {
+        "type": "transcript_rewrite_committed",
+        "session_id": "session-123",
+    }
+    event = parse_event(raw)
+
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_turn_completed_with_usage():

@@ -7,6 +7,8 @@
 //!
 //! These catch silent renames and accidental field removals.
 
+#[cfg(feature = "schema")]
+use meerkat_contracts::emit::emit_all_schemas;
 use meerkat_contracts::{
     ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeInputChunk,
     WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage,
@@ -15,14 +17,60 @@ use meerkat_contracts::{
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, AssistantImageEvent, AssistantImageId, BlobId, BlobRef,
-    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, MediaType,
+    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, MediaType, Message,
     ProviderImageMetadata, RevisedPromptDisposition, RunResult, SessionId,
     SkillResolutionFailureReason, StopReason, ToolCallArguments, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
+    ToolConfigChangeStatus, ToolConfigChangedPayload, TranscriptRevisionBody,
+    TranscriptRewriteCommit, TranscriptRewriteReason, TranscriptRewriteRecord,
+    TranscriptRewriteSelection, Usage, UserMessage, transcript_messages_digest,
 };
 
 fn tool_args(value: serde_json::Value) -> ToolCallArguments {
     ToolCallArguments::from_value(value).expect("test tool args must be an object")
+}
+
+fn rewrite_record_fixture() -> TranscriptRewriteRecord {
+    let parent_messages = vec![Message::User(UserMessage::with_blocks(vec![
+        ContentBlock::Text {
+            text: "before rewrite".to_string(),
+        },
+    ]))];
+    let revision_messages = vec![Message::User(UserMessage::with_blocks(vec![
+        ContentBlock::Text {
+            text: "after rewrite".to_string(),
+        },
+    ]))];
+    let parent_revision = transcript_messages_digest(&parent_messages).expect("parent digest");
+    let revision = transcript_messages_digest(&revision_messages).expect("revision digest");
+    TranscriptRewriteRecord::new(
+        TranscriptRewriteCommit {
+            parent_revision: parent_revision.clone(),
+            revision: revision.clone(),
+            selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            original_span_digest: transcript_messages_digest(&parent_messages)
+                .expect("original digest"),
+            replacement_digest: transcript_messages_digest(&revision_messages)
+                .expect("replacement digest"),
+            messages_before: 1,
+            messages_after: 1,
+            reason: TranscriptRewriteReason::new("compaction"),
+            actor: Some("test".to_string()),
+            committed_at: meerkat_core::time_compat::SystemTime::now(),
+        },
+        TranscriptRevisionBody {
+            revision: parent_revision,
+            parent_revision: None,
+            messages: parent_messages,
+            created_at: meerkat_core::time_compat::SystemTime::now(),
+        },
+        TranscriptRevisionBody {
+            revision,
+            parent_revision: None,
+            messages: revision_messages,
+            created_at: meerkat_core::time_compat::SystemTime::now(),
+        },
+    )
+    .expect("valid rewrite record")
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +557,10 @@ fn agent_event_all_variants_roundtrip() {
             BackgroundJobTerminalStatus::Completed,
             "exit_code: 0",
         ),
+        AgentEvent::TranscriptRewriteCommitted {
+            session_id: SessionId::new(),
+            record: rewrite_record_fixture(),
+        },
     ];
 
     for event in &direct_variants {
@@ -758,6 +810,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             BackgroundJobTerminalStatus::Completed,
             "exit_code: 0",
         ),
+        AgentEvent::TranscriptRewriteCommitted {
+            session_id: SessionId::new(),
+            record: rewrite_record_fixture(),
+        },
     ];
 
     for event in events {
@@ -767,6 +823,64 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             "documented event catalog missing {kind}"
         );
     }
+}
+
+#[cfg(feature = "schema")]
+#[test]
+fn emitted_rpc_catalog_type_names_resolve_to_schema_artifacts() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "meerkat-contracts-schema-test-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create schema tempdir");
+    emit_all_schemas(&dir).expect("emit schemas");
+
+    let params: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("params.json")).expect("params"))
+            .expect("parse params");
+    let wire_types: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("wire-types.json")).expect("wire types"))
+            .expect("parse wire types");
+    let rpc_methods: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("rpc-methods.json")).expect("rpc methods"))
+            .expect("parse rpc methods");
+
+    let params = params.as_object().expect("params object");
+    let wire_types = wire_types.as_object().expect("wire-types object");
+    let methods = rpc_methods["methods"].as_array().expect("methods array");
+    let mut checked = 0usize;
+    for method in methods {
+        let name = method["name"].as_str().expect("method name");
+        if !matches!(
+            name,
+            "session/rewrite_transcript"
+                | "session/transcript_revision"
+                | "session/restore_transcript_revision"
+        ) {
+            continue;
+        }
+        checked += 1;
+        if let Some(params_type) = method.get("params_type").and_then(|value| value.as_str()) {
+            assert!(
+                params.contains_key(params_type),
+                "{name} references missing params schema {params_type}"
+            );
+        }
+        if let Some(result_type) = method.get("result_type").and_then(|value| value.as_str())
+            && result_type != "Value"
+        {
+            assert!(
+                wire_types.contains_key(result_type),
+                "{name} references missing result schema {result_type}"
+            );
+        }
+    }
+    assert_eq!(checked, 3, "expected to check all transcript edit RPCs");
+    std::fs::remove_dir_all(&dir).expect("remove schema tempdir");
 }
 
 #[test]

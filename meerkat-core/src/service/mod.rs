@@ -27,7 +27,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub use crate::session::{TranscriptEditError, TranscriptReplacement};
+pub use crate::session::{
+    TranscriptEditError, TranscriptReplacement, TranscriptRewriteCommit, TranscriptRewriteReason,
+    TranscriptRewriteSelection,
+};
 
 /// Controls whether `create_session()` should execute an initial turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1096,6 +1099,60 @@ impl SessionHistoryPage {
     }
 }
 
+/// Query parameters for reading a retained transcript revision body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTranscriptRevisionQuery {
+    pub revision: String,
+    /// Number of messages to skip from the start of the revision transcript.
+    pub offset: usize,
+    /// Maximum number of messages to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Paginated transcript page for a retained immutable revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTranscriptRevisionPage {
+    pub session_id: SessionId,
+    pub revision: String,
+    pub head_revision: String,
+    pub message_count: usize,
+    pub offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    pub has_more: bool,
+    pub messages: Vec<Message>,
+}
+
+impl SessionTranscriptRevisionPage {
+    /// Build a transcript page from a retained revision body.
+    pub fn from_messages(
+        session_id: SessionId,
+        revision: String,
+        head_revision: String,
+        messages: &[Message],
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Self {
+        let message_count = messages.len();
+        let start = offset.min(message_count);
+        let end = match limit {
+            Some(limit) => start.saturating_add(limit).min(message_count),
+            None => message_count,
+        };
+        Self {
+            session_id,
+            revision,
+            head_revision,
+            message_count,
+            offset: start,
+            limit,
+            has_more: end < message_count,
+            messages: messages[start..end].to_vec(),
+        }
+    }
+}
+
 /// Explicit behavior for transcript fork/edit requests when the source
 /// session has active work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1138,6 +1195,48 @@ pub struct SessionForkResult {
     pub message_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
+}
+
+/// Request to rewrite the current transcript head without changing SessionId.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionTranscriptRewriteRequest {
+    pub selection: TranscriptRewriteSelection,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
+    pub replacement: Vec<Message>,
+    pub reason: TranscriptRewriteReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_revision: Option<String>,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Request to restore the current transcript head to a retained revision body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionTranscriptRestoreRevisionRequest {
+    pub revision: String,
+    pub reason: TranscriptRewriteReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_revision: Option<String>,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Result of committing a same-session transcript rewrite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionTranscriptRewriteResult {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub session_id: SessionId,
+    pub parent_revision: String,
+    pub revision: String,
+    pub message_count: usize,
+    pub commit: TranscriptRewriteCommit,
 }
 
 impl TranscriptEditError {
@@ -1383,12 +1482,25 @@ pub trait SessionServiceHistoryExt: SessionService {
         id: &SessionId,
         query: SessionHistoryQuery,
     ) -> Result<SessionHistoryPage, SessionError>;
+
+    /// Read a retained immutable transcript revision body.
+    async fn read_transcript_revision(
+        &self,
+        id: &SessionId,
+        query: SessionTranscriptRevisionQuery,
+    ) -> Result<SessionTranscriptRevisionPage, SessionError> {
+        let _ = (id, query);
+        Err(SessionError::Unsupported(
+            "read_transcript_revision".to_string(),
+        ))
+    }
 }
 
 /// Optional typed transcript fork/edit extension for `SessionService`.
 ///
-/// Implementations must create a new session identity for every operation.
-/// Source history is never mutated in place.
+/// Implementations must route transcript surgery through typed semantic edit
+/// paths. Fork operations create new `SessionId`s; rewrite operations keep the
+/// `SessionId` stable while advancing the session transcript head.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionServiceTranscriptEditExt: SessionService {
@@ -1411,6 +1523,30 @@ pub trait SessionServiceTranscriptEditExt: SessionService {
         let _ = (id, req);
         Err(SessionError::Unsupported(
             "fork_session_replace".to_string(),
+        ))
+    }
+
+    /// Commit a typed same-session transcript rewrite.
+    async fn rewrite_session_transcript(
+        &self,
+        id: &SessionId,
+        req: SessionTranscriptRewriteRequest,
+    ) -> Result<SessionTranscriptRewriteResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported(
+            "rewrite_session_transcript".to_string(),
+        ))
+    }
+
+    /// Restore the current transcript head to a retained immutable revision.
+    async fn restore_session_transcript_revision(
+        &self,
+        id: &SessionId,
+        req: SessionTranscriptRestoreRevisionRequest,
+    ) -> Result<SessionTranscriptRewriteResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported(
+            "restore_session_transcript_revision".to_string(),
         ))
     }
 }

@@ -83,6 +83,9 @@ subset.
 | `session/list` | Session | List active sessions |
 | `session/read` | Session | Get session state |
 | `session/history` | Session | Get committed session transcript messages |
+| `session/rewrite_transcript` | Session | Commit a same-session transcript rewrite |
+| `session/transcript_revision` | Session | Read a transcript revision by id |
+| `session/restore_transcript_revision` | Session | Restore an earlier transcript revision in place |
 | `session/fork_at` | Session | Fork an idle session at a transcript message index |
 | `session/fork_replace` | Session | Fork an idle session and apply a typed transcript replacement |
 | `blob/get` | Session | Fetch a blob payload by id |
@@ -496,6 +499,87 @@ Read committed transcript history for an existing session.
 ```
 
 Returns oldest-to-newest committed messages plus pagination metadata. This method follows the same owner-resolution rules as `session/read`, including mob-owned session IDs when mob support is enabled.
+
+### session/rewrite_transcript
+
+Commit a transcript rewrite without changing the session identity. The request names a
+message-range selection, supplies replacement messages, and records a machine-readable
+reason. The session appends a rewrite commit, advances its transcript head, and retains
+the parent revision for audit and restore.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "session/rewrite_transcript",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "selection": {
+      "type": "message_range",
+      "start": 2,
+      "end": 3
+    },
+    "replacement": [
+      {
+        "role": "assistant",
+        "content": "Compacted assistant trace"
+      }
+    ],
+    "reason": {
+      "kind": "compaction",
+      "note": "Replace verbose assistant output with durable compacted form"
+    },
+    "running_behavior": "reject"
+  }
+}
+```
+
+Returns the stable `session_id`, the parent revision, the new revision, and the updated
+message count. `running_behavior` currently supports `"reject"`, which returns
+`SESSION_BUSY` if the target session has active work.
+
+### session/transcript_revision
+
+Read one retained transcript revision body by revision id.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "session/transcript_revision",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "revision": "current",
+    "offset": 0,
+    "limit": 50
+  }
+}
+```
+
+Use `"current"` to read the active transcript head, or pass a concrete revision returned
+by `session/rewrite_transcript` or `session/restore_transcript_revision`.
+
+### session/restore_transcript_revision
+
+Restore a retained transcript revision as the active transcript head without changing
+the session identity. Restore is represented as another rewrite commit so the graph
+remains append-only even though the source transcript projection is updated in place.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "session/restore_transcript_revision",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "revision": "sha256:...",
+    "reason": {
+      "kind": "restore"
+    },
+    "running_behavior": "reject"
+  }
+}
+```
 
 ### session/fork_at
 

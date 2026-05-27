@@ -86,6 +86,7 @@ impl SessionProjector {
         let events_path = dir.join("events.jsonl");
         let mut lines = String::new();
         let mut last_seq = from_seq.saturating_sub(1);
+        let mut summary_updated = false;
         let mut last_assistant_text: Option<String> = None;
 
         for stored in &events {
@@ -99,7 +100,12 @@ impl SessionProjector {
             if let AgentEvent::TextComplete { content } = &stored.event
                 && !content.is_empty()
             {
+                summary_updated = true;
                 last_assistant_text = Some(content.clone());
+            } else if let AgentEvent::TranscriptRewriteCommitted { record, .. } = &stored.event {
+                summary_updated = true;
+                last_assistant_text =
+                    last_assistant_text_from_messages(&record.revision_body.messages);
             }
         }
 
@@ -121,12 +127,19 @@ impl SessionProjector {
         file.flush().await.map_err(ProjectionError::Io)?;
         drop(file);
 
-        // Write summary.txt if we have assistant text
-        if let Some(text) = last_assistant_text {
+        // Rewrite commits can replace or remove prior assistant text, so keep
+        // the derived summary aligned with the retained revision body.
+        if summary_updated {
             let summary_path = dir.join("summary.txt");
-            tokio::fs::write(&summary_path, text.as_bytes())
-                .await
-                .map_err(ProjectionError::Io)?;
+            if let Some(text) = last_assistant_text {
+                tokio::fs::write(&summary_path, text.as_bytes())
+                    .await
+                    .map_err(ProjectionError::Io)?;
+            } else if let Err(err) = tokio::fs::remove_file(&summary_path).await
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(ProjectionError::Io(err));
+            }
         }
 
         // Write checkpoint
@@ -264,6 +277,19 @@ async fn remove_derived_path(path: &Path) -> Result<(), ProjectionError> {
     }
 }
 
+fn last_assistant_text_from_messages(messages: &[meerkat_core::Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        meerkat_core::Message::Assistant(message) if !message.content.is_empty() => {
+            Some(message.content.clone())
+        }
+        meerkat_core::Message::BlockAssistant(message) => {
+            let text = message.to_string();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    })
+}
+
 /// Errors from projection operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
@@ -282,7 +308,7 @@ pub enum ProjectionError {
 mod tests {
     use super::*;
     use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
-    use meerkat_core::types::Usage;
+    use meerkat_core::types::{AssistantMessage, Message, StopReason, Usage, UserMessage};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::SystemTime;
@@ -399,6 +425,63 @@ mod tests {
         // Check checkpoint
         let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
         assert_eq!(checkpoint.trim(), "3");
+    }
+
+    #[tokio::test]
+    async fn test_projector_rewrite_event_refreshes_summary() {
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        let mut session = meerkat_core::Session::with_id(sid.clone());
+        session.push(Message::User(UserMessage::text("hello")));
+        session.push(Message::Assistant(AssistantMessage {
+            content: "old summary".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        }));
+        let parent_revision = session.transcript_revision().unwrap();
+        let commit = session
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                Vec::new(),
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("projector-test".to_string()),
+                Some(parent_revision.clone()),
+            )
+            .unwrap();
+        let parent_body = session
+            .transcript_revision_body(&parent_revision)
+            .unwrap()
+            .unwrap();
+        let revision_body = session
+            .transcript_revision_body(&commit.revision)
+            .unwrap()
+            .unwrap();
+        let record =
+            meerkat_core::TranscriptRewriteRecord::new(commit, parent_body, revision_body).unwrap();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TextComplete {
+                    content: "old summary".to_string(),
+                },
+                AgentEvent::TranscriptRewriteCommitted {
+                    session_id: sid.clone(),
+                    record,
+                },
+            ],
+        );
+
+        projector.project(&store, &sid, 1).await.unwrap();
+        assert!(
+            !projector.session_dir(&sid).join("summary.txt").exists(),
+            "rewrite removing assistant output must clear stale summary"
+        );
     }
 
     #[tokio::test]

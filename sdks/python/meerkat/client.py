@@ -114,6 +114,8 @@ from .types import (
     SessionAssistantBlock,
     SessionForkResult,
     SessionHistory,
+    SessionTranscriptRevision,
+    SessionTranscriptRewriteResult,
     SessionSummary,
     SessionMessage,
     SessionToolCall,
@@ -126,6 +128,9 @@ from .types import (
     StoredMobProfile,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
+    TranscriptRewriteInputMessage,
+    TranscriptRewriteReason,
+    TranscriptRewriteSelection,
     WorkGraphEventFilter,
     WorkGraphEventsResult,
     WorkGraphItemFilter,
@@ -1002,6 +1007,25 @@ class MeerkatClient:
         raw = await self._request("session/history", params)
         return self._parse_session_history(raw)
 
+    async def read_session_transcript_revision(
+        self,
+        session_id: str,
+        revision: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevision:
+        """Read paginated transcript history for a retained revision."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "revision": revision,
+            "offset": offset,
+        }
+        if limit is not None:
+            params["limit"] = limit
+        raw = await self._request("session/transcript_revision", params)
+        return self._parse_session_transcript_revision(raw)
+
     async def fork_session_at(
         self,
         session_id: str,
@@ -1037,6 +1061,61 @@ class MeerkatClient:
             params["running_behavior"] = running_behavior
         raw = await self._request("session/fork_replace", params)
         return self._parse_session_fork_result(raw)
+
+    async def rewrite_session_transcript(
+        self,
+        session_id: str,
+        selection: TranscriptRewriteSelection,
+        replacement: list[TranscriptRewriteInputMessage],
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed same-session transcript rewrite."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "selection": selection,
+            "replacement": [
+                self._serialize_transcript_rewrite_message(message)
+                for message in replacement
+            ],
+            "reason": reason,
+        }
+        if actor is not None:
+            params["actor"] = actor
+        if expected_parent_revision is not None:
+            params["expected_parent_revision"] = expected_parent_revision
+        if running_behavior is not None:
+            params["running_behavior"] = running_behavior
+        raw = await self._request("session/rewrite_transcript", params)
+        return self._parse_session_transcript_rewrite_result(raw)
+
+    async def restore_session_transcript_revision(
+        self,
+        session_id: str,
+        revision: str,
+        reason: TranscriptRewriteReason,
+        *,
+        actor: str | None = None,
+        expected_parent_revision: str | None = None,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionTranscriptRewriteResult:
+        """Commit a typed rewrite that restores a retained transcript revision."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "revision": revision,
+            "reason": reason,
+        }
+        if actor is not None:
+            params["actor"] = actor
+        if expected_parent_revision is not None:
+            params["expected_parent_revision"] = expected_parent_revision
+        if running_behavior is not None:
+            params["running_behavior"] = running_behavior
+        raw = await self._request("session/restore_transcript_revision", params)
+        return self._parse_session_transcript_rewrite_result(raw)
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
         raw = await self._request("blob/get", {"blob_id": blob_id})
@@ -3395,6 +3474,25 @@ class MeerkatClient:
         )
 
     @staticmethod
+    def _parse_session_transcript_revision(
+        data: dict[str, Any],
+    ) -> SessionTranscriptRevision:
+        return SessionTranscriptRevision(
+            session_id=data.get("session_id", ""),
+            session_ref=data.get("session_ref"),
+            revision=str(data.get("revision", "")),
+            head_revision=str(data.get("head_revision", "")),
+            message_count=data.get("message_count", 0),
+            offset=data.get("offset", 0),
+            limit=data.get("limit"),
+            has_more=bool(data.get("has_more", False)),
+            messages=[
+                MeerkatClient._parse_session_message(message)
+                for message in data.get("messages", [])
+            ],
+        )
+
+    @staticmethod
     def _parse_session_fork_result(data: dict[str, Any]) -> SessionForkResult:
         return SessionForkResult(
             source_session_id=str(data.get("source_session_id", "")),
@@ -3404,12 +3502,33 @@ class MeerkatClient:
         )
 
     @staticmethod
+    def _parse_session_transcript_rewrite_result(
+        data: dict[str, Any],
+    ) -> SessionTranscriptRewriteResult:
+        return SessionTranscriptRewriteResult(
+            session_id=str(data.get("session_id", "")),
+            parent_revision=str(data.get("parent_revision", "")),
+            revision=str(data.get("revision", "")),
+            message_count=MeerkatClient._parse_int(data.get("message_count"), 0),
+            commit=dict(data.get("commit") or {}),
+        )
+
+    @staticmethod
     def _parse_session_message(data: dict[str, Any]) -> SessionMessage:
         role = data.get("role", "")
+        content_value = (
+            data.get("body")
+            if role == "system_notice" and "content" not in data and "body" in data
+            else data.get("content")
+        )
         return SessionMessage(
             role=role,
             created_at=str(data.get("created_at", "")),
-            content=MeerkatClient._parse_content_input(data["content"]) if "content" in data else None,
+            kind=str(data["kind"]) if "kind" in data else None,
+            body=str(data["body"]) if "body" in data else None,
+            content=MeerkatClient._parse_content_input(content_value)
+            if content_value is not None
+            else None,
             tool_calls=[
                 SessionToolCall(
                     id=tool_call.get("id", ""),
@@ -3431,7 +3550,90 @@ class MeerkatClient:
                 )
                 for result in data.get("results", [])
             ],
+            raw=dict(data),
         )
+
+    @staticmethod
+    def _serialize_transcript_rewrite_message(
+        message: TranscriptRewriteInputMessage,
+    ) -> dict[str, Any]:
+        if isinstance(message, SessionMessage):
+            payload: dict[str, Any] = dict(message.raw)
+            payload.update({
+                "role": message.role,
+                "created_at": message.created_at,
+            })
+            if message.kind is not None:
+                payload["kind"] = message.kind
+            if message.role == "system_notice":
+                payload.pop("body", None)
+                payload.pop("content", None)
+                if message.body is not None:
+                    payload["body"] = message.body
+                elif message.content is not None:
+                    payload["content"] = message.content
+            else:
+                if message.body is not None:
+                    payload["body"] = message.body
+                if message.content is not None:
+                    payload["content"] = message.content
+            if message.tool_calls:
+                payload["tool_calls"] = [
+                    {"id": call.id, "name": call.name, "args": call.args}
+                    for call in message.tool_calls
+                ]
+            if message.stop_reason is not None:
+                payload["stop_reason"] = message.stop_reason
+            if message.blocks:
+                payload["blocks"] = [
+                    MeerkatClient._serialize_session_assistant_block(block)
+                    for block in message.blocks
+                ]
+            if message.results:
+                payload["results"] = [
+                    {
+                        "tool_use_id": result.tool_use_id,
+                        "content": result.content,
+                        "is_error": result.is_error,
+                    }
+                    for result in message.results
+                ]
+            return payload
+        return dict(message)
+
+    @staticmethod
+    def _serialize_session_assistant_block(
+        block: SessionAssistantBlock,
+    ) -> dict[str, Any]:
+        raw_data = block.raw.get("data")
+        data: dict[str, Any] = dict(raw_data) if isinstance(raw_data, dict) else {}
+        if block.text is not None:
+            data["text"] = block.text
+        if block.id is not None:
+            data["id"] = block.id
+        if block.name is not None:
+            data["name"] = block.name
+        if block.args is not None:
+            data["args"] = block.args
+        if block.image_id is not None:
+            data["image_id"] = block.image_id
+        if block.blob_id is not None:
+            data["blob_ref"] = {"blob_id": block.blob_id}
+        if block.media_type is not None:
+            data["media_type"] = block.media_type
+        if block.width is not None:
+            data["width"] = block.width
+        if block.height is not None:
+            data["height"] = block.height
+        if block.revised_prompt is not None:
+            data["revised_prompt"] = block.revised_prompt
+        if block.meta is not None:
+            data["meta"] = block.meta
+        if block.source is not None:
+            data["source"] = block.source
+        payload = dict(block.raw)
+        payload.update({"block_type": block.block_type, "data": data})
+        return payload
 
     @staticmethod
     def _parse_content_input(value: Any) -> ContentInput:
@@ -3498,6 +3700,7 @@ class MeerkatClient:
             revised_prompt=block_data.get("revised_prompt") if isinstance(block_data.get("revised_prompt"), dict) else None,
             meta=block_data.get("meta"),
             source=source,
+            raw=dict(data),
         )
 
     @staticmethod

@@ -26,9 +26,12 @@ where
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
-    SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptSource, VideoData,
+    AssistantBlock, AssistantMessage, BlobId, BlockAssistantMessage, ContentBlock, ContentInput,
+    ImageData, Message, ProviderMeta, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
+    SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
+    SystemNoticeMessage, ToolCall, ToolResult, TranscriptEditRunningBehavior,
+    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
+    Usage, UserMessage, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -88,6 +91,101 @@ pub struct ForkSessionReplaceParams {
     pub replacement: TranscriptReplacement,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Public transcript message accepted by same-session rewrite APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum TranscriptRewriteMessage {
+    System {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+    SystemNotice {
+        kind: SystemNoticeKind,
+        #[serde(default, alias = "content", skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<meerkat_core::SystemNoticeBlock>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+    User {
+        content: WireContentInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+    Assistant {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<WireToolCall>,
+        #[serde(default)]
+        stop_reason: WireStopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+    #[serde(rename = "block_assistant")]
+    BlockAssistant {
+        blocks: Vec<WireAssistantBlock>,
+        #[serde(default)]
+        stop_reason: WireStopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+    #[serde(rename = "tool_results")]
+    ToolResults {
+        results: Vec<WireToolResult>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
+}
+
+/// Request payload for `session/rewrite_transcript`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RewriteSessionTranscriptParams {
+    pub session_id: String,
+    pub selection: TranscriptRewriteSelection,
+    pub replacement: Vec<TranscriptRewriteMessage>,
+    pub reason: TranscriptRewriteReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_revision: Option<String>,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Request payload for `session/restore_transcript_revision`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RestoreSessionTranscriptRevisionParams {
+    pub session_id: String,
+    pub revision: String,
+    pub reason: TranscriptRewriteReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_revision: Option<String>,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Request payload for `session/transcript_revision`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ReadSessionTranscriptRevisionParams {
+    pub session_id: String,
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Canonical session info for wire protocol.
@@ -717,10 +815,11 @@ impl TryFrom<WireAssistantBlock> for AssistantBlock {
 }
 
 /// Canonical stop reason for transcript messages.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireStopReason {
+    #[default]
     EndTurn,
     ToolUse,
     MaxTokens,
@@ -738,6 +837,19 @@ impl From<StopReason> for WireStopReason {
             StopReason::StopSequence => Self::StopSequence,
             StopReason::ContentFilter => Self::ContentFilter,
             StopReason::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<WireStopReason> for StopReason {
+    fn from(value: WireStopReason) -> Self {
+        match value {
+            WireStopReason::EndTurn => Self::EndTurn,
+            WireStopReason::ToolUse => Self::ToolUse,
+            WireStopReason::MaxTokens => Self::MaxTokens,
+            WireStopReason::StopSequence => Self::StopSequence,
+            WireStopReason::ContentFilter => Self::ContentFilter,
+            WireStopReason::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -769,6 +881,139 @@ pub struct WireToolResult {
     pub content: WireToolResultContent,
     #[serde(default)]
     pub is_error: bool,
+}
+
+fn transcript_message_timestamp(
+    created_at: Option<String>,
+) -> Result<meerkat_core::types::MessageTimestamp, crate::wire::error::WireConversionError> {
+    match created_at {
+        Some(value) => chrono::DateTime::parse_from_rfc3339(&value)
+            .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+            .map_err(
+                |err| crate::wire::error::WireConversionError::TranscriptMessage {
+                    debug: format!("invalid created_at {value:?}: {err}"),
+                },
+            ),
+        None => Ok(meerkat_core::types::message_timestamp_now()),
+    }
+}
+
+impl TranscriptRewriteMessage {
+    pub fn into_core(self) -> Result<Message, crate::wire::error::WireConversionError> {
+        match self {
+            Self::System {
+                content,
+                created_at,
+            } => Ok(Message::System(SystemMessage {
+                content,
+                created_at: transcript_message_timestamp(created_at)?,
+            })),
+            Self::SystemNotice {
+                kind,
+                body,
+                blocks,
+                created_at,
+            } => Ok(Message::SystemNotice(SystemNoticeMessage {
+                kind,
+                body,
+                blocks,
+                created_at: transcript_message_timestamp(created_at)?,
+            })),
+            Self::User {
+                content,
+                created_at,
+            } => {
+                let content = ContentInput::try_from(content)
+                    .map_err(
+                        |err| crate::wire::error::WireConversionError::TranscriptMessage {
+                            debug: err.to_string(),
+                        },
+                    )?
+                    .into_blocks();
+                Ok(Message::User(UserMessage {
+                    content,
+                    render_metadata: None,
+                    created_at: transcript_message_timestamp(created_at)?,
+                }))
+            }
+            Self::Assistant {
+                content,
+                tool_calls,
+                stop_reason,
+                created_at,
+            } => {
+                let tool_calls = tool_calls
+                    .into_iter()
+                    .map(|tool_call| {
+                        serde_json::from_str(tool_call.args.get())
+                            .map(|args| ToolCall {
+                                id: tool_call.id,
+                                name: tool_call.name,
+                                args,
+                            })
+                            .map_err(|err| {
+                                crate::wire::error::WireConversionError::TranscriptMessage {
+                                    debug: format!("invalid assistant tool call args: {err}"),
+                                }
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Message::Assistant(AssistantMessage {
+                    content,
+                    tool_calls,
+                    stop_reason: stop_reason.into(),
+                    usage: Usage::default(),
+                    created_at: transcript_message_timestamp(created_at)?,
+                }))
+            }
+            Self::BlockAssistant {
+                blocks,
+                stop_reason,
+                created_at,
+            } => {
+                let blocks = blocks
+                    .into_iter()
+                    .map(AssistantBlock::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Message::BlockAssistant(BlockAssistantMessage {
+                    blocks,
+                    stop_reason: stop_reason.into(),
+                    created_at: transcript_message_timestamp(created_at)?,
+                }))
+            }
+            Self::ToolResults {
+                results,
+                created_at,
+            } => {
+                let results = results
+                    .into_iter()
+                    .map(|result| {
+                        let content = match result.content {
+                            WireToolResultContent::Text(text) => ContentBlock::text_vec(text),
+                            WireToolResultContent::Blocks(blocks) => blocks
+                                .into_iter()
+                                .map(ContentBlock::try_from)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|err| {
+                                    crate::wire::error::WireConversionError::TranscriptMessage {
+                                        debug: err.to_string(),
+                                    }
+                                })?,
+                        };
+                        Ok(ToolResult {
+                            tool_use_id: result.tool_use_id,
+                            content,
+                            is_error: result.is_error,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, crate::wire::error::WireConversionError>>()?;
+                Ok(Message::ToolResults {
+                    results,
+                    created_at: transcript_message_timestamp(created_at)?,
+                })
+            }
+        }
+    }
 }
 
 /// Canonical transcript message for public wire surfaces.
@@ -932,6 +1177,40 @@ impl From<SessionHistoryPage> for WireSessionHistory {
     }
 }
 
+/// Full transcript revision body in canonical wire format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireSessionTranscriptRevision {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+    pub revision: String,
+    pub head_revision: String,
+    pub message_count: usize,
+    pub offset: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    pub has_more: bool,
+    pub messages: Vec<WireSessionMessage>,
+}
+
+impl From<SessionTranscriptRevisionPage> for WireSessionTranscriptRevision {
+    fn from(page: SessionTranscriptRevisionPage) -> Self {
+        Self {
+            session_id: page.session_id,
+            session_ref: None,
+            revision: page.revision,
+            head_revision: page.head_revision,
+            message_count: page.message_count,
+            offset: page.offset,
+            limit: page.limit,
+            has_more: page.has_more,
+            messages: page.messages.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -978,6 +1257,193 @@ mod tests {
         let json = serde_json::to_value(&fork_replace).unwrap();
         assert_eq!(json["replacement"]["type"], "message");
         assert_eq!(json["running_behavior"], "reject");
+    }
+
+    #[test]
+    fn test_rewrite_session_transcript_params_roundtrip() {
+        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "selection": {
+                "type": "message_range",
+                "start": 1,
+                "end": 4
+            },
+            "replacement": [
+                {
+                    "role": "block_assistant",
+                    "blocks": [
+                        {
+                            "block_type": "text",
+                            "data": {
+                                "text": "compacted trace"
+                            }
+                        }
+                    ],
+                    "stop_reason": "end_turn"
+                }
+            ],
+            "reason": {
+                "kind": "compaction",
+                "note": "replace N-3 trace"
+            },
+            "actor": "test",
+            "expected_parent_revision": "sha256:parent",
+            "running_behavior": "reject"
+        }))
+        .unwrap();
+        assert_eq!(params.session_id, "session_123");
+        assert!(matches!(
+            params.selection,
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 4 }
+        ));
+        assert_eq!(params.replacement.len(), 1);
+        assert_eq!(params.reason.kind, "compaction");
+
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["selection"]["type"], "message_range");
+        assert_eq!(json["replacement"][0]["role"], "block_assistant");
+        assert_eq!(json["running_behavior"], "reject");
+    }
+
+    #[test]
+    fn test_rewrite_session_transcript_accepts_public_assistant_shorthand() {
+        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "selection": {
+                "type": "message_range",
+                "start": 1,
+                "end": 2
+            },
+            "replacement": [
+                {
+                    "role": "assistant",
+                    "content": "Compacted assistant trace"
+                }
+            ],
+            "reason": {
+                "kind": "compaction"
+            }
+        }))
+        .unwrap();
+
+        let message = params
+            .replacement
+            .into_iter()
+            .next()
+            .expect("replacement exists")
+            .into_core()
+            .expect("public assistant shorthand converts");
+        assert!(matches!(
+            message,
+            Message::Assistant(AssistantMessage {
+                content,
+                stop_reason: StopReason::EndTurn,
+                ..
+            }) if content == "Compacted assistant trace"
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_session_transcript_accepts_public_system_notice() {
+        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "selection": {
+                "type": "message_range",
+                "start": 0,
+                "end": 1
+            },
+            "replacement": [
+                {
+                    "role": "system_notice",
+                    "kind": "background_job",
+                    "body": "still running"
+                }
+            ],
+            "reason": {
+                "kind": "correction"
+            }
+        }))
+        .unwrap();
+
+        let message = params
+            .replacement
+            .into_iter()
+            .next()
+            .expect("replacement exists")
+            .into_core()
+            .expect("public system notice converts");
+        assert!(matches!(
+            message,
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage {
+                kind: meerkat_core::SystemNoticeKind::BackgroundJob,
+                body: Some(body),
+                ..
+            }) if body == "still running"
+        ));
+    }
+
+    #[test]
+    fn test_read_session_transcript_revision_params_roundtrip() {
+        let params: ReadSessionTranscriptRevisionParams =
+            serde_json::from_value(serde_json::json!({
+                "session_id": "session_123",
+                "revision": "sha256:parent",
+                "offset": 1,
+                "limit": 2
+            }))
+            .unwrap();
+        assert_eq!(params.session_id, "session_123");
+        assert_eq!(params.revision, "sha256:parent");
+        assert_eq!(params.offset, Some(1));
+        assert_eq!(params.limit, Some(2));
+
+        let page = SessionTranscriptRevisionPage::from_messages(
+            SessionId::new(),
+            "sha256:parent".to_string(),
+            "sha256:head".to_string(),
+            &[Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "recover me".to_string(),
+                },
+            ]))],
+            0,
+            None,
+        );
+        let wire: WireSessionTranscriptRevision = page.into();
+        let encoded = serde_json::to_value(wire).unwrap();
+        assert!(encoded["session_id"].as_str().is_some());
+        assert_eq!(encoded["revision"], "sha256:parent");
+        assert_eq!(encoded["head_revision"], "sha256:head");
+        assert_eq!(encoded["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_restore_session_transcript_revision_params_roundtrip() {
+        let params: RestoreSessionTranscriptRevisionParams =
+            serde_json::from_value(serde_json::json!({
+                "session_id": "session_123",
+                "revision": "sha256:parent",
+                "reason": {
+                    "kind": "restore",
+                    "note": "recover prior truth"
+                },
+                "actor": "test",
+                "expected_parent_revision": "sha256:current",
+                "running_behavior": "reject"
+            }))
+            .unwrap();
+        assert_eq!(params.session_id, "session_123");
+        assert_eq!(params.revision, "sha256:parent");
+        assert_eq!(params.reason.kind, "restore");
+        assert_eq!(params.actor.as_deref(), Some("test"));
+        assert_eq!(
+            params.expected_parent_revision.as_deref(),
+            Some("sha256:current")
+        );
+        assert_eq!(
+            params.running_behavior,
+            TranscriptEditRunningBehavior::Reject
+        );
     }
 
     #[test]

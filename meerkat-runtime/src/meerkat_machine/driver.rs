@@ -31,6 +31,12 @@ pub(crate) struct IngressView<'a> {
     driver: &'a EphemeralRuntimeDriver,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlowToolOverlayMatch {
+    MissingInputState,
+    Present(Option<meerkat_core::service::TurnToolOverlay>),
+}
+
 impl IngressView<'_> {
     pub(crate) fn queue(&self) -> Vec<InputId> {
         self.driver.queue_lane()
@@ -77,16 +83,17 @@ impl IngressView<'_> {
         self.driver.admitted_policy(input_id)
     }
 
-    pub(crate) fn flow_tool_overlay(
-        &self,
-        input_id: &InputId,
-    ) -> Option<Option<meerkat_core::service::TurnToolOverlay>> {
-        self.driver
-            .stored_input_state(input_id)?
-            .state
-            .persisted_input
-            .as_ref()
-            .map(input_flow_tool_overlay)
+    pub(crate) fn flow_tool_overlay(&self, input_id: &InputId) -> FlowToolOverlayMatch {
+        let Some(input_state) = self.driver.stored_input_state(input_id) else {
+            return FlowToolOverlayMatch::MissingInputState;
+        };
+        FlowToolOverlayMatch::Present(
+            input_state
+                .state
+                .persisted_input
+                .as_ref()
+                .and_then(input_flow_tool_overlay),
+        )
     }
 
     pub(crate) fn request_id(&self, input_id: &InputId) -> Option<crate::ingress_types::RequestId> {

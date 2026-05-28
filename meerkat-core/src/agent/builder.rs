@@ -8,22 +8,26 @@ use crate::ops::ConcurrencyLimits;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
-use crate::session::{SESSION_TOOL_VISIBILITY_STATE_KEY, Session, SessionToolVisibilityState};
+#[cfg(test)]
+use crate::session::AuthorizedSessionToolVisibilityState;
+use crate::session::{
+    InheritedToolVisibilityAuthority, SESSION_TOOL_VISIBILITY_STATE_KEY, Session,
+    SessionToolVisibilityState,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::tool_scope::{
-    EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY,
-    LocalToolVisibilityOwner, ToolFilter, ToolScope, ToolVisibilityOwner,
-    validate_inherited_filter_witnesses,
+    EXTERNAL_TOOL_FILTER_METADATA_KEY, GeneratedToolVisibilityOwner,
+    INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 use std::any::Any;
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 use std::future::Future;
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -62,13 +66,15 @@ pub struct AgentBuilder {
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
-    pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
+    pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
+    pub(super) capability_base_filter_override: Option<ToolFilter>,
+    pub(super) initial_visibility_authority: Option<InheritedToolVisibilityAuthority>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) runtime_execution_kind_required: bool,
     #[allow(dead_code)]
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
-    pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    pub(super) auth_lease_handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
 }
@@ -95,12 +101,18 @@ pub enum AgentBuildPolicyError {
     InvalidFactoryBridgeToken,
     #[error("failed to restore canonical tool visibility state: {message}")]
     ToolVisibilityRestore { message: String },
+    #[error("failed to restore canonical system-context state: {message}")]
+    SystemContextRestore { message: String },
+    #[error("failed to authorize canonical system prompt: {message}")]
+    SystemPromptAuthority { message: String },
+    #[error("failed to install tool visibility authority catalog: {message}")]
+    ToolVisibilityCatalog { message: String },
     #[error("failed to persist canonical tool visibility state during restore: {message}")]
     ToolVisibilityPersist { message: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 type AgentFactoryBuildFuture = Pin<
     Box<
         dyn Future<
@@ -113,7 +125,7 @@ type AgentFactoryBuildFuture = Pin<
 >;
 
 #[cfg(target_arch = "wasm32")]
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 type AgentFactoryBuildFuture = Pin<
     Box<
         dyn Future<
@@ -125,7 +137,7 @@ type AgentFactoryBuildFuture = Pin<
     >,
 >;
 
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 #[allow(improper_ctypes, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = concat!(
@@ -137,7 +149,7 @@ unsafe extern "Rust" {
     ) -> bool;
 }
 
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
     "__meerkat_agent_factory_policy_build_v3_",
@@ -157,7 +169,7 @@ pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
     })
 }
 
-#[cfg(meerkat_internal_agent_factory_build)]
+#[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 fn validate_factory_bridge_token(
     token: &(dyn Any + Send + Sync),
 ) -> Result<(), AgentBuildPolicyError> {
@@ -204,6 +216,8 @@ impl AgentBuilder {
             call_timeout_override: CallTimeoutOverride::default(),
             epoch_cursor_state: None,
             tool_visibility_owner: None,
+            capability_base_filter_override: None,
+            initial_visibility_authority: None,
             turn_state_handle: None,
             runtime_execution_kind_required: false,
             runtime_execution_kind: None,
@@ -361,7 +375,7 @@ impl AgentBuilder {
         self.build_inner(client, tools, store).await
     }
 
-    #[cfg(meerkat_internal_agent_factory_build)]
+    #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
     fn validate_factory_policy(&self) -> Result<(), AgentBuildPolicyError> {
         let session = self
             .session
@@ -406,13 +420,12 @@ impl AgentBuilder {
     {
         let runtime_tool_visibility_owner_required =
             self.requires_explicit_runtime_tool_visibility_owner();
-        let tool_visibility_owner = match self.tool_visibility_owner.clone() {
-            Some(owner) => owner,
-            None if runtime_tool_visibility_owner_required => {
-                return Err(AgentBuildPolicyError::MissingToolVisibilityOwner);
-            }
-            None => Arc::new(LocalToolVisibilityOwner::new()),
-        };
+        let capability_base_filter_override = self.capability_base_filter_override.clone();
+        let initial_visibility_authority = self.initial_visibility_authority.clone();
+        let tool_visibility_owner = self.tool_visibility_owner.clone();
+        if runtime_tool_visibility_owner_required && tool_visibility_owner.is_none() {
+            return Err(AgentBuildPolicyError::MissingToolVisibilityOwner);
+        }
         let mut session = self.session.unwrap_or_default();
         let discarded_runtime_steer_context = session.discard_transient_runtime_steer_context();
         if discarded_runtime_steer_context > 0 {
@@ -422,22 +435,51 @@ impl AgentBuilder {
             );
         }
         let system_context_state = Arc::new(std::sync::Mutex::new(
-            session.system_context_state().unwrap_or_default(),
+            session
+                .try_system_context_state()
+                .map_err(|err| AgentBuildPolicyError::SystemContextRestore {
+                    message: format!(
+                        "failed to restore canonical session metadata `{}`: {err}",
+                        crate::SESSION_SYSTEM_CONTEXT_STATE_KEY
+                    ),
+                })?
+                .unwrap_or_default(),
         ));
 
         // Apply system prompt: use builder's prompt if set, otherwise compose default for new sessions
         let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
         if let Some(prompt) = self.system_prompt {
-            session.set_system_prompt(prompt);
+            session
+                .set_system_prompt_with_source(
+                    prompt,
+                    crate::generated::session_durable_config_authority::SessionSystemPromptSource::ExplicitBuild,
+                )
+                .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
+                    message: err.to_string(),
+                })?;
         } else if !has_system_prompt {
             // Only set default prompt for new sessions without an existing system prompt
             #[cfg(not(target_arch = "wasm32"))]
             {
-                session.set_system_prompt(SystemPromptConfig::new().compose().await);
+                session
+                    .set_system_prompt_with_source(
+                        SystemPromptConfig::new().compose().await,
+                        crate::generated::session_durable_config_authority::SessionSystemPromptSource::DefaultBuild,
+                    )
+                    .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
+                        message: err.to_string(),
+                    })?;
             }
             #[cfg(target_arch = "wasm32")]
             {
-                session.set_system_prompt(String::new());
+                session
+                    .set_system_prompt_with_source(
+                        String::new(),
+                        crate::generated::session_durable_config_authority::SessionSystemPromptSource::WasmDefaultBuild,
+                    )
+                    .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
+                        message: err.to_string(),
+                    })?;
             }
         }
 
@@ -475,12 +517,22 @@ impl AgentBuilder {
                     std::collections::HashSet::new(),
                 )
             };
-        let tool_scope = ToolScope::new_with_visibility_owner(
-            tools.tools(),
-            control_tool_names,
-            deferred_tool_names,
-            tool_visibility_owner,
-        );
+        let tool_scope = match tool_visibility_owner {
+            Some(owner) => ToolScope::new_with_visibility_owner(
+                tools.tools(),
+                control_tool_names,
+                deferred_tool_names,
+                owner,
+            )
+            .map_err(|err| AgentBuildPolicyError::ToolVisibilityCatalog {
+                message: err.to_string(),
+            })?,
+            None => ToolScope::new_with_projection_names(
+                tools.tools(),
+                control_tool_names,
+                deferred_tool_names,
+            ),
+        };
         let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
         let mut agent = Agent {
@@ -513,19 +565,19 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            ops_lifecycle: self.ops_lifecycle,
-            // Seed from epoch cursor state if available (runtime-backed surfaces),
-            // otherwise fall back to the feed watermark to avoid replaying retained
-            // completions from prior agent lifetimes (stop/resume, live reattach).
-            // Same pattern as runtime_loop.rs line 276. Computed before move.
+            // Seed only from generated cursor authority. A completion feed
+            // without ops-lifecycle authority is read-only storage, not cursor
+            // truth for async completion delivery.
             applied_cursor: self
-                .epoch_cursor_state
+                .ops_lifecycle
                 .as_ref()
-                .map(|cs| {
-                    cs.agent_applied_cursor
-                        .load(std::sync::atomic::Ordering::Acquire)
+                .and_then(|registry| {
+                    registry.completion_cursor(
+                        crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                    )
                 })
-                .unwrap_or_else(|| self.completion_feed.as_ref().map_or(0, |f| f.watermark())),
+                .unwrap_or(0),
+            ops_lifecycle: self.ops_lifecycle,
             completion_feed: self.completion_feed,
             epoch_cursor_state: self.epoch_cursor_state,
             completion_enrichment: self.completion_enrichment,
@@ -573,19 +625,6 @@ impl AgentBuilder {
             );
             return Err(AgentBuildPolicyError::LegacyInheritedToolFilterMetadata);
         }
-        if runtime_tool_visibility_owner_required
-            && let Err(err) = validate_inherited_filter_witnesses(
-                &visibility_state.inherited_base_filter,
-                &visibility_state.filter_witnesses,
-            )
-        {
-            tracing::error!(
-                error = %err,
-                "runtime-backed agent build rejected inherited tool visibility without witnesses"
-            );
-            return Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses);
-        }
-
         if !has_canonical_visibility_state && !runtime_tool_visibility_owner_required {
             if let Some(raw_filter) = agent
                 .session
@@ -629,19 +668,61 @@ impl AgentBuilder {
             }
         }
 
+        let has_initial_visibility_state = initial_visibility_authority.is_some();
+        if let Some(incoming) = initial_visibility_authority {
+            let incoming = incoming.into_initial_visibility_state();
+            visibility_state.inherited_base_filter = incoming.inherited_base_filter;
+            visibility_state
+                .filter_witnesses
+                .extend(incoming.filter_witnesses);
+        }
+
+        if runtime_tool_visibility_owner_required
+            && let Err(err) = validate_inherited_filter_witnesses(
+                &visibility_state.inherited_base_filter,
+                &visibility_state.filter_witnesses,
+            )
+        {
+            tracing::error!(
+                error = %err,
+                "runtime-backed agent build rejected inherited tool visibility without witnesses"
+            );
+            return Err(AgentBuildPolicyError::MissingInheritedToolVisibilityWitnesses);
+        }
+
+        let capability_base_filter_changed =
+            if let Some(capability_base_filter) = capability_base_filter_override {
+                let changed = visibility_state.capability_base_filter != capability_base_filter;
+                visibility_state.capability_base_filter = capability_base_filter;
+                changed
+            } else {
+                false
+            };
+
         if visibility_state != SessionToolVisibilityState::default()
             || has_canonical_visibility_state
+            || has_initial_visibility_state
+            || capability_base_filter_changed
         {
-            if let Err(err) = agent
-                .tool_scope
-                .set_visibility_state(visibility_state.clone())
-            {
+            if let Err(err) = agent.tool_scope.set_visibility_state(visibility_state) {
                 return Err(AgentBuildPolicyError::ToolVisibilityRestore {
                     message: err.to_string(),
                 });
             }
-            if !runtime_tool_visibility_owner_required {
-                if let Err(err) = agent.session.set_tool_visibility_state(visibility_state) {
+            if !runtime_tool_visibility_owner_required
+                || has_canonical_visibility_state
+                || has_initial_visibility_state
+            {
+                let authorized_visibility_state = agent
+                    .tool_scope
+                    .authorized_visibility_state()
+                    .map_err(|err| AgentBuildPolicyError::ToolVisibilityPersist {
+                        message: err.to_string(),
+                    })?;
+                if let Err(err) = agent
+                    .session
+                    .set_tool_visibility_state(authorized_visibility_state)
+                {
                     return Err(AgentBuildPolicyError::ToolVisibilityPersist {
                         message: err.to_string(),
                     });
@@ -758,8 +839,38 @@ impl AgentBuilder {
     }
 
     /// Set the canonical durable tool-visibility owner for this build.
-    pub fn with_tool_visibility_owner(mut self, owner: Arc<dyn ToolVisibilityOwner>) -> Self {
+    pub fn with_tool_visibility_owner(mut self, owner: GeneratedToolVisibilityOwner) -> Self {
         self.tool_visibility_owner = Some(owner);
+        self
+    }
+
+    /// Set the model capability base filter through the build's visibility owner.
+    pub fn with_capability_base_filter(mut self, filter: ToolFilter) -> Self {
+        self.capability_base_filter_override = Some(filter);
+        self
+    }
+
+    /// Carry initial inherited visibility into the generated visibility owner.
+    ///
+    /// The value is validated and merged during build after the tool catalogs
+    /// are installed, then persisted only from the owner-approved projection.
+    pub fn with_initial_tool_visibility_state(
+        mut self,
+        authority: InheritedToolVisibilityAuthority,
+    ) -> Self {
+        self.initial_visibility_authority = Some(authority);
+        self
+    }
+
+    /// Carry resumed inherited visibility into the generated visibility owner.
+    ///
+    /// Retained for callers still using the older resumed-only name; the
+    /// authority path is the same typed initial visibility handoff.
+    pub fn with_resumed_initial_tool_visibility_state(
+        mut self,
+        authority: InheritedToolVisibilityAuthority,
+    ) -> Self {
+        self.initial_visibility_authority = Some(authority);
         self
     }
 
@@ -796,7 +907,7 @@ impl AgentBuilder {
     /// Set the runtime-backed auth lease handle for this build (Phase 1.5-rev).
     pub fn with_auth_lease_handle(
         mut self,
-        handle: Arc<dyn crate::handles::AuthLeaseHandle>,
+        handle: crate::handles::GeneratedAuthLeaseHandle,
     ) -> Self {
         self.auth_lease_handle = Some(handle);
         self
@@ -833,18 +944,16 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use crate::LlmStreamResult;
-    use crate::connection::{AuthBindingRef, BindingId, RealmId};
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
-    use crate::handles::{
-        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
-        DslTransitionError, LeaseKey,
+    use crate::tool_scope::ToolVisibilityOwner;
+    use crate::types::{
+        AssistantBlock, StopReason, ToolCallView, ToolDef, ToolProvenance, ToolSourceKind,
+        UserMessage,
     };
-    use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
@@ -899,6 +1008,45 @@ mod tests {
         }
     }
 
+    struct StaticTools {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl StaticTools {
+        fn new(tools: Arc<[Arc<ToolDef>]>) -> Self {
+            Self { tools }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for StaticTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::NotFound {
+                name: call.name.to_string(),
+            })
+        }
+    }
+
+    fn test_tool_with_provenance(name: &str, source_id: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: format!("{name} tool"),
+            input_schema: serde_json::json!({ "type": "object" }),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Callback,
+                source_id: source_id.into(),
+            }),
+        })
+    }
+
     struct MockStore;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -912,19 +1060,38 @@ mod tests {
         }
     }
 
-    fn explicit_test_visibility_owner() -> Arc<dyn ToolVisibilityOwner> {
-        Arc::new(LocalToolVisibilityOwner::new())
+    fn generated_visibility_owner_from<T>(owner: Arc<T>) -> GeneratedToolVisibilityOwner
+    where
+        T: ToolVisibilityOwner + 'static,
+    {
+        let owner: Arc<dyn ToolVisibilityOwner> = owner;
+        crate::tool_scope::generated_test_tool_visibility_owner_from(owner)
+    }
+
+    fn explicit_test_visibility_owner() -> GeneratedToolVisibilityOwner {
+        generated_visibility_owner_from(Arc::new(
+            crate::tool_scope::GeneratedTestToolVisibilityOwner::new(),
+        ))
+    }
+
+    fn session_with_raw_metadata(session: Session, key: &str, value: serde_json::Value) -> Session {
+        let mut raw = serde_json::to_value(&session).expect("session should serialize");
+        raw.get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized session should contain metadata")
+            .insert(key.to_string(), value);
+        serde_json::from_value(raw).expect("session should deserialize with raw metadata")
     }
 
     struct RestoreFailingVisibilityOwner {
-        fallback_state: LocalToolVisibilityOwner,
+        fallback_state: crate::tool_scope::GeneratedTestToolVisibilityOwner,
         replace_calls: AtomicUsize,
     }
 
     impl RestoreFailingVisibilityOwner {
         fn new() -> Self {
             Self {
-                fallback_state: LocalToolVisibilityOwner::new(),
+                fallback_state: crate::tool_scope::GeneratedTestToolVisibilityOwner::new(),
                 replace_calls: AtomicUsize::new(0),
             }
         }
@@ -977,9 +1144,9 @@ mod tests {
         fn replace_deferred_tool_authority_catalog(
             &self,
             catalog: BTreeMap<String, crate::ToolVisibilityWitness>,
-        ) {
+        ) -> Result<(), crate::ToolScopeApplyError> {
             self.fallback_state
-                .replace_deferred_tool_authority_catalog(catalog);
+                .replace_deferred_tool_authority_catalog(catalog)
         }
 
         fn boundary_applied(
@@ -1089,111 +1256,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingAuthLeaseHandle {
-        snapshots: Mutex<BTreeMap<LeaseKey, AuthLeaseSnapshot>>,
-    }
-
-    impl RecordingAuthLeaseHandle {
-        fn seed(&self, key: LeaseKey, snapshot: AuthLeaseSnapshot) {
-            self.snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, snapshot);
-        }
-    }
-
-    impl AuthLeaseHandle for RecordingAuthLeaseHandle {
-        fn acquire_lease(
-            &self,
-            lease_key: &LeaseKey,
-            expires_at: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            let mut snapshots = self
-                .snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let generation = snapshots
-                .get(lease_key)
-                .map(|snapshot| snapshot.generation + 1)
-                .unwrap_or(1);
-            snapshots.insert(
-                lease_key.clone(),
-                AuthLeaseSnapshot {
-                    phase: Some(AuthLeasePhase::Valid),
-                    expires_at: (expires_at != u64::MAX).then_some(expires_at),
-                    credential_present: true,
-                    generation,
-                    credential_published_at_millis: None,
-                },
-            );
-            Ok(AuthLeaseTransition {
-                generation,
-                credential_published_at_millis: None,
-            })
-        }
-
-        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn complete_refresh(
-            &self,
-            lease_key: &LeaseKey,
-            new_expires_at: u64,
-            _now: u64,
-        ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            self.acquire_lease(lease_key, new_expires_at)
-        }
-
-        fn refresh_failed(
-            &self,
-            _lease_key: &LeaseKey,
-            _permanent: bool,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
-        }
-
-        fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            self.snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(lease_key);
-            Ok(())
-        }
-
-        fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-            self.snapshots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(lease_key)
-                .cloned()
-                .unwrap_or(AuthLeaseSnapshot {
-                    phase: None,
-                    expires_at: None,
-                    credential_present: false,
-                    generation: 0,
-                    credential_published_at_millis: None,
-                })
-        }
-    }
-
-    fn auth_binding(binding: &str) -> AuthBindingRef {
-        AuthBindingRef {
-            realm: RealmId::parse("dev").expect("valid realm fixture"),
-            binding: BindingId::parse(binding).expect("valid binding fixture"),
-            profile: None,
-        }
-    }
-
     #[tokio::test]
     async fn builder_fails_closed_when_canonical_visibility_restore_fails() {
         let client = Arc::new(MockClient);
@@ -1211,7 +1273,7 @@ mod tests {
 
         let result = AgentBuilder::new()
             .resume_session(session)
-            .with_tool_visibility_owner(visibility_owner.clone())
+            .with_tool_visibility_owner(generated_visibility_owner_from(visibility_owner.clone()))
             .try_build_standalone(client, tools, store)
             .await;
 
@@ -1245,8 +1307,8 @@ mod tests {
         let client = Arc::new(MockClient);
         let tools = Arc::new(RestoreFailureCatalogDispatcher::new());
         let store = Arc::new(MockStore);
-        let mut session = Session::new();
-        session.set_metadata(
+        let session = session_with_raw_metadata(
+            Session::new(),
             SESSION_TOOL_VISIBILITY_STATE_KEY,
             serde_json::json!({
                 "active_filter": {
@@ -1316,40 +1378,6 @@ mod tests {
             }
             Err(err) => panic!("unexpected build error: {err}"),
         }
-    }
-
-    #[tokio::test]
-    async fn auth_lease_rotation_preserves_existing_target_expiry() {
-        let client = Arc::new(MockClient);
-        let tools = Arc::new(MockTools);
-        let store = Arc::new(MockStore);
-        let auth_lease = Arc::new(RecordingAuthLeaseHandle::default());
-        let previous = auth_binding("previous");
-        let target = auth_binding("target");
-        let target_key = LeaseKey::from_auth_binding(&target);
-        auth_lease.seed(
-            target_key.clone(),
-            AuthLeaseSnapshot {
-                phase: Some(AuthLeasePhase::Valid),
-                expires_at: Some(1_900_000_000),
-                credential_present: true,
-                generation: 7,
-                credential_published_at_millis: None,
-            },
-        );
-        let agent = AgentBuilder::new()
-            .with_auth_lease_handle(auth_lease.clone())
-            .build_standalone(client, tools, store)
-            .await;
-
-        agent
-            .rotate_auth_lease_auth_binding(Some(&previous), Some(&target))
-            .unwrap();
-
-        let snapshot = auth_lease.snapshot(&target_key);
-        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
-        assert_eq!(snapshot.expires_at, Some(1_900_000_000));
-        assert_eq!(snapshot.generation, 7);
     }
 
     /// Regression test: AgentBuilder should apply system_prompt to new sessions
@@ -1475,21 +1503,27 @@ mod tests {
         let store = Arc::new(MockStore);
         let mut session = Session::new();
         session
-            .set_tool_visibility_state(SessionToolVisibilityState {
-                active_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
-                staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
-                active_revision: 7,
-                staged_revision: 7,
-                ..Default::default()
-            })
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState {
+                        active_filter: ToolFilter::Deny(
+                            ["secret".to_string()].into_iter().collect(),
+                        ),
+                        staged_filter: ToolFilter::Deny(
+                            ["secret".to_string()].into_iter().collect(),
+                        ),
+                        active_revision: 7,
+                        staged_revision: 7,
+                        ..Default::default()
+                    },
+                ),
+            )
             .expect("visibility state should serialize");
         let owner = Arc::new(RestoreFailingVisibilityOwner::new());
-        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
-
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(owner_trait)
+            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1518,30 +1552,43 @@ mod tests {
     #[tokio::test]
     async fn runtime_backed_builder_rejects_malformed_canonical_visibility_state() {
         let client = Arc::new(MockClient);
-        let tools = Arc::new(MockTools);
+        let secret_tool = test_tool_with_provenance("secret", "secret");
+        let tools = Arc::new(StaticTools::new(vec![Arc::clone(&secret_tool)].into()));
         let store = Arc::new(MockStore);
-        let mut session = Session::new();
-        session.set_metadata(
+        let session = session_with_raw_metadata(
+            Session::new(),
             SESSION_TOOL_VISIBILITY_STATE_KEY,
             serde_json::json!("not-a-visibility-state"),
         );
+        let secret_witness = crate::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:secret".to_string()),
+            last_seen_provenance: secret_tool.provenance.clone(),
+        };
         let original_state = SessionToolVisibilityState {
             active_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
             staged_filter: ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
             active_revision: 3,
             staged_revision: 3,
+            filter_witnesses: [("secret".to_string(), secret_witness.clone())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
-        let owner = Arc::new(LocalToolVisibilityOwner::new());
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        owner
+            .replace_filter_tool_authority_catalog(
+                [("secret".to_string(), secret_witness)]
+                    .into_iter()
+                    .collect(),
+            )
+            .expect("test owner should accept initial filter authority catalog");
         owner
             .replace_visibility_state(original_state.clone())
             .expect("test owner should accept initial state");
-        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
-
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(owner_trait)
+            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1575,13 +1622,11 @@ mod tests {
             ))
             .expect("legacy filter should serialize"),
         );
-        let owner = Arc::new(LocalToolVisibilityOwner::new());
-        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
-
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(owner_trait)
+            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1604,13 +1649,11 @@ mod tests {
             ))
             .expect("legacy inherited filter should serialize"),
         );
-        let owner = Arc::new(LocalToolVisibilityOwner::new());
-        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
-
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(owner_trait)
+            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1632,20 +1675,22 @@ mod tests {
         let store = Arc::new(MockStore);
         let mut session = Session::new();
         session
-            .set_tool_visibility_state(SessionToolVisibilityState {
-                inherited_base_filter: ToolFilter::Allow(
-                    ["secret".to_string()].into_iter().collect(),
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState {
+                        inherited_base_filter: ToolFilter::Allow(
+                            ["secret".to_string()].into_iter().collect(),
+                        ),
+                        ..Default::default()
+                    },
                 ),
-                ..Default::default()
-            })
+            )
             .expect("visibility state should serialize");
-        let owner = Arc::new(LocalToolVisibilityOwner::new());
-        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
-
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(owner_trait)
+            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1663,32 +1708,33 @@ mod tests {
     #[tokio::test]
     async fn runtime_backed_builder_restores_canonical_inherited_visibility_state() {
         let client = Arc::new(MockClient);
-        let tools = Arc::new(MockTools);
+        let secret_tool = test_tool_with_provenance("secret", "secret");
+        let tools = Arc::new(StaticTools::new(vec![Arc::clone(&secret_tool)].into()));
         let store = Arc::new(MockStore);
         let inherited_filter = ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+        let secret_witness = crate::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:secret".to_string()),
+            last_seen_provenance: secret_tool.provenance.clone(),
+        };
         let mut session = Session::new();
         session
-            .set_tool_visibility_state(SessionToolVisibilityState {
-                inherited_base_filter: inherited_filter.clone(),
-                filter_witnesses: [(
-                    "secret".to_string(),
-                    crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("test-owner:secret".to_string()),
-                        last_seen_provenance: None,
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState {
+                        inherited_base_filter: inherited_filter.clone(),
+                        filter_witnesses: [("secret".to_string(), secret_witness)]
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
                     },
-                )]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            })
+                ),
+            )
             .expect("visibility state should serialize");
-        let owner = Arc::new(LocalToolVisibilityOwner::new());
-        let owner_trait: Arc<dyn ToolVisibilityOwner> = owner.clone();
-
+        let owner = Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(owner_trait)
+            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1877,11 +1923,10 @@ mod tests {
         );
     }
 
-    /// Regression: agent builder must seed applied_cursor from the feed's
-    /// current watermark, not from 0. Starting from 0 replays every retained
-    /// completion as new after stop/resume or live reattachment.
+    /// Regression: agent builder must not treat the feed watermark as cursor
+    /// authority when generated ops-lifecycle authority is absent.
     #[tokio::test]
-    async fn test_builder_seeds_applied_cursor_from_feed_watermark() {
+    async fn test_builder_does_not_seed_applied_cursor_from_feed_without_ops_authority() {
         use crate::completion_feed::tests::MockCompletionFeed;
 
         let client = Arc::new(MockClient);
@@ -1897,8 +1942,8 @@ mod tests {
             .await;
 
         assert_eq!(
-            agent.applied_cursor, 42,
-            "applied_cursor must seed from feed watermark, not 0"
+            agent.applied_cursor, 0,
+            "feed watermark must not seed cursor truth without generated ops authority"
         );
     }
 

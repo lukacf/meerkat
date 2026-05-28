@@ -324,11 +324,27 @@ pub struct CoreApplyOutput {
     /// Optional serialized session snapshot to durably commit atomically with
     /// the receipt and input-state updates.
     pub session_snapshot: Option<Vec<u8>>,
-    /// Canonical terminal outcome for runtime-backed execution.
+    /// Terminal payload observation produced by runtime-backed execution.
     ///
-    /// `None` means the primitive committed successfully but did not produce a
-    /// turn terminal (for example immediate context appends).
+    /// `None` means the primitive committed successfully but did not produce
+    /// a result payload (for example immediate context appends). Runtime
+    /// surfaces must route this payload shape through generated machine
+    /// authority before choosing a public completion result class.
     pub terminal: Option<CoreApplyTerminal>,
+}
+
+/// Successful result of staging runtime-owned context at an active turn boundary.
+#[derive(Debug, Clone)]
+pub struct CoreBoundaryStageOutput {
+    /// Optional serialized session snapshot to commit atomically with the
+    /// generated receipt and input-state updates.
+    pub session_snapshot: Option<Vec<u8>>,
+}
+
+impl CoreBoundaryStageOutput {
+    pub fn new(session_snapshot: Option<Vec<u8>>) -> Self {
+        Self { session_snapshot }
+    }
 }
 
 impl CoreApplyOutput {
@@ -406,7 +422,7 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
         &self,
         _expected_run_id: &RunId,
         _appends: Vec<PendingSystemContextAppend>,
-    ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+    ) -> Result<CoreBoundaryStageOutput, CoreExecutorError> {
         Err(CoreExecutorError::Internal(
             "live boundary system-context staging is unsupported by this executor".to_string(),
         ))

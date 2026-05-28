@@ -1,4 +1,6 @@
 //! MeerkatMachine DSL definition with real bridging types.
+#![allow(clippy::too_many_arguments)]
+
 use meerkat_machine_dsl::machine;
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
 
@@ -63,6 +65,21 @@ impl From<u64> for Generation {
 impl Generation {
     pub fn from_domain(value: u64) -> Self {
         Self(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RuntimeEpochId(pub String);
+
+impl<T: Into<String>> From<T> for RuntimeEpochId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl RuntimeEpochId {
+    pub fn from_domain(id: &meerkat_core::runtime_epoch::RuntimeEpochId) -> Self {
+        Self(id.to_string())
     }
 }
 
@@ -146,12 +163,90 @@ impl WaitRequestId {
 /// newtype wrapper around an opaque JSON-encoded string. The DSL writes this
 /// variant directly on `RegisterOp` so guards on `PeerReadyOp`
 /// (`kind_is_mob_member_child`) can reason about the closed set without
-/// string parsing.
+/// string parsing. `BackgroundToolCapacitySlot` is a generated shell admission
+/// reservation, not a background job, so completion-feed publication can
+/// distinguish it from `BackgroundToolOp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationKind {
     #[default]
     MobMemberChild,
     BackgroundToolOp,
+    BackgroundToolCapacitySlot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationSourceKind {
+    #[default]
+    SessionChild,
+    BackendPeer,
+}
+
+/// Typed source identity for an async operation. The lifecycle machine stores
+/// this on `RegisterOp` so peer-only operation identity is not reconstructed
+/// from display strings or shell-side labels.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct OperationSource {
+    pub kind: OperationSourceKind,
+    pub session_id: Option<SessionId>,
+    pub peer_id: Option<PeerId>,
+    pub address: Option<PeerAddress>,
+}
+
+impl OperationSource {
+    pub fn from_domain(source: &meerkat_core::ops_lifecycle::OperationSource) -> Self {
+        match source {
+            meerkat_core::ops_lifecycle::OperationSource::SessionChild { session_id } => Self {
+                kind: OperationSourceKind::SessionChild,
+                session_id: Some(SessionId::from_domain(session_id)),
+                peer_id: None,
+                address: None,
+            },
+            meerkat_core::ops_lifecycle::OperationSource::BackendPeer { peer_id, address } => {
+                Self {
+                    kind: OperationSourceKind::BackendPeer,
+                    session_id: None,
+                    peer_id: Some(PeerId(peer_id.to_string())),
+                    address: Some(PeerAddress(address.to_string())),
+                }
+            }
+        }
+    }
+
+    pub fn to_domain(&self) -> Result<meerkat_core::ops_lifecycle::OperationSource, String> {
+        match self.kind {
+            OperationSourceKind::SessionChild => {
+                let session_id = self
+                    .session_id
+                    .as_ref()
+                    .ok_or_else(|| "session operation source missing session_id".to_string())?;
+                let session_id = meerkat_core::types::SessionId::parse(&session_id.0)
+                    .map_err(|error| format!("invalid session operation source id: {error}"))?;
+                Ok(meerkat_core::ops_lifecycle::OperationSource::session_child(
+                    session_id,
+                ))
+            }
+            OperationSourceKind::BackendPeer => {
+                let peer_id = self
+                    .peer_id
+                    .as_ref()
+                    .ok_or_else(|| "backend peer operation source missing peer_id".to_string())?;
+                let address = self
+                    .address
+                    .as_ref()
+                    .ok_or_else(|| "backend peer operation source missing address".to_string())?;
+                let peer_id = meerkat_core::comms::PeerId::parse(&peer_id.0).map_err(|error| {
+                    format!("invalid backend peer operation source id: {error}")
+                })?;
+                let address =
+                    meerkat_core::comms::PeerAddress::parse(&address.0).map_err(|error| {
+                        format!("invalid backend peer operation source address: {error}")
+                    })?;
+                Ok(meerkat_core::ops_lifecycle::OperationSource::backend_peer(
+                    peer_id, address,
+                ))
+            }
+        }
+    }
 }
 
 impl From<meerkat_core::ops_lifecycle::OperationKind> for OperationKind {
@@ -159,6 +254,9 @@ impl From<meerkat_core::ops_lifecycle::OperationKind> for OperationKind {
         match kind {
             meerkat_core::ops_lifecycle::OperationKind::MobMemberChild => Self::MobMemberChild,
             meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp => Self::BackgroundToolOp,
+            meerkat_core::ops_lifecycle::OperationKind::BackgroundToolCapacitySlot => {
+                Self::BackgroundToolCapacitySlot
+            }
         }
     }
 }
@@ -168,6 +266,7 @@ impl From<OperationKind> for meerkat_core::ops_lifecycle::OperationKind {
         match kind {
             OperationKind::MobMemberChild => Self::MobMemberChild,
             OperationKind::BackgroundToolOp => Self::BackgroundToolOp,
+            OperationKind::BackgroundToolCapacitySlot => Self::BackgroundToolCapacitySlot,
         }
     }
 }
@@ -295,6 +394,29 @@ impl SessionLlmIdentity {
     }
 }
 
+impl TryFrom<SessionLlmIdentity> for meerkat_core::SessionLlmIdentity {
+    type Error = String;
+
+    fn try_from(id: SessionLlmIdentity) -> Result<Self, Self::Error> {
+        Ok(Self {
+            model: id.model,
+            provider: id.provider.into(),
+            self_hosted_server_id: id.self_hosted_server_id,
+            provider_params: id
+                .provider_params_repr
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|err| format!("invalid generated provider_params identity: {err}"))?,
+            auth_binding: id
+                .auth_binding
+                .map(meerkat_core::AuthBindingRef::try_from)
+                .transpose()
+                .map_err(|err| format!("invalid generated auth binding identity: {err}"))?,
+        })
+    }
+}
+
 /// Typed mirror of [`meerkat_core::SessionToolVisibilityState`] —
 /// structural projection using typed `ToolFilter` / `ToolVisibilityWitness`
 /// mirrors plus ordered name sets for deterministic Ord/Hash.
@@ -359,6 +481,26 @@ impl From<&crate::meerkat_machine_types::SessionLlmCapabilitySurface>
     for SessionLlmCapabilitySurface
 {
     fn from(s: &crate::meerkat_machine_types::SessionLlmCapabilitySurface) -> Self {
+        Self {
+            supports_temperature: s.supports_temperature,
+            supports_thinking: s.supports_thinking,
+            supports_reasoning: s.supports_reasoning,
+            inline_video: s.inline_video,
+            vision: s.vision,
+            image_input: s.image_input,
+            image_tool_results: s.image_tool_results,
+            supports_web_search: s.supports_web_search,
+            image_generation: s.image_generation,
+            realtime: s.realtime,
+            call_timeout_secs: s.call_timeout_secs,
+        }
+    }
+}
+
+impl From<SessionLlmCapabilitySurface>
+    for crate::meerkat_machine_types::SessionLlmCapabilitySurface
+{
+    fn from(s: SessionLlmCapabilitySurface) -> Self {
         Self {
             supports_temperature: s.supports_temperature,
             supports_thinking: s.supports_thinking,
@@ -572,7 +714,7 @@ impl ToolVisibilityWitness {
     }
 
     fn len(&self) -> u64 {
-        u64::from(self.last_seen_provenance.is_some())
+        u64::from(self.stable_owner_key.is_some()) + u64::from(self.last_seen_provenance.is_some())
     }
 }
 
@@ -634,6 +776,7 @@ pub enum OutboundPeerRequestState {
 }
 
 impl From<meerkat_core::OutboundPeerRequestState> for OutboundPeerRequestState {
+    #[allow(clippy::panic)]
     fn from(s: meerkat_core::OutboundPeerRequestState) -> Self {
         match s {
             meerkat_core::OutboundPeerRequestState::Sent => Self::Sent,
@@ -641,10 +784,9 @@ impl From<meerkat_core::OutboundPeerRequestState> for OutboundPeerRequestState {
             meerkat_core::OutboundPeerRequestState::Completed => Self::Completed,
             meerkat_core::OutboundPeerRequestState::Failed => Self::Failed,
             meerkat_core::OutboundPeerRequestState::TimedOut => Self::TimedOut,
-            // core `#[non_exhaustive]` guard: new variants added there
-            // without a catalog mirror fall back to `Sent`. Detect at
-            // codegen time via the parity test, not at runtime.
-            _ => Self::Sent,
+            _ => panic!(
+                "unsupported OutboundPeerRequestState variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -671,11 +813,14 @@ pub enum InboundPeerRequestState {
 }
 
 impl From<meerkat_core::InboundPeerRequestState> for InboundPeerRequestState {
+    #[allow(clippy::panic)]
     fn from(s: meerkat_core::InboundPeerRequestState) -> Self {
         match s {
             meerkat_core::InboundPeerRequestState::Received => Self::Received,
             meerkat_core::InboundPeerRequestState::Replied => Self::Replied,
-            _ => Self::Received,
+            _ => panic!(
+                "unsupported InboundPeerRequestState variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -699,11 +844,14 @@ pub enum PeerTerminalDisposition {
 }
 
 impl From<meerkat_core::handles::PeerTerminalDisposition> for PeerTerminalDisposition {
+    #[allow(clippy::panic)]
     fn from(d: meerkat_core::handles::PeerTerminalDisposition) -> Self {
         match d {
             meerkat_core::handles::PeerTerminalDisposition::Completed => Self::Completed,
             meerkat_core::handles::PeerTerminalDisposition::Failed => Self::Failed,
-            _ => Self::Failed,
+            _ => panic!(
+                "unsupported PeerTerminalDisposition variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -726,6 +874,7 @@ pub enum InteractionStreamState {
 }
 
 impl From<meerkat_core::InteractionStreamState> for InteractionStreamState {
+    #[allow(clippy::panic)]
     fn from(s: meerkat_core::InteractionStreamState) -> Self {
         match s {
             meerkat_core::InteractionStreamState::Reserved => Self::Reserved,
@@ -733,7 +882,9 @@ impl From<meerkat_core::InteractionStreamState> for InteractionStreamState {
             meerkat_core::InteractionStreamState::Completed => Self::Completed,
             meerkat_core::InteractionStreamState::Expired => Self::Expired,
             meerkat_core::InteractionStreamState::ClosedEarly => Self::ClosedEarly,
-            _ => Self::Reserved,
+            _ => panic!(
+                "unsupported InteractionStreamState variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -880,6 +1031,65 @@ pub enum PeerIngressResponseTerminality {
     Progress,
     TerminalCompleted,
     TerminalFailed,
+}
+
+/// DSL-owned public peer-ingress authority phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAuthorityPhaseClass {
+    #[default]
+    Absent,
+    Received,
+    Dropped,
+    Delivered,
+}
+
+impl From<PeerIngressAuthorityPhaseClass> for meerkat_core::PeerIngressAuthorityPhase {
+    fn from(phase: PeerIngressAuthorityPhaseClass) -> Self {
+        match phase {
+            PeerIngressAuthorityPhaseClass::Absent => Self::Absent,
+            PeerIngressAuthorityPhaseClass::Received => Self::Received,
+            PeerIngressAuthorityPhaseClass::Dropped => Self::Dropped,
+            PeerIngressAuthorityPhaseClass::Delivered => Self::Delivered,
+        }
+    }
+}
+
+/// DSL-owned receive/admission result for classified peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressReceiveOutcomeClass {
+    #[default]
+    Admitted,
+    DroppedUntrustedSender,
+    DroppedSessionClosed,
+    DroppedInboxFull,
+}
+
+impl From<PeerIngressReceiveOutcomeClass> for meerkat_core::PeerIngressReceiveOutcome {
+    fn from(outcome: PeerIngressReceiveOutcomeClass) -> Self {
+        match outcome {
+            PeerIngressReceiveOutcomeClass::Admitted => Self::Admitted,
+            PeerIngressReceiveOutcomeClass::DroppedUntrustedSender => Self::DroppedUntrustedSender,
+            PeerIngressReceiveOutcomeClass::DroppedSessionClosed => Self::DroppedSessionClosed,
+            PeerIngressReceiveOutcomeClass::DroppedInboxFull => Self::DroppedInboxFull,
+        }
+    }
+}
+
+/// DSL-owned admission diagnostic copy emitted with receive authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAdmissionDiagnosticClass {
+    #[default]
+    TrustedAtAdmission,
+    UntrustedAtAdmission,
+}
+
+impl From<PeerIngressAdmissionDiagnosticClass> for meerkat_core::PeerIngressAdmissionDiagnostic {
+    fn from(diagnostic: PeerIngressAdmissionDiagnosticClass) -> Self {
+        match diagnostic {
+            PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission => Self::TrustedAtAdmission,
+            PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission => Self::UntrustedAtAdmission,
+        }
+    }
 }
 
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).
@@ -1098,6 +1308,20 @@ impl InputPhase {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputObservedPhase {
+    Accepted,
+    #[default]
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
 /// Typed input terminal kind, mirroring the closed set of literals the DSL
 /// transitions assign to `input_terminal_kind`. The companion fields
 /// (`input_superseded_by`, `input_aggregate_id`, `input_abandon_reason`,
@@ -1119,6 +1343,62 @@ impl InputTerminalKind {
             Self::Superseded => "Superseded",
             Self::Coalesced => "Coalesced",
             Self::Abandoned => "Abandoned",
+        }
+    }
+}
+
+/// Public lifecycle class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicLifecycleState {
+    #[default]
+    Accepted,
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+impl InputPublicLifecycleState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+
+/// Public terminal result class emitted by generated authority before runtime
+/// surfaces project input state onto their transport enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPublicTerminalOutcome {
+    #[default]
+    Completed,
+    Abandoned,
+    Superseded,
+    Coalesced,
+    Cancelled,
+}
+
+impl InputPublicTerminalOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Abandoned => "Abandoned",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Cancelled => "Cancelled",
         }
     }
 }
@@ -1422,6 +1702,147 @@ impl From<TurnTerminalCauseKind> for meerkat_core::turn_execution_authority::Tur
     }
 }
 
+/// Raw failure source fact carried by runtime run-failure handoff.
+/// MeerkatMachine maps this to terminal outcome/cause before public
+/// projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RunFailureSourceKind {
+    #[default]
+    Unknown,
+    Llm,
+    StoreError,
+    ToolError,
+    McpError,
+    SessionNotFound,
+    TokenBudgetExceeded,
+    TimeBudgetExceeded,
+    ToolCallBudgetExceeded,
+    MaxTokensReached,
+    ContentFiltered,
+    MaxTurnsReached,
+    Cancelled,
+    InvalidStateTransition,
+    OperationNotFound,
+    DepthLimitExceeded,
+    ConcurrencyLimitExceeded,
+    ConfigError,
+    InvalidToolAccess,
+    InternalError,
+    BuildError,
+    AuthReauthRequired,
+    CallbackPending,
+    StructuredOutputValidationFailed,
+    InvalidOutputSchema,
+    HookDenied,
+    HookTimeout,
+    HookExecutionFailed,
+    HookConfigInvalid,
+    TerminalFailure,
+    NoPendingBoundary,
+    LlmRetryExhausted,
+}
+
+impl From<meerkat_core::turn_execution_authority::TurnFailureSourceKind> for RunFailureSourceKind {
+    fn from(kind: meerkat_core::turn_execution_authority::TurnFailureSourceKind) -> Self {
+        match kind {
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::Unknown => {
+                Self::Unknown
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::Llm => Self::Llm,
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::StoreError => {
+                Self::StoreError
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::ToolError => {
+                Self::ToolError
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::McpError => {
+                Self::McpError
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::SessionNotFound => {
+                Self::SessionNotFound
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::TokenBudgetExceeded => {
+                Self::TokenBudgetExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::TimeBudgetExceeded => {
+                Self::TimeBudgetExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::ToolCallBudgetExceeded => {
+                Self::ToolCallBudgetExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::MaxTokensReached => {
+                Self::MaxTokensReached
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::ContentFiltered => {
+                Self::ContentFiltered
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::MaxTurnsReached => {
+                Self::MaxTurnsReached
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::Cancelled => {
+                Self::Cancelled
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::InvalidStateTransition => {
+                Self::InvalidStateTransition
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::OperationNotFound => {
+                Self::OperationNotFound
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::DepthLimitExceeded => {
+                Self::DepthLimitExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::ConcurrencyLimitExceeded => {
+                Self::ConcurrencyLimitExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::ConfigError => {
+                Self::ConfigError
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::InvalidToolAccess => {
+                Self::InvalidToolAccess
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::InternalError => {
+                Self::InternalError
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::BuildError => {
+                Self::BuildError
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::AuthReauthRequired => {
+                Self::AuthReauthRequired
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::CallbackPending => {
+                Self::CallbackPending
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::StructuredOutputValidationFailed => {
+                Self::StructuredOutputValidationFailed
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::InvalidOutputSchema => {
+                Self::InvalidOutputSchema
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::HookDenied => {
+                Self::HookDenied
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::HookTimeout => {
+                Self::HookTimeout
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::HookExecutionFailed => {
+                Self::HookExecutionFailed
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::HookConfigInvalid => {
+                Self::HookConfigInvalid
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::TerminalFailure => {
+                Self::TerminalFailure
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::NoPendingBoundary => {
+                Self::NoPendingBoundary
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::LlmRetryExhausted => {
+                Self::LlmRetryExhausted
+            }
+        }
+    }
+}
+
 /// Typed classifier for failures surfaced by the runtime apply loop when a
 /// `CoreExecutor::apply` call fails and terminalizes the runtime turn.
 /// The companion `last_runtime_apply_failure_message` state field carries the
@@ -1441,6 +1862,7 @@ pub enum RuntimeApplyFailureCause {
 }
 
 impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFailureCause {
+    #[allow(clippy::panic)]
     fn from(kind: meerkat_core::lifecycle::CoreApplyFailureCauseKind) -> Self {
         match kind {
             meerkat_core::lifecycle::CoreApplyFailureCauseKind::PrimitiveRejected => {
@@ -1464,7 +1886,9 @@ impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFa
                 Self::ExecutorInternal
             }
             meerkat_core::lifecycle::CoreApplyFailureCauseKind::Unknown => Self::Unknown,
-            _ => Self::Unknown,
+            _ => panic!(
+                "unsupported CoreApplyFailureCauseKind variant; update generated MeerkatMachine mirror"
+            ),
         }
     }
 }
@@ -1483,6 +1907,28 @@ pub enum PreRunPhase {
     Idle,
     Attached,
     Retired,
+}
+
+/// Generated authority for deferred session materialization.
+///
+/// The shell keeps bulky build payloads in a registry, but phase/admission
+/// meaning for the staged lifecycle is owned here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum StagedSessionPhase {
+    #[default]
+    NotStaged,
+    Staged,
+    Promoting,
+    Closing,
+}
+
+/// Explicit host/profile request class for mob operator access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobOperatorAccessRequestKind {
+    #[default]
+    Inherit,
+    Enable,
+    Disable,
 }
 
 /// Typed runtime notice classifier for the `RuntimeNotice` effect. Closed set
@@ -1509,6 +1955,401 @@ pub enum RuntimeEffectKind {
     #[default]
     CancelAfterBoundary,
     StopRuntimeExecutor,
+}
+
+/// Typed runtime completion observation supplied by completion waiter plumbing.
+/// Generated `ResolveRuntimeCompletionCleanup` authority owns whether that
+/// observation permits runtime cleanup; surfaces must not match this enum to
+/// decide cleanup locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionObservedOutcome {
+    #[default]
+    Completed,
+    CompletedWithoutResult,
+    CallbackPending,
+    Cancelled,
+    Abandoned,
+    RuntimeApplyFailed,
+    FinalizationFailed,
+    RuntimeTerminated,
+}
+
+/// Typed observation of the terminal payload shape produced by runtime-loop
+/// execution. This is input evidence only; the generated
+/// `ResolveRuntimeCompletionResult` transition owns the public waiter class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionTerminalObservation {
+    #[default]
+    RunResult,
+    NoResult,
+    CallbackPending,
+    MachineTerminal,
+    RuntimeTerminated,
+}
+
+/// Typed observation of whether runtime finalization completed after the
+/// executor produced terminal evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionFinalizationObservation {
+    #[default]
+    Succeeded,
+    Failed,
+}
+
+/// Typed observation supplied by public session-interrupt surfaces. The
+/// generated `ResolveUserInterruptPublicResult` transition owns the app-facing
+/// result class; REST/RPC/CLI may only map its typed effect to transport shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum UserInterruptObservationKind {
+    #[default]
+    Accepted,
+    IdleNoop,
+    AttachedNoop,
+    StagedNoop,
+    Destroyed,
+    NotInterruptible,
+}
+
+/// Generated public result class for user interrupt requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum UserInterruptPublicResultKind {
+    #[default]
+    Interrupted,
+    NotFound,
+    SessionBusy,
+    Conflict,
+}
+
+/// Generated public completion result class for runtime-loop waiters. Payloads
+/// remain runtime data, but this closed classifier is the authority for which
+/// public `CompletionOutcome` variant may be emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionResultClass {
+    #[default]
+    Completed,
+    CompletedWithoutResult,
+    CallbackPending,
+    Cancelled,
+    AbandonedWithError,
+    CompletedWithFinalizationFailure,
+    RuntimeTerminated,
+}
+
+/// Typed observation of the live-session projection available to generated
+/// runtime-completion cleanup authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionLiveSessionObservation {
+    #[default]
+    NotObserved,
+    Present,
+    Absent,
+}
+
+/// Generated cleanup action for runtime completion side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionCleanupAction {
+    #[default]
+    RetainRuntime,
+    CleanupRuntime,
+}
+
+/// Generated authority for whether completion cleanup may release a surface
+/// pre-admission guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionPreAdmissionAction {
+    #[default]
+    RetainPreAdmission,
+    ReleasePreAdmission,
+}
+
+/// Typed mechanical failure observed by completion waiter plumbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionWaitFailureObservation {
+    #[default]
+    ChannelClosed,
+    AuthorityUnavailable,
+}
+
+/// Generated public error class for mechanical runtime completion waiter
+/// failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionWaitFailurePublicErrorClass {
+    #[default]
+    InternalError,
+}
+
+/// Generated public reason classifier for mechanical runtime completion waiter
+/// failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeCompletionWaitFailurePublicReason {
+    #[default]
+    CompletionChannelClosed,
+    CompletionAuthorityUnavailable,
+}
+
+/// Generated durability action for runtime-owned ops lifecycle snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeOpsLifecycleDurabilityAction {
+    #[default]
+    RetainSnapshot,
+    DeleteSnapshot,
+}
+
+/// Typed public rejection class for `live/open` admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveOpenAdmissionRejection {
+    #[default]
+    AlreadyBound,
+    ChannelAlreadyBound,
+}
+
+/// Typed public result class for `live/refresh` after the adapter command
+/// queue accepts a refresh handoff. The RPC surface may only project this
+/// value from a generated `LiveRefreshResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveRefreshPublicStatus {
+    #[default]
+    Queued,
+}
+
+/// Typed public result class for `live/close` after the live host accepts a
+/// close handoff. The RPC surface may only project this value from a generated
+/// `LiveCloseResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveClosePublicStatus {
+    #[default]
+    Closed,
+}
+
+/// Closed classifier for live adapter commands whose queue acceptance backs a
+/// public RPC result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveCommandPublicKind {
+    #[default]
+    SendInput,
+    CommitInput,
+    Interrupt,
+    TruncateAssistantOutput,
+}
+
+/// Closed classifier for live command rejection observations. The live host
+/// can observe why an adapter command handoff failed, but public error-class
+/// truth is generated from this typed fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveCommandRejectionReason {
+    #[default]
+    ChannelNotFound,
+    NoAdapter,
+    ChannelNotReady,
+    UnsupportedCommand,
+    AdapterError,
+    InternalHostError,
+}
+
+/// Typed public error class for live command rejections. RPC surfaces may only
+/// project their JSON-RPC error code from a generated
+/// `LiveCommandRejectionResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveCommandRejectionPublicErrorClass {
+    #[default]
+    InvalidParams,
+    InternalError,
+}
+
+/// Closed classifier for live channel control requests whose rejection backs a
+/// public RPC error result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelRequestPublicKind {
+    #[default]
+    Status,
+    Close,
+    Refresh,
+    WebrtcAnswer,
+}
+
+/// Closed classifier for live channel control request rejection observations.
+/// The live host can observe missing transport/cache pieces, but public
+/// error-class truth is generated from this typed fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelRequestRejectionReason {
+    #[default]
+    ChannelNotFound,
+    NoAdapter,
+    InvalidToken,
+    InvalidPayload,
+    WebrtcAnswerError,
+    InternalHostError,
+}
+
+/// Typed public error class for live channel control request rejections. RPC
+/// surfaces may only project their JSON-RPC error code from a generated
+/// `LiveChannelRequestRejectionResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelRequestRejectionPublicErrorClass {
+    #[default]
+    InvalidParams,
+    InternalError,
+}
+
+/// Closed classifier for generated WebRTC answer admission rejections. The
+/// transport can provide bearer material, but token existence, expiry,
+/// channel binding, and single-use admission are decided by MeerkatMachine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebrtcAnswerAdmissionRejection {
+    #[default]
+    TokenNotFound,
+    TokenExpired,
+    TokenChannelMismatch,
+    TokenAlreadyConsumed,
+    ChannelNotBound,
+}
+
+/// Closed classifier for generated WebSocket token admission rejections. The
+/// WebSocket transport can present bearer material, but token existence,
+/// expiry, channel binding, and single-use admission are decided by
+/// MeerkatMachine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebsocketTokenAdmissionRejection {
+    #[default]
+    TokenNotFound,
+    TokenExpired,
+    TokenChannelMismatch,
+    TokenAlreadyConsumed,
+    ChannelNotBound,
+}
+
+/// Typed public error class for live WebSocket token admission. The transport
+/// projects its close/error code only from the generated admission effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebsocketTokenAdmissionPublicErrorClass {
+    #[default]
+    InvalidToken,
+}
+
+/// Typed public success class for `live/webrtc/answer`. The WebRTC stack
+/// produces SDP material, but the public success result is projected only
+/// after a generated `LiveWebrtcAnswerResultResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveWebrtcAnswerPublicStatus {
+    #[default]
+    Answered,
+}
+
+/// Typed terminal reason for RPC event streams. The router observes transport
+/// end conditions, then submits the closed set here before projecting the
+/// public `*/stream_end` notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalReason {
+    #[default]
+    RemoteEnd,
+    TerminalError,
+    ExplicitClose,
+}
+
+/// Typed transport observation for RPC event-stream termination. The router
+/// submits this non-public observation; generated authority derives the public
+/// terminal reason and error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalObservationKind {
+    #[default]
+    TransportEnded,
+    NotificationQueueOverflow,
+    NotificationReceiverGone,
+}
+
+/// Typed public error code for RPC event-stream terminal notifications. The
+/// RPC surface may only project this value from a generated
+/// `*EventStreamTerminalResolved` effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RpcEventStreamTerminalErrorCode {
+    #[default]
+    StreamQueueOverflow,
+    StreamReceiverGone,
+}
+
+/// Typed public status class for `live/status` after the live host has
+/// observed the adapter transport state. RPC/SDK surfaces may only project
+/// these values from generated `LiveChannelStatusResolved` effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelPublicStatus {
+    #[default]
+    Idle,
+    Opening,
+    Ready,
+    Degraded,
+    Closing,
+    Closed,
+}
+
+/// Typed public degradation reason for `live/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveChannelDegradationReason {
+    #[default]
+    Unknown,
+    RateLimited,
+    ProviderThrottled,
+    NetworkUnstable,
+    Other,
+}
+
+/// Typed mirror of the public runtime lifecycle projection. The shell passes
+/// only the observed variant; generated transitions own the semantic facts
+/// derived from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleObservedState {
+    #[default]
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLifecycleTerminality {
+    #[default]
+    NonTerminal,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeInputAdmission {
+    #[default]
+    RejectsInput,
+    AcceptsInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeQueueAdmission {
+    #[default]
+    BlocksQueue,
+    ProcessesQueue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimePrepareAdmission {
+    #[default]
+    NotReady,
+    Ready,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeIngressAdmission {
+    #[default]
+    Open,
+    NotReady,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeLoopRunBinding {
+    #[default]
+    Blocked,
+    AllocateNew,
+    UsePrebound,
 }
 
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
@@ -1759,6 +2600,27 @@ impl From<DrainExitReason> for meerkat_core::handles::DrainExitReason {
     }
 }
 
+/// Generated surface-request lifecycle phase. Surface transports may project
+/// this value for diagnostics; mutation authority lives in MeerkatMachine
+/// transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestPhase {
+    #[default]
+    Pending,
+    Published,
+    Cancelled,
+    Completed,
+}
+
+/// Generated terminal-publication policy recorded when a surface request is
+/// admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    RespondWithoutPublish,
+    PublishOnSuccess,
+}
+
 /// Typed work-lane origin for [`MeerkatMachineInput::Ingest`]. Closed set of
 /// the work-lane labels the DSL observes on the admission seam — replaces
 /// the former literal-string `origin` field. Structurally mirrors the
@@ -1879,6 +2741,124 @@ pub enum OperationTerminalOutcomeKind {
     Terminated,
 }
 
+/// Typed public result class for operation lifecycle projections. Shell/tool
+/// surfaces may format these classes, but the lifecycle machine owns the
+/// status-to-public-result classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationPublicResultClass {
+    #[default]
+    MissingAuthority,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationCompletionFeedClass {
+    #[default]
+    Emit,
+    Suppress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationCompletionWakeClass {
+    #[default]
+    Wake,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationDurabilityClass {
+    #[default]
+    Retain,
+    Discard,
+}
+
+impl From<OperationPublicResultClass> for meerkat_core::ops_lifecycle::OperationPublicResultClass {
+    fn from(value: OperationPublicResultClass) -> Self {
+        match value {
+            OperationPublicResultClass::MissingAuthority => Self::MissingAuthority,
+            OperationPublicResultClass::Running => Self::Running,
+            OperationPublicResultClass::Completed => Self::Completed,
+            OperationPublicResultClass::Failed => Self::Failed,
+            OperationPublicResultClass::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<OperationCompletionWakeClass>
+    for meerkat_core::ops_lifecycle::OperationCompletionWakeClass
+{
+    fn from(value: OperationCompletionWakeClass) -> Self {
+        match value {
+            OperationCompletionWakeClass::Wake => Self::Wake,
+            OperationCompletionWakeClass::Ignore => Self::Ignore,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpRegistrationRejectReasonKind {
+    #[default]
+    AlreadyRegistered,
+    MaxConcurrentExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleActionKind {
+    #[default]
+    Start,
+    Fail,
+    PeerReady,
+    ProgressReported,
+    Complete,
+    Abort,
+    Cancel,
+    RetireRequested,
+    RetireCompleted,
+    Terminate,
+}
+
+impl From<meerkat_core::ops_lifecycle::OperationLifecycleAction> for OpLifecycleActionKind {
+    fn from(action: meerkat_core::ops_lifecycle::OperationLifecycleAction) -> Self {
+        match action {
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::Start => Self::Start,
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::Fail => Self::Fail,
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::PeerReady => Self::PeerReady,
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::ProgressReported => {
+                Self::ProgressReported
+            }
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::Complete => Self::Complete,
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::Abort => Self::Abort,
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::Cancel => Self::Cancel,
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::RetireRequested => {
+                Self::RetireRequested
+            }
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::RetireCompleted => {
+                Self::RetireCompleted
+            }
+            meerkat_core::ops_lifecycle::OperationLifecycleAction::Terminate => Self::Terminate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OpLifecycleRejectReasonKind {
+    #[default]
+    OperationNotFound,
+    InvalidTransition,
+    PeerNotExpected,
+    AlreadyPeerReady,
+}
+
 /// Typed input-abandonment reason. Closed mirror of the discriminant set of
 /// [`crate::input_state::InputAbandonReason`] — replaces the former
 /// `format!("{reason:?}")` Debug round-trip in the DSL's
@@ -1955,6 +2935,460 @@ impl From<crate::HandlingMode> for InputLane {
     }
 }
 
+/// Typed live-admission input kind carried by `ResolveAdmissionPlan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+/// Typed durability class observed on an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputDurabilityKind {
+    #[default]
+    Durable,
+    Ephemeral,
+    Derived,
+    Missing,
+}
+
+impl From<crate::input::InputDurability> for InputDurabilityKind {
+    fn from(durability: crate::input::InputDurability) -> Self {
+        match durability {
+            crate::input::InputDurability::Durable => Self::Durable,
+            crate::input::InputDurability::Ephemeral => Self::Ephemeral,
+            crate::input::InputDurability::Derived => Self::Derived,
+        }
+    }
+}
+
+impl From<Option<crate::input::InputDurability>> for InputDurabilityKind {
+    fn from(durability: Option<crate::input::InputDurability>) -> Self {
+        durability.map(Self::from).unwrap_or(Self::Missing)
+    }
+}
+
+/// Typed input-origin class observed at live admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputOriginKind {
+    #[default]
+    Operator,
+    Peer,
+    Flow,
+    System,
+    External,
+}
+
+impl From<&crate::input::InputOrigin> for AdmissionInputOriginKind {
+    fn from(origin: &crate::input::InputOrigin) -> Self {
+        match origin {
+            crate::input::InputOrigin::Operator => Self::Operator,
+            crate::input::InputOrigin::Peer { .. } => Self::Peer,
+            crate::input::InputOrigin::Flow { .. } => Self::Flow,
+            crate::input::InputOrigin::System => Self::System,
+            crate::input::InputOrigin::External { .. } => Self::External,
+        }
+    }
+}
+
+impl From<crate::identifiers::InputKind> for AdmissionInputKind {
+    fn from(kind: crate::identifiers::InputKind) -> Self {
+        match kind {
+            crate::identifiers::InputKind::Prompt => Self::Prompt,
+            crate::identifiers::InputKind::PeerMessage => Self::PeerMessage,
+            crate::identifiers::InputKind::PeerRequest => Self::PeerRequest,
+            crate::identifiers::InputKind::PeerResponseProgress => Self::PeerResponseProgress,
+            crate::identifiers::InputKind::PeerResponseTerminal => Self::PeerResponseTerminal,
+            crate::identifiers::InputKind::FlowStep => Self::FlowStep,
+            crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
+            crate::identifiers::InputKind::Continuation => Self::Continuation,
+            crate::identifiers::InputKind::Operation => Self::Operation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyApplyMode {
+    #[default]
+    StageRunStart,
+    StageRunBoundary,
+    InjectNow,
+    Ignore,
+}
+
+impl From<AdmissionPolicyApplyMode> for crate::policy::ApplyMode {
+    fn from(mode: AdmissionPolicyApplyMode) -> Self {
+        match mode {
+            AdmissionPolicyApplyMode::StageRunStart => Self::StageRunStart,
+            AdmissionPolicyApplyMode::StageRunBoundary => Self::StageRunBoundary,
+            AdmissionPolicyApplyMode::InjectNow => Self::InjectNow,
+            AdmissionPolicyApplyMode::Ignore => Self::Ignore,
+        }
+    }
+}
+
+impl From<crate::policy::ApplyMode> for AdmissionPolicyApplyMode {
+    fn from(mode: crate::policy::ApplyMode) -> Self {
+        match mode {
+            crate::policy::ApplyMode::StageRunStart => Self::StageRunStart,
+            crate::policy::ApplyMode::StageRunBoundary => Self::StageRunBoundary,
+            crate::policy::ApplyMode::InjectNow => Self::InjectNow,
+            crate::policy::ApplyMode::Ignore => Self::Ignore,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyWakeMode {
+    #[default]
+    WakeIfIdle,
+    InterruptYielding,
+    None,
+}
+
+impl From<AdmissionPolicyWakeMode> for crate::policy::WakeMode {
+    fn from(mode: AdmissionPolicyWakeMode) -> Self {
+        match mode {
+            AdmissionPolicyWakeMode::WakeIfIdle => Self::WakeIfIdle,
+            AdmissionPolicyWakeMode::InterruptYielding => Self::InterruptYielding,
+            AdmissionPolicyWakeMode::None => Self::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyQueueMode {
+    None,
+    #[default]
+    Fifo,
+    Coalesce,
+    Supersede,
+    Priority,
+}
+
+impl From<AdmissionPolicyQueueMode> for crate::policy::QueueMode {
+    fn from(mode: AdmissionPolicyQueueMode) -> Self {
+        match mode {
+            AdmissionPolicyQueueMode::None => Self::None,
+            AdmissionPolicyQueueMode::Fifo => Self::Fifo,
+            AdmissionPolicyQueueMode::Coalesce => Self::Coalesce,
+            AdmissionPolicyQueueMode::Supersede => Self::Supersede,
+            AdmissionPolicyQueueMode::Priority => Self::Priority,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyConsumePoint {
+    OnAccept,
+    OnApply,
+    OnRunStart,
+    #[default]
+    OnRunComplete,
+    ExplicitAck,
+}
+
+impl From<AdmissionPolicyConsumePoint> for crate::policy::ConsumePoint {
+    fn from(point: AdmissionPolicyConsumePoint) -> Self {
+        match point {
+            AdmissionPolicyConsumePoint::OnAccept => Self::OnAccept,
+            AdmissionPolicyConsumePoint::OnApply => Self::OnApply,
+            AdmissionPolicyConsumePoint::OnRunStart => Self::OnRunStart,
+            AdmissionPolicyConsumePoint::OnRunComplete => Self::OnRunComplete,
+            AdmissionPolicyConsumePoint::ExplicitAck => Self::ExplicitAck,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyDrainPolicy {
+    #[default]
+    QueueNextTurn,
+    SteerBatch,
+    Immediate,
+    Ignore,
+}
+
+impl From<AdmissionPolicyDrainPolicy> for crate::policy::DrainPolicy {
+    fn from(policy: AdmissionPolicyDrainPolicy) -> Self {
+        match policy {
+            AdmissionPolicyDrainPolicy::QueueNextTurn => Self::QueueNextTurn,
+            AdmissionPolicyDrainPolicy::SteerBatch => Self::SteerBatch,
+            AdmissionPolicyDrainPolicy::Immediate => Self::Immediate,
+            AdmissionPolicyDrainPolicy::Ignore => Self::Ignore,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRoutingDisposition {
+    #[default]
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+impl From<AdmissionRoutingDisposition> for crate::policy::RoutingDisposition {
+    fn from(disposition: AdmissionRoutingDisposition) -> Self {
+        match disposition {
+            AdmissionRoutingDisposition::Queue => Self::Queue,
+            AdmissionRoutingDisposition::Steer => Self::Steer,
+            AdmissionRoutingDisposition::Immediate => Self::Immediate,
+            AdmissionRoutingDisposition::Drop => Self::Drop,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+impl From<AdmissionRunApplyBoundary> for meerkat_core::lifecycle::run_primitive::RunApplyBoundary {
+    fn from(boundary: AdmissionRunApplyBoundary) -> Self {
+        match boundary {
+            AdmissionRunApplyBoundary::RunStart => Self::RunStart,
+            AdmissionRunApplyBoundary::RunCheckpoint => Self::RunCheckpoint,
+            AdmissionRunApplyBoundary::Immediate => Self::Immediate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+impl From<AdmissionRuntimeExecutionKind> for meerkat_core::lifecycle::RuntimeExecutionKind {
+    fn from(kind: AdmissionRuntimeExecutionKind) -> Self {
+        match kind {
+            AdmissionRuntimeExecutionKind::ContentTurn => Self::ContentTurn,
+            AdmissionRuntimeExecutionKind::ResumePending => Self::ResumePending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
+impl From<AdmissionPeerResponseTerminalApplyIntent>
+    for meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent
+{
+    fn from(intent: AdmissionPeerResponseTerminalApplyIntent) -> Self {
+        match intent {
+            AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun => {
+                Self::AppendContextAndRun
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPlanKind {
+    ConsumedOnAccept,
+    #[default]
+    Queued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionIdempotencyResultKind {
+    #[default]
+    Accept,
+    Deduplicated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionValidationResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerResponseTerminalObservedStatus {
+    #[default]
+    NotPeerTerminal,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRejectReasonKind {
+    #[default]
+    DurabilityViolation,
+    PeerHandlingModeInvalid,
+    PeerResponseTerminalInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WaitAllRejectReasonKind {
+    #[default]
+    DuplicateOperation,
+    WaitAlreadyActive,
+    OperationNotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputNormalizationReasonKind {
+    #[default]
+    QueueAccepted,
+    RollbackStaged,
+    BoundaryReceiptCommitted,
+    MissingBoundaryReceipt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionQueueActionKind {
+    #[default]
+    None,
+    EnqueueTo,
+    EnqueueFront,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionExistingQueuedActionKind {
+    #[default]
+    None,
+    Coalesce,
+    Supersede,
+}
+
+/// Typed persisted input kind carried by recovered-admission witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+/// Generated recovery disposition for a persisted input row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputRecoveryDisposition {
+    #[default]
+    Retain,
+    Discard,
+}
+
+impl From<crate::identifiers::InputKind> for RecoveredInputKind {
+    fn from(kind: crate::identifiers::InputKind) -> Self {
+        match kind {
+            crate::identifiers::InputKind::Prompt => Self::Prompt,
+            crate::identifiers::InputKind::PeerMessage => Self::PeerMessage,
+            crate::identifiers::InputKind::PeerRequest => Self::PeerRequest,
+            crate::identifiers::InputKind::PeerResponseProgress => Self::PeerResponseProgress,
+            crate::identifiers::InputKind::PeerResponseTerminal => Self::PeerResponseTerminal,
+            crate::identifiers::InputKind::FlowStep => Self::FlowStep,
+            crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
+            crate::identifiers::InputKind::Continuation => Self::Continuation,
+            crate::identifiers::InputKind::Operation => Self::Operation,
+        }
+    }
+}
+
+/// Typed persisted runtime apply boundary carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+impl TryFrom<meerkat_core::lifecycle::run_primitive::RunApplyBoundary>
+    for RecoveredRunApplyBoundary
+{
+    type Error = &'static str;
+
+    fn try_from(
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+    ) -> Result<Self, Self::Error> {
+        match boundary {
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart => {
+                Ok(Self::RunStart)
+            }
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint => {
+                Ok(Self::RunCheckpoint)
+            }
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate => {
+                Ok(Self::Immediate)
+            }
+            _ => Err("unknown recovered runtime boundary"),
+        }
+    }
+}
+
+/// Typed persisted runtime execution class carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+impl From<meerkat_core::lifecycle::RuntimeExecutionKind> for RecoveredRuntimeExecutionKind {
+    fn from(kind: meerkat_core::lifecycle::RuntimeExecutionKind) -> Self {
+        match kind {
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn => Self::ContentTurn,
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending => Self::ResumePending,
+        }
+    }
+}
+
+/// Typed recovered terminal peer-response apply intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent>
+    for RecoveredPeerResponseTerminalApplyIntent
+{
+    fn from(
+        intent: meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent,
+    ) -> Self {
+        match intent {
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun => {
+                Self::AppendContextAndRun
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingSwitchTurnPhase {
     #[default]
@@ -1981,6 +3415,40 @@ pub enum RoutingDenialReason {
     DeniedDuringApproval,
     ScopedOverrideConflict,
     RealtimeTransportConflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingSwitchApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    UntilChangedFromModelOrigin,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageApprovalReason {
+    #[default]
+    CrossProvider,
+    CostExceedsThreshold,
+    SafetyHold,
+    RealtimeDetachRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImagePlanDenialReason {
+    #[default]
+    UnsupportedTarget,
+    UnsupportedCount,
+    CapabilityPolicy,
+    CostPolicy,
+    SafetyPolicy,
+    ApprovalRequiredButUnavailable,
+    DeniedDuringApproval,
+    ScopedOverrideConflict,
+    RealtimeTransportConflict,
+    ProjectionUnsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2024,6 +3492,103 @@ pub enum RoutingImageTerminal {
     Cancelled,
     Timeout,
     ScopedRestoreFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageTerminalObservation {
+    #[default]
+    Generated,
+    EmptyResult,
+    ProviderHttpError,
+    ProviderNativeError,
+    ExecutionFailed,
+    BlobCommitFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingImageProviderErrorCode {
+    #[default]
+    Unknown,
+    OpenAiContentFilter,
+    OpenAiModelRefusal,
+    GeminiSafety,
+    GeminiModelRefusal,
+    GeminiDeadlineExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RoutingProviderTextDisposition {
+    #[default]
+    NotEmitted,
+    Captured,
+    EmittedButNotStored,
+}
+
+/// Typed bridge command class for supervisor-authorized mob peer overlay
+/// observations. The runtime submits this as part of the generated
+/// MeerkatMachine overlay authorization input so the bridge surface does not
+/// decide whether the command peer should be present or absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobPeerOverlayCommandKind {
+    #[default]
+    Wire,
+    Unwire,
+}
+
+/// Generated admission result for supervisor bridge commands that require an
+/// already-bound supervisor. The bridge shell may project this result to the
+/// wire response, but it must not classify binding/epoch/sender admission from
+/// snapshots on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBridgeCommandAdmissionResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+/// Generated public rejection class for supervisor bridge command admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBridgeCommandRejectionKind {
+    #[default]
+    NotBound,
+    StaleSupervisor,
+    SenderMismatch,
+}
+
+/// Generated admission result for `BindMember`, before bootstrap transport
+/// checks or supervisor binding mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindAdmissionResultKind {
+    #[default]
+    Bootstrap,
+    IdempotentAck,
+    Reject,
+}
+
+/// Generated public rejection class for `BindMember` admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindRejectionKind {
+    #[default]
+    AlreadyBound,
+    SenderMismatch,
+}
+
+/// Generated admission result for `AuthorizeSupervisor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorAuthorizeAdmissionResultKind {
+    #[default]
+    Proceed,
+    IdempotentAck,
+    Reject,
+}
+
+/// Generated public rejection class for `AuthorizeSupervisor` admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorAuthorizeRejectionKind {
+    #[default]
+    NotBound,
+    StaleSupervisor,
+    SenderMismatch,
 }
 
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
@@ -2135,5 +3700,8 @@ impl PeerAddress {
 // MeerkatMachine production body is catalog-owned. Keep bridge/runtime mechanics
 // outside this macro invocation; canonical semantics live in the catalog DSL.
 meerkat_machine_schema::meerkat_catalog_machine_dsl!("meerkat-runtime", "meerkat_machine::dsl");
+
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 
 // =====================================================================

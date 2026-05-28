@@ -7,15 +7,15 @@ use meerkat::surface::{
     immediate_delivery_failure,
 };
 use meerkat::{
-    DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, ForkContextSpec, HelperOptionsSpec,
-    MobTargetBinding, Occurrence, OccurrenceFailureClass, ScheduleDomainError,
-    ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
-    TargetProbeOutcome,
+    DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryTerminal, ForkContextSpec,
+    HelperOptionsSpec, MobTargetBinding, Occurrence, ScheduleDomainError, ScheduleSpawnTooling,
+    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, TargetProbeOutcome,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata};
 use meerkat_mob::{
-    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobError, MobId,
-    MobRunStatus, RunId,
+    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobError,
+    MobFlowRunPublicResultClass, MobId, MobRunStatus, RunId, mob_machine_run_public_result_class,
+    mob_machine_run_status_is_terminal,
 };
 
 use crate::MobMcpState;
@@ -387,6 +387,12 @@ fn helper_options_from_spec(
 ) -> Result<HelperOptions, ScheduleDomainError> {
     let mut options = HelperOptions::default();
     options.role_name = spec.role_name.clone().map(Into::into);
+    if spec.resolved_spawn_snapshot.is_some() {
+        return Err(ScheduleDomainError::InvalidSchedule(
+            "scheduled mob helper resolved spawn snapshots are compatibility mirrors and cannot authorize inherited tool visibility without a live generated parent authority"
+                .to_string(),
+        ));
+    }
     if let Some(tooling) = &spec.tooling {
         match tooling {
             ScheduleSpawnTooling::InheritParent { .. } | ScheduleSpawnTooling::Minimal
@@ -426,14 +432,6 @@ fn helper_options_from_spec(
         ScheduledMobBackendKind::External => MobBackendKind::External,
     });
     options.tool_access_policy = spec.tool_access_policy.clone();
-    if let Some(snapshot) = &spec.resolved_spawn_snapshot {
-        options.inherited_tool_filter = Some(meerkat_core::WitnessedToolFilter::new(
-            snapshot.tool_filter.clone(),
-            snapshot.tool_filter_witnesses.clone(),
-        ));
-        options.model_override = Some(snapshot.model.clone());
-        options.provider_params_override = snapshot.provider_params.clone();
-    }
     Ok(options)
 }
 
@@ -445,13 +443,13 @@ fn fork_context_from_spec(spec: &ForkContextSpec) -> ForkContext {
 }
 
 fn mob_delivery_failed_dispatch(occurrence: &Occurrence, error: MobError) -> DeliveryDispatch {
-    let failure_class = mob_error_failure_class(&error);
-    immediate_delivery_failure(occurrence, error.to_string(), failure_class, None, None)
+    let failure_reason = mob_error_failure_reason(&error);
+    immediate_delivery_failure(occurrence, error.to_string(), failure_reason, None, None)
 }
 
 fn mob_delivery_failed_terminal(error: MobError) -> DeliveryTerminal {
-    let failure_class = mob_error_failure_class(&error);
-    DeliveryTerminal::delivery_failed(error.to_string(), failure_class)
+    let failure_reason = mob_error_failure_reason(&error);
+    DeliveryTerminal::delivery_failed(error.to_string(), failure_reason)
 }
 
 fn mob_probe_error_outcome(error: MobError) -> Result<TargetProbeOutcome, ScheduleDomainError> {
@@ -467,32 +465,34 @@ fn mob_probe_error_outcome(error: MobError) -> Result<TargetProbeOutcome, Schedu
 fn mob_error_is_missing_target(error: &MobError) -> bool {
     matches!(
         error,
-        MobError::ProfileNotFound(_)
+        MobError::MobNotFound(_)
+            | MobError::ProfileNotFound(_)
             | MobError::MemberNotFound(_)
             | MobError::FlowNotFound(_)
             | MobError::RunNotFound(_)
             | MobError::WorkNotFound(_)
-    ) || matches!(error, MobError::Internal(detail) if detail.starts_with("mob not found:"))
+    )
 }
 
-fn mob_error_failure_class(error: &MobError) -> OccurrenceFailureClass {
+fn mob_error_failure_reason(error: &MobError) -> DeliveryFailureReason {
     match error {
-        MobError::ProfileNotFound(_)
+        MobError::MobNotFound(_)
+        | MobError::ProfileNotFound(_)
         | MobError::MemberNotFound(_)
         | MobError::FlowNotFound(_)
         | MobError::RunNotFound(_)
-        | MobError::WorkNotFound(_) => OccurrenceFailureClass::TargetMissing,
-        MobError::MemberAlreadyExists(_) => OccurrenceFailureClass::TargetBusy,
+        | MobError::WorkNotFound(_) => DeliveryFailureReason::TargetMissing,
+        MobError::MemberAlreadyExists(_) => DeliveryFailureReason::TargetBusy,
         MobError::StorageError(_)
         | MobError::SessionError(_)
         | MobError::CommsError(_)
         | MobError::MemberRestoreFailed { .. }
         | MobError::KickoffWaitTimedOut { .. }
         | MobError::ReadyWaitTimedOut { .. }
-        | MobError::FlowTurnTimedOut => OccurrenceFailureClass::TransportError,
-        MobError::Internal(_) => OccurrenceFailureClass::InternalError,
-        MobError::CallbackPending { .. } => OccurrenceFailureClass::RuntimeRejected,
-        _ => OccurrenceFailureClass::MobRejected,
+        | MobError::FlowTurnTimedOut => DeliveryFailureReason::TransportError,
+        MobError::Internal(_) => DeliveryFailureReason::InternalError,
+        MobError::CallbackPending { .. } => DeliveryFailureReason::RuntimeRejected,
+        _ => DeliveryFailureReason::MobRejected,
     }
 }
 
@@ -504,20 +504,35 @@ fn mob_flow_completion_future(
     Box::pin(async move {
         loop {
             match runtime.flow_status(&mob_id, run_id.clone()).await {
-                Ok(Some(MobRunStatus::Completed)) => {
-                    return Ok(DeliveryTerminal::completed(None));
+                Ok(Some(status)) => {
+                    let terminal = match mob_machine_run_status_is_terminal(&run_id, &status) {
+                        Ok(terminal) => terminal,
+                        Err(error) => return Ok(mob_delivery_failed_terminal(error)),
+                    };
+                    if terminal {
+                        let result_class =
+                            match mob_machine_run_public_result_class(&run_id, &status) {
+                                Ok(result_class) => result_class,
+                                Err(error) => return Ok(mob_delivery_failed_terminal(error)),
+                            };
+                        return Ok(match result_class {
+                            MobFlowRunPublicResultClass::Success => {
+                                DeliveryTerminal::completed(None)
+                            }
+                            MobFlowRunPublicResultClass::Error => {
+                                DeliveryTerminal::delivery_failed(
+                                    format!("mob flow terminated as {status:?}"),
+                                    DeliveryFailureReason::MobRejected,
+                                )
+                            }
+                        });
+                    }
+                    sleep(Duration::from_millis(100)).await;
                 }
-                Ok(Some(status)) if status.is_terminal() => {
-                    return Ok(DeliveryTerminal::delivery_failed(
-                        format!("mob flow terminated as {status:?}"),
-                        OccurrenceFailureClass::MobRejected,
-                    ));
-                }
-                Ok(Some(_)) => sleep(Duration::from_millis(100)).await,
                 Ok(None) => {
                     return Ok(DeliveryTerminal::delivery_failed(
                         format!("mob flow run disappeared: {run_id}"),
-                        OccurrenceFailureClass::TargetMissing,
+                        DeliveryFailureReason::TargetMissing,
                     ));
                 }
                 Err(error) => return Ok(mob_delivery_failed_terminal(error)),
@@ -542,7 +557,7 @@ mod tests {
     use meerkat_core::tool_scope::ToolFilter;
     use serde_json::value::RawValue;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct RecordingMobRuntime {
         members: Mutex<BTreeSet<String>>,
         flows: Mutex<BTreeSet<String>>,
@@ -551,7 +566,24 @@ mod tests {
         spawn_helpers: Mutex<Vec<(String, String, HelperOptions)>>,
         member_exists_error: Mutex<Option<String>>,
         flow_run_missing: Mutex<bool>,
+        flow_status: Mutex<MobRunStatus>,
         next_run_id: Mutex<Option<RunId>>,
+    }
+
+    impl Default for RecordingMobRuntime {
+        fn default() -> Self {
+            Self {
+                members: Mutex::new(BTreeSet::new()),
+                flows: Mutex::new(BTreeSet::new()),
+                sent_members: Mutex::new(Vec::new()),
+                run_flows: Mutex::new(Vec::new()),
+                spawn_helpers: Mutex::new(Vec::new()),
+                member_exists_error: Mutex::new(None),
+                flow_run_missing: Mutex::new(false),
+                flow_status: Mutex::new(MobRunStatus::Completed),
+                next_run_id: Mutex::new(None),
+            }
+        }
     }
 
     impl RecordingMobRuntime {
@@ -646,7 +678,9 @@ mod tests {
             if *self.flow_run_missing.lock().expect("flow run missing lock") {
                 return Ok(None);
             }
-            Ok(Some(MobRunStatus::Completed))
+            Ok(Some(
+                self.flow_status.lock().expect("flow status lock").clone(),
+            ))
         }
 
         async fn spawn_helper(
@@ -697,9 +731,11 @@ mod tests {
             labels: Default::default(),
             planning_horizon_days: None,
             planning_horizon_occurrences: None,
-        });
+        })
+        .expect("sample schedule creation should pass generated authority");
         let mut occurrence =
-            Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now());
+            Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now())
+                .expect("sample occurrence planning should pass generated authority");
         occurrence.attempt_count = 1;
         occurrence
     }
@@ -849,10 +885,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn helper_delivery_preserves_resolved_spawn_snapshot() {
-        let runtime = Arc::new(RecordingMobRuntime::default());
-        let host = MobMcpScheduleHost::from_runtime(runtime.clone());
+    #[test]
+    fn helper_options_reject_resolved_spawn_snapshot_without_live_authority() {
         let filter = ToolFilter::Allow(["send", "read_file"].into_iter().collect());
         let filter_witnesses: std::collections::BTreeMap<
             String,
@@ -875,60 +909,56 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let binding = MobTargetBinding::SpawnHelper {
-            mob_id: "ops".to_string(),
-            member_id: "deploy-monitor".to_string(),
-            prompt: "Check deploy state.".to_string(),
-            options: HelperOptionsSpec {
-                tooling: Some(ScheduleSpawnTooling::Profile {
-                    name: "delegate".to_string(),
-                    allow_overlay: None,
-                    deny_overlay: None,
-                }),
-                resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
-                    tool_filter: filter.clone(),
-                    tool_filter_witnesses: filter_witnesses.clone(),
-                    model: "claude-snapshot".to_string(),
-                    provider_params: Some(serde_json::json!({"thinking_budget": 1024})),
-                }),
-                ..HelperOptionsSpec::default()
-            },
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::Profile {
+                name: "delegate".to_string(),
+                allow_overlay: None,
+                deny_overlay: None,
+            }),
+            resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
+                tool_filter: filter,
+                tool_filter_witnesses: filter_witnesses,
+            }),
+            ..HelperOptionsSpec::default()
         };
-        let occurrence = sample_occurrence(binding.clone());
 
-        let dispatch = host
-            .deliver_mob_target(&occurrence, &binding)
-            .await
-            .expect("delivery dispatch");
-        let terminal = (dispatch.completion).await.expect("completion");
-        assert_eq!(terminal.phase, meerkat::OccurrencePhase::Completed);
+        let error = helper_options_from_spec(&spec)
+            .expect_err("resolved snapshots must not authorize scheduled inherited visibility");
 
-        let helpers = runtime.spawn_helpers.lock().expect("spawn lock");
-        assert_eq!(helpers.len(), 1);
-        let (_, identity, options) = &helpers[0];
-        assert_eq!(identity, "deploy-monitor");
-        assert_eq!(
-            options
-                .role_name
-                .as_ref()
-                .map(meerkat_mob::ProfileName::as_str),
-            Some("delegate")
-        );
-        assert_eq!(
-            options.inherited_tool_filter.as_ref(),
-            Some(&meerkat_core::WitnessedToolFilter::new(
-                filter,
-                filter_witnesses
-            ))
-        );
-        assert_eq!(options.model_override.as_deref(), Some("claude-snapshot"));
-        assert_eq!(
-            options.provider_params_override,
-            Some(serde_json::json!({"thinking_budget": 1024}))
-        );
         assert!(
-            options.override_profile.is_none(),
-            "schedule snapshot should not fabricate a replacement role profile"
+            matches!(&error, ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("compatibility mirrors")
+                    && message.contains("live generated parent authority")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn helper_options_reject_malformed_resolved_snapshot_without_live_authority() {
+        let spec = HelperOptionsSpec {
+            resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
+                tool_filter: ToolFilter::Allow(["send", "read_file"].into_iter().collect()),
+                tool_filter_witnesses: [(
+                    "send".to_string(),
+                    meerkat_core::ToolVisibilityWitness {
+                        stable_owner_key: Some("test-owner:send".to_string()),
+                        last_seen_provenance: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..HelperOptionsSpec::default()
+        };
+
+        let error = helper_options_from_spec(&spec)
+            .expect_err("invalid snapshot witness set should fail closed");
+
+        assert!(
+            matches!(&error, ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("compatibility mirrors")
+                    && message.contains("live generated parent authority")),
+            "unexpected error: {error:?}"
         );
     }
 
@@ -957,8 +987,8 @@ mod tests {
 
         assert_eq!(terminal.phase, meerkat::OccurrencePhase::DeliveryFailed);
         assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::TargetMissing)
+            terminal.delivery_failure_reason,
+            Some(DeliveryFailureReason::TargetMissing)
         );
         assert_eq!(
             terminal.detail.as_deref(),
@@ -966,19 +996,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn flow_completion_uses_generated_public_result_class_for_success() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        let run_id = RunId::new();
+        *runtime.next_run_id.lock().expect("run id lock") = Some(run_id.clone());
+        let host = MobMcpScheduleHost::from_runtime(runtime);
+        let binding = MobTargetBinding::Flow {
+            mob_id: "ops".to_string(),
+            flow_id: "release-check".to_string(),
+            params: raw_json(r"{}"),
+        };
+        let occurrence = sample_occurrence(binding.clone());
+
+        let dispatch = host
+            .deliver_mob_target(&occurrence, &binding)
+            .await
+            .expect("delivery dispatch");
+        let terminal = (dispatch.completion).await.expect("completion");
+
+        assert_eq!(terminal.phase, meerkat::OccurrencePhase::Completed);
+        assert_eq!(terminal.delivery_failure_reason, None);
+        assert_eq!(terminal.detail, None);
+    }
+
+    #[tokio::test]
+    async fn flow_completion_uses_generated_public_result_class_for_failure() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        *runtime.flow_status.lock().expect("flow status lock") = MobRunStatus::Failed;
+        let run_id = RunId::new();
+        *runtime.next_run_id.lock().expect("run id lock") = Some(run_id.clone());
+        let host = MobMcpScheduleHost::from_runtime(runtime);
+        let binding = MobTargetBinding::Flow {
+            mob_id: "ops".to_string(),
+            flow_id: "release-check".to_string(),
+            params: raw_json(r"{}"),
+        };
+        let occurrence = sample_occurrence(binding.clone());
+
+        let dispatch = host
+            .deliver_mob_target(&occurrence, &binding)
+            .await
+            .expect("delivery dispatch");
+        let terminal = (dispatch.completion).await.expect("completion");
+
+        assert_eq!(terminal.phase, meerkat::OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(DeliveryFailureReason::MobRejected)
+        );
+        assert_eq!(
+            terminal.detail.as_deref(),
+            Some("mob flow terminated as Failed")
+        );
+    }
+
     #[test]
-    fn mob_error_failure_class_maps_common_target_failures() {
+    fn mob_error_failure_reason_maps_common_target_failures() {
         assert_eq!(
-            mob_error_failure_class(&MobError::MemberNotFound(AgentIdentity::from("missing"))),
-            OccurrenceFailureClass::TargetMissing
+            mob_error_failure_reason(&MobError::MemberNotFound(AgentIdentity::from("missing"))),
+            DeliveryFailureReason::TargetMissing
         );
         assert_eq!(
-            mob_error_failure_class(&MobError::MemberAlreadyExists(AgentIdentity::from("busy"))),
-            OccurrenceFailureClass::TargetBusy
+            mob_error_failure_reason(&MobError::MemberAlreadyExists(AgentIdentity::from("busy"))),
+            DeliveryFailureReason::TargetBusy
         );
         assert_eq!(
-            mob_error_failure_class(&MobError::Internal("boom".to_string())),
-            OccurrenceFailureClass::InternalError
+            mob_error_failure_reason(&MobError::Internal("boom".to_string())),
+            DeliveryFailureReason::InternalError
         );
     }
 }

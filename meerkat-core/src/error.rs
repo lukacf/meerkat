@@ -380,11 +380,10 @@ pub enum AgentError {
         message: String,
     },
 
-    /// The session has no pending user/tool-results boundary for `run_pending`.
+    /// Generated pending-continuation authority found no resumable boundary.
     ///
-    /// Returned when `RuntimeExecutionKind::ResumePending` is requested but the
-    /// session's last message is not `User` or `ToolResults`. The caller should
-    /// treat this as a successful no-op (no turn ran, no output produced).
+    /// The caller should treat this as a successful no-op (no turn ran, no
+    /// output produced).
     #[error("no pending boundary for resume")]
     NoPendingBoundary,
 }

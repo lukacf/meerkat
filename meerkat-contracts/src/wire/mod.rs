@@ -38,8 +38,8 @@ pub use comms::{
     HandlingMode as WireCommsHandlingMode, InputSource as WireCommsInputSource,
     InputStreamMode as WireCommsInputStreamMode, PeerAddress, PeerCapabilitySet,
     PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
-    PeerName as WireCommsPeerName, PeerReachability, PeerReachabilityReason, PeerSendability,
-    PeerTransport, ResponseStatus as WireCommsResponseStatus,
+    PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
+    ResponseStatus as WireCommsResponseStatus,
 };
 pub use connection::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
@@ -79,12 +79,13 @@ pub use image_generation::{
     WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 pub use live::{
-    LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
-    LiveOpenTransport, LiveRefreshResult, LiveRefreshStatus, LiveSendInputParams, LiveStatusResult,
-    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, WireLiveAdapterErrorCode,
-    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveChannelCapabilities,
-    WireLiveConfigRejectionReason, WireLiveContinuityMode, WireLiveDegradationReason,
-    WireLiveResponseModality, WireLiveTransportBootstrap, WireProvider,
+    LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams, LiveInputChunkWire,
+    LiveOpenParams, LiveOpenResult, LiveOpenTransport, LiveRefreshResult, LiveRefreshStatus,
+    LiveSendInputParams, LiveStatusResult, LiveTruncateParams, LiveWebrtcAnswerParams,
+    LiveWebrtcAnswerResult, WireLiveAdapterErrorCode, WireLiveAdapterObservation,
+    WireLiveAdapterStatus, WireLiveChannelCapabilities, WireLiveConfigRejectionReason,
+    WireLiveContinuityMode, WireLiveDegradationReason, WireLiveResponseModality,
+    WireLiveTransportBootstrap, WireProvider,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
@@ -171,9 +172,9 @@ pub use supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
     BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeHardCancelPayload, BridgeMemberRuntimeState, BridgeObservationResponse,
-    BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload, BridgeProtocolVersion,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    BridgeHardCancelPayload, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
+    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
+    BridgeProtocolVersion, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
     SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION,
     SUPERVISOR_BRIDGE_INTENT, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
     SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS, UnsupportedBridgeProtocolVersion,

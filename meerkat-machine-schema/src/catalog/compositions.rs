@@ -9,13 +9,15 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    ActorKind, ActorSchema, ClosurePolicy, CompositionDriver, CompositionDriverRustBinding,
-    CompositionInvariant, CompositionInvariantKind, CompositionSchema, CompositionStateLimits,
-    CompositionTransactionPlan, CompositionWitness, CompositionWitnessField,
-    CompositionWitnessInput, CompositionWitnessTransition, CompositionWitnessTransitionOrder,
-    DriverDispatchRoute, EffectHandoffProtocol, EntryInput, Expr, FeedbackFieldBinding,
-    FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance,
-    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
+    ActorKind, ActorSchema, ClosurePolicy, CommsTrustAuthorityOperation,
+    CommsTrustAuthorityProtocol, CommsTrustAuthoritySourceKind, CompositionDriver,
+    CompositionDriverRustBinding, CompositionInvariant, CompositionInvariantKind,
+    CompositionSchema, CompositionStateLimits, CompositionTransactionPlan, CompositionWitness,
+    CompositionWitnessField, CompositionWitnessInput, CompositionWitnessTransition,
+    CompositionWitnessTransitionOrder, DriverDispatchRoute, DurableMarkerFieldBinding,
+    DurableMarkerProtocol, DurableMarkerRelationProtocol, EffectHandoffProtocol, EntryInput, Expr,
+    FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding,
+    MachineInstance, ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
     RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
     RouteVariantId, WatchedEffect,
 };
@@ -138,7 +140,10 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
                 "occurrence",
                 RouteTargetKind::Input,
                 "Supersede",
-                &[bind("superseded_by_revision", "superseding_revision")],
+                &[
+                    bind("superseded_by_revision", "superseding_revision"),
+                    bind("at_utc_ms", "at_utc_ms"),
+                ],
             ),
             // Reciprocal ack (wave-d D-f): once an occurrence absorbs
             // Supersede it emits OccurrencesSuperseded, routed back to
@@ -280,7 +285,10 @@ pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
                 "occurrence",
                 RouteTargetKind::Input,
                 "Supersede",
-                &[bind("superseded_by_revision", "superseding_revision")],
+                &[
+                    bind("superseded_by_revision", "superseding_revision"),
+                    bind("at_utc_ms", "at_utc_ms"),
+                ],
             ),
             route(
                 "occurrence_supersede_ack_returns_to_schedule",
@@ -370,7 +378,10 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
                 "occurrence",
                 RouteTargetKind::Input,
                 "Supersede",
-                &[bind("superseded_by_revision", "superseding_revision")],
+                &[
+                    bind("superseded_by_revision", "superseding_revision"),
+                    bind("at_utc_ms", "at_utc_ms"),
+                ],
             ),
             route(
                 "occurrence_supersede_ack_returns_to_schedule",
@@ -420,6 +431,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
     let mut handoff_protocols = Vec::new();
     handoff_protocols.extend(mob_bundle_composition().handoff_protocols);
     handoff_protocols.extend(external_tool_bundle_composition().handoff_protocols);
+    handoff_protocols.extend(comms_trust_bundle_composition().handoff_protocols);
     handoff_protocols.extend(supervisor_trust_bundle_composition().handoff_protocols);
     handoff_protocols.extend(mob_destroy_session_ingress_bundle_composition().handoff_protocols);
 
@@ -442,6 +454,8 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             machine_actor("mob_kernel"),
             owner_actor("ops_lifecycle_owner"),
             owner_actor("surface_host_owner"),
+            owner_actor("comms_trust_reconcile_owner"),
+            owner_actor("mob_comms_trust_owner"),
             owner_actor("supervisor_bridge_owner"),
             owner_actor("mob_destroy_session_ingress_owner"),
         ],
@@ -492,6 +506,9 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "Ingest",
                 &[
                     bind("runtime_id", "agent_runtime_id"),
+                    bind("fence_token", "fence_token"),
+                    bind("generation", "generation"),
+                    bind("session_id", "session_id"),
                     bind("work_id", "work_id"),
                     bind("origin", "origin"),
                 ],
@@ -859,6 +876,87 @@ fn named_variant(enum_name: &str, variant: &str) -> Expr {
     }
 }
 
+fn effect_extractor_rust_binding(
+    module_path: &str,
+    required_imports: &[&str],
+    effect_enum_path: &str,
+    transition_type_path: &str,
+) -> ProtocolRustBinding {
+    ProtocolRustBinding {
+        module_path: module_path.into(),
+        generation_mode: ProtocolGenerationMode::EffectExtractor,
+        required_imports: required_imports
+            .iter()
+            .map(|import| (*import).into())
+            .collect(),
+        authority_type_path: None,
+        mutator_trait_path: None,
+        input_enum_path: None,
+        effect_enum_path: Some(effect_enum_path.into()),
+        transition_type_path: Some(transition_type_path.into()),
+        error_type_path: None,
+        executor_trigger_input_variant: None,
+        bridge_source_type_path: None,
+        helper_return_shape: ProtocolHelperReturnShape::Obligations,
+        handle_trait_path: None,
+        handle_feedback_bindings: vec![],
+        input_payload_module_path: None,
+        additional_modes: vec![],
+    }
+}
+
+struct TrustHandoffProtocolSpec<'a> {
+    name: &'a str,
+    producer_instance: &'a str,
+    effect_variant: &'a str,
+    realizing_actor: &'a str,
+    source_kind: CommsTrustAuthoritySourceKind,
+    row_owner_kind: Option<CommsTrustAuthoritySourceKind>,
+    allowed_operations: &'a [CommsTrustAuthorityOperation],
+    obligation_fields: &'a [&'a str],
+    module_path: &'a str,
+    required_imports: &'a [&'a str],
+    effect_enum_path: &'a str,
+    transition_type_path: &'a str,
+}
+
+fn trust_handoff_protocol(spec: TrustHandoffProtocolSpec<'_>) -> EffectHandoffProtocol {
+    EffectHandoffProtocol {
+        name: protocol_id(spec.name),
+        producer_instance: mi_id(spec.producer_instance),
+        effect_variant: ev_id(spec.effect_variant),
+        realizing_actor: act_id(spec.realizing_actor),
+        correlation_fields: spec
+            .obligation_fields
+            .iter()
+            .map(|field| fld_id(field))
+            .collect(),
+        obligation_fields: spec
+            .obligation_fields
+            .iter()
+            .map(|field| fld_id(field))
+            .collect(),
+        allowed_feedback_inputs: vec![],
+        closure_policy: ClosurePolicy::PublicationOnly,
+        liveness_annotation: Some(
+            "generated authority publication is consumed by the owning runtime; no source-machine feedback is declared"
+                .into(),
+        ),
+        comms_trust_authority: Some(CommsTrustAuthorityProtocol {
+            source_kind: spec.source_kind,
+            row_owner_kind: spec.row_owner_kind,
+            allowed_operations: spec.allowed_operations.to_vec(),
+        }),
+        durable_marker: None,
+        rust: effect_extractor_rust_binding(
+            spec.module_path,
+            spec.required_imports,
+            spec.effect_enum_path,
+            spec.transition_type_path,
+        ),
+    }
+}
+
 fn transaction_plan(
     name: &str,
     trigger: &str,
@@ -913,26 +1011,22 @@ pub fn compat_composition_schemas() -> Vec<CompositionSchema> {
 /// Host composition for the `ops_barrier_satisfaction` handoff protocol.
 ///
 /// The producer is the canonical `MeerkatMachine` which declares
-/// `WaitAllSatisfied { wait_request_id, operation_ids }` as a
+/// `WaitAllSatisfied { wait_request_id, run_id, operation_ids }` as a
 /// local-disposition effect. The realizing owner — the runtime's ops
 /// lifecycle shell — observes the barrier closure and feeds back
-/// through the `OpsBarrierSatisfied { operation_ids }` input; the
+/// through the `OpsBarrierSatisfied { run_id, operation_ids }` input; the
 /// `HandleBridge` mode routes the same payload through
 /// `TurnStateHandle::ops_barrier_satisfied` for runtime-backed sessions.
 ///
 /// Modes: primary `ShellBridge` (accept + authority.apply submitters),
 /// secondary `HandleBridge` (handle-driven submitter suffixed `_handle`).
 fn mob_bundle_composition() -> CompositionSchema {
-    // Handle method takes `operation_ids: BTreeSet<OperationId>` — the
-    // obligation field is `Set<OperationId>` which renders as
-    // `Vec<OperationId>`. The accessor consumes the obligation vector into the
-    // handle's typed set.
+    // Handle method takes `run_id: RunId` and
+    // `operation_ids: BTreeSet<OperationId>` — the obligation field is
+    // `Set<OperationId>` which renders as `Vec<OperationId>`. The accessor
+    // consumes the obligation vector into the handle's typed set.
     let mut handle_accessors = BTreeMap::new();
     handle_accessors.insert(fld_id("operation_ids"), ".into_iter().collect()".into());
-    // Handle method takes only `operation_ids`; the obligation carries
-    // a `wait_request_id` correlation token that the turn-state handle
-    // never consumes (the ops-lifecycle owner matches on it internally,
-    // not through the handle).
 
     CompositionSchema {
         name: comp_id("mob_bundle"),
@@ -947,20 +1041,28 @@ fn mob_bundle_composition() -> CompositionSchema {
             producer_instance: mi_id("meerkat"),
                 effect_variant: ev_id("WaitAllSatisfied"),
                 realizing_actor: act_id("ops_lifecycle_owner"),
-                correlation_fields: vec![fld_id("operation_ids")],
-            obligation_fields: vec![fld_id("operation_ids")],
+                correlation_fields: vec![fld_id("run_id"), fld_id("operation_ids")],
+            obligation_fields: vec![fld_id("run_id"), fld_id("operation_ids")],
                 allowed_feedback_inputs: vec![FeedbackInputRef {
                     machine_instance: mi_id("meerkat"),
                     input_variant: iv_id("OpsBarrierSatisfied"),
-                    field_bindings: vec![FeedbackFieldBinding {
-                        input_field: fld_id("operation_ids"),
-                        source: FeedbackFieldSource::ObligationField(fld_id("operation_ids")),
-                    }],
+                    field_bindings: vec![
+                        FeedbackFieldBinding {
+                            input_field: fld_id("run_id"),
+                            source: FeedbackFieldSource::ObligationField(fld_id("run_id")),
+                        },
+                        FeedbackFieldBinding {
+                            input_field: fld_id("operation_ids"),
+                            source: FeedbackFieldSource::ObligationField(fld_id("operation_ids")),
+                        },
+                    ],
                 }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "eventual feedback under task-scheduling fairness".into(),
             ),
+            comms_trust_authority: None,
+            durable_marker: None,
             rust: ProtocolRustBinding {
                 module_path: "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs"
                     .into(),
@@ -975,7 +1077,7 @@ fn mob_bundle_composition() -> CompositionSchema {
                 generation_mode: ProtocolGenerationMode::HandleBridge,
                 required_imports: vec![
                     "use crate::handles::{DslTransitionError, TurnStateHandle};".into(),
-                    "use crate::OperationId;".into(),
+                    "use crate::{OperationId, RunId};".into(),
                 ],
                 authority_type_path: None,
                 mutator_trait_path: None,
@@ -991,7 +1093,7 @@ fn mob_bundle_composition() -> CompositionSchema {
                     input_variant: iv_id("OpsBarrierSatisfied"),
                     method_name: "ops_barrier_satisfied".into(),
                     arg_accessors: handle_accessors,
-                    forwarded_fields: Some(vec![fld_id("operation_ids")]),
+                    forwarded_fields: Some(vec![fld_id("run_id"), fld_id("operation_ids")]),
                 }],
                 input_payload_module_path: None,
                 additional_modes: vec![],
@@ -1115,6 +1217,8 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 liveness_annotation: Some(
                     "eventual feedback under surface connection liveness".into(),
                 ),
+                comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/protocol_surface_completion.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1186,6 +1290,8 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 liveness_annotation: Some(
                     "eventual snapshot acknowledgement under surface host liveness".into(),
                 ),
+                comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs".into(),
@@ -1272,6 +1378,229 @@ fn owner_actor(name: &str) -> ActorSchema {
     }
 }
 
+/// Host composition for comms trust projection mutation obligations.
+///
+/// The MeerkatMachine and MobMachine own the semantic peer/trust facts. These
+/// protocols turn their emitted effects into typed obligations consumed by the
+/// runtime/mob comms owners; the owners may only mutate the comms projection by
+/// carrying one of these obligations through generated protocol helpers.
+fn comms_trust_bundle_composition() -> CompositionSchema {
+    let member_wiring_imports = [
+        "use crate::machines::mob_machine::{AgentIdentity, MemberPeerEndpoint, MobMachineAuthority, MobMachineEffect, MobMachineTransition, MobPhase, PeerId, WiringEdge};",
+    ];
+    let member_imports = [
+        "use crate::machines::mob_machine::{MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId, WiringEdge};",
+    ];
+    let member_overlay_imports = [
+        "use crate::machines::mob_machine::{AgentIdentity, MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId};",
+    ];
+    let external_imports = [
+        "use crate::machines::mob_machine::{ExternalPeerEdge, MobMachineEffect, MobMachineTransition, PeerId};",
+    ];
+    let reciprocal_imports = [
+        "use crate::machines::mob_machine::{ExternalPeerEdge, ExternalPeerKey, MemberPeerEndpoint, MobMachineEffect, MobMachineTransition, PeerId};",
+    ];
+    CompositionSchema {
+        name: comp_id("comms_trust_bundle"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("meerkat"),
+                machine_name: mach_id("MeerkatMachine"),
+                actor: act_id("meerkat_kernel"),
+            },
+            MachineInstance {
+                instance_id: mi_id("mob"),
+                machine_name: mach_id("MobMachine"),
+                actor: act_id("mob_kernel"),
+            },
+        ],
+        actors: vec![
+            machine_actor("meerkat_kernel"),
+            machine_actor("mob_kernel"),
+            owner_actor("comms_trust_reconcile_owner"),
+            owner_actor("mob_comms_trust_owner"),
+        ],
+        handoff_protocols: vec![
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "comms_trust_reconcile",
+                producer_instance: "meerkat",
+                effect_variant: "CommsTrustReconcileRequested",
+                realizing_actor: "comms_trust_reconcile_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                row_owner_kind: None,
+                allowed_operations: &[
+                    CommsTrustAuthorityOperation::PublicAdd,
+                    CommsTrustAuthorityOperation::PublicRemove,
+                ],
+                obligation_fields: &[
+                    "local_endpoint",
+                    "peer_projection_epoch",
+                    "direct_peer_endpoints",
+                    "mob_overlay_peer_endpoints",
+                ],
+                module_path: "meerkat-runtime/src/generated/protocol_comms_trust_reconcile.rs",
+                required_imports: &[
+                    "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};",
+                ],
+                effect_enum_path: "crate::meerkat_machine::dsl::MeerkatMachineEffect",
+                transition_type_path: "crate::meerkat_machine::dsl::MeerkatMachineTransition",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_member_trust_wiring",
+                producer_instance: "mob",
+                effect_variant: "MemberTrustWiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                row_owner_kind: None,
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
+                obligation_fields: &[
+                    "edge",
+                    "a_peer_id",
+                    "b_peer_id",
+                    "a_endpoint",
+                    "b_endpoint",
+                    "epoch",
+                ],
+                module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_wiring.rs",
+                required_imports: &member_wiring_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_member_trust_unwiring",
+                producer_instance: "mob",
+                effect_variant: "MemberTrustUnwiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring,
+                row_owner_kind: Some(CommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring),
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
+                obligation_fields: &["edge", "a_peer_id", "b_peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_unwiring.rs",
+                required_imports: &member_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+            EffectHandoffProtocol {
+                name: protocol_id("mob_member_peer_overlay"),
+                producer_instance: mi_id("mob"),
+                effect_variant: ev_id("MemberPeerOverlayAuthorized"),
+                realizing_actor: act_id("mob_comms_trust_owner"),
+                correlation_fields: vec![
+                    fld_id("agent_identity"),
+                    fld_id("peer_id"),
+                    fld_id("epoch"),
+                ],
+                obligation_fields: vec![
+                    fld_id("agent_identity"),
+                    fld_id("peer_id"),
+                    fld_id("peer_overlay_endpoints"),
+                    fld_id("epoch"),
+                ],
+                allowed_feedback_inputs: vec![],
+                closure_policy: ClosurePolicy::PublicationOnly,
+                liveness_annotation: Some(
+                    "generated MobMachine peer overlay publication is consumed by the bridge owner before MeerkatMachine peer projection reconciliation"
+                        .into(),
+                ),
+                comms_trust_authority: None,
+                durable_marker: None,
+                rust: effect_extractor_rust_binding(
+                    "meerkat-mob/src/generated/protocol_mob_member_peer_overlay.rs",
+                    &member_overlay_imports,
+                    "crate::machines::mob_machine::MobMachineEffect",
+                    "crate::machines::mob_machine::MobMachineTransition",
+                ),
+            },
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_trust_wiring",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerTrustWiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                row_owner_kind: None,
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
+                obligation_fields: &["edge", "local_peer_id", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_wiring.rs",
+                required_imports: &external_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_trust_unwiring",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerTrustUnwiringRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
+                obligation_fields: &["edge", "local_peer_id", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_unwiring.rs",
+                required_imports: &external_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_trust_repair",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerTrustRepairRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
+                obligation_fields: &["edge", "local_peer_id", "peer_id", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_repair.rs",
+                required_imports: &external_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+            trust_handoff_protocol(TrustHandoffProtocolSpec {
+                name: "mob_external_peer_reciprocal_trust",
+                producer_instance: "mob",
+                effect_variant: "ExternalPeerReciprocalTrustRequested",
+                realizing_actor: "mob_comms_trust_owner",
+                source_kind: CommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+                row_owner_kind: Some(
+                    CommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+                ),
+                allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
+                obligation_fields: &["key", "edge", "peer_id", "peer_endpoint", "epoch"],
+                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
+                required_imports: &reciprocal_imports,
+                effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
+                transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
+            }),
+        ],
+        entry_inputs: vec![],
+        routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![CompositionInvariant {
+            name: "mob_member_peer_overlay_protocol_covered".into(),
+            kind: CompositionInvariantKind::HandoffProtocolCovered {
+                producer_instance: mi_id("mob"),
+                effect_variant: ev_id("MemberPeerOverlayAuthorized"),
+                protocol_name: protocol_id("mob_member_peer_overlay"),
+            },
+            statement: "peer-only bridge trust overlay facts cross from MobMachine into bridge reconciliation only through the explicit `mob_member_peer_overlay` generated handoff protocol".into(),
+            references_machines: vec![mi_id("mob"), mi_id("meerkat")],
+            references_actors: vec![act_id("mob_kernel"), act_id("mob_comms_trust_owner")],
+        }],
+        witnesses: vec![witness("comms_trust_projection_round_trip", &[])],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        closed_world: true,
+    }
+}
+
 /// Host composition for the `supervisor_trust_publish` and
 /// `supervisor_trust_revoke` handoff protocols — C-F2 step-lock
 /// formalisation for the trust-edge mutation that runs alongside
@@ -1285,43 +1614,40 @@ fn owner_actor(name: &str) -> ActorSchema {
 /// today (see `meerkat-runtime/src/meerkat_machine/dsl.rs` DSL comment
 /// `:114-134` and `state-scope-audit.md` §3 row F2).
 ///
-/// C-F2 formalises the step-lock as a generated obligation pair so the
-/// companion trust-edge mutation crosses from the supervisor-binding
-/// authority back through acknowledged owner feedback, not via a raw
-/// shell call that the machine forgets about. The canonical
+/// C-F2 formalises the step-lock as a generated obligation publication
+/// so the companion trust-edge mutation crosses from the
+/// supervisor-binding authority through minted generated trust-mutation
+/// authority, not via a raw shell call that the machine forgets about. The canonical
 /// `MeerkatMachine` effects host the `handoff_protocol` annotations;
 /// the realising actor `supervisor_bridge_owner` corresponds to
 /// `meerkat-runtime::comms_drain`, which calls
-/// `meerkat-comms::Router::{add,remove}_trusted_peer(...)` and emits
-/// the typed feedback ack through the generated protocol helper.
+/// `meerkat-comms::Router::{add,remove}_trusted_peer(...)` only with a
+/// generated `CommsTrustMutationAuthority`.
 ///
 /// Two protocols:
 ///
 /// * `supervisor_trust_publish` — publish trust edge (add trusted
 ///   peer). Emitted alongside `BindSupervisor` and
-///   `AuthorizeSupervisor`. Feedback: `SupervisorTrustEdgePublished`
-///   or `SupervisorTrustEdgePublishFailed` (the latter triggers a
-///   shell-side rollback of the supervisor-binding DSL commit —
-///   preserving the invariant that "trust edge is published iff
-///   `supervisor_binding_kind == Bound`").
+///   `AuthorizeSupervisor`. The generated obligation authorizes the
+///   private trust add/removal cleanup authority for the declared peer
+///   and epoch.
 /// * `supervisor_trust_revoke` — revoke trust edge (remove trusted
 ///   peer). Emitted alongside `RevokeSupervisor` and during the
-///   previous-supervisor cleanup half of `AuthorizeSupervisor`.
-///   Feedback: `SupervisorTrustEdgeRevoked` or
-///   `SupervisorTrustEdgeRevokeFailed`.
+///   previous-supervisor cleanup half of `AuthorizeSupervisor`. The
+///   generated obligation authorizes only the matching private trust
+///   removal.
 ///
-/// `closure_policy` is `AckRequired` for both: the shell must feed
-/// back success or failure. `liveness_annotation` documents that
-/// feedback is eventual under the comms transport's liveness guarantee
-/// (the existing `send_bridge_response` path already surfaces typed
-/// outcomes).
+/// `closure_policy` is `PublicationOnly` for both: the generated
+/// obligation mints the only trust-mutation authority the owning shell
+/// can spend, and there is no feedback input back into `MeerkatMachine`.
+/// `liveness_annotation` documents that publication is consumed under
+/// the comms transport's liveness guarantee.
 ///
 /// Mode: EffectExtractor. The owner (`comms_drain`) consumes the
 /// obligation via the generated extractor, calls `router.add_trusted_peer`
-/// / `remove_trusted_peer`, and submits feedback through the runtime's
-/// existing supervisor trust staging methods. Until those staging methods
-/// are lifted behind a sync handle bridge, the generated surface owns the
-/// obligation extraction and the hand-written owner owns the async ack.
+/// / `remove_trusted_peer` with the generated trust-mutation authority.
+/// The generated surface owns obligation extraction and authority minting;
+/// the hand-written owner can only spend that authority.
 fn supervisor_trust_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("supervisor_trust_bundle"),
@@ -1343,6 +1669,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 // cannot be confused across a rotation.
                 correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
                 obligation_fields: vec![
+                    fld_id("local_endpoint"),
                     fld_id("peer_id"),
                     fld_id("name"),
                     fld_id("address"),
@@ -1350,18 +1677,26 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     fld_id("epoch"),
                 ],
                 allowed_feedback_inputs: vec![],
-                closure_policy: ClosurePolicy::AckRequired,
+                closure_policy: ClosurePolicy::PublicationOnly,
                 liveness_annotation: Some(
-                    "eventual feedback under comms transport liveness — \
-                     `send_bridge_response` surfaces the typed outcome"
+                    "generated supervisor trust authority publication is consumed under comms transport liveness"
                         .into(),
                 ),
+                comms_trust_authority: Some(CommsTrustAuthorityProtocol {
+                    source_kind: CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
+                    row_owner_kind: None,
+                    allowed_operations: vec![
+                        CommsTrustAuthorityOperation::PrivateAdd,
+                        CommsTrustAuthorityOperation::PrivateRemove,
+                    ],
+                }),
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),
@@ -1396,20 +1731,31 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 effect_variant: ev_id("RevokeSupervisorTrustEdge"),
                 realizing_actor: act_id("supervisor_bridge_owner"),
                 correlation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
-                obligation_fields: vec![fld_id("peer_id"), fld_id("epoch")],
+                obligation_fields: vec![
+                    fld_id("local_endpoint"),
+                    fld_id("peer_id"),
+                    fld_id("epoch"),
+                ],
                 allowed_feedback_inputs: vec![],
-                closure_policy: ClosurePolicy::AckRequired,
+                closure_policy: ClosurePolicy::PublicationOnly,
                 liveness_annotation: Some(
-                    "eventual feedback under comms transport liveness — \
-                     `send_bridge_response` surfaces the typed outcome"
+                    "generated supervisor trust authority publication is consumed under comms transport liveness"
                         .into(),
                 ),
+                comms_trust_authority: Some(CommsTrustAuthorityProtocol {
+                    source_kind: CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke,
+                    row_owner_kind: Some(
+                        CommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish,
+                    ),
+                    allowed_operations: vec![CommsTrustAuthorityOperation::PrivateRemove],
+                }),
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path:
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),
@@ -1454,7 +1800,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     effect_variant: ev_id("PublishSupervisorTrustEdge"),
                     protocol_name: protocol_id("supervisor_trust_publish"),
                 },
-                statement: "supervisor trust-edge publication crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_publish` protocol".into(),
+                statement: "supervisor trust-edge publication crosses from the supervisor-binding authority into runtime trust mutation only through the explicit `supervisor_trust_publish` protocol and its generated trust authority".into(),
                 references_machines: vec![mi_id("meerkat")],
                 references_actors: vec![act_id("meerkat_kernel"), act_id("supervisor_bridge_owner")],
             },
@@ -1465,7 +1811,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                     effect_variant: ev_id("RevokeSupervisorTrustEdge"),
                     protocol_name: protocol_id("supervisor_trust_revoke"),
                 },
-                statement: "supervisor trust-edge revocation crosses from the supervisor-binding authority back into runtime acknowledgement only through the explicit `supervisor_trust_revoke` protocol".into(),
+                statement: "supervisor trust-edge revocation crosses from the supervisor-binding authority into runtime trust mutation only through the explicit `supervisor_trust_revoke` protocol and its generated trust authority".into(),
                 references_machines: vec![mi_id("meerkat")],
                 references_actors: vec![act_id("meerkat_kernel"), act_id("supervisor_bridge_owner")],
             },
@@ -1596,6 +1942,8 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
                 "eventual feedback: the mob destroy path awaits each session's DetachIngress ack before requesting runtime destroy"
                     .into(),
             ),
+            comms_trust_authority: None,
+            durable_marker: None,
             rust: ProtocolRustBinding {
                 module_path:
                     "meerkat-mob/src/generated/protocol_mob_destroying_session_ingress.rs"
@@ -1709,28 +2057,63 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             effect_variant: ev_id("EmitLifecycleEvent"),
             realizing_actor: act_id("auth_lease_owner"),
             correlation_fields: vec![fld_id("new_state")],
-            obligation_fields: vec![fld_id("new_state")],
+            obligation_fields: vec![
+                fld_id("new_state"),
+                fld_id("expires_at"),
+                fld_id("credential_generation"),
+                fld_id("credential_published_at_millis"),
+            ],
             allowed_feedback_inputs: vec![],
-            closure_policy: ClosurePolicy::AckRequired,
+            closure_policy: ClosurePolicy::PublicationOnly,
             liveness_annotation: Some(
                 "informative publication: AuthMachine's own transitions carry the \
                  authoritative phase fact; runtime owner refreshes the lease-state \
                  projection under task-scheduling fairness"
                     .into(),
             ),
+            comms_trust_authority: None,
+            durable_marker: Some(DurableMarkerProtocol {
+                metadata_key: "meerkat_auth_lifecycle".into(),
+                previous_metadata_key: "meerkat_previous_metadata".into(),
+                published_field: "published".into(),
+                version_field: "version".into(),
+                authority_field: "authority".into(),
+                protocol_field: "protocol".into(),
+                realm_field: "realm".into(),
+                binding_field: "binding".into(),
+                profile_field: "profile".into(),
+                schema_version: 4,
+                phase: DurableMarkerFieldBinding {
+                    marker_field: "phase".into(),
+                    obligation_field: fld_id("new_state"),
+                },
+                expires_at: DurableMarkerFieldBinding {
+                    marker_field: "expires_at".into(),
+                    obligation_field: fld_id("expires_at"),
+                },
+                generation: DurableMarkerFieldBinding {
+                    marker_field: "generation".into(),
+                    obligation_field: fld_id("credential_generation"),
+                },
+                credential_published_at_millis: DurableMarkerFieldBinding {
+                    marker_field: "credential_published_at_millis".into(),
+                    obligation_field: fld_id("credential_published_at_millis"),
+                },
+                relation: DurableMarkerRelationProtocol::AuthLeaseCredentialPublication,
+            }),
             rust: ProtocolRustBinding {
                 module_path:
                     "meerkat-runtime/src/generated/protocol_auth_lease_lifecycle_publication.rs"
                         .into(),
                 generation_mode: ProtocolGenerationMode::EffectExtractor,
                 required_imports: vec![
-                    "use crate::auth_machine::dsl::{AuthLifecyclePhase, AuthMachineEffect};".into(),
+                    "use crate::auth_machine::dsl::{AuthLifecyclePhase, AuthMachineEffect, AuthMachineTransition};".into(),
                 ],
                 authority_type_path: None,
                 mutator_trait_path: None,
                 input_enum_path: None,
                 effect_enum_path: Some("crate::auth_machine::dsl::AuthMachineEffect".into()),
-                transition_type_path: None,
+                transition_type_path: Some("crate::auth_machine::dsl::AuthMachineTransition".into()),
                 error_type_path: None,
                 executor_trigger_input_variant: None,
                 bridge_source_type_path: None,

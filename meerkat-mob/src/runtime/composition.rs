@@ -142,7 +142,7 @@ impl MobSeamEffect {
                 } else if id == &seam_facts::fields::fence_token() {
                     Some(FieldValue::U64(fence_token.0))
                 } else if id == &seam_facts::fields::generation() {
-                    Some(FieldValue::U64(generation.0))
+                    generation.map(|generation| FieldValue::U64(generation.0))
                 } else if id == &seam_facts::fields::session_id() {
                     Some(FieldValue::Str(session_id.0.as_str()))
                 } else {
@@ -152,6 +152,8 @@ impl MobSeamEffect {
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                 agent_runtime_id,
                 fence_token,
+                generation,
+                session_id,
                 work_id,
                 origin,
             }) => {
@@ -159,6 +161,10 @@ impl MobSeamEffect {
                     Some(FieldValue::Str(agent_runtime_id.as_str()))
                 } else if id == &seam_facts::fields::fence_token() {
                     Some(FieldValue::U64(fence_token.0))
+                } else if id == &seam_facts::fields::generation() {
+                    generation.map(|generation| FieldValue::U64(generation.0))
+                } else if id == &seam_facts::fields::session_id() {
+                    Some(FieldValue::Str(session_id.0.as_str()))
                 } else if id == &seam_facts::fields::work_id() {
                     Some(FieldValue::Str(work_id.0.as_str()))
                 } else if id == &seam_facts::fields::origin() {
@@ -496,7 +502,7 @@ mod tests {
             agent_identity: mob_dsl::AgentIdentity::from("agent"),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             fence_token: mob_dsl::FenceToken(7),
-            generation: mob_dsl::Generation(3),
+            generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
         };
         assert_eq!(
@@ -511,7 +517,7 @@ mod tests {
             agent_identity: mob_dsl::AgentIdentity::from("agent"),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             fence_token: mob_dsl::FenceToken(7),
-            generation: mob_dsl::Generation(3),
+            generation: Some(mob_dsl::Generation(3)),
             session_id: mob_dsl::SessionId::from("session-1"),
         };
         let effect = MobSeamEffect::Mob(body);
@@ -541,7 +547,7 @@ mod tests {
                     agent_identity: mob_dsl::AgentIdentity::from("agent"),
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                     fence_token: mob_dsl::FenceToken(7),
-                    generation: mob_dsl::Generation(3),
+                    generation: Some(mob_dsl::Generation(3)),
                     session_id: mob_dsl::SessionId::from("session-1"),
                 }),
                 seam_facts::route_binding_request_reaches_meerkat(),
@@ -550,6 +556,8 @@ mod tests {
                 MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                     agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                     fence_token: mob_dsl::FenceToken(7),
+                    generation: Some(mob_dsl::Generation(3)),
+                    session_id: mob_dsl::SessionId::from("session-1"),
                     work_id: mob_dsl::WorkId::from("work-1"),
                     origin: mob_dsl::WorkOrigin::External,
                 }),
@@ -602,6 +610,8 @@ mod tests {
         let body = mob_dsl::MobMachineEffect::RequestRuntimeIngress {
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-x"),
             fence_token: mob_dsl::FenceToken(1),
+            generation: Some(mob_dsl::Generation(2)),
+            session_id: mob_dsl::SessionId::from("session-x"),
             work_id: mob_dsl::WorkId::from("w-1"),
             origin: mob_dsl::WorkOrigin::External,
         };
@@ -612,6 +622,18 @@ mod tests {
                 .field(&fid("agent_runtime_id"))
                 .expect("agent_runtime_id"),
             FieldValue::Str("rt-x"),
+        ));
+        assert!(matches!(
+            effect.field(&fid("fence_token")).expect("fence_token"),
+            FieldValue::U64(1),
+        ));
+        assert!(matches!(
+            effect.field(&fid("generation")).expect("generation"),
+            FieldValue::U64(2),
+        ));
+        assert!(matches!(
+            effect.field(&fid("session_id")).expect("session_id"),
+            FieldValue::Str("session-x"),
         ));
         assert!(effect.field(&fid("runtime_id")).is_none());
         match effect.field(&fid("origin")).expect("origin") {
@@ -631,7 +653,7 @@ mod tests {
             agent_identity: mob_dsl::AgentIdentity::from("a"),
             agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt"),
             fence_token: mob_dsl::FenceToken(1),
-            generation: mob_dsl::Generation(0),
+            generation: Some(mob_dsl::Generation(0)),
             session_id: mob_dsl::SessionId::from("session-1"),
         };
         assert!(matches!(

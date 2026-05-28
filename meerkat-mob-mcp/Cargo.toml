@@ -40,9 +40,11 @@ tokio = { workspace = true }
 tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true }
 tempfile = { workspace = true }
+meerkat-runtime = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 ignored = ["chrono", "meerkat-client", "thiserror", "tempfile"]  # proc macros / transitive

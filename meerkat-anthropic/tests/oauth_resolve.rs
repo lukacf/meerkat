@@ -13,7 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -23,8 +23,7 @@ use meerkat_auth_core::auth_store::{
     RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
-    LeaseKey,
+    AuthLeaseHandle, AuthLeaseTransition, GeneratedAuthLeaseHandle, LeaseKey,
 };
 use meerkat_core::{
     AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
@@ -92,6 +91,77 @@ fn default_auth_binding() -> AuthBindingRef {
     }
 }
 
+fn fixture_refresh_observation_time(expires_at: u64) -> u64 {
+    if expires_at == u64::MAX {
+        0
+    } else {
+        expires_at.saturating_sub(1)
+    }
+}
+
+fn auth_lease_transition_for_test(
+    tokens: &PersistedTokens,
+    generation: u64,
+) -> (AuthLeaseTransition, GeneratedAuthLeaseHandle) {
+    let lease_key = LeaseKey::from_auth_binding(&default_auth_binding());
+    let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(tokens);
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    let mut transition = handle
+        .acquire_lease(&lease_key, expires_at)
+        .expect("fixture AuthMachine accepts acquired lease");
+    let target_generation = generation.max(1);
+    while transition.generation() < target_generation {
+        handle
+            .begin_refresh(&lease_key)
+            .expect("fixture AuthMachine accepts refresh start");
+        transition = handle
+            .complete_refresh(
+                &lease_key,
+                expires_at,
+                fixture_refresh_observation_time(expires_at),
+            )
+            .expect("fixture AuthMachine accepts refresh completion");
+    }
+    let generated = generated_auth_lease_handle_for_test(handle);
+    (transition, generated)
+}
+
+fn mark_tokens_and_auth_lease_handle_for_test(
+    tokens: &PersistedTokens,
+    generation: u64,
+    credential_published_after_millis: Option<u64>,
+) -> (PersistedTokens, GeneratedAuthLeaseHandle) {
+    let key = TokenKey::from_auth_binding(&default_auth_binding());
+    for _ in 0..100 {
+        let (transition, generated) = auth_lease_transition_for_test(tokens, generation);
+        let publication_time_matches = match credential_published_after_millis {
+            Some(after) => transition
+                .credential_published_at_millis()
+                .is_some_and(|published| published > after),
+            None => true,
+        };
+        if publication_time_matches {
+            let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                tokens,
+                &transition,
+            )
+            .expect("runtime AuthMachine transition marks fixture tokens");
+            return (marked, generated);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("fixture AuthMachine publication clock did not advance");
+}
+
+fn mark_tokens_lifecycle_published_for_test(
+    tokens: &PersistedTokens,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+) -> PersistedTokens {
+    mark_tokens_and_auth_lease_handle_for_test(tokens, generation, credential_published_at_millis).0
+}
+
 async fn assert_claude_ai_authorizer_headers(connection: &ResolvedConnection, token: &str) {
     let authorizer = connection
         .resolved_authorizer()
@@ -114,230 +184,36 @@ async fn assert_claude_ai_authorizer_headers(connection: &ResolvedConnection, to
     );
 }
 
-struct StaticAuthLeaseHandle {
-    expires_at: Option<u64>,
-    credential_published_at_millis: Option<u64>,
+fn generated_auth_lease_handle_for_test(
+    handle: Arc<meerkat_runtime::RuntimeAuthLeaseHandle>,
+) -> GeneratedAuthLeaseHandle {
+    meerkat_runtime::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(handle)
+        .expect("runtime AuthLeaseHandle is certified by generated AuthMachine authority")
 }
 
-impl StaticAuthLeaseHandle {
-    fn valid() -> Arc<Self> {
-        Arc::new(Self {
-            expires_at: None,
-            credential_published_at_millis: None,
-        })
-    }
-
-    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
-        Arc::new(Self {
-            expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
-            credential_published_at_millis: Some(1_000),
-        })
-    }
+fn valid_auth_lease_handle() -> GeneratedAuthLeaseHandle {
+    valid_auth_lease_handle_for_expires_at(u64::MAX)
 }
 
-impl AuthLeaseHandle for StaticAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        _lease_key: &LeaseKey,
-        _expires_at: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition {
-            generation: 1,
-            credential_published_at_millis: self.credential_published_at_millis,
-        })
-    }
-
-    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn complete_refresh(
-        &self,
-        _lease_key: &LeaseKey,
-        _new_expires_at: u64,
-        _now: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition {
-            generation: 1,
-            credential_published_at_millis: self.credential_published_at_millis,
-        })
-    }
-
-    fn refresh_failed(
-        &self,
-        _lease_key: &LeaseKey,
-        _permanent: bool,
-    ) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        AuthLeaseSnapshot {
-            phase: Some(AuthLeasePhase::Valid),
-            expires_at: self.expires_at,
-            credential_present: true,
-            generation: 1,
-            credential_published_at_millis: self.credential_published_at_millis,
-        }
-    }
+fn valid_auth_lease_handle_for_expires_at(expires_at: u64) -> GeneratedAuthLeaseHandle {
+    let lease_key = LeaseKey::from_auth_binding(&default_auth_binding());
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    handle
+        .acquire_lease(&lease_key, expires_at)
+        .expect("fixture AuthMachine accepts acquired lease");
+    generated_auth_lease_handle_for_test(handle)
 }
 
-struct MutableAuthLeaseHandle {
-    snapshot: Mutex<AuthLeaseSnapshot>,
-}
-
-impl MutableAuthLeaseHandle {
-    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
-        Arc::new(Self {
-            snapshot: Mutex::new(AuthLeaseSnapshot {
-                phase: Some(AuthLeasePhase::Valid),
-                expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
-                credential_present: true,
-                generation: 1,
-                credential_published_at_millis: Some(1_000),
-            }),
-        })
-    }
-}
-
-impl AuthLeaseHandle for MutableAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        _lease_key: &LeaseKey,
-        expires_at: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        self.complete_refresh(_lease_key, expires_at, 0)
-    }
-
-    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        let mut snapshot = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snapshot.phase = Some(AuthLeasePhase::Refreshing);
-        Ok(())
-    }
-
-    fn complete_refresh(
-        &self,
-        _lease_key: &LeaseKey,
-        new_expires_at: u64,
-        _now: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        let mut snapshot = self
-            .snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        snapshot.phase = Some(AuthLeasePhase::Valid);
-        snapshot.expires_at = Some(new_expires_at);
-        snapshot.credential_present = true;
-        snapshot.generation = snapshot.generation.saturating_add(1);
-        snapshot.credential_published_at_millis = Some(2_000);
-        Ok(AuthLeaseTransition {
-            generation: snapshot.generation,
-            credential_published_at_millis: snapshot.credential_published_at_millis,
-        })
-    }
-
-    fn refresh_failed(
-        &self,
-        _lease_key: &LeaseKey,
-        _permanent: bool,
-    ) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        self.snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
-
-struct ReauthRequiredAuthLeaseHandle;
-
-impl AuthLeaseHandle for ReauthRequiredAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        _lease_key: &LeaseKey,
-        _expires_at: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Err(DslTransitionError::guard_rejected(
-            "acquire_lease",
-            "reauth required",
-        ))
-    }
-
-    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn complete_refresh(
-        &self,
-        _lease_key: &LeaseKey,
-        _new_expires_at: u64,
-        _now: u64,
-    ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Err(DslTransitionError::guard_rejected(
-            "complete_refresh",
-            "reauth required",
-        ))
-    }
-
-    fn refresh_failed(
-        &self,
-        _lease_key: &LeaseKey,
-        _permanent: bool,
-    ) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        Ok(())
-    }
-
-    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        AuthLeaseSnapshot {
-            phase: Some(AuthLeasePhase::ReauthRequired),
-            expires_at: None,
-            credential_present: false,
-            generation: 1,
-            credential_published_at_millis: None,
-        }
-    }
+fn reauth_required_auth_lease_handle() -> GeneratedAuthLeaseHandle {
+    let lease_key = LeaseKey::from_auth_binding(&default_auth_binding());
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    handle
+        .acquire_lease(&lease_key, u64::MAX)
+        .expect("fixture AuthMachine accepts acquired lease");
+    handle
+        .mark_reauth_required(&lease_key)
+        .expect("fixture AuthMachine marks reauth required");
+    generated_auth_lease_handle_for_test(handle)
 }
 
 struct StaticRefreshCoordinator {
@@ -390,16 +266,12 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         account_id: None,
         metadata: serde_json::Value::Null,
     };
+    let (persisted, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&persisted, 1, Some(1_000));
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &persisted,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
-            ),
+            &persisted,
         )
         .await
         .unwrap();
@@ -407,7 +279,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted));
+        .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -485,13 +357,7 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &persisted,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: None,
-                },
-            ),
+            &mark_tokens_lifecycle_published_for_test(&persisted, 1, None),
         )
         .await
         .unwrap();
@@ -499,7 +365,7 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(Arc::new(ReauthRequiredAuthLeaseHandle));
+        .with_auth_lease_handle(reauth_required_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -543,7 +409,7 @@ async fn claude_ai_oauth_rejects_wrong_persisted_mode() {
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -597,7 +463,7 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
     );
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -636,19 +502,9 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    store
-        .save(
-            &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &expired,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
-            ),
-        )
-        .await
-        .unwrap();
+    let (marked_expired, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
+    store.save(&key, &marked_expired).await.unwrap();
     let refreshed = PersistedTokens {
         auth_mode: PersistedAuthMode::ClaudeAiOauth,
         primary_secret: Some("refreshed-access-NEW".into()),
@@ -668,7 +524,7 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
         .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
-        .with_auth_lease_handle(MutableAuthLeaseHandle::valid_for_tokens(&expired));
+        .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -702,19 +558,9 @@ async fn claude_ai_oauth_refresh_failure_is_typed() {
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    store
-        .save(
-            &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &expired,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
-            ),
-        )
-        .await
-        .unwrap();
+    let (marked_expired, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
+    store.save(&key, &marked_expired).await.unwrap();
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
@@ -722,7 +568,7 @@ async fn claude_ai_oauth_refresh_failure_is_typed() {
         .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
             error: RefreshError::Refresh("claude refresh transport failed".into()),
         }))
-        .with_auth_lease_handle(MutableAuthLeaseHandle::valid_for_tokens(&expired));
+        .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -757,19 +603,9 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    store
-        .save(
-            &key,
-            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
-                &fresh,
-                AuthLeaseTransition {
-                    generation: 1,
-                    credential_published_at_millis: Some(1_000),
-                },
-            ),
-        )
-        .await
-        .unwrap();
+    let (marked_fresh, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&fresh, 1, Some(1_000));
+    store.save(&key, &marked_fresh).await.unwrap();
     let refreshed = PersistedTokens {
         auth_mode: PersistedAuthMode::ClaudeAiOauth,
         primary_secret: Some("forced-claude-access".into()),
@@ -789,7 +625,7 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
         .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&fresh))
+        .with_auth_lease_handle(auth_lease)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -823,10 +659,11 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
         account_id: None,
         metadata: serde_json::Value::Null,
     };
+    let (persisted, auth_lease) = mark_tokens_and_auth_lease_handle_for_test(&persisted, 1, None);
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
+            &persisted,
         )
         .await
         .unwrap();
@@ -834,7 +671,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     let realm = realm_with_oauth_binding("oauth_to_api_key");
     let env = ResolverEnvironment::testing()
         .with_token_store(store.clone())
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -873,7 +710,7 @@ async fn oauth_to_api_key_rejects_claude_ai_oauth_mode() {
     let realm = realm_with_oauth_binding("oauth_to_api_key");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));

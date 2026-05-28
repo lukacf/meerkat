@@ -249,6 +249,14 @@ fn tool_visibility_witness_identity_len(
     schema: &MachineSchema,
     value: &KernelValue,
 ) -> Option<usize> {
+    let value = match value {
+        KernelValue::Named { type_name, value }
+            if named_value_type_is(type_name, TOOL_VISIBILITY_WITNESS_TYPE) =>
+        {
+            value.as_ref()
+        }
+        other => other,
+    };
     let KernelValue::Map(fields) = value else {
         return None;
     };
@@ -890,11 +898,52 @@ impl GeneratedMachineKernel {
         match expr {
             Expr::Bool(value) => Ok(KernelValue::Bool(*value)),
             Expr::U64(value) => Ok(KernelValue::U64(*value)),
+            Expr::U64Max => Ok(KernelValue::U64(u64::MAX)),
             Expr::String(value) => Ok(KernelValue::String(value.clone())),
             Expr::NamedVariant { enum_name, variant } => Ok(KernelValue::NamedVariant {
                 enum_name: enum_name.clone(),
                 variant: variant.clone(),
             }),
+            Expr::FieldAccess { base, field } => {
+                let base = self.eval_expr(state, bindings, base, transition_name)?;
+                type_path_field(&base, field.as_str())
+                    .cloned()
+                    .ok_or_else(|| {
+                        self.eval_error(
+                            transition_name,
+                            format!("field projection `{field}` not present"),
+                        )
+                    })
+            }
+            Expr::EnumVariantIs {
+                value,
+                enum_name,
+                variant,
+            } => {
+                let value = self.eval_expr(state, bindings, value, transition_name)?;
+                Ok(KernelValue::Bool(kernel_value_enum_variant_matches(
+                    &value, enum_name, variant,
+                )))
+            }
+            Expr::EnumStringSetPayload {
+                value,
+                enum_name,
+                variant,
+                field,
+            } => {
+                let value = self.eval_expr(state, bindings, value, transition_name)?;
+                if !kernel_value_enum_variant_matches(&value, enum_name, variant) {
+                    return Ok(KernelValue::Set(BTreeSet::new()));
+                }
+                match type_path_field(&value, field.as_str()) {
+                    Some(KernelValue::Set(items)) => Ok(KernelValue::Set(items.clone())),
+                    Some(KernelValue::Named { value, .. }) => match value.as_ref() {
+                        KernelValue::Set(items) => Ok(KernelValue::Set(items.clone())),
+                        _ => Ok(KernelValue::Set(BTreeSet::new())),
+                    },
+                    _ => Ok(KernelValue::Set(BTreeSet::new())),
+                }
+            }
             Expr::EmptySet => Ok(KernelValue::Set(BTreeSet::new())),
             Expr::EmptyMap => Ok(KernelValue::Map(BTreeMap::new())),
             Expr::SeqLiteral(items) => Ok(KernelValue::Seq(
@@ -1104,6 +1153,30 @@ impl GeneratedMachineKernel {
                 };
                 Ok(KernelValue::U64(len as u64))
             }
+            Expr::Count { collection, value } => {
+                let collection = self.eval_expr(state, bindings, collection, transition_name)?;
+                let value = self.eval_expr(state, bindings, value, transition_name)?;
+                let count = match collection {
+                    KernelValue::Seq(items) => items.iter().filter(|item| *item == &value).count(),
+                    KernelValue::Set(items) => usize::from(items.contains(&value)),
+                    KernelValue::String(items) => match value {
+                        KernelValue::String(needle) => items.matches(&needle).count(),
+                        _ => 0,
+                    },
+                    KernelValue::Map(_)
+                    | KernelValue::NamedVariant { .. }
+                    | KernelValue::Named { .. }
+                    | KernelValue::Bool(_)
+                    | KernelValue::U64(_)
+                    | KernelValue::None => {
+                        return Err(self.eval_error(
+                            transition_name,
+                            "Count expects seq, set, or string".to_string(),
+                        ));
+                    }
+                };
+                Ok(KernelValue::U64(count as u64))
+            }
             Expr::Head(inner) => {
                 let inner = self.eval_expr(state, bindings, inner, transition_name)?;
                 let seq = inner
@@ -1141,24 +1214,28 @@ impl GeneratedMachineKernel {
                 transition_name,
             )?)),
             Expr::Call { helper, args } => {
-                let helper = self
+                let Some(helper_schema) = self
                     .schema
                     .helpers
                     .iter()
                     .chain(self.schema.derived.iter())
                     .find(|candidate| candidate.name == *helper)
-                    .ok_or_else(|| {
-                        self.eval_error(transition_name, format!("unknown helper `{helper}`"))
-                    })?;
+                else {
+                    let evaluated_args = args
+                        .iter()
+                        .map(|arg| self.eval_expr(state, bindings, arg, transition_name))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return self.eval_native_helper(helper, evaluated_args, transition_name);
+                };
 
                 let mut nested_bindings = BTreeMap::new();
-                for (param, arg) in helper.params.iter().zip(args.iter()) {
+                for (param, arg) in helper_schema.params.iter().zip(args.iter()) {
                     nested_bindings.insert(
                         param.name.as_str().to_owned(),
                         self.eval_expr(state, bindings, arg, transition_name)?,
                     );
                 }
-                self.eval_helper(state, &nested_bindings, helper, transition_name)
+                self.eval_helper(state, &nested_bindings, helper_schema, transition_name)
             }
             Expr::Quantified {
                 quantifier,
@@ -1225,6 +1302,49 @@ impl GeneratedMachineKernel {
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
         self.eval_expr(state, bindings, &helper.body, transition_name)
+    }
+
+    fn eval_native_helper(
+        &self,
+        helper: &str,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        // Test-oracle support for native helpers whose production semantics
+        // live in the generated/Rust machine owner.
+        match helper {
+            "mob_machine_external_peer_identity_absent" => {
+                self.eval_mob_machine_external_peer_identity_absent(args, transition_name)
+            }
+            _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
+        }
+    }
+
+    fn eval_mob_machine_external_peer_identity_absent(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [edges, agent_identity]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_external_peer_identity_absent expects two args",
+            )
+        })?;
+        let edges = edges
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let agent_identity =
+            named_string_leaf(&agent_identity, "AgentIdentity").ok_or_else(|| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_external_peer_identity_absent expected AgentIdentity",
+                )
+            })?;
+        let absent = edges.iter().all(|edge| {
+            external_peer_edge_endpoint_name(edge).is_none_or(|name| name != agent_identity)
+        });
+        Ok(KernelValue::Bool(absent))
     }
 
     fn validate_helper_return_value(
@@ -1369,6 +1489,74 @@ impl GeneratedMachineKernel {
             TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => false,
         }
     }
+}
+
+fn named_string_leaf<'a>(value: &'a KernelValue, expected_type: &str) -> Option<&'a str> {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == expected_type => {
+            string_leaf(value)
+        }
+        _ => None,
+    }
+}
+
+fn string_leaf(value: &KernelValue) -> Option<&str> {
+    match value {
+        KernelValue::String(value) => Some(value.as_str()),
+        KernelValue::Named { value, .. } => string_leaf(value),
+        _ => None,
+    }
+}
+
+fn type_path_field<'a>(value: &'a KernelValue, field: &str) -> Option<&'a KernelValue> {
+    let value = match value {
+        KernelValue::Named { value, .. } => value.as_ref(),
+        other => other,
+    };
+    let KernelValue::Map(fields) = value else {
+        return None;
+    };
+    fields.get(&string_key(field))
+}
+
+fn kernel_value_enum_variant_matches(
+    value: &KernelValue,
+    expected_enum: &EnumTypeId,
+    expected_variant: &EnumVariantId,
+) -> bool {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == expected_enum.as_str() => {
+            kernel_value_enum_variant_matches_inner(value, expected_enum, expected_variant)
+        }
+        other => kernel_value_enum_variant_matches_inner(other, expected_enum, expected_variant),
+    }
+}
+
+fn kernel_value_enum_variant_matches_inner(
+    value: &KernelValue,
+    expected_enum: &EnumTypeId,
+    expected_variant: &EnumVariantId,
+) -> bool {
+    match value {
+        KernelValue::NamedVariant { enum_name, variant } => {
+            enum_name == expected_enum && variant == expected_variant
+        }
+        KernelValue::String(tag) => tag == expected_variant.as_str(),
+        KernelValue::Map(fields) => matches!(
+            fields.get(&string_key("tag")),
+            Some(KernelValue::String(tag)) if tag == expected_variant.as_str()
+        ),
+        KernelValue::Named { type_name, value } if type_name.as_str() == expected_enum.as_str() => {
+            kernel_value_enum_variant_matches_inner(value, expected_enum, expected_variant)
+        }
+        _ => false,
+    }
+}
+
+fn external_peer_edge_endpoint_name(edge: &KernelValue) -> Option<&str> {
+    let endpoint = type_path_field(edge, "endpoint")?;
+    let name = type_path_field(endpoint, "name")?;
+    string_leaf(name)
 }
 
 /// Synthetic transition id used in error contexts that are not raised from a
@@ -1598,7 +1786,8 @@ fn named_type_has_resolved_named_bindings(
         Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
             fields.iter().all(|field| match &field.atom {
                 TypePathStructFieldAtom::String => true,
-                TypePathStructFieldAtom::Named(name) => {
+                TypePathStructFieldAtom::Named(name)
+                | TypePathStructFieldAtom::OptionalNamed(name) => {
                     named_type_has_resolved_named_bindings(schema, name, visiting)
                 }
             })
@@ -1659,6 +1848,7 @@ fn default_value_for_type_path_struct_field(
 ) -> KernelValue {
     match &field.atom {
         TypePathStructFieldAtom::String => KernelValue::String(String::new()),
+        TypePathStructFieldAtom::OptionalNamed(_) => KernelValue::None,
         TypePathStructFieldAtom::Named(name) => KernelValue::Named {
             type_name: name.clone(),
             value: Box::new(default_value_for_named_type(schema, name)),
@@ -1743,6 +1933,11 @@ fn type_path_struct_matches(
             TypePathStructFieldAtom::Named(name) => {
                 value_matches_type(schema, value, &TypeRef::Named(name.clone()))
             }
+            TypePathStructFieldAtom::OptionalNamed(name) => value_matches_type(
+                schema,
+                value,
+                &TypeRef::Option(Box::new(TypeRef::Named(name.clone()))),
+            ),
         }
     })
 }
@@ -1854,7 +2049,7 @@ mod tests {
 
     use super::{
         GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
-        default_value_for_type, value_matches_type,
+        default_value_for_type, option_some, value_matches_type,
     };
 
     fn input_id(slug: &str) -> InputVariantId {
@@ -1916,12 +2111,251 @@ mod tests {
         EnumVariantId::parse(slug).expect("valid enum variant slug")
     }
 
+    fn tool_filter_all() -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("ToolFilter"),
+            value: Box::new(KernelValue::String("All".to_string())),
+        }
+    }
+
+    fn tool_filter_allow(names: &[&str]) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("ToolFilter"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("tag".to_string()),
+                    KernelValue::String("Allow".to_string()),
+                ),
+                (
+                    KernelValue::String("names".to_string()),
+                    KernelValue::Set(
+                        names
+                            .iter()
+                            .map(|name| KernelValue::String((*name).to_string()))
+                            .collect(),
+                    ),
+                ),
+            ]))),
+        }
+    }
+
+    fn tool_filter_deny(names: &[&str]) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("ToolFilter"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("tag".to_string()),
+                    KernelValue::String("Deny".to_string()),
+                ),
+                (
+                    KernelValue::String("names".to_string()),
+                    KernelValue::Set(
+                        names
+                            .iter()
+                            .map(|name| KernelValue::String((*name).to_string()))
+                            .collect(),
+                    ),
+                ),
+            ]))),
+        }
+    }
+
+    fn capability_surface(image_tool_results: bool) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("SessionLlmCapabilitySurface"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("image_tool_results".to_string()),
+                KernelValue::Bool(image_tool_results),
+            )]))),
+        }
+    }
+
+    fn capability_surface_status(variant: &str) -> KernelValue {
+        KernelValue::NamedVariant {
+            enum_name: enum_type_id("SessionLlmCapabilitySurfaceStatus"),
+            variant: enum_variant_id(variant),
+        }
+    }
+
+    fn visibility_state(
+        capability_base_filter: KernelValue,
+        active_revision: u64,
+        staged_revision: u64,
+    ) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("SessionToolVisibilityState"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("capability_base_filter".to_string()),
+                    capability_base_filter,
+                ),
+                (
+                    KernelValue::String("inherited_base_filter".to_string()),
+                    tool_filter_all(),
+                ),
+                (
+                    KernelValue::String("active_filter".to_string()),
+                    tool_filter_all(),
+                ),
+                (
+                    KernelValue::String("staged_filter".to_string()),
+                    tool_filter_all(),
+                ),
+                (
+                    KernelValue::String("active_requested_deferred_names".to_string()),
+                    KernelValue::Set(BTreeSet::new()),
+                ),
+                (
+                    KernelValue::String("staged_requested_deferred_names".to_string()),
+                    KernelValue::Set(BTreeSet::new()),
+                ),
+                (
+                    KernelValue::String("active_revision".to_string()),
+                    KernelValue::U64(active_revision),
+                ),
+                (
+                    KernelValue::String("staged_revision".to_string()),
+                    KernelValue::U64(staged_revision),
+                ),
+                (
+                    KernelValue::String("requested_witnesses".to_string()),
+                    KernelValue::Map(BTreeMap::new()),
+                ),
+                (
+                    KernelValue::String("filter_witnesses".to_string()),
+                    KernelValue::Map(BTreeMap::new()),
+                ),
+            ]))),
+        }
+    }
+
+    fn visibility_delta(
+        previous_capability_base_filter: KernelValue,
+        current_capability_base_filter: KernelValue,
+        committed_visible_set_changed: bool,
+        revision_bumped: bool,
+    ) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("SessionToolVisibilityDelta"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("previous_capability_base_filter".to_string()),
+                    previous_capability_base_filter,
+                ),
+                (
+                    KernelValue::String("current_capability_base_filter".to_string()),
+                    current_capability_base_filter,
+                ),
+                (
+                    KernelValue::String("committed_visible_set_changed".to_string()),
+                    KernelValue::Bool(committed_visible_set_changed),
+                ),
+                (
+                    KernelValue::String("revision_bumped".to_string()),
+                    KernelValue::Bool(revision_bumped),
+                ),
+            ]))),
+        }
+    }
+
+    fn schema_helper_bool(
+        kernel: &GeneratedMachineKernel,
+        helper: &str,
+        args: Vec<KernelValue>,
+    ) -> bool {
+        let state = kernel.initial_state().expect("initial state");
+        let helper_schema = kernel
+            .schema
+            .helpers
+            .iter()
+            .chain(kernel.schema.derived.iter())
+            .find(|candidate| candidate.name == helper)
+            .expect("schema helper should exist");
+        let bindings = helper_schema
+            .params
+            .iter()
+            .zip(args)
+            .map(|(param, arg)| (param.name.as_str().to_owned(), arg))
+            .collect::<BTreeMap<_, _>>();
+        match kernel
+            .eval_helper(
+                &state,
+                &bindings,
+                helper_schema,
+                &transition_id("ReconfigureSessionLlmIdentityIdle"),
+            )
+            .expect("schema helper should evaluate")
+        {
+            KernelValue::Bool(value) => value,
+            other => panic!("expected bool helper result, got {other:?}"),
+        }
+    }
+
+    fn visibility_witness(owner: &str) -> KernelValue {
+        KernelValue::Named {
+            type_name: named_type_id("ToolVisibilityWitness"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("stable_owner_key".to_string()),
+                KernelValue::String(owner.to_string()),
+            )]))),
+        }
+    }
+
+    fn sync_visibility_revisions_input(filter_witnesses: KernelValue) -> KernelInput {
+        sync_visibility_revisions_input_with_filters(
+            tool_filter_all(),
+            tool_filter_allow(&["secret"]),
+            tool_filter_allow(&["secret"]),
+            filter_witnesses,
+        )
+    }
+
+    fn sync_visibility_revisions_input_with_filters(
+        capability_base_filter: KernelValue,
+        active_filter: KernelValue,
+        staged_filter: KernelValue,
+        filter_witnesses: KernelValue,
+    ) -> KernelInput {
+        KernelInput {
+            variant: input_id("SyncVisibilityRevisions"),
+            fields: BTreeMap::from([
+                (field_id("capability_base_filter"), capability_base_filter),
+                (field_id("inherited_base_filter"), tool_filter_all()),
+                (field_id("active_filter"), active_filter),
+                (field_id("staged_filter"), staged_filter),
+                (field_id("active_revision"), KernelValue::U64(1)),
+                (field_id("staged_revision"), KernelValue::U64(1)),
+                (
+                    field_id("active_deferred_names"),
+                    KernelValue::Set(BTreeSet::new()),
+                ),
+                (
+                    field_id("staged_deferred_names"),
+                    KernelValue::Set(BTreeSet::new()),
+                ),
+                (
+                    field_id("requested_witnesses"),
+                    KernelValue::Map(BTreeMap::new()),
+                ),
+                (field_id("filter_witnesses"), filter_witnesses),
+                (
+                    field_id("active_deferred_authorities"),
+                    KernelValue::Map(BTreeMap::new()),
+                ),
+                (
+                    field_id("staged_deferred_authorities"),
+                    KernelValue::Map(BTreeMap::new()),
+                ),
+            ]),
+        }
+    }
+
     fn replace_register_op_status_update(schema: &mut meerkat_machine_schema::MachineSchema) {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let update = transition
             .updates
             .iter_mut()
@@ -1959,8 +2393,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let effect = transition
             .emit
             .iter_mut()
@@ -1992,8 +2426,8 @@ mod tests {
         let transition = schema
             .transitions
             .iter_mut()
-            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
-            .expect("RegisterOpIdle transition");
+            .find(|transition| transition.name.as_str() == "RegisterOpAcceptedIdle")
+            .expect("RegisterOpAcceptedIdle transition");
         let effect = transition
             .emit
             .iter_mut()
@@ -2482,6 +2916,8 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("source"), KernelValue::None),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2560,6 +2996,8 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("source"), KernelValue::None),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2598,6 +3036,8 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("source"), KernelValue::None),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2654,6 +3094,8 @@ mod tests {
                                 variant: enum_variant_id("BackgroundToolOp"),
                             },
                         ),
+                        (field_id("source"), KernelValue::None),
+                        (field_id("max_concurrent"), KernelValue::None),
                     ]),
                 },
             )
@@ -2824,13 +3266,275 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
+    fn meerkat_visibility_replacement_kernel_helper_rejects_missing_filter_witness() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+        let registered = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: input_id("RegisterSession"),
+                    fields: BTreeMap::from([(
+                        field_id("session_id"),
+                        named_string("SessionId", "session-1"),
+                    )]),
+                },
+            )
+            .expect("register session");
+        let mut registered_state = registered.next_state.clone();
+        registered_state.fields.insert(
+            field_id("current_session_capability_base_filter"),
+            tool_filter_all(),
+        );
+        registered_state = kernel
+            .transition(
+                &registered_state,
+                &KernelInput {
+                    variant: input_id("ReplaceFilterToolAuthorityCatalog"),
+                    fields: BTreeMap::from([(
+                        field_id("catalog"),
+                        KernelValue::Map(BTreeMap::from([(
+                            KernelValue::String("secret".to_string()),
+                            visibility_witness("callback:test"),
+                        )])),
+                    )]),
+                },
+            )
+            .expect("filter authority catalog should be generated before visibility replacement")
+            .next_state;
+
+        let refusal = kernel
+            .transition(
+                &registered_state,
+                &sync_visibility_revisions_input(KernelValue::Map(BTreeMap::new())),
+            )
+            .expect_err("missing filter witness must reject visibility replacement");
+        assert!(
+            matches!(refusal, TransitionRefusal::NoMatchingTransition { .. }),
+            "expected guard rejection through no matching transition, got {refusal:?}"
+        );
+
+        let accepted = kernel
+            .transition(
+                &registered_state,
+                &sync_visibility_revisions_input(KernelValue::Map(BTreeMap::from([(
+                    KernelValue::String("secret".to_string()),
+                    visibility_witness("callback:test"),
+                )]))),
+            )
+            .expect("filter witness should satisfy generated visibility replacement authority");
+        assert_eq!(
+            accepted.transition,
+            transition_id("SyncVisibilityRevisionsIdle")
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn meerkat_visibility_replacement_requires_generated_capability_surface_authority() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let deny_view_image = tool_filter_deny(&["view_image"]);
+
+        assert!(schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_hydrated_capability_base_filter_matches",
+            vec![
+                super::option_some(capability_surface(false)),
+                capability_surface_status("Resolved"),
+                deny_view_image.clone(),
+            ],
+        ));
+        assert!(!schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_hydrated_capability_base_filter_matches",
+            vec![
+                super::option_some(capability_surface(false)),
+                capability_surface_status("Resolved"),
+                tool_filter_all(),
+            ],
+        ));
+        assert!(schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_hydrated_capability_base_filter_matches",
+            vec![
+                KernelValue::None,
+                capability_surface_status("Unresolved"),
+                tool_filter_all(),
+            ],
+        ));
+        assert!(!schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_hydrated_capability_base_filter_matches",
+            vec![
+                KernelValue::None,
+                capability_surface_status("Unresolved"),
+                deny_view_image.clone(),
+            ],
+        ));
+        assert!(!schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_capability_base_filter_replacement_matches",
+            vec![
+                KernelValue::None,
+                capability_surface_status("Unresolved"),
+                tool_filter_all(),
+                deny_view_image.clone(),
+            ],
+        ));
+        assert!(schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_capability_base_filter_replacement_matches",
+            vec![
+                super::option_some(capability_surface(false)),
+                capability_surface_status("Resolved"),
+                tool_filter_all(),
+                deny_view_image,
+            ],
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn meerkat_llm_reconfigure_kernel_helpers_reject_bad_visibility_plan() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let all_filter = tool_filter_all();
+        let deny_view_image = tool_filter_deny(&["view_image"]);
+
+        assert!(schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_capability_base_filter_matches",
+            vec![capability_surface(false), deny_view_image.clone()],
+        ));
+        assert!(!schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_capability_base_filter_matches",
+            vec![capability_surface(false), all_filter.clone()],
+        ));
+
+        let previous_visibility = visibility_state(all_filter.clone(), 2, 5);
+        let accepted_next_visibility = visibility_state(deny_view_image.clone(), 6, 5);
+        let accepted_delta =
+            visibility_delta(all_filter.clone(), deny_view_image.clone(), true, true);
+        assert!(schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_visibility_reconfigure_plan_matches",
+            vec![
+                previous_visibility.clone(),
+                accepted_next_visibility,
+                all_filter.clone(),
+                deny_view_image.clone(),
+                KernelValue::Bool(true),
+                KernelValue::Bool(true),
+                KernelValue::Bool(false),
+                KernelValue::U64(2),
+                KernelValue::U64(5),
+                KernelValue::U64(6),
+                accepted_delta,
+            ],
+        ));
+
+        let bad_revision_visibility = visibility_state(deny_view_image.clone(), 3, 5);
+        let bad_revision_delta =
+            visibility_delta(all_filter.clone(), deny_view_image.clone(), true, true);
+        assert!(!schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_visibility_reconfigure_plan_matches",
+            vec![
+                previous_visibility.clone(),
+                bad_revision_visibility,
+                all_filter.clone(),
+                deny_view_image.clone(),
+                KernelValue::Bool(true),
+                KernelValue::Bool(true),
+                KernelValue::Bool(false),
+                KernelValue::U64(2),
+                KernelValue::U64(5),
+                KernelValue::U64(3),
+                bad_revision_delta,
+            ],
+        ));
+
+        let accepted_next_visibility = visibility_state(deny_view_image.clone(), 6, 5);
+        let bad_delta = visibility_delta(all_filter, deny_view_image.clone(), true, false);
+        assert!(!schema_helper_bool(
+            &kernel,
+            "meerkat_session_llm_visibility_reconfigure_plan_matches",
+            vec![
+                previous_visibility,
+                accepted_next_visibility,
+                tool_filter_all(),
+                deny_view_image,
+                KernelValue::Bool(true),
+                KernelValue::Bool(true),
+                KernelValue::Bool(false),
+                KernelValue::U64(2),
+                KernelValue::U64(5),
+                KernelValue::U64(6),
+                bad_delta,
+            ],
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
     fn mob_spawn_and_submit_work_transitions_execute() {
         let kernel = GeneratedMachineKernel::new(mob_machine());
         let state = kernel.initial_state().expect("initial state");
         assert_eq!(state.phase, phase_id("Running"));
-        let running = kernel
+        let profile_material_digest = "profile.worker.1";
+        let authorized = kernel
             .transition(
                 &state,
+                &KernelInput {
+                    variant: input_id("AuthorizeSpawnProfile"),
+                    fields: BTreeMap::from([
+                        (
+                            field_id("agent_identity"),
+                            named_string("AgentIdentity", "agent.worker"),
+                        ),
+                        (
+                            field_id("profile_name"),
+                            KernelValue::String("worker".to_owned()),
+                        ),
+                        (
+                            field_id("model"),
+                            KernelValue::String("test-model".to_owned()),
+                        ),
+                        (
+                            field_id("profile_material_digest"),
+                            KernelValue::String(profile_material_digest.to_owned()),
+                        ),
+                        (
+                            field_id("tool_config_digest"),
+                            KernelValue::String("tool-config.worker.1".to_owned()),
+                        ),
+                        (
+                            field_id("skills_digest"),
+                            KernelValue::String("skills.worker.1".to_owned()),
+                        ),
+                        (field_id("provider_params_digest"), KernelValue::None),
+                        (field_id("output_schema_digest"), KernelValue::None),
+                        (field_id("external_addressable"), KernelValue::Bool(false)),
+                    ]),
+                },
+            )
+            .expect("authorize spawn profile");
+        assert_eq!(
+            authorized.transition,
+            transition_id("AuthorizeSpawnProfileRunning")
+        );
+        let running = kernel
+            .transition(
+                &authorized.next_state,
                 &KernelInput {
                     variant: input_id("Spawn"),
                     fields: BTreeMap::from([
@@ -2844,13 +3548,24 @@ mod tests {
                         ),
                         (field_id("fence_token"), named_u64("FenceToken", 41)),
                         (field_id("generation"), named_u64("Generation", 2)),
+                        (
+                            field_id("profile_material_digest"),
+                            KernelValue::String(profile_material_digest.to_owned()),
+                        ),
                         (field_id("external_addressable"), KernelValue::Bool(false)),
+                        (
+                            field_id("runtime_mode"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("SpawnPolicyRuntimeMode"),
+                                variant: enum_variant_id("AutonomousHost"),
+                            },
+                        ),
                         // W3-H-1: new realtime-binding fields. `replacing`
                         // is None (no prior binding) so the Fresh branch
                         // fires.
                         (
                             field_id("bridge_session_id"),
-                            named_string("SessionId", "bridge.worker.1"),
+                            option_some(named_string("SessionId", "bridge.worker.1")),
                         ),
                         (field_id("replacing"), KernelValue::None),
                     ]),
@@ -2871,6 +3586,10 @@ mod tests {
                 &KernelInput {
                     variant: input_id("SubmitWork"),
                     fields: BTreeMap::from([
+                        (
+                            field_id("agent_identity"),
+                            named_string("AgentIdentity", "agent.worker"),
+                        ),
                         (
                             field_id("agent_runtime_id"),
                             named_string("AgentRuntimeId", "runtime.worker.1"),

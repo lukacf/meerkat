@@ -23,6 +23,7 @@ use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
     ResponseProgressPhase,
 };
+use meerkat_runtime::store::load_runtime_state;
 use meerkat_runtime::{
     InMemoryRuntimeStore, InputAbandonReason, InputLifecycleState, InputTerminalOutcome,
     LogicalRuntimeId, MeerkatMachine, RuntimeState, RuntimeStore, SessionServiceRuntimeExt,
@@ -162,7 +163,8 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
                 )))),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("reset");
     let input_id = input.id().clone();
@@ -178,7 +180,11 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
 
     runtime.reset_runtime(&sid).await.unwrap();
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(result, CompletionOutcome::RuntimeTerminated(_)),
         "reset should terminate queued waiters, got {result:?}"
@@ -231,7 +237,8 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
                 )))),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("stop");
     let input_id = input.id().clone();
@@ -250,7 +257,11 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
         .await
         .unwrap();
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(result, CompletionOutcome::RuntimeTerminated(_)),
         "stop-runtime-executor should terminate queued waiters, got {result:?}"
@@ -294,6 +305,10 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
     let sid = SessionId::new();
 
     adapter.register_session(sid.clone()).await;
+    let _bindings = adapter
+        .prepare_bindings(sid.clone())
+        .await
+        .expect("prepare generated runtime binding before accepting stopped waiter");
 
     let input = make_progress_input("persistent-stop");
     let input_id = input.id().clone();
@@ -309,7 +324,11 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
         .await
         .unwrap();
 
-    match handle.wait().await {
+    match handle
+        .wait()
+        .await
+        .expect("completion waiter should resolve")
+    {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime stopped");
         }
@@ -322,7 +341,9 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
 
     let runtime_id = LogicalRuntimeId::for_session(&sid);
     assert_eq!(
-        store.load_runtime_state(&runtime_id).await.unwrap(),
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Stopped),
         "persistent stop terminalization should commit Stopped as durable runtime truth"
     );
@@ -354,7 +375,8 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
                 terminal: None,
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("retire");
     let input_id = input.id().clone();
@@ -375,7 +397,11 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
     );
     assert_eq!(report.inputs_abandoned, 0);
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(result, CompletionOutcome::CompletedWithoutResult),
         "retire+drain should complete the queued waiter through the runtime, got {result:?}"
@@ -426,7 +452,11 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
     );
     assert_eq!(report.inputs_abandoned, 1);
 
-    let result = handle.unwrap().wait().await;
+    let result = handle
+        .unwrap()
+        .wait()
+        .await
+        .expect("completion waiter should resolve");
     assert!(
         matches!(result, CompletionOutcome::RuntimeTerminated(_)),
         "retire without a runtime loop should terminate the waiter, got {result:?}"

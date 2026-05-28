@@ -82,8 +82,15 @@ impl AsyncOpRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "effect_type", rename_all = "snake_case")]
 pub enum SessionEffect {
-    /// Grant management scope for a specific mob.
-    GrantManageMob { mob_id: String },
+    /// Replace the session's canonical mob operator authority projection.
+    ///
+    /// The replacement context is constructible only by generated machine
+    /// authority. The turn owner rejects deserialized/unsealed effects before
+    /// installing the durable projection and does not widen scope from local
+    /// effect fields.
+    ReplaceMobToolAuthorityContext {
+        authority_context: crate::service::MobToolAuthorityContext,
+    },
     /// Record durable deferred-tool requests for subsequent boundaries.
     RequestDeferredTools {
         authorities: Vec<DeferredToolLoadAuthority>,
@@ -459,9 +466,21 @@ pub struct ForkBranch {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn generated_mob_authority_for_test() -> crate::service::MobToolAuthorityContext {
+        crate::service::MobToolAuthorityContext::generated_for_test(
+            crate::service::OpaquePrincipalToken::new("generated-effect-test"),
+            true,
+            true,
+            std::collections::BTreeSet::from(["test-mob".to_string()]),
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
+    }
 
     #[test]
     fn barrier_constructor_produces_barrier_policy() {
@@ -629,13 +648,21 @@ mod tests {
     }
 
     #[test]
-    fn session_effect_grant_manage_mob_serde_round_trip() {
-        let effect = SessionEffect::GrantManageMob {
-            mob_id: "test-mob".into(),
+    fn session_effect_replace_mob_authority_context_deserializes_without_authority_seal() {
+        let effect = SessionEffect::ReplaceMobToolAuthorityContext {
+            authority_context: generated_mob_authority_for_test(),
         };
         let json = serde_json::to_value(&effect).unwrap();
         let parsed: SessionEffect = serde_json::from_value(json).unwrap();
-        assert_eq!(effect, parsed);
+        match parsed {
+            SessionEffect::ReplaceMobToolAuthorityContext { authority_context } => {
+                assert!(!authority_context.is_generated_authority_context());
+                assert!(!authority_context.can_create_mobs());
+                assert!(!authority_context.can_mutate_profiles());
+                assert!(!authority_context.can_manage_mob("test-mob"));
+            }
+            other => panic!("unexpected session effect: {other:?}"),
+        }
     }
 
     #[test]
@@ -644,8 +671,8 @@ mod tests {
         let outcome = ToolDispatchOutcome::new(
             result,
             vec![],
-            vec![SessionEffect::GrantManageMob {
-                mob_id: "mob-1".into(),
+            vec![SessionEffect::ReplaceMobToolAuthorityContext {
+                authority_context: generated_mob_authority_for_test(),
             }],
         );
         assert_eq!(outcome.session_effects.len(), 1);

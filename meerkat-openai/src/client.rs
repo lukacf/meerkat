@@ -9,10 +9,10 @@ use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
-    ImageGenerationWarning, ImageOperationTerminalClass, Message, OpenAiImageMetadata,
-    OutputSchema, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
-    RevisedPromptSource, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult, Usage,
-    UserMessage,
+    ImageGenerationWarning, ImageProviderErrorCode, ImageProviderTerminalObservation, Message,
+    OpenAiImageMetadata, OutputSchema, ProviderImageMetadata, ProviderMeta,
+    RevisedPromptDisposition, RevisedPromptSource, StopReason, SystemNoticeBlock,
+    SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::BlockAssembler;
 use meerkat_llm_core::LlmError;
@@ -903,38 +903,37 @@ impl OpenAiClient {
         }
     }
 
-    fn openai_error_terminal(status_code: u16, text: &str) -> ImageOperationTerminalClass {
-        if status_code == 408 || status_code == 504 {
-            ImageOperationTerminalClass::Timeout
-        } else if status_code == 499 {
-            ImageOperationTerminalClass::Cancelled
-        } else if let Ok(value) = serde_json::from_str::<Value>(text) {
-            Self::openai_structured_error_terminal(&value)
-                .unwrap_or(ImageOperationTerminalClass::Failed)
+    fn openai_error_observation(status_code: u16, text: &str) -> ImageProviderTerminalObservation {
+        let code = if let Ok(value) = serde_json::from_str::<Value>(text) {
+            Self::openai_structured_error_code(&value).unwrap_or(ImageProviderErrorCode::Unknown)
         } else {
-            ImageOperationTerminalClass::Failed
+            ImageProviderErrorCode::Unknown
+        };
+        ImageProviderTerminalObservation::ProviderHttpError {
+            status_code: Some(status_code),
+            code,
         }
     }
 
-    fn openai_structured_error_terminal(value: &Value) -> Option<ImageOperationTerminalClass> {
+    fn openai_structured_error_code(value: &Value) -> Option<ImageProviderErrorCode> {
         let error = value.get("error").unwrap_or(value);
         ["code", "type"].into_iter().find_map(|field| {
             error
                 .get(field)
                 .and_then(Value::as_str)
-                .and_then(Self::openai_structured_error_code_terminal)
+                .and_then(Self::openai_structured_error_code_observation)
         })
     }
 
-    fn openai_structured_error_code_terminal(code: &str) -> Option<ImageOperationTerminalClass> {
+    fn openai_structured_error_code_observation(code: &str) -> Option<ImageProviderErrorCode> {
         match code {
             "content_filter"
             | "content_filtered"
             | "content_policy_violation"
             | "moderation_blocked"
-            | "safety_violation" => Some(ImageOperationTerminalClass::SafetyFiltered),
+            | "safety_violation" => Some(ImageProviderErrorCode::OpenAiContentFilter),
             "model_refusal" | "refusal" | "refused_by_model" => {
-                Some(ImageOperationTerminalClass::RefusedByProvider)
+                Some(ImageProviderErrorCode::OpenAiModelRefusal)
             }
             _ => None,
         }
@@ -968,15 +967,11 @@ impl OpenAiClient {
         response: Option<Value>,
         error: Option<Value>,
     ) -> ProviderImageGenerationOutput {
-        let terminal = response
+        let code = response
             .as_ref()
-            .and_then(Self::openai_structured_error_terminal)
-            .or_else(|| {
-                error
-                    .as_ref()
-                    .and_then(Self::openai_structured_error_terminal)
-            })
-            .unwrap_or(ImageOperationTerminalClass::Failed);
+            .and_then(Self::openai_structured_error_code)
+            .or_else(|| error.as_ref().and_then(Self::openai_structured_error_code))
+            .unwrap_or(ImageProviderErrorCode::Unknown);
         let response_id = response
             .as_ref()
             .and_then(|value| value.get("id"))
@@ -990,7 +985,7 @@ impl OpenAiClient {
 
         ProviderImageGenerationOutput {
             operation_id: request.operation_id,
-            terminal,
+            terminal_observation: ImageProviderTerminalObservation::ProviderNativeError { code },
             images: Vec::new(),
             provider_text: None,
             revised_prompt: RevisedPromptDisposition::NotRequested,
@@ -1300,21 +1295,15 @@ impl OpenAiClient {
             }
         }
 
-        let terminal = if images.is_empty() {
-            ImageOperationTerminalClass::EmptyResult {
-                provider_text: if provider_text.is_empty() {
-                    meerkat_core::ProviderTextDisposition::NotEmitted
-                } else {
-                    meerkat_core::ProviderTextDisposition::EmittedButNotStored
-                },
-            }
+        let terminal_observation = if images.is_empty() {
+            ImageProviderTerminalObservation::EmptyResult
         } else {
-            ImageOperationTerminalClass::Generated
+            ImageProviderTerminalObservation::Generated
         };
         let warnings = Self::image_count_warning(&request, images.len());
         Ok(ProviderImageGenerationOutput {
             operation_id: request.operation_id,
-            terminal,
+            terminal_observation,
             images,
             provider_text: if provider_text.is_empty() {
                 None
@@ -1442,7 +1431,7 @@ impl OpenAiClient {
             };
             return Ok(ProviderImageGenerationOutput {
                 operation_id: request.operation_id,
-                terminal: Self::openai_error_terminal(status_code, &text),
+                terminal_observation: Self::openai_error_observation(status_code, &text),
                 images: Vec::new(),
                 provider_text: None,
                 revised_prompt: RevisedPromptDisposition::NotRequested,
@@ -2770,7 +2759,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn openai_image_error_terminal_uses_structured_error_codes()
+    fn openai_image_error_observation_uses_structured_error_codes()
     -> Result<(), Box<dyn std::error::Error>> {
         let safety = serde_json::json!({
             "error": {
@@ -2780,8 +2769,11 @@ mod tests {
             }
         });
         assert_eq!(
-            OpenAiClient::openai_error_terminal(400, &safety.to_string()),
-            ImageOperationTerminalClass::SafetyFiltered
+            OpenAiClient::openai_error_observation(400, &safety.to_string()),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(400),
+                code: ImageProviderErrorCode::OpenAiContentFilter,
+            }
         );
 
         let refusal = serde_json::json!({
@@ -2792,14 +2784,17 @@ mod tests {
             }
         });
         assert_eq!(
-            OpenAiClient::openai_error_terminal(400, &refusal.to_string()),
-            ImageOperationTerminalClass::RefusedByProvider
+            OpenAiClient::openai_error_observation(400, &refusal.to_string()),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(400),
+                code: ImageProviderErrorCode::OpenAiModelRefusal,
+            }
         );
         Ok(())
     }
 
     #[test]
-    fn openai_image_error_terminal_does_not_parse_message_text() {
+    fn openai_image_error_observation_does_not_parse_message_text() {
         let message_only = serde_json::json!({
             "error": {
                 "type": "invalid_request_error",
@@ -2808,31 +2803,46 @@ mod tests {
         });
 
         assert_eq!(
-            OpenAiClient::openai_error_terminal(400, &message_only.to_string()),
-            ImageOperationTerminalClass::Failed
+            OpenAiClient::openai_error_observation(400, &message_only.to_string()),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(400),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
         assert_eq!(
-            OpenAiClient::openai_error_terminal(
+            OpenAiClient::openai_error_observation(
                 503,
                 "provider overloaded while checking safety filters"
             ),
-            ImageOperationTerminalClass::Failed
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(503),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
     }
 
     #[test]
-    fn openai_image_error_terminal_uses_transport_status_for_timeout_and_cancelled() {
+    fn openai_image_error_observation_keeps_transport_status() {
         assert_eq!(
-            OpenAiClient::openai_error_terminal(408, "request timed out"),
-            ImageOperationTerminalClass::Timeout
+            OpenAiClient::openai_error_observation(408, "request timed out"),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(408),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
         assert_eq!(
-            OpenAiClient::openai_error_terminal(504, "gateway timeout"),
-            ImageOperationTerminalClass::Timeout
+            OpenAiClient::openai_error_observation(504, "gateway timeout"),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(504),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
         assert_eq!(
-            OpenAiClient::openai_error_terminal(499, "client closed request"),
-            ImageOperationTerminalClass::Cancelled
+            OpenAiClient::openai_error_observation(499, "client closed request"),
+            ImageProviderTerminalObservation::ProviderHttpError {
+                status_code: Some(499),
+                code: ImageProviderErrorCode::Unknown,
+            }
         );
     }
 
@@ -2863,8 +2873,8 @@ mod tests {
             .await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         assert_eq!(output.images.len(), 1);
         assert_eq!(output.images[0].base64_data, "aGVsbG8=");
@@ -2939,8 +2949,8 @@ mod tests {
         let output = client.execute_image_generation(request).await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         let headers = seen_headers.lock().expect("seen headers mutex");
         let headers = headers.first().expect("captured Azure image headers");
@@ -3023,8 +3033,8 @@ mod tests {
             .await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         let bodies = seen.lock().expect("seen mutex");
         let body = bodies.first().expect("captured ChatGPT image request");
@@ -3071,8 +3081,8 @@ mod tests {
                 });
 
             assert!(matches!(
-                output.terminal,
-                ImageOperationTerminalClass::Failed
+                output.terminal_observation,
+                ImageProviderTerminalObservation::ProviderNativeError { .. }
             ));
             assert!(output.images.is_empty());
             assert!(matches!(
@@ -3110,8 +3120,8 @@ mod tests {
         let output = client.execute_image_generation(request).await?;
 
         assert!(matches!(
-            output.terminal,
-            ImageOperationTerminalClass::Generated
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
         ));
         assert_eq!(
             (output.images[0].width, output.images[0].height),

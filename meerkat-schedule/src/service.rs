@@ -1,6 +1,8 @@
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
-use crate::lifecycle::ScheduleLifecycleInput;
-use crate::store::{OccurrenceFilter, PendingSupersession, ScheduleFilter, ScheduleStore};
+use crate::lifecycle::{
+    AuthorizedOccurrenceWrite, ScheduleLifecycleInput, ScheduleLifecycleMutator,
+};
+use crate::store::{OccurrenceFilter, ScheduleFilter, ScheduleStore};
 use crate::trigger::occurrences_for_horizon;
 use crate::types::{
     CreateScheduleRequest, Occurrence, OccurrencePhase, Schedule, ScheduleId, SchedulePhase,
@@ -46,12 +48,18 @@ impl ScheduleService {
             .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
         let planned = self
-            .plan_schedule_occurrences(&mut mutator.schedule, store_now)
+            .plan_schedule_occurrences(&mutator.schedule, store_now)
             .await?;
-        self.store
-            .commit_schedule_mutation(mutator.schedule.clone(), planned, None)
+        if let Some(planning_mutator) = planned.schedule_mutator {
+            mutator
+                .absorb_followup(planning_mutator)
+                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        }
+        let committed = self
+            .store
+            .commit_schedule_mutation(mutator.into_authorized_write(), planned.occurrences)
             .await?;
-        Ok(mutator.schedule)
+        Ok(committed)
     }
 
     pub async fn get(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -91,25 +99,29 @@ impl ScheduleService {
             .map_err(ScheduleDomainError::InvalidSchedule)?;
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
-        let mut mutator =
-            Schedule::apply(Some(current), ScheduleLifecycleInput::Update(request))
-                .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
+        let mut mutator = Schedule::apply(
+            Some(current),
+            ScheduleLifecycleInput::Update {
+                request,
+                at_utc: store_now,
+            },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
 
         let planned = self
-            .plan_schedule_occurrences(&mut mutator.schedule, store_now)
+            .plan_schedule_occurrences(&mutator.schedule, store_now)
             .await?;
-        self.store
-            .commit_schedule_mutation(
-                mutator.schedule.clone(),
-                planned,
-                mutator.revision_bumped.then_some(PendingSupersession {
-                    at_utc: store_now,
-                    superseded_by_revision: mutator.schedule.revision,
-                }),
-            )
+        if let Some(planning_mutator) = planned.schedule_mutator {
+            mutator
+                .absorb_followup(planning_mutator)
+                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        }
+        let committed = self
+            .store
+            .commit_schedule_mutation(mutator.into_authorized_write(), planned.occurrences)
             .await?;
-        Ok(mutator.schedule)
+        Ok(committed)
     }
 
     pub async fn pause(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -122,8 +134,11 @@ impl ScheduleService {
             },
         )
         .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
-        self.store.put_schedule(mutator.schedule.clone()).await?;
-        Ok(mutator.schedule)
+        let schedule = mutator.schedule.clone();
+        self.store
+            .commit_schedule_write(mutator.into_authorized_write())
+            .await?;
+        Ok(schedule)
     }
 
     pub async fn resume(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -138,12 +153,18 @@ impl ScheduleService {
         .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
         let planned = self
-            .plan_schedule_occurrences(&mut mutator.schedule, store_now)
+            .plan_schedule_occurrences(&mutator.schedule, store_now)
             .await?;
-        self.store
-            .commit_schedule_mutation(mutator.schedule.clone(), planned, None)
+        if let Some(planning_mutator) = planned.schedule_mutator {
+            mutator
+                .absorb_followup(planning_mutator)
+                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        }
+        let committed = self
+            .store
+            .commit_schedule_mutation(mutator.into_authorized_write(), planned.occurrences)
             .await?;
-        Ok(mutator.schedule)
+        Ok(committed)
     }
 
     pub async fn delete(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
@@ -155,18 +176,11 @@ impl ScheduleService {
             ScheduleLifecycleInput::Delete { at_utc: store_now },
         )
         .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
-        let deleted = mutator.schedule.clone();
-        self.store
-            .commit_schedule_mutation(
-                deleted.clone(),
-                Vec::new(),
-                Some(PendingSupersession {
-                    at_utc: store_now,
-                    superseded_by_revision: deleted.revision,
-                }),
-            )
+        let committed = self
+            .store
+            .commit_schedule_mutation(mutator.into_authorized_write(), Vec::new())
             .await?;
-        Ok(deleted)
+        Ok(committed)
     }
 
     pub async fn list_occurrences(
@@ -196,17 +210,24 @@ impl ScheduleService {
         schedule_id: &ScheduleId,
     ) -> Result<Vec<Occurrence>, ScheduleDomainError> {
         let _planning_guard = self.planning_lock.lock().await;
-        let mut schedule = self.get(schedule_id).await?;
+        let schedule = self.get(schedule_id).await?;
         let store_now = self.store.get_store_time_utc().await?;
-        let planned = self
-            .plan_schedule_occurrences(&mut schedule, store_now)
-            .await?;
-        if !planned.is_empty() {
-            self.store
-                .commit_schedule_mutation(schedule, planned.clone(), None)
+        let planned = self.plan_schedule_occurrences(&schedule, store_now).await?;
+        let occurrences = planned
+            .occurrences
+            .iter()
+            .map(|write| write.occurrence().clone())
+            .collect();
+        if let Some(planning_mutator) = planned.schedule_mutator {
+            let _ = self
+                .store
+                .commit_schedule_mutation(
+                    planning_mutator.into_authorized_write(),
+                    planned.occurrences,
+                )
                 .await?;
         }
-        Ok(planned)
+        Ok(occurrences)
     }
 
     pub async fn sync_occurrence_target_with_schedule(
@@ -223,8 +244,15 @@ impl ScheduleService {
         if occurrence.target_snapshot == current.target {
             return Ok(occurrence);
         }
-        occurrence.target_snapshot = current.target.clone();
-        self.store.put_occurrence(occurrence.clone()).await?;
+        let mutator = occurrence
+            .apply(crate::OccurrenceLifecycleInput::SyncTargetSnapshot {
+                target_snapshot: current.target.clone(),
+            })
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        occurrence = mutator.occurrence.clone();
+        self.store
+            .commit_occurrence_write(mutator.into_authorized_write())
+            .await?;
         Ok(occurrence)
     }
 
@@ -233,17 +261,26 @@ impl ScheduleService {
         occurrence: &Occurrence,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        let Some(mut schedule) = self.store.get_schedule(&occurrence.schedule_id).await? else {
+        let Some(schedule) = self.store.get_schedule(&occurrence.schedule_id).await? else {
             return Ok(());
         };
         if schedule.revision != occurrence.schedule_revision {
             return Ok(());
         }
 
-        let schedule_changed = schedule.target.bind_materialized_session(session_id);
+        let mut updated_schedule_target = schedule.target.clone();
+        let schedule_changed = updated_schedule_target.bind_materialized_session(session_id);
         if schedule_changed {
-            schedule.touch();
-            self.store.put_schedule(schedule).await?;
+            let mutator = Schedule::apply(
+                Some(schedule),
+                ScheduleLifecycleInput::SyncTargetSnapshot {
+                    target: updated_schedule_target,
+                },
+            )
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+            self.store
+                .commit_schedule_write(mutator.into_authorized_write())
+                .await?;
         }
 
         let pending = self
@@ -257,20 +294,23 @@ impl ScheduleService {
             .await?;
 
         let mut updated_pending = Vec::new();
-        for mut pending_occurrence in pending {
+        for pending_occurrence in pending {
             if pending_occurrence.schedule_revision != occurrence.schedule_revision {
                 continue;
             }
-            if pending_occurrence
-                .target_snapshot
-                .bind_materialized_session(session_id)
-            {
-                updated_pending.push(pending_occurrence);
+            let mut updated_target = pending_occurrence.target_snapshot.clone();
+            if updated_target.bind_materialized_session(session_id) {
+                let mutator = pending_occurrence
+                    .apply(crate::OccurrenceLifecycleInput::SyncTargetSnapshot {
+                        target_snapshot: updated_target,
+                    })
+                    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+                updated_pending.push(mutator.into_authorized_write());
             }
         }
 
         if !updated_pending.is_empty() {
-            self.store.put_occurrences(updated_pending).await?;
+            self.store.commit_occurrence_writes(updated_pending).await?;
         }
 
         Ok(())
@@ -278,11 +318,11 @@ impl ScheduleService {
 
     async fn plan_schedule_occurrences(
         &self,
-        schedule: &mut Schedule,
+        schedule: &Schedule,
         store_now_utc: chrono::DateTime<Utc>,
-    ) -> Result<Vec<Occurrence>, ScheduleDomainError> {
+    ) -> Result<PlannedScheduleOccurrences, ScheduleDomainError> {
         if schedule.phase != SchedulePhase::Active {
-            return Ok(Vec::new());
+            return Ok(PlannedScheduleOccurrences::default());
         }
 
         let horizon_end_utc =
@@ -315,7 +355,7 @@ impl ScheduleService {
         let desired_count =
             usize::try_from(schedule.config.planning_horizon_occurrences).unwrap_or(usize::MAX);
         if future_pending_count >= desired_count {
-            return Ok(Vec::new());
+            return Ok(PlannedScheduleOccurrences::default());
         }
 
         let remaining = desired_count.saturating_sub(future_pending_count);
@@ -325,7 +365,7 @@ impl ScheduleService {
             .map(|occurrence| occurrence.due_at_utc)
             .max()
             .or(schedule.planning_cursor_utc)
-            .unwrap_or_else(|| schedule.config.updated_at_utc - Duration::minutes(1));
+            .unwrap_or_else(|| store_now_utc - Duration::minutes(1));
 
         let due_times = occurrences_for_horizon(
             &schedule.trigger,
@@ -335,16 +375,18 @@ impl ScheduleService {
         )?;
 
         let mut planned = Vec::new();
+        let mut next_occurrence_ordinal = schedule.next_occurrence_ordinal;
         for due_at_utc in due_times {
             if existing_due.contains(&due_at_utc) {
                 continue;
             }
-            let occurrence = Occurrence::planned_from_schedule(
+            let occurrence = Occurrence::planned_write_from_schedule(
                 schedule,
-                schedule.next_occurrence_ordinal,
+                next_occurrence_ordinal,
                 due_at_utc,
-            );
-            schedule.next_occurrence_ordinal = schedule.next_occurrence_ordinal.next();
+            )
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+            next_occurrence_ordinal = next_occurrence_ordinal.next();
             planned.push(occurrence);
             if planned.len() >= remaining {
                 break;
@@ -352,24 +394,39 @@ impl ScheduleService {
         }
 
         if !planned.is_empty() {
-            let Some(planning_cursor_utc) = planned.last().map(|occurrence| occurrence.due_at_utc)
+            let Some(planning_cursor_utc) =
+                planned.last().map(|write| write.occurrence().due_at_utc)
             else {
-                return Ok(planned);
+                return Ok(PlannedScheduleOccurrences {
+                    occurrences: planned,
+                    schedule_mutator: None,
+                });
             };
             let mutator = Schedule::apply(
                 Some(schedule.clone()),
                 ScheduleLifecycleInput::RecordPlanningWindow {
                     planning_cursor_utc,
-                    next_occurrence_ordinal: schedule.next_occurrence_ordinal,
+                    next_occurrence_ordinal,
                 },
             )
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-            *schedule = mutator.schedule;
-            schedule.touch();
+            return Ok(PlannedScheduleOccurrences {
+                occurrences: planned,
+                schedule_mutator: Some(mutator),
+            });
         }
 
-        Ok(planned)
+        Ok(PlannedScheduleOccurrences {
+            occurrences: planned,
+            schedule_mutator: None,
+        })
     }
+}
+
+#[derive(Default)]
+struct PlannedScheduleOccurrences {
+    occurrences: Vec<AuthorizedOccurrenceWrite>,
+    schedule_mutator: Option<ScheduleLifecycleMutator>,
 }
 
 #[cfg(test)]
@@ -392,7 +449,7 @@ mod tests {
     struct AtomicMutationProbeStore {
         inner: Arc<dyn ScheduleStore>,
         atomic_calls: AtomicUsize,
-        direct_schedule_writes: AtomicUsize,
+        standalone_schedule_commits: AtomicUsize,
     }
 
     impl AtomicMutationProbeStore {
@@ -400,7 +457,7 @@ mod tests {
             Self {
                 inner: Arc::new(MemoryScheduleStore::new()),
                 atomic_calls: AtomicUsize::new(0),
-                direct_schedule_writes: AtomicUsize::new(0),
+                standalone_schedule_commits: AtomicUsize::new(0),
             }
         }
     }
@@ -415,9 +472,13 @@ mod tests {
             self.inner.get_store_time_utc().await
         }
 
-        async fn put_schedule(&self, schedule: Schedule) -> Result<(), ScheduleStoreError> {
-            self.direct_schedule_writes.fetch_add(1, Ordering::SeqCst);
-            self.inner.put_schedule(schedule).await
+        async fn commit_schedule_write(
+            &self,
+            write: crate::AuthorizedScheduleWrite,
+        ) -> Result<(), ScheduleStoreError> {
+            self.standalone_schedule_commits
+                .fetch_add(1, Ordering::SeqCst);
+            self.inner.commit_schedule_write(write).await
         }
 
         async fn get_schedule(
@@ -434,26 +495,28 @@ mod tests {
             self.inner.list_schedules(filter).await
         }
 
-        async fn put_occurrence(&self, occurrence: Occurrence) -> Result<(), ScheduleStoreError> {
-            self.inner.put_occurrence(occurrence).await
+        async fn commit_occurrence_write(
+            &self,
+            write: AuthorizedOccurrenceWrite,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner.commit_occurrence_write(write).await
         }
 
-        async fn put_occurrences(
+        async fn commit_occurrence_writes(
             &self,
-            occurrences: Vec<Occurrence>,
+            writes: Vec<AuthorizedOccurrenceWrite>,
         ) -> Result<(), ScheduleStoreError> {
-            self.inner.put_occurrences(occurrences).await
+            self.inner.commit_occurrence_writes(writes).await
         }
 
         async fn commit_schedule_mutation(
             &self,
-            schedule: Schedule,
-            occurrences: Vec<Occurrence>,
-            supersession: Option<PendingSupersession>,
-        ) -> Result<(), ScheduleStoreError> {
+            schedule: crate::AuthorizedScheduleWrite,
+            occurrences: Vec<AuthorizedOccurrenceWrite>,
+        ) -> Result<Schedule, ScheduleStoreError> {
             self.atomic_calls.fetch_add(1, Ordering::SeqCst);
             self.inner
-                .commit_schedule_mutation(schedule, occurrences, supersession)
+                .commit_schedule_mutation(schedule, occurrences)
                 .await
         }
 
@@ -696,6 +759,18 @@ mod tests {
             "revision bump should supersede prior pending future occurrences"
         );
         assert!(
+            occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.phase == OccurrencePhase::Superseded
+                        && occurrence.schedule_revision == created.revision
+                })
+                .all(|occurrence| updated
+                    .superseded_ack_ids
+                    .contains(&occurrence.occurrence_id)),
+            "supersession acks should be routed back through schedule authority"
+        );
+        assert!(
             replanned > 0,
             "revision bump should plan replacement pending occurrences"
         );
@@ -823,6 +898,18 @@ mod tests {
             }),
             "delete should supersede pending occurrences against the new deleted revision"
         );
+        assert!(
+            occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.phase == OccurrencePhase::Superseded
+                        && occurrence.schedule_revision == created.revision
+                })
+                .all(|occurrence| deleted
+                    .superseded_ack_ids
+                    .contains(&occurrence.occurrence_id)),
+            "delete supersession acks should be routed back through schedule authority"
+        );
         Ok(())
     }
 
@@ -871,9 +958,9 @@ mod tests {
             "update should route through the atomic schedule mutation seam"
         );
         assert_eq!(
-            store.direct_schedule_writes.load(Ordering::SeqCst),
+            store.standalone_schedule_commits.load(Ordering::SeqCst),
             0,
-            "update should not fall back to piecemeal put_schedule writes"
+            "update should not fall back to standalone schedule commits"
         );
         Ok(())
     }
@@ -925,8 +1012,6 @@ mod tests {
                 "shell".to_string(),
             ])),
             tool_filter_witnesses: Default::default(),
-            model: "claude-sonnet-4-6".into(),
-            provider_params: None,
         }
     }
 

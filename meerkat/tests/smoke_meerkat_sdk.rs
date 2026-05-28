@@ -976,23 +976,19 @@ mod scenario_08_comms {
         let addr_b = listener_b.local_addr().unwrap();
         drop(listener_b);
 
-        let trusted_for_a = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "agent-b".to_string(),
-                pubkey: pubkey_b,
-                addr: format!("tcp://{addr_b}"),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
+        let trusted_for_a = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "agent-b".to_string(),
+            pubkey: pubkey_b,
+            addr: format!("tcp://{addr_b}"),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
 
-        let trusted_for_b = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "agent-a".to_string(),
-                pubkey: pubkey_a,
-                addr: format!("tcp://{addr_a}"),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
+        let trusted_for_b = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "agent-a".to_string(),
+            pubkey: pubkey_a,
+            addr: format!("tcp://{addr_a}"),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
 
         let config_a = CommsManagerConfig::with_keypair(keypair_a)
             .trusted_peers(trusted_for_a.clone())
@@ -1035,12 +1031,12 @@ mod scenario_08_comms {
 
         let tools_a = Arc::new(CommsToolDispatcher::new(
             comms_manager_a.router().clone(),
-            trusted_a_shared,
+            comms_manager_a.router().trusted_peers_view(),
         ));
 
         let tools_b = Arc::new(CommsToolDispatcher::new(
             comms_manager_b.router().clone(),
-            trusted_b_shared,
+            comms_manager_b.router().trusted_peers_view(),
         ));
 
         let (_store_a, store_adapter_a, temp_dir_a) = create_temp_store().await;
@@ -1817,7 +1813,8 @@ mod scenario_22_runtime_host_comms {
         runtime_adapter.register_session(sid_a.clone()).await;
         runtime_adapter
             .register_session_with_executor(sid_a.clone(), executor)
-            .await;
+            .await
+            .expect("runtime executor registration should succeed");
 
         // Run A's initial turn through runtime
         let input_a = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(

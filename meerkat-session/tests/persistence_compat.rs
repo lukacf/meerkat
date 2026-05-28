@@ -4,16 +4,20 @@
 //! (fixtures 1-11) + **C-6r** (fixture #12, runtime-side snapshot
 //! table).
 //!
-//! Invariant: every v0 session/runtime-store fixture from
-//! `docs/wave-c-prep/persistence-migration.md` §5 must load under the
-//! v1 typed schema with lossless round-trip semantics. The canary is
-//! fixture #4 (Anthropic extended-thinking `thinking: {type:"enabled",
-//! budget_tokens:32000}`), which is the production shape most at risk
-//! of being silently dropped by an eager typed retype.
+//! Invariant: compatible v0 session/runtime-store fixtures must load
+//! under the v1 typed schema with lossless round-trip semantics. The
+//! canary is fixture #4 (Anthropic extended-thinking
+//! `thinking: {type:"enabled", budget_tokens:32000}`), which is the
+//! production shape most at risk of being silently dropped by an eager
+//! typed retype. Auth-binding identity aliases, root
+//! `session_metadata`, and root `session_llm_identity` are intentionally
+//! not compatible migration shapes: changing or lowering those facts
+//! affects trust/default resolution, so the migration shell must fail
+//! closed unless a generated authority owns the value change.
 //!
 //! At c.0 the stub used fixtures as inline blobs. C-3 lands:
 //! - disk fixtures under `meerkat-session/tests/fixtures/pre_wave_b/`
-//!   so helper drift cannot mask regressions (per §5 of the design doc);
+//!   so helper drift cannot mask regressions;
 //! - the migration entry points in
 //!   `meerkat_session::persistent::migrations`;
 //! - per-fixture typed assertions (the Anthropic `thinking` canary
@@ -29,10 +33,10 @@
 
 use std::path::{Path, PathBuf};
 
+use meerkat_core::generated::session_persistence_version_authority::STORED_INPUT_STATE_VERSION;
 use meerkat_core::{SESSION_METADATA_SCHEMA_VERSION, SESSION_VERSION};
 use meerkat_session::migrations::{
-    STORED_INPUT_STATE_VERSION, SessionMigrationError, migrate_input_state_value,
-    migrate_session_value,
+    SessionMigrationError, migrate_input_state_value, migrate_session_value,
 };
 use serde_json::{Value, json};
 
@@ -50,16 +54,32 @@ fn load_fixture(name: &str) -> Value {
     serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("fixture {name} parse error: {err}"))
 }
 
-/// Call the session-envelope migrator for a fixture where the
-/// scenario lives inside `session_metadata`; we splice it into a
-/// minimal Session skeleton before handing it to the migrator so the
-/// round-trip exercises the full typed path.
+/// Call the session-envelope migrator for a fixture where the scenario
+/// blob is stored under root `session_metadata`; we merge it into a
+/// complete, supported nested SessionMetadata shell before handing it
+/// to the migrator so the round-trip exercises the full typed path.
+/// Direct root `session_metadata` is a separate fail-closed contract
+/// below.
 fn migrate_metadata_scenario(name: &str) -> Result<meerkat_core::Session, SessionMigrationError> {
     let raw = load_fixture(name);
     let metadata_root = raw
         .as_object()
         .and_then(|obj| obj.get("session_metadata").cloned())
         .unwrap_or(Value::Null);
+    let mut session_metadata = json!({
+        "model": "gpt-4o-mini",
+        "max_tokens": 4096,
+        "provider": "open_a_i",
+        "tooling": {},
+        "comms_name": null,
+    });
+    if let (Some(target), Some(source)) =
+        (session_metadata.as_object_mut(), metadata_root.as_object())
+    {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
     let session_llm_identity = raw
         .as_object()
         .and_then(|obj| obj.get("session_llm_identity").cloned());
@@ -75,14 +95,14 @@ fn migrate_metadata_scenario(name: &str) -> Result<meerkat_core::Session, Sessio
         "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
         "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
         "metadata": {
-            "session_metadata": metadata_root,
+            "session_metadata": session_metadata,
         },
     });
     if let Some(ident) = session_llm_identity {
         envelope
             .as_object_mut()
             .unwrap()
-            .insert("session_llm_identity_scenario".to_string(), ident);
+            .insert("session_llm_identity".to_string(), ident);
     }
     migrate_session_value(envelope)
 }
@@ -104,6 +124,66 @@ fn fixture_01_session_empty_metadata() {
     assert!(
         session.metadata().get("session_metadata").is_none(),
         "migrator must not synthesize SessionMetadata when none was persisted"
+    );
+}
+
+#[test]
+fn migration_rejects_unsupported_session_envelope_version() {
+    let envelope = json!({
+        "version": SESSION_VERSION + 100,
+        "id": "00000000-0000-0000-0000-000000000001",
+        "messages": [],
+        "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+    });
+    let err =
+        migrate_session_value(envelope).expect_err("future envelope version must fail closed");
+    assert!(
+        matches!(err, SessionMigrationError::GeneratedAuthority(_)),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn migration_rejects_unsupported_session_metadata_schema_version() {
+    let envelope = json!({
+        "id": "00000000-0000-0000-0000-000000000001",
+        "messages": [],
+        "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "metadata": {
+            "session_metadata": {
+                "schema_version": SESSION_METADATA_SCHEMA_VERSION + 100,
+            },
+        },
+    });
+    let err = migrate_session_value(envelope).expect_err("future metadata schema must fail closed");
+    assert!(
+        matches!(err, SessionMigrationError::GeneratedAuthority(_)),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn migration_rejects_root_session_metadata() {
+    let err = migrate_session_value(load_fixture("session_provider_params_openai"))
+        .expect_err("root session_metadata must fail closed");
+    assert!(
+        matches!(err, SessionMigrationError::UnsupportedRootSessionMetadata),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn migration_rejects_unsupported_stored_input_state_version() {
+    let raw = json!({
+        "stored_input_state_version": STORED_INPUT_STATE_VERSION + 100,
+    });
+    let err = migrate_input_state_value(raw)
+        .expect_err("future stored input-state version must fail closed");
+    assert!(
+        matches!(err, SessionMigrationError::GeneratedAuthority(_)),
+        "unexpected error: {err:?}"
     );
 }
 
@@ -216,82 +296,60 @@ fn fixture_05_session_provider_params_unknown_scalar() {
     assert_eq!(params.as_u64(), Some(42));
 }
 
-/// Fixture #6: clean AuthBindingRef — `{realm_id, binding_id}` → typed
-/// `{realm, binding}`.
+/// Fixture #6: legacy AuthBindingRef aliases are identity/trust facts,
+/// so the migration shell rejects them fail-closed instead of rewriting
+/// `connection_ref.{realm_id,binding_id}` to `auth_binding.{realm,binding}`.
 #[test]
-fn fixture_06_auth_binding_clean_v0_rename() {
-    let session =
-        migrate_metadata_scenario("session_auth_binding_slug_valid").expect("must migrate");
-    let cref = session
-        .metadata()
-        .get("session_metadata")
-        .and_then(|m| m.get("auth_binding"))
-        .expect("auth_binding preserved");
-    assert_eq!(cref.get("realm").and_then(Value::as_str), Some("dev"));
-    assert_eq!(
-        cref.get("binding").and_then(Value::as_str),
-        Some("default_openai")
-    );
-    assert!(cref.get("realm_id").is_none(), "legacy key must be removed");
+fn fixture_06_auth_binding_legacy_identity_rejected_fail_closed() {
+    let err = migrate_metadata_scenario("session_auth_binding_slug_valid")
+        .expect_err("legacy auth-binding identity aliases must fail closed");
+
     assert!(
-        cref.get("binding_id").is_none(),
-        "legacy key must be removed"
+        matches!(
+            err,
+            SessionMigrationError::UnsupportedLegacyAuthBinding {
+                location: "SessionMetadata",
+                field: "connection_ref",
+            }
+        ),
+        "unexpected error: {err:?}"
     );
 }
 
-/// Fixture #7: invalid slug (`dev mode`). Migration slugifies
-/// (`dev_mode`) and returns `SessionMigrationError::Partial` carrying
-/// the original payload.
+/// Fixture #7: invalid legacy auth-binding slugs are not slugified or
+/// salvaged by compatibility code; the identity alias itself is
+/// rejected before any value rewrite can occur.
 #[test]
-fn fixture_07_auth_binding_invalid_slug_slugified() {
-    let result = migrate_metadata_scenario("session_auth_binding_slug_invalid");
-    match result {
-        Err(SessionMigrationError::Partial(partial)) => {
-            let cref = partial
-                .session
-                .metadata()
-                .get("session_metadata")
-                .and_then(|m| m.get("auth_binding"))
-                .expect("auth_binding coerced to valid slug");
-            assert_eq!(
-                cref.get("realm").and_then(Value::as_str),
-                Some("dev_mode"),
-                "realm_id `dev mode` must slugify to `dev_mode`"
-            );
+fn fixture_07_auth_binding_invalid_legacy_identity_rejected_fail_closed() {
+    let err = migrate_metadata_scenario("session_auth_binding_slug_invalid")
+        .expect_err("legacy auth-binding identity aliases must fail closed");
 
-            // Legacy payload retained under the documented key.
-            let salvaged = partial
-                .legacy
-                .get("legacy_auth_binding_session_metadata")
-                .expect("legacy payload retained");
-            assert_eq!(
-                salvaged.get("realm_id").and_then(Value::as_str),
-                Some("dev mode"),
-                "original `dev mode` must survive under legacy bag"
-            );
-        }
-        Ok(_) => panic!("invalid slug must return Partial, not Ok"),
-        Err(other) => panic!("unexpected migration error: {other:?}"),
-    }
+    assert!(
+        matches!(
+            err,
+            SessionMigrationError::UnsupportedLegacyAuthBinding {
+                location: "SessionMetadata",
+                field: "connection_ref",
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
 }
 
-/// Fixture #8: mixed v0 identity + v1 metadata — both independently
-/// migrated, no cross-contamination.
+/// Fixture #8: root `session_llm_identity` is an identity/trust fact
+/// that `Session` serde does not carry, so migration rejects it
+/// fail-closed instead of silently dropping or lowering it.
 #[test]
 fn fixture_08_hot_swap_identity_mixed() {
-    let session =
-        migrate_metadata_scenario("session_hot_swap_identity_mixed").expect("must migrate");
-    let cref = session
-        .metadata()
-        .get("session_metadata")
-        .and_then(|m| m.get("auth_binding"))
-        .expect("auth_binding preserved");
-    // The fixture's metadata already used v1 shape (realm/binding); the
-    // migrator must not duplicate or churn the fields.
-    assert_eq!(cref.get("realm").and_then(Value::as_str), Some("prod"));
-    assert_eq!(
-        cref.get("binding").and_then(Value::as_str),
-        Some("openai_main")
+    let err = migrate_metadata_scenario("session_hot_swap_identity_mixed")
+        .expect_err("root session_llm_identity must fail closed");
+
+    assert!(
+        matches!(
+            err,
+            SessionMigrationError::UnsupportedRootSessionLlmIdentity
+        ),
+        "unexpected error: {err:?}"
     );
 }
 

@@ -1,5 +1,6 @@
 //! Product-neutral mob coordination records.
 
+use crate::generated::mob_coordination_lifecycle_authority;
 use crate::ids::{AgentIdentity, MobId, RunId};
 use chrono::{DateTime, Utc};
 use meerkat_core::types::SessionId;
@@ -115,18 +116,6 @@ impl CoordinationOwner {
     pub fn is_empty(&self) -> bool {
         self.principal.is_none() && self.agent_identity.is_none()
     }
-
-    fn validate(&self) -> Result<(), MobCoordinationError> {
-        if self.is_empty() {
-            return Err(MobCoordinationError::MissingOwner);
-        }
-        if let Some(agent_identity) = &self.agent_identity
-            && agent_identity.as_str().trim().is_empty()
-        {
-            return Err(MobCoordinationError::EmptyOwnerAgentIdentity);
-        }
-        Ok(())
-    }
 }
 
 /// Typed optional owning references for a coordination record.
@@ -163,7 +152,7 @@ pub enum WorkIntentStatus {
 impl WorkIntentStatus {
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled)
+        mob_coordination_lifecycle_authority::work_intent_status_is_terminal(self)
     }
 }
 
@@ -239,7 +228,7 @@ pub enum ResourceClaimStatus {
 impl ResourceClaimStatus {
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Released | Self::Expired | Self::Cancelled)
+        mob_coordination_lifecycle_authority::resource_claim_status_is_terminal(self)
     }
 }
 
@@ -267,7 +256,7 @@ pub struct ResourceClaim {
 impl ResourceClaim {
     #[must_use]
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
-        self.status == ResourceClaimStatus::Expired
+        mob_coordination_lifecycle_authority::resource_claim_status_is_expired(self.status)
             || self.expires_at.is_some_and(|expires_at| expires_at <= now)
     }
 
@@ -351,7 +340,8 @@ impl MobCoordinationBoard {
             work_intents: BTreeMap::new(),
             resource_claims: BTreeMap::new(),
             events: Vec::new(),
-            next_event_sequence: 1,
+            next_event_sequence:
+                mob_coordination_lifecycle_authority::authorize_initial_event_sequence(),
         }
     }
 
@@ -362,42 +352,20 @@ impl MobCoordinationBoard {
 
     pub fn record_work_intent(
         &mut self,
-        mut draft: NewWorkIntent,
+        draft: NewWorkIntent,
         now: DateTime<Utc>,
     ) -> Result<&WorkIntent, MobCoordinationError> {
-        if self.work_intents.contains_key(&draft.id) {
-            return Err(MobCoordinationError::DuplicateWorkIntent { id: draft.id });
-        }
-        validate_summary(&draft.summary)?;
-        draft.owner.validate()?;
-        validate_resources(&draft.resources)?;
-        draft.metadata.validate_public()?;
-        self.normalize_refs(&mut draft.owning_refs)?;
-
         let id = draft.id.clone();
-        self.work_intents.insert(
-            id.clone(),
-            WorkIntent {
-                id: id.clone(),
-                revision: 1,
-                summary: draft.summary,
-                details: draft.details,
-                status: draft.status,
-                owner: draft.owner,
-                owning_refs: draft.owning_refs,
-                resources: draft.resources,
-                metadata: draft.metadata,
-                created_at: now,
-                updated_at: now,
-                expires_at: draft.expires_at,
-            },
-        );
-        self.push_event(
+        let authorized = mob_coordination_lifecycle_authority::authorize_work_intent_record(
+            &self.mob_id,
+            draft,
             now,
-            MobCoordinationEventKind::WorkIntentRecorded {
-                intent_id: id.clone(),
-            },
-        );
+            self.next_event_sequence,
+            self.work_intents.contains_key(&id),
+        )?;
+        let (record, event_publication) = authorized.into_parts();
+        self.work_intents.insert(id.clone(), record);
+        self.append_authorized_event(event_publication);
         Ok(self
             .work_intents
             .get(&id)
@@ -411,24 +379,38 @@ impl MobCoordinationBoard {
         status: WorkIntentStatus,
         now: DateTime<Utc>,
     ) -> Result<&WorkIntent, MobCoordinationError> {
+        let (current_revision, is_expired) = {
+            let intent = self
+                .work_intents
+                .get(id)
+                .ok_or_else(|| MobCoordinationError::UnknownWorkIntent { id: id.clone() })?;
+            (intent.revision, intent.is_expired_at(now))
+        };
+        let authorized_revision =
+            mob_coordination_lifecycle_authority::authorize_record_revision_advance(
+                current_revision,
+                expected_revision,
+            )?;
+        let authorized_status =
+            mob_coordination_lifecycle_authority::authorize_work_intent_update_status(
+                status, is_expired,
+            )?;
+        let event_publication =
+            mob_coordination_lifecycle_authority::authorize_work_intent_status_changed_event(
+                &self.mob_id,
+                now,
+                id.clone(),
+                authorized_status,
+                self.next_event_sequence,
+            )?;
         let intent = self
             .work_intents
             .get_mut(id)
-            .ok_or_else(|| MobCoordinationError::UnknownWorkIntent { id: id.clone() })?;
-        ensure_fresh_revision(intent.revision, expected_revision)?;
-        if !status.is_terminal() && intent.is_expired_at(now) {
-            return Err(MobCoordinationError::ExpiredRecord);
-        }
-        intent.status = status;
-        intent.revision += 1;
+            .expect("authorized work intent must still be present");
+        intent.status = authorized_status;
+        intent.revision = authorized_revision;
         intent.updated_at = now;
-        self.push_event(
-            now,
-            MobCoordinationEventKind::WorkIntentStatusChanged {
-                intent_id: id.clone(),
-                status,
-            },
-        );
+        self.append_authorized_event(event_publication);
         Ok(self
             .work_intents
             .get(id)
@@ -437,43 +419,20 @@ impl MobCoordinationBoard {
 
     pub fn record_resource_claim(
         &mut self,
-        mut draft: NewResourceClaim,
+        draft: NewResourceClaim,
         now: DateTime<Utc>,
     ) -> Result<&ResourceClaim, MobCoordinationError> {
-        if self.resource_claims.contains_key(&draft.id) {
-            return Err(MobCoordinationError::DuplicateResourceClaim { id: draft.id });
-        }
-        draft.owner.validate()?;
-        validate_resources(&draft.resources)?;
-        draft.metadata.validate_public()?;
-        self.normalize_refs(&mut draft.owning_refs)?;
-
         let id = draft.id.clone();
-        let kind = draft.kind;
-        self.resource_claims.insert(
-            id.clone(),
-            ResourceClaim {
-                id: id.clone(),
-                revision: 1,
-                kind,
-                status: draft.status,
-                owner: draft.owner,
-                owning_refs: draft.owning_refs,
-                resources: draft.resources,
-                reason: draft.reason,
-                metadata: draft.metadata,
-                created_at: now,
-                updated_at: now,
-                expires_at: draft.expires_at,
-            },
-        );
-        self.push_event(
+        let authorized = mob_coordination_lifecycle_authority::authorize_resource_claim_record(
+            &self.mob_id,
+            draft,
             now,
-            MobCoordinationEventKind::ResourceClaimRecorded {
-                claim_id: id.clone(),
-                kind,
-            },
-        );
+            self.next_event_sequence,
+            self.resource_claims.contains_key(&id),
+        )?;
+        let (record, event_publication) = authorized.into_parts();
+        self.resource_claims.insert(id.clone(), record);
+        self.append_authorized_event(event_publication);
         Ok(self
             .resource_claims
             .get(&id)
@@ -487,24 +446,38 @@ impl MobCoordinationBoard {
         status: ResourceClaimStatus,
         now: DateTime<Utc>,
     ) -> Result<&ResourceClaim, MobCoordinationError> {
+        let (current_revision, is_expired) = {
+            let claim = self
+                .resource_claims
+                .get(id)
+                .ok_or_else(|| MobCoordinationError::UnknownResourceClaim { id: id.clone() })?;
+            (claim.revision, claim.is_expired_at(now))
+        };
+        let authorized_revision =
+            mob_coordination_lifecycle_authority::authorize_record_revision_advance(
+                current_revision,
+                expected_revision,
+            )?;
+        let authorized_status =
+            mob_coordination_lifecycle_authority::authorize_resource_claim_update_status(
+                status, is_expired,
+            )?;
+        let event_publication =
+            mob_coordination_lifecycle_authority::authorize_resource_claim_status_changed_event(
+                &self.mob_id,
+                now,
+                id.clone(),
+                authorized_status,
+                self.next_event_sequence,
+            )?;
         let claim = self
             .resource_claims
             .get_mut(id)
-            .ok_or_else(|| MobCoordinationError::UnknownResourceClaim { id: id.clone() })?;
-        ensure_fresh_revision(claim.revision, expected_revision)?;
-        if !status.is_terminal() && claim.is_expired_at(now) {
-            return Err(MobCoordinationError::ExpiredRecord);
-        }
-        claim.status = status;
-        claim.revision += 1;
+            .expect("authorized resource claim must still be present");
+        claim.status = authorized_status;
+        claim.revision = authorized_revision;
         claim.updated_at = now;
-        self.push_event(
-            now,
-            MobCoordinationEventKind::ResourceClaimStatusChanged {
-                claim_id: id.clone(),
-                status,
-            },
-        );
+        self.append_authorized_event(event_publication);
         Ok(self
             .resource_claims
             .get(id)
@@ -582,14 +555,15 @@ impl MobCoordinationBoard {
             .filter(|claim| &claim.id != claim_id)
             .map(|claim| claim.id.clone())
             .collect();
-
-        self.push_event(
-            now,
-            MobCoordinationEventKind::ResourceClaimOverlapObserved {
-                claim_id: claim_id.clone(),
-                overlaps: overlaps.clone(),
-            },
-        );
+        let event_publication =
+            mob_coordination_lifecycle_authority::authorize_resource_claim_overlap_observed_event(
+                &self.mob_id,
+                now,
+                claim_id.clone(),
+                overlaps.clone(),
+                self.next_event_sequence,
+            )?;
+        self.append_authorized_event(event_publication);
 
         Ok(overlaps
             .iter()
@@ -602,32 +576,13 @@ impl MobCoordinationBoard {
         &self.events
     }
 
-    fn normalize_refs(
-        &self,
-        refs: &mut CoordinationRecordRefs,
-    ) -> Result<(), MobCoordinationError> {
-        match &refs.mob_id {
-            Some(mob_id) if mob_id != &self.mob_id => Err(MobCoordinationError::MismatchedMobRef {
-                expected: self.mob_id.clone(),
-                actual: mob_id.clone(),
-            }),
-            Some(_) => Ok(()),
-            None => {
-                refs.mob_id = Some(self.mob_id.clone());
-                Ok(())
-            }
-        }
-    }
-
-    fn push_event(&mut self, timestamp: DateTime<Utc>, kind: MobCoordinationEventKind) {
-        let sequence = self.next_event_sequence;
-        self.next_event_sequence += 1;
-        self.events.push(MobCoordinationEvent {
-            sequence,
-            timestamp,
-            mob_id: self.mob_id.clone(),
-            kind,
-        });
+    fn append_authorized_event(
+        &mut self,
+        publication: mob_coordination_lifecycle_authority::AuthorizedMobCoordinationEventPublication,
+    ) {
+        let (event, next_event_sequence) = publication.into_parts();
+        self.next_event_sequence = next_event_sequence;
+        self.events.push(event);
     }
 }
 
@@ -677,35 +632,12 @@ pub enum MobCoordinationError {
     UnknownWorkIntent { id: WorkIntentId },
     #[error("unknown resource claim '{id}'")]
     UnknownResourceClaim { id: ResourceClaimId },
-    #[error("stale revision: expected {expected}, actual {actual}")]
-    StaleRevision { expected: u64, actual: u64 },
-    #[error("coordination record is expired")]
-    ExpiredRecord,
     #[error("coordination mob ref mismatch: expected '{expected}', actual '{actual}'")]
     MismatchedMobRef { expected: MobId, actual: MobId },
-}
-
-fn validate_summary(summary: &str) -> Result<(), MobCoordinationError> {
-    if summary.trim().is_empty() {
-        return Err(MobCoordinationError::EmptyWorkIntentSummary);
-    }
-    Ok(())
-}
-
-fn validate_resources(
-    resources: &BTreeSet<CoordinationResourceRef>,
-) -> Result<(), MobCoordinationError> {
-    if resources.is_empty() {
-        return Err(MobCoordinationError::EmptyResources);
-    }
-    Ok(())
-}
-
-fn ensure_fresh_revision(actual: u64, expected: u64) -> Result<(), MobCoordinationError> {
-    if actual != expected {
-        return Err(MobCoordinationError::StaleRevision { expected, actual });
-    }
-    Ok(())
+    #[error("{0}")]
+    GeneratedAuthority(
+        #[from] mob_coordination_lifecycle_authority::MobCoordinationLifecycleAuthorityError,
+    ),
 }
 
 fn resources_overlap(
@@ -808,14 +740,14 @@ mod tests {
         empty_owner.owner = CoordinationOwner::default();
         assert!(matches!(
             board.record_work_intent(empty_owner, now()),
-            Err(MobCoordinationError::MissingOwner)
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
 
         let mut empty_resources = claim("claim-1", ResourceClaimKind::Exclusive, &[]);
         empty_resources.resources = BTreeSet::new();
         assert!(matches!(
             board.record_resource_claim(empty_resources, now()),
-            Err(MobCoordinationError::EmptyResources)
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
     }
 
@@ -834,7 +766,7 @@ mod tests {
 
         assert!(matches!(
             board.record_resource_claim(draft, now()),
-            Err(MobCoordinationError::InvalidMetadata(_))
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
     }
 
@@ -846,8 +778,7 @@ mod tests {
 
         assert!(matches!(
             board.record_work_intent(draft, now()),
-            Err(MobCoordinationError::MismatchedMobRef { expected, actual })
-                if expected.as_str() == "mob-k" && actual.as_str() == "other-mob"
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
     }
 
@@ -859,7 +790,7 @@ mod tests {
             .expect("first intent");
         assert!(matches!(
             board.record_work_intent(intent("intent-1", &["file:/src/lib.rs"]), now()),
-            Err(MobCoordinationError::DuplicateWorkIntent { .. })
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
 
         board
@@ -881,7 +812,7 @@ mod tests {
                 ),
                 now(),
             ),
-            Err(MobCoordinationError::DuplicateResourceClaim { .. })
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
     }
 
@@ -908,10 +839,7 @@ mod tests {
                 WorkIntentStatus::Completed,
                 now() + Duration::seconds(2),
             ),
-            Err(MobCoordinationError::StaleRevision {
-                expected: 1,
-                actual: 2
-            })
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
     }
 
@@ -954,7 +882,7 @@ mod tests {
 
         assert!(matches!(
             board.update_resource_claim_status(&id, 1, ResourceClaimStatus::Active, now()),
-            Err(MobCoordinationError::ExpiredRecord)
+            Err(MobCoordinationError::GeneratedAuthority(_))
         ));
     }
 

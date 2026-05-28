@@ -3,10 +3,18 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
+SetOfWorkDependencyPathKeyValuesCi == {{}}
+SetOfWorkEdgeKeyValuesCi == {{}}
+WorkDependencyPathKeyValuesCi == {}
+WorkEdgeKeyValuesCi == {}
 WorkOwnerKeyValuesCi == {}
 
+SetOfWorkDependencyPathKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkEdgeKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+WorkDependencyPathKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
+WorkEdgeKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesDeep == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
 
 None == [tag |-> "none", value |-> "none"]
@@ -22,6 +30,7 @@ MapDecrement(map, key, amount) == [x \in DOMAIN map \cup {key} |-> IF x = key TH
 MapRemove(map, key) == [x \in DOMAIN map \ {key} |-> map[x]]
 StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
 SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
+Count(seq, value) == Cardinality({i \in DOMAIN seq : seq[i] = value})
 RECURSIVE SeqRemove(_, _)
 SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \o SeqRemove(Tail(seq), value)
 RECURSIVE SeqRemoveAll(_, _)

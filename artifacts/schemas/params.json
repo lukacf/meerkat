@@ -458,6 +458,9 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "mob_peer_overlay": {
+                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+              },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
               },
@@ -473,7 +476,8 @@
               "supervisor",
               "epoch",
               "protocol_version",
-              "peer_spec"
+              "peer_spec",
+              "mob_peer_overlay"
             ],
             "type": "object"
           },
@@ -490,6 +494,9 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "mob_peer_overlay": {
+                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+              },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
               },
@@ -505,7 +512,8 @@
               "supervisor",
               "epoch",
               "protocol_version",
-              "peer_spec"
+              "peer_spec",
+              "mob_peer_overlay"
             ],
             "type": "object"
           }
@@ -656,6 +664,32 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "BridgeMobPeerOverlayHandoff": {
+        "additionalProperties": false,
+        "description": "Generated MobMachine peer overlay handoff carried with peer wiring commands.",
+        "properties": {
+          "peer_specs": {
+            "items": {
+              "$ref": "#/$defs/BridgePeerSpec"
+            },
+            "type": "array"
+          },
+          "recipient_peer_id": {
+            "type": "string"
+          },
+          "topology_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recipient_peer_id",
+          "topology_epoch",
+          "peer_specs"
+        ],
+        "type": "object"
       },
       "BridgePeerConnectivity": {
         "description": "Connectivity class observed for the bridged member runtime.",

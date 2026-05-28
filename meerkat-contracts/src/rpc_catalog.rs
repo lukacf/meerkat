@@ -537,7 +537,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "live/close",
                 "Close a live channel",
                 "LiveChannelParams",
-                "Value",
+                "LiveCloseResult",
             ),
             RpcMethodDescriptor::typed(
                 "live/send_input",

@@ -13,6 +13,10 @@ use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 pub const INVALID_ARGUMENTS: &str = "invalid_arguments";
 pub const NOT_FOUND: &str = "not_found";
 pub const CAPABILITY_UNAVAILABLE: &str = "capability_unavailable";
+pub const CONFLICT: &str = "conflict";
+pub const INVALID_TRANSITION: &str = "invalid_transition";
+pub const STORE_ERROR: &str = "store_error";
+pub const INTERNAL_ERROR: &str = "internal_error";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkGraphToolError {
@@ -309,11 +313,13 @@ fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError
 fn map_error(error: WorkGraphError) -> WorkGraphToolError {
     let code = match error {
         WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => NOT_FOUND,
-        WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => "conflict",
-        WorkGraphError::InvalidTransition(_) => "invalid_transition",
-        WorkGraphError::InvalidInput(_) => INVALID_ARGUMENTS,
+        WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => CONFLICT,
+        WorkGraphError::InvalidTransition(_) => INVALID_TRANSITION,
+        WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
+            INVALID_ARGUMENTS
+        }
         WorkGraphError::UnsupportedBackend(_) => CAPABILITY_UNAVAILABLE,
-        WorkGraphError::Store(_) => "store_error",
+        WorkGraphError::Store(_) => STORE_ERROR,
     };
     WorkGraphToolError::new(code, error.to_string())
 }

@@ -46,7 +46,9 @@ pub use auth_store::{
     FileTokenStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use meerkat_core::auth::{RefreshCoordinator, RefreshError, TokenStore};
+pub use meerkat_core::auth::{
+    RefreshCoordinator, RefreshError, RefreshFailureObservation, TokenStore,
+};
 
 pub use resolver::{resolve_external_authorizer, resolve_simple_secret};
 pub use self_hosted::SelfHostedProviderRuntime;

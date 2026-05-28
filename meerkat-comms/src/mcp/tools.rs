@@ -7,7 +7,6 @@
 //! request/response traffic then projects through the generated comms
 //! contract before it becomes a [`CommsCommand`] domain envelope.
 
-use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -15,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::{CommsConfig, Keypair};
-use crate::{Router, TrustedPeers};
+use crate::{CommsConfig, Keypair, TrustedPeers};
+use crate::{Router, TrustedPeersView};
 use meerkat_contracts::{
     CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
     CommsSendResult,
@@ -26,8 +25,7 @@ use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerRoute, PeerSendability, SendError,
-    SendReceipt,
+    PeerDirectorySource, PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
@@ -189,7 +187,7 @@ pub struct PeersInput {}
 #[derive(Clone)]
 pub struct ToolContext {
     pub router: Arc<Router>,
-    pub trusted_peers: Arc<RwLock<TrustedPeers>>,
+    pub trusted_peers: TrustedPeersView,
     pub runtime: Option<RuntimeCommsCommandHandle>,
 }
 
@@ -245,7 +243,7 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "peers",
-            "description": "List all visible peers with connection info and optional metadata (description, labels, capabilities, reachability).\n\nAlways call peers before sending any message to pick the canonical peer_id. Names are display labels and may not be unique. The returned list includes:\n- peer_id: Unique cryptographic identity to use in send_message / send_request / send_response.\n- name: Display label only.\n- address: Transport address.\n- reachability: Whether the peer is currently reachable.\n- capabilities / meta: What the peer can do and its role description.\n\nExample output:\n{\"peers\": [{\"name\": \"helper-1\", \"peer_id\": \"018f...\", \"address\": \"tcp://...\", \"reachability\": \"reachable\", \"meta\": {\"description\": \"Code review helper\"}}]}",
+            "description": "List all visible peers with connection info and optional metadata (description, labels, capabilities).\n\nAlways call peers before sending any message to pick the canonical peer_id. Names are display labels and may not be unique. The returned list includes:\n- peer_id: Unique cryptographic identity to use in send_message / send_request / send_response.\n- name: Display label only.\n- address: Transport address.\n- capabilities / meta: What the peer can do and its role description.\n\nExample output:\n{\"peers\": [{\"name\": \"helper-1\", \"peer_id\": \"018f...\", \"address\": \"tcp://...\", \"meta\": {\"description\": \"Code review helper\"}}]}",
             "inputSchema": schema_for::<PeersInput>()
         }),
     ]
@@ -307,12 +305,6 @@ pub async fn handle_tools_call_with_context(
             let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
             let in_reply_to_uuid = uuid::Uuid::parse_str(&input.in_reply_to)
                 .map_err(|_| format!("invalid UUID for in_reply_to: {}", input.in_reply_to))?;
-            // Accepted progress responses reject a handling_mode override
-            // at the tool boundary — the receiver's admission gate would
-            // drop them, so refuse to build a command that can't succeed.
-            if matches!(input.status, ResponseStatus::Accepted) && input.handling_mode.is_some() {
-                return Err("handling_mode is forbidden on accepted peer responses".to_string());
-            }
             let blocks = resolve_tool_blocks(input.blocks, dispatch_context)?;
             let typed_request = meerkat_contracts::CommsCommandRequest::PeerResponse {
                 to: input.peer_id,
@@ -628,7 +620,7 @@ fn sent_result(kind: &str, receipt: SendReceipt) -> Value {
 
 /// Validate a canonical [`PeerId`] against the runtime-facing trust set.
 fn ensure_peer_id_is_trusted(ctx: &ToolContext, peer_id: &PeerId) -> Result<(), String> {
-    let peers = ctx.trusted_peers.read();
+    let peers = ctx.trusted_peers.snapshot();
     match peers.find_by_peer_id(peer_id) {
         Some(_) => Ok(()),
         None => Err(format!(
@@ -686,10 +678,9 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 
 fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
-    let peers = ctx.trusted_peers.read();
+    let peers = ctx.trusted_peers.snapshot();
     let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
     let peer_id_counts: HashMap<PeerId, usize> = peers
-        .peers
         .iter()
         .filter(|p| !p.pubkey.is_zero() && p.pubkey != self_pubkey)
         .fold(HashMap::new(), |mut counts, peer| {
@@ -697,7 +688,6 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
             counts
         });
     peers
-        .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
         .filter_map(|p| {
@@ -749,8 +739,6 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
                 source: PeerDirectorySource::Trusted,
                 sendable_kinds: sendable_kinds.clone(),
                 capabilities: PeerCapabilitySet::default(),
-                reachability: PeerReachability::Unknown,
-                last_unreachable_reason: None,
                 meta: p.meta.clone(),
             })
         })
@@ -778,14 +766,14 @@ fn peer_sendability_tool_name(kind: PeerSendability) -> &'static str {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::{PubKey, TrustedPeer};
+    use crate::{CommsRuntime, PubKey, TrustedPeer};
     use meerkat_contracts::wire::supervisor_bridge::{
         BridgeAck, BridgeCommand, BridgePeerSpec, BridgeReply, BridgeSupervisorPayload,
         supervisor_bridge_current_protocol_version,
     };
     use meerkat_core::comms::{
-        PeerAddress, PeerCapabilitySet, PeerDirectorySource, PeerReachability, PeerSendability,
-        PeerTransport,
+        CommsTrustMutation, PeerAddress, PeerCapabilitySet, PeerDirectorySource, PeerSendability,
+        PeerTransport, TrustedPeerDescriptor,
     };
     use parking_lot::Mutex;
     use std::sync::LazyLock;
@@ -923,33 +911,151 @@ mod tests {
         }
     }
 
-    fn make_trusted_runtime_less_context(
+    #[allow(clippy::expect_used)]
+    fn test_peer_projection_reconcile_obligation(
+        session_id: impl Into<String>,
+        local_peer_id: meerkat_core::comms::PeerId,
+        endpoints: std::collections::BTreeSet<meerkat_runtime::meerkat_machine::dsl::PeerEndpoint>,
+    ) -> (
+        Arc<meerkat_runtime::HandleDslAuthority>,
+        meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation,
+    ) {
+        let session_id = session_id.into();
+        let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+        dsl.apply_signal(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+            "test::initialize",
+        )
+        .expect("Initialize signal");
+        dsl.apply_input(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    session_id.clone(),
+                ),
+            },
+            "test::register_session",
+        )
+        .expect("RegisterSession input");
+        dsl.apply_input(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: meerkat_runtime::meerkat_machine::dsl::AgentRuntimeId::from(
+                    format!("test-runtime-{session_id}"),
+                ),
+                fence_token: meerkat_runtime::meerkat_machine::dsl::FenceToken::from(0),
+                generation: Some(meerkat_runtime::meerkat_machine::dsl::Generation::from(0)),
+                runtime_epoch_id: None,
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session_id),
+            },
+            "test::prepare_bindings",
+        )
+        .expect("PrepareBindings input");
+        dsl.apply_input(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint {
+                endpoint: meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::new(
+                    "local",
+                    local_peer_id.to_string(),
+                    "inproc://local",
+                    [0x7f; 32],
+                ),
+            },
+            "test::publish_local_endpoint",
+        )
+        .expect("PublishLocalEndpoint input");
+        let transition = dsl
+            .apply_input_with_transition(
+                meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: 1,
+                    endpoints,
+                },
+                "test::apply_mob_peer_overlay",
+            )
+            .expect("ApplyMobPeerOverlay input");
+        let mut obligations =
+            meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+                &transition,
+                dsl.peer_projection_freshness_authority(),
+            );
+        assert_eq!(
+            obligations.len(),
+            1,
+            "test reconcile effect must produce one generated obligation"
+        );
+        (dsl, obligations.pop().expect("obligation count checked"))
+    }
+
+    async fn add_generated_peer_projection_trust(
+        runtime: &CommsRuntime,
+        peer: TrustedPeerDescriptor,
+        context: &'static str,
+    ) {
+        add_generated_peer_projection_trust_batch(runtime, vec![peer], context).await;
+    }
+
+    async fn add_generated_peer_projection_trust_batch(
+        runtime: &CommsRuntime,
+        peers: Vec<TrustedPeerDescriptor>,
+        context: &'static str,
+    ) {
+        let endpoints = peers
+            .iter()
+            .map(meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from)
+            .collect::<std::collections::BTreeSet<_>>();
+        let (dsl, obligation) = test_peer_projection_reconcile_obligation(
+            "comms-mcp-tools-test-reconcile",
+            runtime
+                .peer_id()
+                .unwrap_or_else(|| panic!("{context}: runtime peer_id unavailable")),
+            endpoints,
+        );
+        meerkat_runtime::RuntimePeerCommsHandle::install_generated_on(dsl, runtime)
+            .expect("install generated peer-comms handle");
+        for peer in peers {
+            let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+            CoreCommsRuntime::apply_trust_mutation(
+                runtime,
+                CommsTrustMutation::AddTrustedPeer {
+                    authority:
+                        meerkat_runtime::protocol_comms_trust_reconcile::authority_for_endpoint(
+                            &obligation,
+                            &endpoint,
+                        )
+                        .expect("generated peer projection add authority"),
+                    peer,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+        }
+    }
+
+    async fn make_trusted_runtime_less_context(
         peer_keypair: &Keypair,
     ) -> (ToolContext, meerkat_core::comms::PeerId) {
-        let sender_keypair = Keypair::generate();
         let peer_id = peer_keypair.public_key().to_peer_id();
-        let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "inproc://test-peer".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
-            sender_keypair,
-            trusted_peers.clone(),
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
+        let runtime = Arc::new(
+            CommsRuntime::inproc_only(&format!(
+                "mcp-tools-runtime-{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .expect("runtime"),
+        );
+        add_generated_peer_projection_trust(
+            runtime.as_ref(),
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                "test-peer",
+                peer_id.to_string(),
+                *peer_keypair.public_key().as_bytes(),
+                "inproc://test-peer",
+            )
+            .expect("trusted peer descriptor"),
+            "install test peer trust",
+        )
+        .await;
 
         (
             ToolContext {
-                router,
-                trusted_peers,
+                router: runtime.router_arc(),
+                trusted_peers: runtime.trusted_peers_shared(),
                 runtime: None,
             },
             peer_id,
@@ -968,7 +1074,7 @@ mod tests {
             receiver_sender,
         );
 
-        make_trusted_runtime_less_context(&peer_keypair)
+        make_trusted_runtime_less_context(&peer_keypair).await
     }
 
     #[test]
@@ -1065,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_resolves_current_turn_image_ref_to_peer_message_blocks() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let dispatch_context = meerkat_core::ToolDispatchContext::from_current_turn_input(
@@ -1126,7 +1232,7 @@ mod tests {
     #[tokio::test]
     async fn send_request_resolves_current_turn_image_ref_to_peer_request_blocks() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let dispatch_context = meerkat_core::ToolDispatchContext::from_current_turn_input(
@@ -1181,7 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_resolves_blob_image_ref_to_peer_message_blocks() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
@@ -1231,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn send_request_resolves_blob_image_ref_to_peer_request_blocks() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
@@ -1280,7 +1386,7 @@ mod tests {
     #[tokio::test]
     async fn blob_image_ref_rejects_current_turn_index() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime));
 
@@ -1306,7 +1412,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_synthesizes_body_text_when_blocks_only_reference_image() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let dispatch_context = meerkat_core::ToolDispatchContext::from_current_turn_input(
@@ -1360,7 +1466,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_does_not_duplicate_body_when_text_blocks_split_it() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
@@ -1480,28 +1586,9 @@ mod tests {
         );
         let args = extract_projection_send_response_args(&projection);
 
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "operator".to_string(),
-                pubkey: requester.public_key(),
-                addr: "inproc://operator".to_string(),
-                meta: crate::PeerMeta::default(),
-            }],
-        }));
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
-            Keypair::generate(),
-            trusted_peers.clone(),
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
+        let (mut ctx, _) = make_trusted_runtime_less_context(&requester).await;
         let runtime = Arc::new(RecordingRuntime::new());
-        let ctx = ToolContext {
-            router,
-            trusted_peers,
-            runtime: Some(RuntimeCommsCommandHandle::new(runtime.clone())),
-        };
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
         let result = handle_tools_call(&ctx, "send_response", &args)
             .await
@@ -1561,36 +1648,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_peers() {
-        let keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: "test-peer".to_string(),
-                    pubkey: PubKey::new([1u8; 32]),
-                    addr: "tcp://127.0.0.1:4200".to_string(),
-                    meta: crate::PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: "test-peer".to_string(),
-                    pubkey: PubKey::new([2u8; 32]),
-                    addr: "tcp://127.0.0.1:4201".to_string(),
-                    meta: crate::PeerMeta::default(),
-                },
-            ],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
-            keypair,
-            trusted_peers.clone(),
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
+        let runtime = Arc::new(
+            CommsRuntime::inproc_only(&format!(
+                "mcp-tools-peers-{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .expect("runtime"),
+        );
+        let duplicate_name_peers = [
+            (PubKey::new([1u8; 32]), "tcp://127.0.0.1:4200"),
+            (PubKey::new([2u8; 32]), "tcp://127.0.0.1:4201"),
+        ]
+        .into_iter()
+        .map(|(pubkey, addr)| {
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                "test-peer",
+                pubkey.to_peer_id().to_string(),
+                *pubkey.as_bytes(),
+                addr,
+            )
+            .expect("trusted peer descriptor")
+        })
+        .collect();
+        add_generated_peer_projection_trust_batch(
+            runtime.as_ref(),
+            duplicate_name_peers,
+            "install duplicate-name peer trust",
+        )
+        .await;
 
         let ctx = ToolContext {
-            router,
-            trusted_peers,
+            router: runtime.router_arc(),
+            trusted_peers: runtime.trusted_peers_shared(),
             runtime: None,
         };
 
@@ -1621,12 +1710,10 @@ mod tests {
             sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
             capabilities: PeerCapabilitySet::default()
                 .with_extension("vendor.echo", json!({ "enabled": true })),
-            reachability: PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
         let peer_keypair = Keypair::generate();
-        let (mut ctx, _) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, _) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::with_peers(vec![entry]));
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime));
 
@@ -1647,13 +1734,12 @@ mod tests {
             peer["capabilities"]["extensions"]["vendor.echo"]["enabled"],
             true
         );
-        assert_eq!(peer["reachability"], "reachable");
     }
 
     #[tokio::test]
     async fn test_handle_peers_runtime_less_payload_uses_authorized_sendability() {
         let peer_keypair = Keypair::generate();
-        let (ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
 
         let value = handle_tools_call(&ctx, "peers", &json!({}))
             .await
@@ -1665,8 +1751,6 @@ mod tests {
         assert_eq!(peer["sendable_kinds"], json!(["peer_message"]));
         assert_eq!(peer["capabilities"]["version"], 1);
         assert_eq!(peer["capabilities"]["extensions"], json!({}));
-        assert_eq!(peer["reachability"], "unknown");
-        assert_eq!(peer["last_unreachable_reason"], Value::Null);
         assert!(peer["meta"].is_object());
     }
 
@@ -1676,16 +1760,7 @@ mod tests {
         let peer_keypair = Keypair::generate();
         let peer_pubkey = peer_keypair.public_key();
         let peer_id = peer_pubkey.to_peer_id();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
-            sender_keypair,
-            trusted_peers.clone(),
-            CommsConfig::default(),
-            inbox_sender,
-            true,
-        ));
-        trusted_peers.write().peers.extend([
+        let trusted_peers = TrustedPeers::from_peers(vec![
             TrustedPeer {
                 name: "runtime-less-primary".to_string(),
                 pubkey: peer_pubkey,
@@ -1699,6 +1774,15 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             },
         ]);
+        let (_, inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::new(
+            sender_keypair,
+            trusted_peers,
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+        let trusted_peers = router.trusted_peers_view();
         let ctx = ToolContext {
             router,
             trusted_peers,
@@ -1722,15 +1806,15 @@ mod tests {
         let sender_keypair = Keypair::generate();
         let receiver_id = PeerId::new();
 
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, router_inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             sender_keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             router_inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
 
         let ctx = ToolContext {
             router,
@@ -1759,15 +1843,15 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_invalid_handling_mode_fails_at_serde_boundary() {
         let keypair = Keypair::generate();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         let ctx = ToolContext {
             router,
             trusted_peers,
@@ -1798,15 +1882,15 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_tool_returns_error() {
         let keypair = Keypair::generate();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let (_, inbox_sender) = crate::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            TrustedPeers::new(),
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         let ctx = ToolContext {
             router,
             trusted_peers,
@@ -1874,7 +1958,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_request_unknown_intent_fails_at_typed_boundary() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
@@ -1901,7 +1985,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_request_malformed_params_fail_at_typed_boundary() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
@@ -1929,7 +2013,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_response_malformed_result_fails_at_typed_boundary() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let request_id = uuid::Uuid::from_u128(4);
@@ -1958,7 +2042,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_response_checksum_token_requires_request_subject() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let request_id = uuid::Uuid::from_u128(4);
@@ -1989,7 +2073,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_bound_send_request_returns_typed_receipt() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
 
@@ -2030,7 +2114,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_bound_send_response_returns_typed_receipt() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let request_id = uuid::Uuid::from_u128(4);
@@ -2067,7 +2151,7 @@ mod tests {
     #[tokio::test]
     async fn send_response_resolves_blob_image_ref_to_peer_response_blocks() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let request_id = uuid::Uuid::from_u128(44);
@@ -2116,7 +2200,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_bound_send_response_accepts_checksum_token_subject() {
         let peer_keypair = Keypair::generate();
-        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
         ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
         let request_id = uuid::Uuid::from_u128(4);

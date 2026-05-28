@@ -64,9 +64,9 @@ use meerkat_runtime::{
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
-    DirectControlPayload, KennelPayload, ProviderKind, auto_detect, build_signed_envelope,
-    direct_control_request, parse_direct_control_message, read_envelope, verify_envelope,
-    write_envelope,
+    DirectControlPayload, ExampleGeneratedCommsTrustRouter, KennelPayload, ProviderKind,
+    auto_detect, build_signed_envelope, direct_control_request, parse_direct_control_message,
+    read_envelope, verify_envelope, write_envelope,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
@@ -135,7 +135,8 @@ impl TargetScheduleSessionHost {
         let executor = Box::new(self.executor(session_id.clone()));
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         Ok(())
     }
 
@@ -159,6 +160,21 @@ impl TargetScheduleSessionHost {
     }
 }
 
+fn accepted_scheduled_input_from_runtime_handle(
+    correlation_id: Option<String>,
+    handle: Option<meerkat_runtime::completion::CompletionHandle>,
+) -> meerkat::surface::AcceptedScheduledInput {
+    match handle {
+        Some(handle) => {
+            meerkat::surface::AcceptedScheduledInput::with_runtime_handle(correlation_id, handle)
+        }
+        None => meerkat::surface::AcceptedScheduledInput::with_authority_unavailable(
+            correlation_id,
+            "runtime completion handle missing after accepted dispatch",
+        ),
+    }
+}
+
 fn runtime_delivery_dispatch(
     occurrence: &meerkat::Occurrence,
     outcome: meerkat_runtime::accept::AcceptOutcome,
@@ -167,22 +183,30 @@ fn runtime_delivery_dispatch(
 ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
     match outcome {
         meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
+            let accepted =
+                accepted_scheduled_input_from_runtime_handle(Some(input_id.to_string()), handle);
             Ok(meerkat::surface::build_dispatch_from_accepted(
                 occurrence,
-                meerkat::surface::AcceptedScheduledInput {
-                    correlation_id: Some(input_id.to_string()),
-                    handle,
-                },
+                accepted,
                 materialized_session_id,
             ))
         }
         meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+            let accepted = match handle {
+                Some(handle) => meerkat::surface::AcceptedScheduledInput::with_runtime_handle(
+                    Some(existing_id.to_string()),
+                    handle,
+                ),
+                None => meerkat::surface::AcceptedScheduledInput::with_authority_unavailable(
+                    Some(existing_id.to_string()),
+                    format!(
+                        "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
+                    ),
+                ),
+            };
             Ok(meerkat::surface::build_dispatch_from_accepted(
                 occurrence,
-                meerkat::surface::AcceptedScheduledInput {
-                    correlation_id: Some(existing_id.to_string()),
-                    handle: None,
-                },
+                accepted,
                 materialized_session_id,
             ))
         }
@@ -190,7 +214,7 @@ fn runtime_delivery_dispatch(
             Ok(meerkat::surface::immediate_delivery_failure(
                 occurrence,
                 reason.to_string(),
-                meerkat::OccurrenceFailureClass::RuntimeRejected,
+                meerkat::DeliveryFailureReason::RuntimeRejected,
                 None,
                 materialized_session_id,
             ))
@@ -198,7 +222,7 @@ fn runtime_delivery_dispatch(
         _ => Ok(meerkat::surface::immediate_delivery_failure(
             occurrence,
             "runtime returned an unknown admission outcome".to_string(),
-            meerkat::OccurrenceFailureClass::RuntimeRejected,
+            meerkat::DeliveryFailureReason::RuntimeRejected,
             None,
             materialized_session_id,
         )),
@@ -303,7 +327,8 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 result.session_id.clone(),
                 Box::new(self.executor(result.session_id.clone())),
             )
-            .await;
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
         Ok(result.session_id)
     }
@@ -413,7 +438,12 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
+        runtime_delivery_dispatch(
+            occurrence,
+            outcome,
+            handle,
+            materialized_session_id,
+        )
     }
 }
 
@@ -561,13 +591,12 @@ async fn spawn_comms_listener(comms_runtime: &Arc<CommsRuntime>) -> anyhow::Resu
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
     let local_addr = listener.local_addr()?;
     let keypair = comms_runtime.router_arc().keypair_arc();
-    let trusted = comms_runtime.trusted_peers_shared();
     let inbox_sender = comms_runtime.router_arc().inbox_sender().clone();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (kp, tp, sender) = (keypair.clone(), trusted.clone(), inbox_sender.clone());
+            let (kp, sender) = (keypair.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let _ = meerkat_comms::handle_connection(stream, true, &kp, &tp, &sender).await;
+                let _ = meerkat_comms::handle_connection(stream, true, &kp, &sender).await;
             });
         }
     });
@@ -683,27 +712,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-use mdm_tux::machines::target_attachment::{Effect as TaEffect, State as TaState};
-use mdm_tux::machines::target_kennel_control::{
-    self, Effect as TkcEffect, Event as TkcEvent, State as TkcState,
+use mdm_tux::machines::target_attachment::{
+    self, Effect as TkcEffect, Event as TkcEvent, State as TkcState, TargetAttachmentPhase,
 };
 use mdm_tux::machines::target_kennel_session::{self, Event as TksEvent, State as TksState};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct PersistedAttachmentHint {
     tux_id: String,
     lease_id: String,
-}
-
-async fn load_attachment_hint(path: &Path) -> anyhow::Result<Option<PersistedAttachmentHint>> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes).context("parse attachment hint")?,
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).context("read attachment hint"),
-    }
 }
 
 async fn save_attachment_hint(path: &Path, hint: &PersistedAttachmentHint) -> anyhow::Result<()> {
@@ -765,37 +783,26 @@ fn spawn_heartbeat(
     })
 }
 
-#[allow(dead_code)] // Will be used when all effect processing is centralized
-async fn apply_target_attachment_effects(
+async fn apply_target_control_effects(
     comms_runtime: &Arc<CommsRuntime>,
-    effects: &[TaEffect],
+    comms_trust: &ExampleGeneratedCommsTrustRouter,
+    effects: &[TkcEffect],
     heartbeat: &mut Option<tokio::task::JoinHandle<()>>,
     disconnect_tx: &tokio::sync::watch::Sender<bool>,
-    attachment_hint: &mut Option<PersistedAttachmentHint>,
     attachment_hint_path: &Path,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<(bool, Option<Option<String>>)> {
     let router = comms_runtime.router_arc();
+    let mut return_to_register_attached_tux_id = None;
     for effect in effects {
         match effect {
-            TaEffect::EnsureTuxPeer {
+            TkcEffect::EnsureTuxPeer {
                 tux_pubkey,
                 tux_direct_addr,
             } => {
                 let tux_pk = meerkat_comms::identity::PubKey::from_pubkey_string(tux_pubkey)
                     .context("parse adopted tux pubkey")?;
-                let trusted = comms_runtime.trusted_peers_shared();
-                let stale_keys: Vec<_> = trusted
-                    .read()
-                    .peers
-                    .iter()
-                    .filter(|p| p.name == "tux")
-                    .map(|p| p.pubkey)
-                    .collect();
-                for pk in stale_keys {
-                    router.remove_trusted_peer(&pk.to_peer_id());
-                }
-                comms_runtime
-                    .register_trusted_peer(TrustedPeer {
+                comms_trust
+                    .replace_named_trusted_peer(TrustedPeer {
                         name: "tux".into(),
                         pubkey: tux_pk,
                         addr: tux_direct_addr.clone(),
@@ -803,19 +810,18 @@ async fn apply_target_attachment_effects(
                     })
                     .await?;
             }
-            TaEffect::PersistAttachmentHint { tux_id, lease_id } => {
+            TkcEffect::PersistAttachmentHint { tux_id, lease_id } => {
                 let next = PersistedAttachmentHint {
                     tux_id: tux_id.clone(),
                     lease_id: lease_id.clone(),
                 };
                 save_attachment_hint(attachment_hint_path, &next).await?;
-                *attachment_hint = Some(next);
             }
-            TaEffect::ClearAttachmentHint => {
+            TkcEffect::ClearAttachmentHint => {
                 clear_attachment_hint(attachment_hint_path).await?;
-                *attachment_hint = None;
             }
-            TaEffect::SendAttachRequest {
+            TkcEffect::SendAttachRequest {
+                tux_id,
                 target_id,
                 lease_id,
             } => {
@@ -823,29 +829,25 @@ async fn apply_target_attachment_effects(
                     lease_id: lease_id.clone(),
                     target_id: target_id.clone(),
                 }) else {
-                    return Ok(false);
+                    return Ok((false, return_to_register_attached_tux_id));
                 };
-                let Some(tux_peer) = attachment_hint
-                    .as_ref()
-                    .and_then(|hint| meerkat_core::comms::PeerId::parse(&hint.tux_id).ok())
+                let Some(tux_peer) = meerkat_core::comms::PeerId::parse(tux_id).ok()
                 else {
-                    return Ok(false);
+                    return Ok((false, return_to_register_attached_tux_id));
                 };
                 let attach_fut = router.send(tux_peer, kind);
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(10), attach_fut).await,
                     Ok(Ok(_))
                 ) {
-                    return Ok(false);
+                    return Ok((false, return_to_register_attached_tux_id));
                 }
             }
-            TaEffect::StartDirectHeartbeat => {
+            TkcEffect::StartDirectHeartbeat { tux_id } => {
                 if heartbeat.is_none() {
-                    let Some(tux_peer) = attachment_hint
-                        .as_ref()
-                        .and_then(|hint| meerkat_core::comms::PeerId::parse(&hint.tux_id).ok())
+                    let Some(tux_peer) = meerkat_core::comms::PeerId::parse(tux_id).ok()
                     else {
-                        return Ok(false);
+                        return Ok((false, return_to_register_attached_tux_id));
                     };
                     *heartbeat = Some(spawn_heartbeat(
                         router.clone(),
@@ -854,44 +856,27 @@ async fn apply_target_attachment_effects(
                     ));
                 }
             }
-            TaEffect::StopDirectHeartbeat => {
+            TkcEffect::StopDirectHeartbeat => {
                 if let Some(hb) = heartbeat.take() {
                     hb.abort();
                 }
             }
-            TaEffect::ReregisterWithHint { .. } | TaEffect::ReregisterClean => {}
+            TkcEffect::ReturnToRegisterClean => {
+                return_to_register_attached_tux_id = Some(None);
+            }
+            TkcEffect::ReturnToRegisterWithHint { tux_id } => {
+                return_to_register_attached_tux_id = Some(Some(tux_id.clone()));
+            }
         }
     }
-    Ok(true)
+    Ok((true, return_to_register_attached_tux_id))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn apply_target_control_effects(
-    comms_runtime: &Arc<CommsRuntime>,
-    effects: &[TkcEffect],
-    heartbeat: &mut Option<tokio::task::JoinHandle<()>>,
-    disconnect_tx: &tokio::sync::watch::Sender<bool>,
-    attachment_hint: &mut Option<PersistedAttachmentHint>,
-    attachment_hint_path: &Path,
-) -> anyhow::Result<(bool, bool)> {
-    let mut attachment_effects = Vec::new();
-    let mut should_return_to_register = false;
-    for effect in effects {
-        match effect {
-            TkcEffect::Attachment(effect) => attachment_effects.push(effect.clone()),
-            TkcEffect::ReturnToRegisterLoop => should_return_to_register = true,
-        }
-    }
-    let applied = apply_target_attachment_effects(
-        comms_runtime,
-        &attachment_effects,
-        heartbeat,
-        disconnect_tx,
-        attachment_hint,
-        attachment_hint_path,
-    )
-    .await?;
-    Ok((applied, should_return_to_register))
+fn require_generated_reregister_intent(
+    attached_tux_id: Option<Option<String>>,
+    context: &'static str,
+) -> anyhow::Result<Option<String>> {
+    attached_tux_id.with_context(|| format!("missing generated re-register intent after {context}"))
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
@@ -1033,7 +1018,8 @@ async fn setup_session(
     ));
     runtime_adapter
         .ensure_session_with_executor(session_id.clone(), executor)
-        .await;
+        .await
+        .map_err(|error| anyhow::anyhow!("runtime executor registration failed: {error}"))?;
 
     // Enable peer ingress for this session so the hive can reach us via comms.
     // This is the one session the mob manages for this target — TUX resets go
@@ -1353,6 +1339,11 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         None,
     )
     .await?;
+    let comms_trust = Arc::new(ExampleGeneratedCommsTrustRouter::new(
+        Arc::clone(&runtime_adapter),
+        current_session_id.clone(),
+        Arc::clone(&comms_runtime),
+    ));
 
     let explicit_ip = find_flag(args, "--advertise");
     let attachment_hint_path = data_dir.join("attachment_hint.json");
@@ -1443,8 +1434,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     println!("kennel    : {kennel_addr}");
     println!("provider  : {provider} ({model})");
 
-    let mut attached_tux_hint = load_attachment_hint(&attachment_hint_path).await?;
-    let mut kennel_session_state = TksState::Disconnected;
+    let mut kennel_session_state = TksState::new();
 
     loop {
         let (kennel_host, kennel_port) = kennel_addr
@@ -1486,6 +1476,10 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
 
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
+        let (next_session_state, register_attached_tux_id) =
+            target_kennel_session::register_sent(kennel_session_state)
+                .map_err(|e| anyhow::anyhow!("target kennel session register sent: {e}"))?;
+        kennel_session_state = next_session_state;
         let register = build_signed_envelope(
             comms_runtime.router_arc().keypair_arc().as_ref(),
             &target_id,
@@ -1500,17 +1494,17 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                     ("shell".to_string(), true),
                     ("runtime".to_string(), true),
                 ]),
-                attached_tux_id: attached_tux_hint.as_ref().map(|hint| hint.tux_id.clone()),
+                attached_tux_id: register_attached_tux_id,
             },
         )?;
         if let Err(e) = write_envelope(&mut write_half, &register).await {
             eprintln!("[target] kennel register failed: {e} — retrying");
+            kennel_session_state =
+                target_kennel_session::transition(kennel_session_state, TksEvent::ControlLost)
+                    .map_err(|e| anyhow::anyhow!("target kennel session register send failed: {e}"))?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
-        kennel_session_state =
-            target_kennel_session::transition(kennel_session_state, TksEvent::RegisterSent)
-                .map_err(|e| anyhow::anyhow!("target kennel session register sent: {e}"))?;
         let Some(env) = read_envelope(&mut reader).await? else {
             eprintln!("[target] kennel closed during register");
             kennel_session_state =
@@ -1530,8 +1524,8 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                     if let Ok(pk) =
                         meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str())
                     {
-                        comms_runtime
-                            .register_trusted_peer(meerkat_comms::TrustedPeer {
+                        comms_trust
+                            .add_trusted_peer(meerkat_comms::TrustedPeer {
                                 name: "hive".into(),
                                 pubkey: pk,
                                 addr: addr.clone(),
@@ -1549,7 +1543,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             }
             KennelPayload::TargetRegistrationRejected { reason, message } => {
                 let _ = target_kennel_session::transition(
-                    kennel_session_state.clone(),
+                    kennel_session_state,
                     TksEvent::RegistrationRejected,
                 )
                 .map_err(|e| anyhow::anyhow!("target kennel session registration rejected: {e}"))?;
@@ -1585,9 +1579,12 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             tux_direct_addr,
                             ..
                         } => {
-                            if !kennel_session_state.allows_control_payloads() {
-                                bail!("received adopted before kennel registration completed");
-                            }
+                            target_kennel_session::admit_control_payload(&mut kennel_session_state)
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "target kennel session adopted admission: {e}"
+                                    )
+                                })?;
                             if adopted_target_id != target_id {
                                 continue;
                             }
@@ -1598,16 +1595,34 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 tux_pubkey,
                                 tux_direct_addr,
                             };
-                            let _adopted_exit = run_adopted_loop(
+                            let reregister_attached_tux_id = run_adopted_loop(
                                 &comms_runtime,
+                                &comms_trust,
                                 &mut reader,
                                 &mut write_half,
                                 adoption,
                                 true,
-                                &mut attached_tux_hint,
                                 &attachment_hint_path,
                             ).await?;
 
+                            kennel_session_state =
+                                target_kennel_session::record_reregister_intent(
+                                    kennel_session_state,
+                                    reregister_attached_tux_id,
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "target kennel session record re-register intent after adoption: {e}"
+                                    )
+                                })?;
+                            let (next_session_state, register_attached_tux_id) =
+                                target_kennel_session::register_sent(kennel_session_state)
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "target kennel session re-register sent after adoption: {e}"
+                                        )
+                                    })?;
+                            kennel_session_state = next_session_state;
                             let re_register = build_signed_envelope(
                                 comms_runtime.router_arc().keypair_arc().as_ref(),
                                 &target_id,
@@ -1622,15 +1637,20 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                         ("shell".to_string(), true),
                                         ("runtime".to_string(), true),
                                     ]),
-                                    attached_tux_id: attached_tux_hint.as_ref().map(|hint| hint.tux_id.clone()),
+                                    attached_tux_id: register_attached_tux_id,
                                 },
                             )?;
-                            if write_envelope(&mut write_half, &re_register).await.is_ok() {
+                            if write_envelope(&mut write_half, &re_register).await.is_err() {
                                 kennel_session_state = target_kennel_session::transition(
                                     kennel_session_state,
-                                    TksEvent::RegisterSent,
+                                    TksEvent::ControlLost,
                                 )
-                                .unwrap_or(TksState::Disconnected);
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "target kennel session re-register send failed after adoption: {e}"
+                                    )
+                                })?;
+                                break;
                             }
                         }
                         KennelPayload::LeaseRebound {
@@ -1641,9 +1661,12 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             tux_direct_addr,
                             ..
                         } => {
-                            if !kennel_session_state.allows_control_payloads() {
-                                bail!("received lease rebound before kennel registration completed");
-                            }
+                            target_kennel_session::admit_control_payload(&mut kennel_session_state)
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "target kennel session lease rebound admission: {e}"
+                                    )
+                                })?;
                             if rebound_target_id != target_id {
                                 continue;
                             }
@@ -1657,16 +1680,34 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 tux_pubkey,
                                 tux_direct_addr,
                             };
-                            let _adopted_exit = run_adopted_loop(
+                            let reregister_attached_tux_id = run_adopted_loop(
                                 &comms_runtime,
+                                &comms_trust,
                                 &mut reader,
                                 &mut write_half,
                                 adoption,
                                 false,
-                                &mut attached_tux_hint,
                                 &attachment_hint_path,
                             ).await?;
 
+                            kennel_session_state =
+                                target_kennel_session::record_reregister_intent(
+                                    kennel_session_state,
+                                    reregister_attached_tux_id,
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "target kennel session record re-register intent after rebound: {e}"
+                                    )
+                                })?;
+                            let (next_session_state, register_attached_tux_id) =
+                                target_kennel_session::register_sent(kennel_session_state)
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "target kennel session re-register sent after rebound: {e}"
+                                        )
+                                    })?;
+                            kennel_session_state = next_session_state;
                             let re_register = build_signed_envelope(
                                 comms_runtime.router_arc().keypair_arc().as_ref(),
                                 &target_id,
@@ -1681,22 +1722,27 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                         ("shell".to_string(), true),
                                         ("runtime".to_string(), true),
                                     ]),
-                                    attached_tux_id: attached_tux_hint.as_ref().map(|hint| hint.tux_id.clone()),
+                                    attached_tux_id: register_attached_tux_id,
                                 },
                             )?;
-                            if write_envelope(&mut write_half, &re_register).await.is_ok() {
+                            if write_envelope(&mut write_half, &re_register).await.is_err() {
                                 kennel_session_state = target_kennel_session::transition(
                                     kennel_session_state,
-                                    TksEvent::RegisterSent,
+                                    TksEvent::ControlLost,
                                 )
-                                .unwrap_or(TksState::Disconnected);
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "target kennel session re-register send failed after rebound: {e}"
+                                    )
+                                })?;
+                                break;
                             }
                         }
                         KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
                             if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
                                 if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str()) {
-                                    comms_runtime
-                                        .register_trusted_peer(meerkat_comms::TrustedPeer {
+                                    comms_trust
+                                        .add_trusted_peer(meerkat_comms::TrustedPeer {
                                         name: "hive".into(),
                                         pubkey: pk,
                                         addr: addr.clone(),
@@ -1713,7 +1759,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         }
                         KennelPayload::TargetRegistrationRejected { reason, message } => {
                             let _ = target_kennel_session::transition(
-                                kennel_session_state.clone(),
+                                kennel_session_state,
                                 TksEvent::RegistrationRejected,
                             )
                             .map_err(|e| anyhow::anyhow!(
@@ -1723,8 +1769,8 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         }
                         KennelPayload::PeerWire { peer_name, peer_id, peer_addr } => {
                             if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
-                                comms_runtime
-                                    .register_trusted_peer(meerkat_comms::TrustedPeer {
+                                comms_trust
+                                    .add_trusted_peer(meerkat_comms::TrustedPeer {
                                     name: peer_name.clone(),
                                     pubkey: pk,
                                     addr: peer_addr.clone(),
@@ -1736,7 +1782,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         }
                         KennelPayload::PeerUnwire { peer_id } => {
                             if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
-                                comms_runtime.router_arc().remove_trusted_peer(&pk.to_peer_id());
+                                comms_trust.remove_trusted_peer(&pk.to_peer_id()).await?;
                                 eprintln!("[target] peer unwired: {peer_id}");
                             }
                         }
@@ -1749,7 +1795,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         eprintln!("[target] kennel disconnected — reconnecting...");
         kennel_session_state =
             target_kennel_session::transition(kennel_session_state, TksEvent::ControlLost)
-                .unwrap_or(TksState::Disconnected);
+                .map_err(|e| anyhow::anyhow!("target kennel session control lost: {e}"))?;
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
@@ -1757,22 +1803,22 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn run_adopted_loop(
     comms_runtime: &Arc<CommsRuntime>,
+    comms_trust: &ExampleGeneratedCommsTrustRouter,
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     write_half: &mut tokio::net::tcp::OwnedWriteHalf,
     adoption: ActiveAdoption,
     attach_required: bool,
-    attachment_hint: &mut Option<PersistedAttachmentHint>,
     attachment_hint_path: &Path,
-) -> anyhow::Result<TkcState> {
+) -> anyhow::Result<Option<String>> {
     let (disconnect_tx, mut disconnect_rx) = tokio::sync::watch::channel::<bool>(false);
 
     run_adopted_loop_inner(
         comms_runtime,
+        comms_trust,
         reader,
         write_half,
         adoption,
         attach_required,
-        attachment_hint,
         attachment_hint_path,
         &disconnect_tx,
         &mut disconnect_rx,
@@ -1783,15 +1829,15 @@ async fn run_adopted_loop(
 #[allow(clippy::too_many_arguments)]
 async fn run_adopted_loop_inner(
     comms_runtime: &Arc<CommsRuntime>,
+    comms_trust: &ExampleGeneratedCommsTrustRouter,
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     write_half: &mut tokio::net::tcp::OwnedWriteHalf,
     adoption: ActiveAdoption,
     attach_required: bool,
-    attachment_hint: &mut Option<PersistedAttachmentHint>,
     attachment_hint_path: &Path,
     disconnect_tx: &tokio::sync::watch::Sender<bool>,
     disconnect_rx: &mut tokio::sync::watch::Receiver<bool>,
-) -> anyhow::Result<TkcState> {
+) -> anyhow::Result<Option<String>> {
     let mut heartbeat: Option<tokio::task::JoinHandle<()>> = None;
     let initial_event = if attach_required {
         TkcEvent::Adopted {
@@ -1811,81 +1857,87 @@ async fn run_adopted_loop_inner(
         }
     };
     let (mut machine_state, effects) =
-        target_kennel_control::transition(TkcState::idle(), initial_event)
+        target_attachment::transition(TkcState::new(), initial_event)
             .map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
-    let (applied, should_return) = apply_target_control_effects(
+    let (applied, reregister_attached_tux_id) = apply_target_control_effects(
         comms_runtime,
+        comms_trust,
         &effects,
         &mut heartbeat,
         disconnect_tx,
-        attachment_hint,
         attachment_hint_path,
     )
     .await?;
     if !applied {
-        let (state, effects) =
-            target_kennel_control::transition(machine_state, TkcEvent::AttachSendFailed)
+        let (_state, effects) =
+            target_attachment::transition(machine_state, TkcEvent::AttachSendFailed)
                 .map_err(|e| anyhow::anyhow!("attach-send-failed transition: {e}"))?;
-        let _ = apply_target_control_effects(
+        let (_, reregister_attached_tux_id) = apply_target_control_effects(
             comms_runtime,
+            comms_trust,
             &effects,
             &mut heartbeat,
             disconnect_tx,
-            attachment_hint,
             attachment_hint_path,
         )
         .await?;
-        return Ok(state);
+        return require_generated_reregister_intent(
+            reregister_attached_tux_id,
+            "attach send failure",
+        );
     }
-    if should_return {
-        return Ok(machine_state);
+    if let Some(attached_tux_id) = reregister_attached_tux_id {
+        return Ok(attached_tux_id);
     }
 
     let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
 
     loop {
         let poll_kennel = matches!(
-            &machine_state.attachment,
-            TaState::Attaching { .. } | TaState::Attached { .. }
+            machine_state.state().phase(),
+            TargetAttachmentPhase::Attaching | TargetAttachmentPhase::Attached
         );
 
         tokio::select! {
-            msg = comms_runtime.recv_message(), if matches!(machine_state.attachment, TaState::Attaching { .. }) => {
+            msg = comms_runtime.recv_message(), if machine_state.state().phase() == TargetAttachmentPhase::Attaching => {
                 let Some(msg) = msg else {
                     if let Some(h) = heartbeat.take() { h.abort(); }
-                    let (s, effects) = target_kennel_control::transition(
+                    let (_state, effects) = target_attachment::transition(
                         machine_state,
                         TkcEvent::DirectLinkLost,
                     )
                     .map_err(|e| anyhow::anyhow!("direct-link-lost transition: {e}"))?;
-                    let _ = apply_target_control_effects(
+                    let (_, reregister_attached_tux_id) = apply_target_control_effects(
                         comms_runtime,
+                        comms_trust,
                         &effects,
                         &mut heartbeat,
                         disconnect_tx,
-                        attachment_hint,
                         attachment_hint_path,
                     )
                     .await?;
-                    return Ok(s);
+                    return require_generated_reregister_intent(
+                        reregister_attached_tux_id,
+                        "direct link lost before attach ack",
+                    );
                 };
                 // Handle attach-ack from TUX (kennel protocol).
                 if let Some(payload) = parse_direct_control_message(&msg)?
                     && let DirectControlPayload::AttachAck { lease_id } = payload
-                    && matches!(machine_state.attachment, TaState::Attaching { .. })
+                    && machine_state.state().phase() == TargetAttachmentPhase::Attaching
                 {
-                    let (s, effects) = target_kennel_control::transition(
-                        machine_state.clone(),
+                    let (s, effects) = target_attachment::transition(
+                        machine_state,
                         TkcEvent::DirectAttachAck { lease_id },
                     )
                     .map_err(|e| anyhow::anyhow!("direct-attach-ack transition: {e}"))?;
                     machine_state = s;
                     let _ = apply_target_control_effects(
                         comms_runtime,
+                        comms_trust,
                         &effects,
                         &mut heartbeat,
                         disconnect_tx,
-                        attachment_hint,
                         attachment_hint_path,
                     )
                     .await?;
@@ -1904,29 +1956,25 @@ async fn run_adopted_loop_inner(
                 )?;
                 if write_envelope(write_half, &kennel_hb).await.is_err() {
                     eprintln!("[target] kennel control lost");
-                    let (s, effects) = target_kennel_control::transition(
-                        machine_state.clone(),
+                    let (_state, effects) = target_attachment::transition(
+                        machine_state,
                         TkcEvent::KennelHeartbeatFailed,
                     )
                     .map_err(|e| anyhow::anyhow!("kennel-heartbeat-failed transition: {e}"))?;
-                    machine_state = s;
-                    let (_, should_return) = apply_target_control_effects(
+                    let (_, reregister_attached_tux_id) = apply_target_control_effects(
                         comms_runtime,
+                        comms_trust,
                         &effects,
                         &mut heartbeat,
                         disconnect_tx,
-                        attachment_hint,
                         attachment_hint_path,
                     )
                     .await?;
-                    if should_return {
-                        if let Some(h) = heartbeat.take() { h.abort(); }
-                        return Ok(machine_state);
-                    }
-                    if machine_state.attachment.is_terminal() {
-                        if let Some(h) = heartbeat.take() { h.abort(); }
-                        return Ok(machine_state);
-                    }
+                    if let Some(h) = heartbeat.take() { h.abort(); }
+                    return require_generated_reregister_intent(
+                        reregister_attached_tux_id,
+                        "kennel heartbeat failure",
+                    );
                 }
             }
             maybe = read_envelope(reader), if poll_kennel => {
@@ -1934,49 +1982,47 @@ async fn run_adopted_loop_inner(
                     Ok(Some(env)) => {
                         if verify_envelope(&env).is_err() {
                             eprintln!("[target] invalid signed kennel control frame");
-                            let (s, effects) = target_kennel_control::transition(
-                                machine_state.clone(),
+                            let (_state, effects) = target_attachment::transition(
+                                machine_state,
                                 TkcEvent::KennelDisconnected,
                             )
                             .map_err(|e| anyhow::anyhow!("kennel-disconnected transition: {e}"))?;
-                            machine_state = s;
-                            let (_, should_return) = apply_target_control_effects(
+                            let (_, reregister_attached_tux_id) = apply_target_control_effects(
                                 comms_runtime,
+                                comms_trust,
                                 &effects,
                                 &mut heartbeat,
                                 disconnect_tx,
-                                attachment_hint,
                                 attachment_hint_path,
                             )
                             .await?;
-                            if should_return {
-                                if let Some(h) = heartbeat.take() { h.abort(); }
-                                return Ok(machine_state);
-                            }
-                            if machine_state.attachment.is_terminal() {
-                                if let Some(h) = heartbeat.take() { h.abort(); }
-                                return Ok(machine_state);
-                            }
-                            continue;
+                            if let Some(h) = heartbeat.take() { h.abort(); }
+                            return require_generated_reregister_intent(
+                                reregister_attached_tux_id,
+                                "invalid kennel control frame",
+                            );
                         }
                         match env.payload {
                             KennelPayload::Released { lease_ref, .. } => {
                                 if let Some(h) = heartbeat.take() { h.abort(); }
-                                let (s, effects) = target_kennel_control::transition(
+                                let (_state, effects) = target_attachment::transition(
                                     machine_state,
-                                    TkcEvent::KennelReleased { lease_ref },
+                                    target_attachment::kennel_released_input(lease_ref),
                                 )
                                 .map_err(|e| anyhow::anyhow!("kennel-released transition: {e}"))?;
-                                let _ = apply_target_control_effects(
+                                let (_, reregister_attached_tux_id) = apply_target_control_effects(
                                     comms_runtime,
+                                    comms_trust,
                                     &effects,
                                     &mut heartbeat,
                                     disconnect_tx,
-                                    attachment_hint,
                                     attachment_hint_path,
                                 )
                                 .await?;
-                                return Ok(s);
+                                return require_generated_reregister_intent(
+                                    reregister_attached_tux_id,
+                                    "kennel release",
+                                );
                             }
                             KennelPayload::LeaseRebound {
                                 target_id: rebound_target_id,
@@ -1986,7 +2032,7 @@ async fn run_adopted_loop_inner(
                                 tux_direct_addr,
                                 ..
                             } => {
-                                let (s, effects) = target_kennel_control::transition(
+                                let (s, effects) = target_attachment::transition(
                                     machine_state,
                                     TkcEvent::LeaseRebound {
                                         target_id: rebound_target_id,
@@ -2000,10 +2046,10 @@ async fn run_adopted_loop_inner(
                                 machine_state = s;
                                 let _ = apply_target_control_effects(
                                     comms_runtime,
+                                    comms_trust,
                                     &effects,
                                     &mut heartbeat,
                                     disconnect_tx,
-                                    attachment_hint,
                                     attachment_hint_path,
                                 )
                                 .await?;
@@ -2013,50 +2059,49 @@ async fn run_adopted_loop_inner(
                     }
                     _ => {
                         eprintln!("[target] kennel control lost");
-                        let (s, effects) = target_kennel_control::transition(
-                            machine_state.clone(),
+                        let (_state, effects) = target_attachment::transition(
+                            machine_state,
                             TkcEvent::KennelDisconnected,
                         )
                         .map_err(|e| anyhow::anyhow!("kennel-control-lost transition: {e}"))?;
-                        machine_state = s;
-                        let (_, should_return) = apply_target_control_effects(
+                        let (_, reregister_attached_tux_id) = apply_target_control_effects(
                             comms_runtime,
+                            comms_trust,
                             &effects,
                             &mut heartbeat,
                             disconnect_tx,
-                            attachment_hint,
                             attachment_hint_path,
                         )
                         .await?;
-                        if should_return {
-                            if let Some(h) = heartbeat.take() { h.abort(); }
-                            return Ok(machine_state);
-                        }
-                        if machine_state.attachment.is_terminal() {
-                            if let Some(h) = heartbeat.take() { h.abort(); }
-                            return Ok(machine_state);
-                        }
+                        if let Some(h) = heartbeat.take() { h.abort(); }
+                        return require_generated_reregister_intent(
+                            reregister_attached_tux_id,
+                            "kennel control loss",
+                        );
                     }
                 }
             }
             _ = disconnect_rx.changed() => {
                 if *disconnect_rx.borrow() {
                     if let Some(h) = heartbeat.take() { h.abort(); }
-                    let (s, effects) = target_kennel_control::transition(
+                    let (_state, effects) = target_attachment::transition(
                         machine_state,
                         TkcEvent::DirectLinkLost,
                     )
                     .map_err(|e| anyhow::anyhow!("disconnect-direct-link-lost transition: {e}"))?;
-                    let _ = apply_target_control_effects(
+                    let (_, reregister_attached_tux_id) = apply_target_control_effects(
                         comms_runtime,
+                        comms_trust,
                         &effects,
                         &mut heartbeat,
                         disconnect_tx,
-                        attachment_hint,
                         attachment_hint_path,
                     )
                     .await?;
-                    return Ok(s);
+                    return require_generated_reregister_intent(
+                        reregister_attached_tux_id,
+                        "direct heartbeat failure",
+                    );
                 }
             }
         }
@@ -2381,16 +2426,6 @@ mod tests {
             .await
             .unwrap(),
         );
-        // Add a dummy peer so comms tools pass the availability gate.
-        comms_runtime
-            .register_trusted_peer(meerkat_comms::TrustedPeer {
-                name: "tux".into(),
-                pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-                addr: "tcp://127.0.0.1:9999".into(),
-                meta: meerkat_comms::PeerMeta::default(),
-            })
-            .await
-            .unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .shell(true)
             .builtins(true)
@@ -2748,16 +2783,6 @@ mod tests {
         let comms_runtime = create_target_comms_runtime("test-full", temp.path())
             .await
             .unwrap();
-        // Add a peer so comms tools pass the availability gate.
-        comms_runtime
-            .register_trusted_peer(meerkat_comms::TrustedPeer {
-                name: "tux".into(),
-                pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-                addr: "tcp://127.0.0.1:9999".into(),
-                meta: meerkat_comms::PeerMeta::default(),
-            })
-            .await
-            .unwrap();
         let _surface = build_target_runtime_surface(temp.path(), Arc::clone(&comms_runtime))
             .await
             .unwrap();
@@ -2872,16 +2897,6 @@ mod tests {
         let comms_runtime = create_target_comms_runtime("test-resume", temp.path())
             .await
             .unwrap();
-        comms_runtime
-            .register_trusted_peer(meerkat_comms::TrustedPeer {
-                name: "tux".into(),
-                pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
-                addr: "tcp://127.0.0.1:9999".into(),
-                meta: meerkat_comms::PeerMeta::default(),
-            })
-            .await
-            .unwrap();
-
         let session_dir = temp.path().join("sessions");
 
         // 1. Create a fresh session via the full pipeline, persist it.

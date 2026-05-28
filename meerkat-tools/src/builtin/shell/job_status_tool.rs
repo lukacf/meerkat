@@ -67,11 +67,16 @@ impl BuiltinTool for ShellJobStatusTool {
 
         let job_id = JobId::from_string(&input.job_id);
 
-        let job = self.job_manager.get_status(&job_id).await.ok_or_else(|| {
-            BuiltinToolError::execution_failed(
-                ShellError::JobNotFound(input.job_id.clone()).to_string(),
-            )
-        })?;
+        let job = self
+            .job_manager
+            .get_status(&job_id)
+            .await
+            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?
+            .ok_or_else(|| {
+                BuiltinToolError::execution_failed(
+                    ShellError::JobNotFound(input.job_id.clone()).to_string(),
+                )
+            })?;
 
         serde_json::to_value(job)
             .map(ToolOutput::Json)

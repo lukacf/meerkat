@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use meerkat_mob::definition::FlowSpec;
 use meerkat_mob::ids::{AgentIdentity, FlowId, MobId};
-use meerkat_mob::{MobDefinition, MobRun, MobRunStatus, SpawnMemberSpec, StepRunStatus};
+use meerkat_mob::{
+    MobDefinition, MobFlowRunPublicResultClass, MobRun, MobRunStatus, SpawnMemberSpec,
+    StepRunStatus, mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
+};
 
 use super::{ProgressNotifier, ToolCallError};
 use crate::state::ForceState;
@@ -411,8 +414,10 @@ async fn run_flow(
         }
     };
 
-    match run.status() {
-        MobRunStatus::Completed => {
+    let result_class = mob_machine_run_public_result_class(&run.run_id, run.status())
+        .map_err(|error| ToolCallError::internal(error.to_string()))?;
+    match result_class {
+        MobFlowRunPublicResultClass::Success => {
             let last_output = run
                 .step_ledger
                 .iter()
@@ -428,26 +433,28 @@ async fn run_flow(
 
             Ok(json!({"content": [{"type": "text", "text": text}]}))
         }
-        MobRunStatus::Failed => {
-            let errors: Vec<String> = run
-                .failure_ledger
-                .iter()
-                .map(|f| format!("{}: {}", f.step_id, f.reason))
-                .collect();
-            Err(ToolCallError::internal(format!(
-                "Flow failed: {}",
-                if errors.is_empty() {
-                    "unknown error".into()
-                } else {
-                    errors.join("; ")
-                }
-            )))
-        }
-        MobRunStatus::Canceled => Err(ToolCallError::internal("Flow was canceled".to_string())),
-        _ => Err(ToolCallError::internal(format!(
-            "Flow reached non-terminal status '{}'",
-            format_run_status(run.status())
-        ))),
+        MobFlowRunPublicResultClass::Error => match run.status() {
+            MobRunStatus::Failed => {
+                let errors: Vec<String> = run
+                    .failure_ledger
+                    .iter()
+                    .map(|f| format!("{}: {}", f.step_id, f.reason))
+                    .collect();
+                Err(ToolCallError::internal(format!(
+                    "Flow failed: {}",
+                    if errors.is_empty() {
+                        "unknown error".into()
+                    } else {
+                        errors.join("; ")
+                    }
+                )))
+            }
+            MobRunStatus::Canceled => Err(ToolCallError::internal("Flow was canceled".to_string())),
+            status => Err(ToolCallError::internal(format!(
+                "Flow generated error result for status '{}'",
+                format_run_status(status)
+            ))),
+        },
     }
 }
 
@@ -527,7 +534,9 @@ where
 
         observe(run.clone()).await?;
 
-        if run.status().is_terminal() {
+        let terminal = mob_machine_run_status_is_terminal(&run.run_id, run.status())
+            .map_err(|error| ToolCallError::internal(error.to_string()))?;
+        if terminal {
             return Ok(run);
         }
     }

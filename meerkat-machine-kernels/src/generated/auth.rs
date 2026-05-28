@@ -5,7 +5,8 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
@@ -32,6 +33,8 @@ pub enum AuthLifecyclePhase {
     Valid,
     #[serde(rename = "Expiring")]
     Expiring,
+    #[serde(rename = "Expired")]
+    Expired,
     #[serde(rename = "Refreshing")]
     Refreshing,
     #[serde(rename = "ReauthRequired")]
@@ -44,6 +47,7 @@ impl AuthLifecyclePhase {
         match self {
             Self::Valid => "Valid",
             Self::Expiring => "Expiring",
+            Self::Expired => "Expired",
             Self::Refreshing => "Refreshing",
             Self::ReauthRequired => "ReauthRequired",
             Self::Released => "Released",
@@ -56,6 +60,7 @@ impl std::convert::TryFrom<&str> for AuthLifecyclePhase {
         match value {
             "Valid" => Ok(Self::Valid),
             "Expiring" => Ok(Self::Expiring),
+            "Expired" => Ok(Self::Expired),
             "Refreshing" => Ok(Self::Refreshing),
             "ReauthRequired" => Ok(Self::ReauthRequired),
             "Released" => Ok(Self::Released),
@@ -84,6 +89,7 @@ impl Context for EmptyContext {}
 pub enum Phase {
     Valid,
     Expiring,
+    Expired,
     Refreshing,
     ReauthRequired,
     Released,
@@ -96,6 +102,8 @@ pub struct State {
     pub last_refresh: Option<u64>,
     pub refresh_attempt: u64,
     pub credential_present: bool,
+    pub credential_generation: u64,
+    pub credential_published_at_millis: Option<u64>,
     pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
     pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
     pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
@@ -118,26 +126,75 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Acquire {
         pub expires_at_ts: Option<u64>,
+        pub credential_published_at_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkExpiring {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveCredentialFreshness {
+        pub now_ts: u64,
+        pub refresh_window_secs: u64,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginRefresh {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteRefresh {
         pub new_expires_at: Option<u64>,
         pub now_ts: u64,
+        pub credential_published_at_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RefreshFailedTransient {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RefreshFailedPermanent {}
+    pub struct RefreshFailed {
+        pub http_status: Option<u64>,
+        pub oauth_error_code: Option<String>,
+        pub local_credential_unusable: bool,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkReauthRequired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearCredentialLifecycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseCredentialLifecycle {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Release {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreAuthoritySnapshot {
+        pub lifecycle_phase: AuthLifecyclePhase,
+        pub expires_at: Option<u64>,
+        pub last_refresh: Option<u64>,
+        pub refresh_attempt: u64,
+        pub credential_present: bool,
+        pub credential_generation: u64,
+        pub credential_published_at_millis: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreCredentialLifecycleSnapshot {
+        pub lifecycle_phase: Option<AuthLifecyclePhase>,
+        pub expires_at: Option<u64>,
+        pub last_refresh: Option<u64>,
+        pub refresh_attempt: u64,
+        pub credential_present: bool,
+        pub credential_generation: u64,
+        pub credential_published_at_millis: Option<u64>,
+        pub restored_oauth_membership_observed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOAuthBrowserFlow {
+        pub flow_id: String,
+        pub provider: Option<String>,
+        pub redirect_uri: Option<String>,
+        pub expires_at_millis: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOAuthDeviceFlow {
+        pub flow_id: String,
+        pub provider: Option<String>,
+        pub expires_at_millis: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOAuthDevicePoll {
+        pub flow_id: String,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthBrowserFlow {
         pub flow_id: String,
@@ -145,6 +202,7 @@ pub mod inputs {
         pub redirect_uri: String,
         pub expires_at_millis: u64,
         pub max_outstanding_flows: u64,
+        pub observed_global_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthBrowserFlow {
@@ -169,6 +227,12 @@ pub mod inputs {
         pub flow_id: String,
         pub provider: String,
         pub expires_at_millis: u64,
+        pub max_outstanding_flows: u64,
+        pub observed_global_outstanding_flows: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConfirmOAuthDurableAdmission {
+        pub observed_global_outstanding_flows: u64,
         pub max_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -203,18 +267,25 @@ pub mod inputs {
 pub enum Input {
     Acquire(inputs::Acquire),
     MarkExpiring(inputs::MarkExpiring),
+    ObserveCredentialFreshness(inputs::ObserveCredentialFreshness),
     BeginRefresh(inputs::BeginRefresh),
     CompleteRefresh(inputs::CompleteRefresh),
-    RefreshFailedTransient(inputs::RefreshFailedTransient),
-    RefreshFailedPermanent(inputs::RefreshFailedPermanent),
+    RefreshFailed(inputs::RefreshFailed),
     MarkReauthRequired(inputs::MarkReauthRequired),
     ClearCredentialLifecycle(inputs::ClearCredentialLifecycle),
+    ReleaseCredentialLifecycle(inputs::ReleaseCredentialLifecycle),
     Release(inputs::Release),
+    RestoreAuthoritySnapshot(inputs::RestoreAuthoritySnapshot),
+    RestoreCredentialLifecycleSnapshot(inputs::RestoreCredentialLifecycleSnapshot),
+    RestoreOAuthBrowserFlow(inputs::RestoreOAuthBrowserFlow),
+    RestoreOAuthDeviceFlow(inputs::RestoreOAuthDeviceFlow),
+    RestoreOAuthDevicePoll(inputs::RestoreOAuthDevicePoll),
     AdmitOAuthBrowserFlow(inputs::AdmitOAuthBrowserFlow),
     VerifyOAuthBrowserFlow(inputs::VerifyOAuthBrowserFlow),
     ConsumeOAuthBrowserFlow(inputs::ConsumeOAuthBrowserFlow),
     ExpireOAuthBrowserFlow(inputs::ExpireOAuthBrowserFlow),
     AdmitOAuthDeviceFlow(inputs::AdmitOAuthDeviceFlow),
+    ConfirmOAuthDurableAdmission(inputs::ConfirmOAuthDurableAdmission),
     VerifyOAuthDeviceFlow(inputs::VerifyOAuthDeviceFlow),
     BeginOAuthDevicePoll(inputs::BeginOAuthDevicePoll),
     FinishOAuthDevicePoll(inputs::FinishOAuthDevicePoll),
@@ -226,18 +297,27 @@ impl Input {
         match self {
             Self::Acquire(_) => InputKind::Acquire,
             Self::MarkExpiring(_) => InputKind::MarkExpiring,
+            Self::ObserveCredentialFreshness(_) => InputKind::ObserveCredentialFreshness,
             Self::BeginRefresh(_) => InputKind::BeginRefresh,
             Self::CompleteRefresh(_) => InputKind::CompleteRefresh,
-            Self::RefreshFailedTransient(_) => InputKind::RefreshFailedTransient,
-            Self::RefreshFailedPermanent(_) => InputKind::RefreshFailedPermanent,
+            Self::RefreshFailed(_) => InputKind::RefreshFailed,
             Self::MarkReauthRequired(_) => InputKind::MarkReauthRequired,
             Self::ClearCredentialLifecycle(_) => InputKind::ClearCredentialLifecycle,
+            Self::ReleaseCredentialLifecycle(_) => InputKind::ReleaseCredentialLifecycle,
             Self::Release(_) => InputKind::Release,
+            Self::RestoreAuthoritySnapshot(_) => InputKind::RestoreAuthoritySnapshot,
+            Self::RestoreCredentialLifecycleSnapshot(_) => {
+                InputKind::RestoreCredentialLifecycleSnapshot
+            }
+            Self::RestoreOAuthBrowserFlow(_) => InputKind::RestoreOAuthBrowserFlow,
+            Self::RestoreOAuthDeviceFlow(_) => InputKind::RestoreOAuthDeviceFlow,
+            Self::RestoreOAuthDevicePoll(_) => InputKind::RestoreOAuthDevicePoll,
             Self::AdmitOAuthBrowserFlow(_) => InputKind::AdmitOAuthBrowserFlow,
             Self::VerifyOAuthBrowserFlow(_) => InputKind::VerifyOAuthBrowserFlow,
             Self::ConsumeOAuthBrowserFlow(_) => InputKind::ConsumeOAuthBrowserFlow,
             Self::ExpireOAuthBrowserFlow(_) => InputKind::ExpireOAuthBrowserFlow,
             Self::AdmitOAuthDeviceFlow(_) => InputKind::AdmitOAuthDeviceFlow,
+            Self::ConfirmOAuthDurableAdmission(_) => InputKind::ConfirmOAuthDurableAdmission,
             Self::VerifyOAuthDeviceFlow(_) => InputKind::VerifyOAuthDeviceFlow,
             Self::BeginOAuthDevicePoll(_) => InputKind::BeginOAuthDevicePoll,
             Self::FinishOAuthDevicePoll(_) => InputKind::FinishOAuthDevicePoll,
@@ -250,18 +330,25 @@ impl Input {
 pub enum InputKind {
     Acquire,
     MarkExpiring,
+    ObserveCredentialFreshness,
     BeginRefresh,
     CompleteRefresh,
-    RefreshFailedTransient,
-    RefreshFailedPermanent,
+    RefreshFailed,
     MarkReauthRequired,
     ClearCredentialLifecycle,
+    ReleaseCredentialLifecycle,
     Release,
+    RestoreAuthoritySnapshot,
+    RestoreCredentialLifecycleSnapshot,
+    RestoreOAuthBrowserFlow,
+    RestoreOAuthDeviceFlow,
+    RestoreOAuthDevicePoll,
     AdmitOAuthBrowserFlow,
     VerifyOAuthBrowserFlow,
     ConsumeOAuthBrowserFlow,
     ExpireOAuthBrowserFlow,
     AdmitOAuthDeviceFlow,
+    ConfirmOAuthDurableAdmission,
     VerifyOAuthDeviceFlow,
     BeginOAuthDevicePoll,
     FinishOAuthDevicePoll,
@@ -275,6 +362,9 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitLifecycleEvent {
         pub new_state: AuthLifecyclePhase,
+        pub expires_at: Option<u64>,
+        pub credential_generation: u64,
+        pub credential_published_at_millis: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeRefreshLoop {}
@@ -296,54 +386,112 @@ pub enum EffectKind {
 pub enum TransitionId {
     Acquire,
     MarkExpiring,
+    ObserveCredentialFreshnessValid,
+    ObserveCredentialFreshnessExpiringFromValid,
+    ObserveCredentialFreshnessExpiredFromValid,
+    ObserveCredentialFreshnessExpiring,
+    ObserveCredentialFreshnessExpiredFromExpiring,
+    ObserveCredentialFreshnessExpired,
+    ObserveCredentialFreshnessRefreshing,
+    ObserveCredentialFreshnessReauthRequired,
+    ObserveCredentialFreshnessReleased,
     BeginRefreshFromValid,
     BeginRefreshFromExpiring,
+    BeginRefreshFromExpired,
     CompleteRefresh,
     RefreshFailedTransient,
     RefreshFailedPermanent,
     MarkReauthRequiredFromValid,
     MarkReauthRequiredFromExpiring,
+    MarkReauthRequiredFromExpired,
     MarkReauthRequiredFromRefreshing,
     ClearCredentialLifecycle,
+    ReleaseCredentialLifecycleWithOAuth,
+    ReleaseCredentialLifecycleWithoutOAuth,
     Release,
+    RestoreCredentialLifecycleSnapshotValid,
+    RestoreCredentialLifecycleSnapshotExpiring,
+    RestoreCredentialLifecycleSnapshotRefreshing,
+    RestoreCredentialLifecycleSnapshotExpired,
+    RestoreCredentialLifecycleSnapshotReauthRequired,
+    RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth,
+    RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth,
+    RestoreAuthoritySnapshotValid,
+    RestoreAuthoritySnapshotExpiring,
+    RestoreAuthoritySnapshotRefreshing,
+    RestoreAuthoritySnapshotExpired,
+    RestoreAuthoritySnapshotReauthRequired,
+    RestoreAuthoritySnapshotReleased,
+    RestoreOAuthBrowserFlowValid,
+    RestoreOAuthBrowserFlowExpiring,
+    RestoreOAuthBrowserFlowExpired,
+    RestoreOAuthBrowserFlowRefreshing,
+    RestoreOAuthBrowserFlowReauthRequired,
+    RestoreOAuthDeviceFlowValid,
+    RestoreOAuthDeviceFlowExpiring,
+    RestoreOAuthDeviceFlowExpired,
+    RestoreOAuthDeviceFlowRefreshing,
+    RestoreOAuthDeviceFlowReauthRequired,
+    RestoreOAuthDevicePollValid,
+    RestoreOAuthDevicePollExpiring,
+    RestoreOAuthDevicePollExpired,
+    RestoreOAuthDevicePollRefreshing,
+    RestoreOAuthDevicePollReauthRequired,
     AdmitOAuthBrowserFlowValid,
     AdmitOAuthBrowserFlowExpiring,
+    AdmitOAuthBrowserFlowExpired,
     AdmitOAuthBrowserFlowRefreshing,
     AdmitOAuthBrowserFlowReauthRequired,
+    ReopenReleasedForOAuthBrowserFlowAdmission,
     VerifyOAuthBrowserFlowValid,
     VerifyOAuthBrowserFlowExpiring,
+    VerifyOAuthBrowserFlowExpired,
     VerifyOAuthBrowserFlowRefreshing,
     VerifyOAuthBrowserFlowReauthRequired,
     ConsumeOAuthBrowserFlowValid,
     ConsumeOAuthBrowserFlowExpiring,
+    ConsumeOAuthBrowserFlowExpired,
     ConsumeOAuthBrowserFlowRefreshing,
     ConsumeOAuthBrowserFlowReauthRequired,
     ExpireOAuthBrowserFlowValid,
     ExpireOAuthBrowserFlowExpiring,
+    ExpireOAuthBrowserFlowExpired,
     ExpireOAuthBrowserFlowRefreshing,
     ExpireOAuthBrowserFlowReauthRequired,
     AdmitOAuthDeviceFlowValid,
     AdmitOAuthDeviceFlowExpiring,
+    AdmitOAuthDeviceFlowExpired,
     AdmitOAuthDeviceFlowRefreshing,
     AdmitOAuthDeviceFlowReauthRequired,
+    ReopenReleasedForOAuthDeviceFlowAdmission,
+    ConfirmOAuthDurableAdmissionValid,
+    ConfirmOAuthDurableAdmissionExpiring,
+    ConfirmOAuthDurableAdmissionExpired,
+    ConfirmOAuthDurableAdmissionRefreshing,
+    ConfirmOAuthDurableAdmissionReauthRequired,
     VerifyOAuthDeviceFlowValid,
     VerifyOAuthDeviceFlowExpiring,
+    VerifyOAuthDeviceFlowExpired,
     VerifyOAuthDeviceFlowRefreshing,
     VerifyOAuthDeviceFlowReauthRequired,
     BeginOAuthDevicePollValid,
     BeginOAuthDevicePollExpiring,
+    BeginOAuthDevicePollExpired,
     BeginOAuthDevicePollRefreshing,
     BeginOAuthDevicePollReauthRequired,
     FinishOAuthDevicePollValid,
     FinishOAuthDevicePollExpiring,
+    FinishOAuthDevicePollExpired,
     FinishOAuthDevicePollRefreshing,
     FinishOAuthDevicePollReauthRequired,
     ConsumeOAuthDeviceFlowValid,
     ConsumeOAuthDeviceFlowExpiring,
+    ConsumeOAuthDeviceFlowExpired,
     ConsumeOAuthDeviceFlowRefreshing,
     ConsumeOAuthDeviceFlowReauthRequired,
     ExpireOAuthDeviceFlowValid,
     ExpireOAuthDeviceFlowExpiring,
+    ExpireOAuthDeviceFlowExpired,
     ExpireOAuthDeviceFlowRefreshing,
     ExpireOAuthDeviceFlowReauthRequired,
 }
@@ -422,6 +570,8 @@ pub fn initial_state() -> State {
         last_refresh: None,
         refresh_attempt: 0,
         credential_present: false,
+        credential_generation: 0,
+        credential_published_at_millis: None,
         oauth_browser_flow_ids: Default::default(),
         oauth_browser_flow_providers: Default::default(),
         oauth_browser_flow_redirect_uris: Default::default(),

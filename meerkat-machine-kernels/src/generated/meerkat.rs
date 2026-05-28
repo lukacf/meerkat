@@ -5,13 +5,984 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionExistingQueuedActionKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Coalesce")]
+    Coalesce,
+    #[serde(rename = "Supersede")]
+    Supersede,
+}
+impl AdmissionExistingQueuedActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Coalesce => "Coalesce",
+            Self::Supersede => "Supersede",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionExistingQueuedActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Coalesce" => Ok(Self::Coalesce),
+            "Supersede" => Ok(Self::Supersede),
+            other => Err(format!(
+                "invalid AdmissionExistingQueuedActionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionExistingQueuedActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionExistingQueuedActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionIdempotencyResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Deduplicated")]
+    Deduplicated,
+}
+impl AdmissionIdempotencyResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Deduplicated => "Deduplicated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionIdempotencyResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Deduplicated" => Ok(Self::Deduplicated),
+            other => Err(format!(
+                "invalid AdmissionIdempotencyResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionIdempotencyResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionIdempotencyResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionInputKind {
+    #[default]
+    #[serde(rename = "Prompt")]
+    Prompt,
+    #[serde(rename = "PeerMessage")]
+    PeerMessage,
+    #[serde(rename = "PeerRequest")]
+    PeerRequest,
+    #[serde(rename = "PeerResponseProgress")]
+    PeerResponseProgress,
+    #[serde(rename = "PeerResponseTerminal")]
+    PeerResponseTerminal,
+    #[serde(rename = "FlowStep")]
+    FlowStep,
+    #[serde(rename = "ExternalEvent")]
+    ExternalEvent,
+    #[serde(rename = "Continuation")]
+    Continuation,
+    #[serde(rename = "Operation")]
+    Operation,
+}
+impl AdmissionInputKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prompt => "Prompt",
+            Self::PeerMessage => "PeerMessage",
+            Self::PeerRequest => "PeerRequest",
+            Self::PeerResponseProgress => "PeerResponseProgress",
+            Self::PeerResponseTerminal => "PeerResponseTerminal",
+            Self::FlowStep => "FlowStep",
+            Self::ExternalEvent => "ExternalEvent",
+            Self::Continuation => "Continuation",
+            Self::Operation => "Operation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionInputKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Prompt" => Ok(Self::Prompt),
+            "PeerMessage" => Ok(Self::PeerMessage),
+            "PeerRequest" => Ok(Self::PeerRequest),
+            "PeerResponseProgress" => Ok(Self::PeerResponseProgress),
+            "PeerResponseTerminal" => Ok(Self::PeerResponseTerminal),
+            "FlowStep" => Ok(Self::FlowStep),
+            "ExternalEvent" => Ok(Self::ExternalEvent),
+            "Continuation" => Ok(Self::Continuation),
+            "Operation" => Ok(Self::Operation),
+            other => Err(format!("invalid AdmissionInputKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionInputKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionInputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionInputOriginKind {
+    #[default]
+    #[serde(rename = "Operator")]
+    Operator,
+    #[serde(rename = "Peer")]
+    Peer,
+    #[serde(rename = "Flow")]
+    Flow,
+    #[serde(rename = "System")]
+    System,
+    #[serde(rename = "External")]
+    External,
+}
+impl AdmissionInputOriginKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Operator => "Operator",
+            Self::Peer => "Peer",
+            Self::Flow => "Flow",
+            Self::System => "System",
+            Self::External => "External",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionInputOriginKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Operator" => Ok(Self::Operator),
+            "Peer" => Ok(Self::Peer),
+            "Flow" => Ok(Self::Flow),
+            "System" => Ok(Self::System),
+            "External" => Ok(Self::External),
+            other => Err(format!("invalid AdmissionInputOriginKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionInputOriginKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionInputOriginKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPeerResponseTerminalApplyIntent {
+    #[default]
+    #[serde(rename = "AppendContextAndRun")]
+    AppendContextAndRun,
+}
+impl AdmissionPeerResponseTerminalApplyIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AppendContextAndRun => "AppendContextAndRun",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AppendContextAndRun" => Ok(Self::AppendContextAndRun),
+            other => Err(format!(
+                "invalid AdmissionPeerResponseTerminalApplyIntent value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPeerResponseTerminalApplyIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPlanKind {
+    #[default]
+    #[serde(rename = "ConsumedOnAccept")]
+    ConsumedOnAccept,
+    #[serde(rename = "Queued")]
+    Queued,
+}
+impl AdmissionPlanKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConsumedOnAccept => "ConsumedOnAccept",
+            Self::Queued => "Queued",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPlanKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ConsumedOnAccept" => Ok(Self::ConsumedOnAccept),
+            "Queued" => Ok(Self::Queued),
+            other => Err(format!("invalid AdmissionPlanKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPlanKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPlanKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyApplyMode {
+    #[default]
+    #[serde(rename = "StageRunStart")]
+    StageRunStart,
+    #[serde(rename = "StageRunBoundary")]
+    StageRunBoundary,
+    #[serde(rename = "InjectNow")]
+    InjectNow,
+    #[serde(rename = "Ignore")]
+    Ignore,
+}
+impl AdmissionPolicyApplyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StageRunStart => "StageRunStart",
+            Self::StageRunBoundary => "StageRunBoundary",
+            Self::InjectNow => "InjectNow",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyApplyMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StageRunStart" => Ok(Self::StageRunStart),
+            "StageRunBoundary" => Ok(Self::StageRunBoundary),
+            "InjectNow" => Ok(Self::InjectNow),
+            "Ignore" => Ok(Self::Ignore),
+            other => Err(format!("invalid AdmissionPolicyApplyMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyApplyMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyApplyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyConsumePoint {
+    #[default]
+    #[serde(rename = "OnAccept")]
+    OnAccept,
+    #[serde(rename = "OnApply")]
+    OnApply,
+    #[serde(rename = "OnRunStart")]
+    OnRunStart,
+    #[serde(rename = "OnRunComplete")]
+    OnRunComplete,
+    #[serde(rename = "ExplicitAck")]
+    ExplicitAck,
+}
+impl AdmissionPolicyConsumePoint {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OnAccept => "OnAccept",
+            Self::OnApply => "OnApply",
+            Self::OnRunStart => "OnRunStart",
+            Self::OnRunComplete => "OnRunComplete",
+            Self::ExplicitAck => "ExplicitAck",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyConsumePoint {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OnAccept" => Ok(Self::OnAccept),
+            "OnApply" => Ok(Self::OnApply),
+            "OnRunStart" => Ok(Self::OnRunStart),
+            "OnRunComplete" => Ok(Self::OnRunComplete),
+            "ExplicitAck" => Ok(Self::ExplicitAck),
+            other => Err(format!(
+                "invalid AdmissionPolicyConsumePoint value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyConsumePoint {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyConsumePoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyDrainPolicy {
+    #[default]
+    #[serde(rename = "QueueNextTurn")]
+    QueueNextTurn,
+    #[serde(rename = "SteerBatch")]
+    SteerBatch,
+    #[serde(rename = "Immediate")]
+    Immediate,
+    #[serde(rename = "Ignore")]
+    Ignore,
+}
+impl AdmissionPolicyDrainPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::QueueNextTurn => "QueueNextTurn",
+            Self::SteerBatch => "SteerBatch",
+            Self::Immediate => "Immediate",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyDrainPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "QueueNextTurn" => Ok(Self::QueueNextTurn),
+            "SteerBatch" => Ok(Self::SteerBatch),
+            "Immediate" => Ok(Self::Immediate),
+            "Ignore" => Ok(Self::Ignore),
+            other => Err(format!(
+                "invalid AdmissionPolicyDrainPolicy value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyDrainPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyDrainPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyQueueMode {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Fifo")]
+    Fifo,
+    #[serde(rename = "Coalesce")]
+    Coalesce,
+    #[serde(rename = "Supersede")]
+    Supersede,
+    #[serde(rename = "Priority")]
+    Priority,
+}
+impl AdmissionPolicyQueueMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Fifo => "Fifo",
+            Self::Coalesce => "Coalesce",
+            Self::Supersede => "Supersede",
+            Self::Priority => "Priority",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyQueueMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Fifo" => Ok(Self::Fifo),
+            "Coalesce" => Ok(Self::Coalesce),
+            "Supersede" => Ok(Self::Supersede),
+            "Priority" => Ok(Self::Priority),
+            other => Err(format!("invalid AdmissionPolicyQueueMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyQueueMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyQueueMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyWakeMode {
+    #[default]
+    #[serde(rename = "WakeIfIdle")]
+    WakeIfIdle,
+    #[serde(rename = "InterruptYielding")]
+    InterruptYielding,
+    #[serde(rename = "None")]
+    None,
+}
+impl AdmissionPolicyWakeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WakeIfIdle => "WakeIfIdle",
+            Self::InterruptYielding => "InterruptYielding",
+            Self::None => "None",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyWakeMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "WakeIfIdle" => Ok(Self::WakeIfIdle),
+            "InterruptYielding" => Ok(Self::InterruptYielding),
+            "None" => Ok(Self::None),
+            other => Err(format!("invalid AdmissionPolicyWakeMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyWakeMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyWakeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionQueueActionKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "EnqueueTo")]
+    EnqueueTo,
+    #[serde(rename = "EnqueueFront")]
+    EnqueueFront,
+}
+impl AdmissionQueueActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::EnqueueTo => "EnqueueTo",
+            Self::EnqueueFront => "EnqueueFront",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionQueueActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "EnqueueTo" => Ok(Self::EnqueueTo),
+            "EnqueueFront" => Ok(Self::EnqueueFront),
+            other => Err(format!("invalid AdmissionQueueActionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionQueueActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionQueueActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRejectReasonKind {
+    #[default]
+    #[serde(rename = "DurabilityViolation")]
+    DurabilityViolation,
+    #[serde(rename = "PeerHandlingModeInvalid")]
+    PeerHandlingModeInvalid,
+    #[serde(rename = "PeerResponseTerminalInvalid")]
+    PeerResponseTerminalInvalid,
+}
+impl AdmissionRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DurabilityViolation => "DurabilityViolation",
+            Self::PeerHandlingModeInvalid => "PeerHandlingModeInvalid",
+            Self::PeerResponseTerminalInvalid => "PeerResponseTerminalInvalid",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DurabilityViolation" => Ok(Self::DurabilityViolation),
+            "PeerHandlingModeInvalid" => Ok(Self::PeerHandlingModeInvalid),
+            "PeerResponseTerminalInvalid" => Ok(Self::PeerResponseTerminalInvalid),
+            other => Err(format!("invalid AdmissionRejectReasonKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRoutingDisposition {
+    #[default]
+    #[serde(rename = "Queue")]
+    Queue,
+    #[serde(rename = "Steer")]
+    Steer,
+    #[serde(rename = "Immediate")]
+    Immediate,
+    #[serde(rename = "Drop")]
+    Drop,
+}
+impl AdmissionRoutingDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Steer => "Steer",
+            Self::Immediate => "Immediate",
+            Self::Drop => "Drop",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRoutingDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queue" => Ok(Self::Queue),
+            "Steer" => Ok(Self::Steer),
+            "Immediate" => Ok(Self::Immediate),
+            "Drop" => Ok(Self::Drop),
+            other => Err(format!(
+                "invalid AdmissionRoutingDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRoutingDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRoutingDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRunApplyBoundary {
+    #[default]
+    #[serde(rename = "RunStart")]
+    RunStart,
+    #[serde(rename = "RunCheckpoint")]
+    RunCheckpoint,
+    #[serde(rename = "Immediate")]
+    Immediate,
+}
+impl AdmissionRunApplyBoundary {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunStart => "RunStart",
+            Self::RunCheckpoint => "RunCheckpoint",
+            Self::Immediate => "Immediate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunStart" => Ok(Self::RunStart),
+            "RunCheckpoint" => Ok(Self::RunCheckpoint),
+            "Immediate" => Ok(Self::Immediate),
+            other => Err(format!("invalid AdmissionRunApplyBoundary value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRunApplyBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRuntimeExecutionKind {
+    #[default]
+    #[serde(rename = "ContentTurn")]
+    ContentTurn,
+    #[serde(rename = "ResumePending")]
+    ResumePending,
+}
+impl AdmissionRuntimeExecutionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContentTurn => "ContentTurn",
+            Self::ResumePending => "ResumePending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ContentTurn" => Ok(Self::ContentTurn),
+            "ResumePending" => Ok(Self::ResumePending),
+            other => Err(format!(
+                "invalid AdmissionRuntimeExecutionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRuntimeExecutionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionValidationResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl AdmissionValidationResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionValidationResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid AdmissionValidationResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionValidationResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionValidationResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -725,6 +1696,64 @@ impl std::fmt::Display for InputAbandonReason {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputDurabilityKind {
+    #[default]
+    #[serde(rename = "Durable")]
+    Durable,
+    #[serde(rename = "Ephemeral")]
+    Ephemeral,
+    #[serde(rename = "Derived")]
+    Derived,
+    #[serde(rename = "Missing")]
+    Missing,
+}
+impl InputDurabilityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Durable => "Durable",
+            Self::Ephemeral => "Ephemeral",
+            Self::Derived => "Derived",
+            Self::Missing => "Missing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputDurabilityKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Durable" => Ok(Self::Durable),
+            "Ephemeral" => Ok(Self::Ephemeral),
+            "Derived" => Ok(Self::Derived),
+            "Missing" => Ok(Self::Missing),
+            other => Err(format!("invalid InputDurabilityKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputDurabilityKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputDurabilityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -891,6 +1920,148 @@ impl std::fmt::Display for InputPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum InputPublicLifecycleState {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Queued")]
+    Queued,
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "AppliedPendingConsumption")]
+    AppliedPendingConsumption,
+    #[serde(rename = "Consumed")]
+    Consumed,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl InputPublicLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputPublicLifecycleState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Queued" => Ok(Self::Queued),
+            "Staged" => Ok(Self::Staged),
+            "Applied" => Ok(Self::Applied),
+            "AppliedPendingConsumption" => Ok(Self::AppliedPendingConsumption),
+            "Consumed" => Ok(Self::Consumed),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!("invalid InputPublicLifecycleState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputPublicLifecycleState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputPublicLifecycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputPublicTerminalOutcome {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl InputPublicTerminalOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Abandoned => "Abandoned",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputPublicTerminalOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Abandoned" => Ok(Self::Abandoned),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid InputPublicTerminalOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputPublicTerminalOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputPublicTerminalOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum InputTerminalKind {
     #[default]
     #[serde(rename = "Consumed")]
@@ -993,6 +2164,862 @@ impl std::convert::TryFrom<String> for InteractionStreamState {
     }
 }
 impl std::fmt::Display for InteractionStreamState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveChannelDegradationReason {
+    #[default]
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "RateLimited")]
+    RateLimited,
+    #[serde(rename = "ProviderThrottled")]
+    ProviderThrottled,
+    #[serde(rename = "NetworkUnstable")]
+    NetworkUnstable,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl LiveChannelDegradationReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::RateLimited => "RateLimited",
+            Self::ProviderThrottled => "ProviderThrottled",
+            Self::NetworkUnstable => "NetworkUnstable",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelDegradationReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unknown" => Ok(Self::Unknown),
+            "RateLimited" => Ok(Self::RateLimited),
+            "ProviderThrottled" => Ok(Self::ProviderThrottled),
+            "NetworkUnstable" => Ok(Self::NetworkUnstable),
+            "Other" => Ok(Self::Other),
+            other => Err(format!(
+                "invalid LiveChannelDegradationReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelDegradationReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelDegradationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveChannelPublicStatus {
+    #[default]
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Opening")]
+    Opening,
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Degraded")]
+    Degraded,
+    #[serde(rename = "Closing")]
+    Closing,
+    #[serde(rename = "Closed")]
+    Closed,
+}
+impl LiveChannelPublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Opening => "Opening",
+            Self::Ready => "Ready",
+            Self::Degraded => "Degraded",
+            Self::Closing => "Closing",
+            Self::Closed => "Closed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelPublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "Opening" => Ok(Self::Opening),
+            "Ready" => Ok(Self::Ready),
+            "Degraded" => Ok(Self::Degraded),
+            "Closing" => Ok(Self::Closing),
+            "Closed" => Ok(Self::Closed),
+            other => Err(format!("invalid LiveChannelPublicStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelPublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelPublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveChannelRequestPublicKind {
+    #[default]
+    #[serde(rename = "Status")]
+    Status,
+    #[serde(rename = "Close")]
+    Close,
+    #[serde(rename = "Refresh")]
+    Refresh,
+    #[serde(rename = "WebrtcAnswer")]
+    WebrtcAnswer,
+}
+impl LiveChannelRequestPublicKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Status => "Status",
+            Self::Close => "Close",
+            Self::Refresh => "Refresh",
+            Self::WebrtcAnswer => "WebrtcAnswer",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelRequestPublicKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Status" => Ok(Self::Status),
+            "Close" => Ok(Self::Close),
+            "Refresh" => Ok(Self::Refresh),
+            "WebrtcAnswer" => Ok(Self::WebrtcAnswer),
+            other => Err(format!(
+                "invalid LiveChannelRequestPublicKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelRequestPublicKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelRequestPublicKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveChannelRequestRejectionPublicErrorClass {
+    #[default]
+    #[serde(rename = "InvalidParams")]
+    InvalidParams,
+    #[serde(rename = "InternalError")]
+    InternalError,
+}
+impl LiveChannelRequestRejectionPublicErrorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidParams => "InvalidParams",
+            Self::InternalError => "InternalError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelRequestRejectionPublicErrorClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InvalidParams" => Ok(Self::InvalidParams),
+            "InternalError" => Ok(Self::InternalError),
+            other => Err(format!(
+                "invalid LiveChannelRequestRejectionPublicErrorClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelRequestRejectionPublicErrorClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelRequestRejectionPublicErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveChannelRequestRejectionReason {
+    #[default]
+    #[serde(rename = "ChannelNotFound")]
+    ChannelNotFound,
+    #[serde(rename = "NoAdapter")]
+    NoAdapter,
+    #[serde(rename = "InvalidToken")]
+    InvalidToken,
+    #[serde(rename = "InvalidPayload")]
+    InvalidPayload,
+    #[serde(rename = "WebrtcAnswerError")]
+    WebrtcAnswerError,
+    #[serde(rename = "InternalHostError")]
+    InternalHostError,
+}
+impl LiveChannelRequestRejectionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChannelNotFound => "ChannelNotFound",
+            Self::NoAdapter => "NoAdapter",
+            Self::InvalidToken => "InvalidToken",
+            Self::InvalidPayload => "InvalidPayload",
+            Self::WebrtcAnswerError => "WebrtcAnswerError",
+            Self::InternalHostError => "InternalHostError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveChannelRequestRejectionReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ChannelNotFound" => Ok(Self::ChannelNotFound),
+            "NoAdapter" => Ok(Self::NoAdapter),
+            "InvalidToken" => Ok(Self::InvalidToken),
+            "InvalidPayload" => Ok(Self::InvalidPayload),
+            "WebrtcAnswerError" => Ok(Self::WebrtcAnswerError),
+            "InternalHostError" => Ok(Self::InternalHostError),
+            other => Err(format!(
+                "invalid LiveChannelRequestRejectionReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveChannelRequestRejectionReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveChannelRequestRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveClosePublicStatus {
+    #[default]
+    #[serde(rename = "Closed")]
+    Closed,
+}
+impl LiveClosePublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Closed => "Closed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveClosePublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Closed" => Ok(Self::Closed),
+            other => Err(format!("invalid LiveClosePublicStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveClosePublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveClosePublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveCommandPublicKind {
+    #[default]
+    #[serde(rename = "SendInput")]
+    SendInput,
+    #[serde(rename = "CommitInput")]
+    CommitInput,
+    #[serde(rename = "Interrupt")]
+    Interrupt,
+    #[serde(rename = "TruncateAssistantOutput")]
+    TruncateAssistantOutput,
+}
+impl LiveCommandPublicKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SendInput => "SendInput",
+            Self::CommitInput => "CommitInput",
+            Self::Interrupt => "Interrupt",
+            Self::TruncateAssistantOutput => "TruncateAssistantOutput",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveCommandPublicKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SendInput" => Ok(Self::SendInput),
+            "CommitInput" => Ok(Self::CommitInput),
+            "Interrupt" => Ok(Self::Interrupt),
+            "TruncateAssistantOutput" => Ok(Self::TruncateAssistantOutput),
+            other => Err(format!("invalid LiveCommandPublicKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveCommandPublicKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveCommandPublicKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveCommandRejectionPublicErrorClass {
+    #[default]
+    #[serde(rename = "InvalidParams")]
+    InvalidParams,
+    #[serde(rename = "InternalError")]
+    InternalError,
+}
+impl LiveCommandRejectionPublicErrorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidParams => "InvalidParams",
+            Self::InternalError => "InternalError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveCommandRejectionPublicErrorClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InvalidParams" => Ok(Self::InvalidParams),
+            "InternalError" => Ok(Self::InternalError),
+            other => Err(format!(
+                "invalid LiveCommandRejectionPublicErrorClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveCommandRejectionPublicErrorClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveCommandRejectionPublicErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveCommandRejectionReason {
+    #[default]
+    #[serde(rename = "ChannelNotFound")]
+    ChannelNotFound,
+    #[serde(rename = "NoAdapter")]
+    NoAdapter,
+    #[serde(rename = "ChannelNotReady")]
+    ChannelNotReady,
+    #[serde(rename = "UnsupportedCommand")]
+    UnsupportedCommand,
+    #[serde(rename = "AdapterError")]
+    AdapterError,
+    #[serde(rename = "InternalHostError")]
+    InternalHostError,
+}
+impl LiveCommandRejectionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChannelNotFound => "ChannelNotFound",
+            Self::NoAdapter => "NoAdapter",
+            Self::ChannelNotReady => "ChannelNotReady",
+            Self::UnsupportedCommand => "UnsupportedCommand",
+            Self::AdapterError => "AdapterError",
+            Self::InternalHostError => "InternalHostError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveCommandRejectionReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ChannelNotFound" => Ok(Self::ChannelNotFound),
+            "NoAdapter" => Ok(Self::NoAdapter),
+            "ChannelNotReady" => Ok(Self::ChannelNotReady),
+            "UnsupportedCommand" => Ok(Self::UnsupportedCommand),
+            "AdapterError" => Ok(Self::AdapterError),
+            "InternalHostError" => Ok(Self::InternalHostError),
+            other => Err(format!(
+                "invalid LiveCommandRejectionReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveCommandRejectionReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveCommandRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveOpenAdmissionRejection {
+    #[default]
+    #[serde(rename = "AlreadyBound")]
+    AlreadyBound,
+    #[serde(rename = "ChannelAlreadyBound")]
+    ChannelAlreadyBound,
+}
+impl LiveOpenAdmissionRejection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyBound => "AlreadyBound",
+            Self::ChannelAlreadyBound => "ChannelAlreadyBound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveOpenAdmissionRejection {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AlreadyBound" => Ok(Self::AlreadyBound),
+            "ChannelAlreadyBound" => Ok(Self::ChannelAlreadyBound),
+            other => Err(format!(
+                "invalid LiveOpenAdmissionRejection value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveOpenAdmissionRejection {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveOpenAdmissionRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveRefreshPublicStatus {
+    #[default]
+    #[serde(rename = "Queued")]
+    Queued,
+}
+impl LiveRefreshPublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveRefreshPublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queued" => Ok(Self::Queued),
+            other => Err(format!("invalid LiveRefreshPublicStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveRefreshPublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveRefreshPublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveWebrtcAnswerAdmissionRejection {
+    #[default]
+    #[serde(rename = "TokenNotFound")]
+    TokenNotFound,
+    #[serde(rename = "TokenExpired")]
+    TokenExpired,
+    #[serde(rename = "TokenChannelMismatch")]
+    TokenChannelMismatch,
+    #[serde(rename = "TokenAlreadyConsumed")]
+    TokenAlreadyConsumed,
+    #[serde(rename = "ChannelNotBound")]
+    ChannelNotBound,
+}
+impl LiveWebrtcAnswerAdmissionRejection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TokenNotFound => "TokenNotFound",
+            Self::TokenExpired => "TokenExpired",
+            Self::TokenChannelMismatch => "TokenChannelMismatch",
+            Self::TokenAlreadyConsumed => "TokenAlreadyConsumed",
+            Self::ChannelNotBound => "ChannelNotBound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveWebrtcAnswerAdmissionRejection {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TokenNotFound" => Ok(Self::TokenNotFound),
+            "TokenExpired" => Ok(Self::TokenExpired),
+            "TokenChannelMismatch" => Ok(Self::TokenChannelMismatch),
+            "TokenAlreadyConsumed" => Ok(Self::TokenAlreadyConsumed),
+            "ChannelNotBound" => Ok(Self::ChannelNotBound),
+            other => Err(format!(
+                "invalid LiveWebrtcAnswerAdmissionRejection value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveWebrtcAnswerAdmissionRejection {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveWebrtcAnswerAdmissionRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveWebrtcAnswerPublicStatus {
+    #[default]
+    #[serde(rename = "Answered")]
+    Answered,
+}
+impl LiveWebrtcAnswerPublicStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Answered => "Answered",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveWebrtcAnswerPublicStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Answered" => Ok(Self::Answered),
+            other => Err(format!(
+                "invalid LiveWebrtcAnswerPublicStatus value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveWebrtcAnswerPublicStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveWebrtcAnswerPublicStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveWebsocketTokenAdmissionPublicErrorClass {
+    #[default]
+    #[serde(rename = "InvalidToken")]
+    InvalidToken,
+}
+impl LiveWebsocketTokenAdmissionPublicErrorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InvalidToken => "InvalidToken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveWebsocketTokenAdmissionPublicErrorClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InvalidToken" => Ok(Self::InvalidToken),
+            other => Err(format!(
+                "invalid LiveWebsocketTokenAdmissionPublicErrorClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveWebsocketTokenAdmissionPublicErrorClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveWebsocketTokenAdmissionPublicErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveWebsocketTokenAdmissionRejection {
+    #[default]
+    #[serde(rename = "TokenNotFound")]
+    TokenNotFound,
+    #[serde(rename = "TokenExpired")]
+    TokenExpired,
+    #[serde(rename = "TokenChannelMismatch")]
+    TokenChannelMismatch,
+    #[serde(rename = "TokenAlreadyConsumed")]
+    TokenAlreadyConsumed,
+    #[serde(rename = "ChannelNotBound")]
+    ChannelNotBound,
+}
+impl LiveWebsocketTokenAdmissionRejection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TokenNotFound => "TokenNotFound",
+            Self::TokenExpired => "TokenExpired",
+            Self::TokenChannelMismatch => "TokenChannelMismatch",
+            Self::TokenAlreadyConsumed => "TokenAlreadyConsumed",
+            Self::ChannelNotBound => "ChannelNotBound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveWebsocketTokenAdmissionRejection {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TokenNotFound" => Ok(Self::TokenNotFound),
+            "TokenExpired" => Ok(Self::TokenExpired),
+            "TokenChannelMismatch" => Ok(Self::TokenChannelMismatch),
+            "TokenAlreadyConsumed" => Ok(Self::TokenAlreadyConsumed),
+            "ChannelNotBound" => Ok(Self::ChannelNotBound),
+            other => Err(format!(
+                "invalid LiveWebsocketTokenAdmissionRejection value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveWebsocketTokenAdmissionRejection {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveWebsocketTokenAdmissionRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1169,6 +3196,514 @@ impl std::fmt::Display for MobId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobOperatorAccessRequestKind {
+    #[default]
+    #[serde(rename = "Inherit")]
+    Inherit,
+    #[serde(rename = "Enable")]
+    Enable,
+    #[serde(rename = "Disable")]
+    Disable,
+}
+impl MobOperatorAccessRequestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit",
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobOperatorAccessRequestKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Inherit" => Ok(Self::Inherit),
+            "Enable" => Ok(Self::Enable),
+            "Disable" => Ok(Self::Disable),
+            other => Err(format!(
+                "invalid MobOperatorAccessRequestKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobOperatorAccessRequestKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobOperatorAccessRequestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobPeerOverlayCommandKind {
+    #[default]
+    #[serde(rename = "Wire")]
+    Wire,
+    #[serde(rename = "Unwire")]
+    Unwire,
+}
+impl MobPeerOverlayCommandKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wire => "Wire",
+            Self::Unwire => "Unwire",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobPeerOverlayCommandKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Wire" => Ok(Self::Wire),
+            "Unwire" => Ok(Self::Unwire),
+            other => Err(format!("invalid MobPeerOverlayCommandKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobPeerOverlayCommandKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobPeerOverlayCommandKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpLifecycleActionKind {
+    #[default]
+    #[serde(rename = "Start")]
+    Start,
+    #[serde(rename = "Fail")]
+    Fail,
+    #[serde(rename = "PeerReady")]
+    PeerReady,
+    #[serde(rename = "ProgressReported")]
+    ProgressReported,
+    #[serde(rename = "Complete")]
+    Complete,
+    #[serde(rename = "Abort")]
+    Abort,
+    #[serde(rename = "Cancel")]
+    Cancel,
+    #[serde(rename = "RetireRequested")]
+    RetireRequested,
+    #[serde(rename = "RetireCompleted")]
+    RetireCompleted,
+    #[serde(rename = "Terminate")]
+    Terminate,
+}
+impl OpLifecycleActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Fail => "Fail",
+            Self::PeerReady => "PeerReady",
+            Self::ProgressReported => "ProgressReported",
+            Self::Complete => "Complete",
+            Self::Abort => "Abort",
+            Self::Cancel => "Cancel",
+            Self::RetireRequested => "RetireRequested",
+            Self::RetireCompleted => "RetireCompleted",
+            Self::Terminate => "Terminate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpLifecycleActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Start" => Ok(Self::Start),
+            "Fail" => Ok(Self::Fail),
+            "PeerReady" => Ok(Self::PeerReady),
+            "ProgressReported" => Ok(Self::ProgressReported),
+            "Complete" => Ok(Self::Complete),
+            "Abort" => Ok(Self::Abort),
+            "Cancel" => Ok(Self::Cancel),
+            "RetireRequested" => Ok(Self::RetireRequested),
+            "RetireCompleted" => Ok(Self::RetireCompleted),
+            "Terminate" => Ok(Self::Terminate),
+            other => Err(format!("invalid OpLifecycleActionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpLifecycleActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpLifecycleActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpLifecycleRejectReasonKind {
+    #[default]
+    #[serde(rename = "OperationNotFound")]
+    OperationNotFound,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "PeerNotExpected")]
+    PeerNotExpected,
+    #[serde(rename = "AlreadyPeerReady")]
+    AlreadyPeerReady,
+}
+impl OpLifecycleRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OperationNotFound => "OperationNotFound",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::PeerNotExpected => "PeerNotExpected",
+            Self::AlreadyPeerReady => "AlreadyPeerReady",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpLifecycleRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OperationNotFound" => Ok(Self::OperationNotFound),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "PeerNotExpected" => Ok(Self::PeerNotExpected),
+            "AlreadyPeerReady" => Ok(Self::AlreadyPeerReady),
+            other => Err(format!(
+                "invalid OpLifecycleRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpLifecycleRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpLifecycleRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpRegistrationAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl OpRegistrationAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpRegistrationAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid OpRegistrationAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpRegistrationAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpRegistrationAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OpRegistrationRejectReasonKind {
+    #[default]
+    #[serde(rename = "AlreadyRegistered")]
+    AlreadyRegistered,
+    #[serde(rename = "MaxConcurrentExceeded")]
+    MaxConcurrentExceeded,
+}
+impl OpRegistrationRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyRegistered => "AlreadyRegistered",
+            Self::MaxConcurrentExceeded => "MaxConcurrentExceeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OpRegistrationRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AlreadyRegistered" => Ok(Self::AlreadyRegistered),
+            "MaxConcurrentExceeded" => Ok(Self::MaxConcurrentExceeded),
+            other => Err(format!(
+                "invalid OpRegistrationRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OpRegistrationRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OpRegistrationRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OperationCompletionFeedClass {
+    #[default]
+    #[serde(rename = "Emit")]
+    Emit,
+    #[serde(rename = "Suppress")]
+    Suppress,
+}
+impl OperationCompletionFeedClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Emit => "Emit",
+            Self::Suppress => "Suppress",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OperationCompletionFeedClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Emit" => Ok(Self::Emit),
+            "Suppress" => Ok(Self::Suppress),
+            other => Err(format!(
+                "invalid OperationCompletionFeedClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperationCompletionFeedClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OperationCompletionFeedClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OperationCompletionWakeClass {
+    #[default]
+    #[serde(rename = "Wake")]
+    Wake,
+    #[serde(rename = "Ignore")]
+    Ignore,
+}
+impl OperationCompletionWakeClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wake => "Wake",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OperationCompletionWakeClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Wake" => Ok(Self::Wake),
+            "Ignore" => Ok(Self::Ignore),
+            other => Err(format!(
+                "invalid OperationCompletionWakeClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperationCompletionWakeClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OperationCompletionWakeClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OperationDurabilityClass {
+    #[default]
+    #[serde(rename = "Retain")]
+    Retain,
+    #[serde(rename = "Discard")]
+    Discard,
+}
+impl OperationDurabilityClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retain => "Retain",
+            Self::Discard => "Discard",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OperationDurabilityClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retain" => Ok(Self::Retain),
+            "Discard" => Ok(Self::Discard),
+            other => Err(format!("invalid OperationDurabilityClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperationDurabilityClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OperationDurabilityClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1217,12 +3752,15 @@ pub enum OperationKind {
     MobMemberChild,
     #[serde(rename = "BackgroundToolOp")]
     BackgroundToolOp,
+    #[serde(rename = "BackgroundToolCapacitySlot")]
+    BackgroundToolCapacitySlot,
 }
 impl OperationKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MobMemberChild => "MobMemberChild",
             Self::BackgroundToolOp => "BackgroundToolOp",
+            Self::BackgroundToolCapacitySlot => "BackgroundToolCapacitySlot",
         }
     }
 }
@@ -1232,6 +3770,7 @@ impl std::convert::TryFrom<&str> for OperationKind {
         match value {
             "MobMemberChild" => Ok(Self::MobMemberChild),
             "BackgroundToolOp" => Ok(Self::BackgroundToolOp),
+            "BackgroundToolCapacitySlot" => Ok(Self::BackgroundToolCapacitySlot),
             other => Err(format!("invalid OperationKind value `{other}`")),
         }
     }
@@ -1247,6 +3786,71 @@ impl std::fmt::Display for OperationKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OperationPublicResultClass {
+    #[default]
+    #[serde(rename = "MissingAuthority")]
+    MissingAuthority,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl OperationPublicResultClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingAuthority => "MissingAuthority",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OperationPublicResultClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MissingAuthority" => Ok(Self::MissingAuthority),
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid OperationPublicResultClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperationPublicResultClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OperationPublicResultClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type OperationSource = meerkat_machine_schema::catalog::dsl::meerkat_machine::OperationSource;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1502,6 +4106,58 @@ pub type PeerEndpoint = meerkat_machine_schema::catalog::dsl::meerkat_machine::P
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressAdmissionDiagnosticClass {
+    #[default]
+    #[serde(rename = "TrustedAtAdmission")]
+    TrustedAtAdmission,
+    #[serde(rename = "UntrustedAtAdmission")]
+    UntrustedAtAdmission,
+}
+impl PeerIngressAdmissionDiagnosticClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TrustedAtAdmission => "TrustedAtAdmission",
+            Self::UntrustedAtAdmission => "UntrustedAtAdmission",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressAdmissionDiagnosticClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TrustedAtAdmission" => Ok(Self::TrustedAtAdmission),
+            "UntrustedAtAdmission" => Ok(Self::UntrustedAtAdmission),
+            other => Err(format!(
+                "invalid PeerIngressAdmissionDiagnosticClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressAdmissionDiagnosticClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressAdmissionDiagnosticClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressAdmittedKind {
     #[default]
     #[serde(rename = "Message")]
@@ -1596,6 +4252,66 @@ impl std::convert::TryFrom<String> for PeerIngressAuthClass {
     }
 }
 impl std::fmt::Display for PeerIngressAuthClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressAuthorityPhaseClass {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Received")]
+    Received,
+    #[serde(rename = "Dropped")]
+    Dropped,
+    #[serde(rename = "Delivered")]
+    Delivered,
+}
+impl PeerIngressAuthorityPhaseClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Received => "Received",
+            Self::Dropped => "Dropped",
+            Self::Delivered => "Delivered",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressAuthorityPhaseClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Received" => Ok(Self::Received),
+            "Dropped" => Ok(Self::Dropped),
+            "Delivered" => Ok(Self::Delivered),
+            other => Err(format!(
+                "invalid PeerIngressAuthorityPhaseClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressAuthorityPhaseClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressAuthorityPhaseClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1866,6 +4582,66 @@ impl std::fmt::Display for PeerIngressOwnerKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressReceiveOutcomeClass {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "DroppedUntrustedSender")]
+    DroppedUntrustedSender,
+    #[serde(rename = "DroppedSessionClosed")]
+    DroppedSessionClosed,
+    #[serde(rename = "DroppedInboxFull")]
+    DroppedInboxFull,
+}
+impl PeerIngressReceiveOutcomeClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::DroppedUntrustedSender => "DroppedUntrustedSender",
+            Self::DroppedSessionClosed => "DroppedSessionClosed",
+            Self::DroppedInboxFull => "DroppedInboxFull",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressReceiveOutcomeClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "DroppedUntrustedSender" => Ok(Self::DroppedUntrustedSender),
+            "DroppedSessionClosed" => Ok(Self::DroppedSessionClosed),
+            "DroppedInboxFull" => Ok(Self::DroppedInboxFull),
+            other => Err(format!(
+                "invalid PeerIngressReceiveOutcomeClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressReceiveOutcomeClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressReceiveOutcomeClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressResponseStatus {
     #[default]
     #[serde(rename = "Accepted")]
@@ -1958,6 +4734,66 @@ impl std::convert::TryFrom<String> for PeerIngressResponseTerminality {
     }
 }
 impl std::fmt::Display for PeerIngressResponseTerminality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerResponseTerminalObservedStatus {
+    #[default]
+    #[serde(rename = "NotPeerTerminal")]
+    NotPeerTerminal,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl PeerResponseTerminalObservedStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotPeerTerminal => "NotPeerTerminal",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerResponseTerminalObservedStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotPeerTerminal" => Ok(Self::NotPeerTerminal),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid PeerResponseTerminalObservedStatus value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerResponseTerminalObservedStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerResponseTerminalObservedStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2116,6 +4952,430 @@ impl std::convert::TryFrom<String> for PreRunPhase {
     }
 }
 impl std::fmt::Display for PreRunPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredInputKind {
+    #[default]
+    #[serde(rename = "Prompt")]
+    Prompt,
+    #[serde(rename = "PeerMessage")]
+    PeerMessage,
+    #[serde(rename = "PeerRequest")]
+    PeerRequest,
+    #[serde(rename = "PeerResponseProgress")]
+    PeerResponseProgress,
+    #[serde(rename = "PeerResponseTerminal")]
+    PeerResponseTerminal,
+    #[serde(rename = "FlowStep")]
+    FlowStep,
+    #[serde(rename = "ExternalEvent")]
+    ExternalEvent,
+    #[serde(rename = "Continuation")]
+    Continuation,
+    #[serde(rename = "Operation")]
+    Operation,
+}
+impl RecoveredInputKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prompt => "Prompt",
+            Self::PeerMessage => "PeerMessage",
+            Self::PeerRequest => "PeerRequest",
+            Self::PeerResponseProgress => "PeerResponseProgress",
+            Self::PeerResponseTerminal => "PeerResponseTerminal",
+            Self::FlowStep => "FlowStep",
+            Self::ExternalEvent => "ExternalEvent",
+            Self::Continuation => "Continuation",
+            Self::Operation => "Operation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Prompt" => Ok(Self::Prompt),
+            "PeerMessage" => Ok(Self::PeerMessage),
+            "PeerRequest" => Ok(Self::PeerRequest),
+            "PeerResponseProgress" => Ok(Self::PeerResponseProgress),
+            "PeerResponseTerminal" => Ok(Self::PeerResponseTerminal),
+            "FlowStep" => Ok(Self::FlowStep),
+            "ExternalEvent" => Ok(Self::ExternalEvent),
+            "Continuation" => Ok(Self::Continuation),
+            "Operation" => Ok(Self::Operation),
+            other => Err(format!("invalid RecoveredInputKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredInputNormalizationReasonKind {
+    #[default]
+    #[serde(rename = "QueueAccepted")]
+    QueueAccepted,
+    #[serde(rename = "RollbackStaged")]
+    RollbackStaged,
+    #[serde(rename = "BoundaryReceiptCommitted")]
+    BoundaryReceiptCommitted,
+    #[serde(rename = "MissingBoundaryReceipt")]
+    MissingBoundaryReceipt,
+}
+impl RecoveredInputNormalizationReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::QueueAccepted => "QueueAccepted",
+            Self::RollbackStaged => "RollbackStaged",
+            Self::BoundaryReceiptCommitted => "BoundaryReceiptCommitted",
+            Self::MissingBoundaryReceipt => "MissingBoundaryReceipt",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputNormalizationReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "QueueAccepted" => Ok(Self::QueueAccepted),
+            "RollbackStaged" => Ok(Self::RollbackStaged),
+            "BoundaryReceiptCommitted" => Ok(Self::BoundaryReceiptCommitted),
+            "MissingBoundaryReceipt" => Ok(Self::MissingBoundaryReceipt),
+            other => Err(format!(
+                "invalid RecoveredInputNormalizationReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputNormalizationReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputNormalizationReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredInputObservedPhase {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Queued")]
+    Queued,
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "AppliedPendingConsumption")]
+    AppliedPendingConsumption,
+    #[serde(rename = "Consumed")]
+    Consumed,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl RecoveredInputObservedPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputObservedPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Queued" => Ok(Self::Queued),
+            "Staged" => Ok(Self::Staged),
+            "Applied" => Ok(Self::Applied),
+            "AppliedPendingConsumption" => Ok(Self::AppliedPendingConsumption),
+            "Consumed" => Ok(Self::Consumed),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!(
+                "invalid RecoveredInputObservedPhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputObservedPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputObservedPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredInputRecoveryDisposition {
+    #[default]
+    #[serde(rename = "Retain")]
+    Retain,
+    #[serde(rename = "Discard")]
+    Discard,
+}
+impl RecoveredInputRecoveryDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retain => "Retain",
+            Self::Discard => "Discard",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retain" => Ok(Self::Retain),
+            "Discard" => Ok(Self::Discard),
+            other => Err(format!(
+                "invalid RecoveredInputRecoveryDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputRecoveryDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredPeerResponseTerminalApplyIntent {
+    #[default]
+    #[serde(rename = "AppendContextAndRun")]
+    AppendContextAndRun,
+}
+impl RecoveredPeerResponseTerminalApplyIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AppendContextAndRun => "AppendContextAndRun",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AppendContextAndRun" => Ok(Self::AppendContextAndRun),
+            other => Err(format!(
+                "invalid RecoveredPeerResponseTerminalApplyIntent value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredPeerResponseTerminalApplyIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredRunApplyBoundary {
+    #[default]
+    #[serde(rename = "RunStart")]
+    RunStart,
+    #[serde(rename = "RunCheckpoint")]
+    RunCheckpoint,
+    #[serde(rename = "Immediate")]
+    Immediate,
+}
+impl RecoveredRunApplyBoundary {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunStart => "RunStart",
+            Self::RunCheckpoint => "RunCheckpoint",
+            Self::Immediate => "Immediate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunStart" => Ok(Self::RunStart),
+            "RunCheckpoint" => Ok(Self::RunCheckpoint),
+            "Immediate" => Ok(Self::Immediate),
+            other => Err(format!("invalid RecoveredRunApplyBoundary value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredRunApplyBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredRuntimeExecutionKind {
+    #[default]
+    #[serde(rename = "ContentTurn")]
+    ContentTurn,
+    #[serde(rename = "ResumePending")]
+    ResumePending,
+}
+impl RecoveredRuntimeExecutionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContentTurn => "ContentTurn",
+            Self::ResumePending => "ResumePending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ContentTurn" => Ok(Self::ContentTurn),
+            "ResumePending" => Ok(Self::ResumePending),
+            other => Err(format!(
+                "invalid RecoveredRuntimeExecutionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredRuntimeExecutionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2358,6 +5618,66 @@ impl std::fmt::Display for RoutingDenialReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RoutingImageApprovalReason {
+    #[default]
+    #[serde(rename = "CrossProvider")]
+    CrossProvider,
+    #[serde(rename = "CostExceedsThreshold")]
+    CostExceedsThreshold,
+    #[serde(rename = "SafetyHold")]
+    SafetyHold,
+    #[serde(rename = "RealtimeDetachRequired")]
+    RealtimeDetachRequired,
+}
+impl RoutingImageApprovalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CrossProvider => "CrossProvider",
+            Self::CostExceedsThreshold => "CostExceedsThreshold",
+            Self::SafetyHold => "SafetyHold",
+            Self::RealtimeDetachRequired => "RealtimeDetachRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageApprovalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CrossProvider" => Ok(Self::CrossProvider),
+            "CostExceedsThreshold" => Ok(Self::CostExceedsThreshold),
+            "SafetyHold" => Ok(Self::SafetyHold),
+            "RealtimeDetachRequired" => Ok(Self::RealtimeDetachRequired),
+            other => Err(format!(
+                "invalid RoutingImageApprovalReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageApprovalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageApprovalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingImageOperationPhase {
     #[default]
     #[serde(rename = "Requested")]
@@ -2412,6 +5732,158 @@ impl std::convert::TryFrom<String> for RoutingImageOperationPhase {
     }
 }
 impl std::fmt::Display for RoutingImageOperationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingImagePlanDenialReason {
+    #[default]
+    #[serde(rename = "UnsupportedTarget")]
+    UnsupportedTarget,
+    #[serde(rename = "UnsupportedCount")]
+    UnsupportedCount,
+    #[serde(rename = "CapabilityPolicy")]
+    CapabilityPolicy,
+    #[serde(rename = "CostPolicy")]
+    CostPolicy,
+    #[serde(rename = "SafetyPolicy")]
+    SafetyPolicy,
+    #[serde(rename = "ApprovalRequiredButUnavailable")]
+    ApprovalRequiredButUnavailable,
+    #[serde(rename = "DeniedDuringApproval")]
+    DeniedDuringApproval,
+    #[serde(rename = "ScopedOverrideConflict")]
+    ScopedOverrideConflict,
+    #[serde(rename = "RealtimeTransportConflict")]
+    RealtimeTransportConflict,
+    #[serde(rename = "ProjectionUnsupported")]
+    ProjectionUnsupported,
+}
+impl RoutingImagePlanDenialReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnsupportedTarget => "UnsupportedTarget",
+            Self::UnsupportedCount => "UnsupportedCount",
+            Self::CapabilityPolicy => "CapabilityPolicy",
+            Self::CostPolicy => "CostPolicy",
+            Self::SafetyPolicy => "SafetyPolicy",
+            Self::ApprovalRequiredButUnavailable => "ApprovalRequiredButUnavailable",
+            Self::DeniedDuringApproval => "DeniedDuringApproval",
+            Self::ScopedOverrideConflict => "ScopedOverrideConflict",
+            Self::RealtimeTransportConflict => "RealtimeTransportConflict",
+            Self::ProjectionUnsupported => "ProjectionUnsupported",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImagePlanDenialReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UnsupportedTarget" => Ok(Self::UnsupportedTarget),
+            "UnsupportedCount" => Ok(Self::UnsupportedCount),
+            "CapabilityPolicy" => Ok(Self::CapabilityPolicy),
+            "CostPolicy" => Ok(Self::CostPolicy),
+            "SafetyPolicy" => Ok(Self::SafetyPolicy),
+            "ApprovalRequiredButUnavailable" => Ok(Self::ApprovalRequiredButUnavailable),
+            "DeniedDuringApproval" => Ok(Self::DeniedDuringApproval),
+            "ScopedOverrideConflict" => Ok(Self::ScopedOverrideConflict),
+            "RealtimeTransportConflict" => Ok(Self::RealtimeTransportConflict),
+            "ProjectionUnsupported" => Ok(Self::ProjectionUnsupported),
+            other => Err(format!(
+                "invalid RoutingImagePlanDenialReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImagePlanDenialReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImagePlanDenialReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingImageProviderErrorCode {
+    #[default]
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "OpenAiContentFilter")]
+    OpenAiContentFilter,
+    #[serde(rename = "OpenAiModelRefusal")]
+    OpenAiModelRefusal,
+    #[serde(rename = "GeminiSafety")]
+    GeminiSafety,
+    #[serde(rename = "GeminiModelRefusal")]
+    GeminiModelRefusal,
+    #[serde(rename = "GeminiDeadlineExceeded")]
+    GeminiDeadlineExceeded,
+}
+impl RoutingImageProviderErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::OpenAiContentFilter => "OpenAiContentFilter",
+            Self::OpenAiModelRefusal => "OpenAiModelRefusal",
+            Self::GeminiSafety => "GeminiSafety",
+            Self::GeminiModelRefusal => "GeminiModelRefusal",
+            Self::GeminiDeadlineExceeded => "GeminiDeadlineExceeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageProviderErrorCode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unknown" => Ok(Self::Unknown),
+            "OpenAiContentFilter" => Ok(Self::OpenAiContentFilter),
+            "OpenAiModelRefusal" => Ok(Self::OpenAiModelRefusal),
+            "GeminiSafety" => Ok(Self::GeminiSafety),
+            "GeminiModelRefusal" => Ok(Self::GeminiModelRefusal),
+            "GeminiDeadlineExceeded" => Ok(Self::GeminiDeadlineExceeded),
+            other => Err(format!(
+                "invalid RoutingImageProviderErrorCode value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageProviderErrorCode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageProviderErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2490,6 +5962,194 @@ impl std::convert::TryFrom<String> for RoutingImageTerminal {
     }
 }
 impl std::fmt::Display for RoutingImageTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingImageTerminalObservation {
+    #[default]
+    #[serde(rename = "Generated")]
+    Generated,
+    #[serde(rename = "EmptyResult")]
+    EmptyResult,
+    #[serde(rename = "ProviderHttpError")]
+    ProviderHttpError,
+    #[serde(rename = "ProviderNativeError")]
+    ProviderNativeError,
+    #[serde(rename = "ExecutionFailed")]
+    ExecutionFailed,
+    #[serde(rename = "BlobCommitFailed")]
+    BlobCommitFailed,
+}
+impl RoutingImageTerminalObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generated => "Generated",
+            Self::EmptyResult => "EmptyResult",
+            Self::ProviderHttpError => "ProviderHttpError",
+            Self::ProviderNativeError => "ProviderNativeError",
+            Self::ExecutionFailed => "ExecutionFailed",
+            Self::BlobCommitFailed => "BlobCommitFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageTerminalObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Generated" => Ok(Self::Generated),
+            "EmptyResult" => Ok(Self::EmptyResult),
+            "ProviderHttpError" => Ok(Self::ProviderHttpError),
+            "ProviderNativeError" => Ok(Self::ProviderNativeError),
+            "ExecutionFailed" => Ok(Self::ExecutionFailed),
+            "BlobCommitFailed" => Ok(Self::BlobCommitFailed),
+            other => Err(format!(
+                "invalid RoutingImageTerminalObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageTerminalObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageTerminalObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingProviderTextDisposition {
+    #[default]
+    #[serde(rename = "NotEmitted")]
+    NotEmitted,
+    #[serde(rename = "Captured")]
+    Captured,
+    #[serde(rename = "EmittedButNotStored")]
+    EmittedButNotStored,
+}
+impl RoutingProviderTextDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotEmitted => "NotEmitted",
+            Self::Captured => "Captured",
+            Self::EmittedButNotStored => "EmittedButNotStored",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingProviderTextDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotEmitted" => Ok(Self::NotEmitted),
+            "Captured" => Ok(Self::Captured),
+            "EmittedButNotStored" => Ok(Self::EmittedButNotStored),
+            other => Err(format!(
+                "invalid RoutingProviderTextDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingProviderTextDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingProviderTextDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingSwitchApprovalReason {
+    #[default]
+    #[serde(rename = "CrossProvider")]
+    CrossProvider,
+    #[serde(rename = "CostExceedsThreshold")]
+    CostExceedsThreshold,
+    #[serde(rename = "SafetyHold")]
+    SafetyHold,
+    #[serde(rename = "UntilChangedFromModelOrigin")]
+    UntilChangedFromModelOrigin,
+    #[serde(rename = "RealtimeDetachRequired")]
+    RealtimeDetachRequired,
+}
+impl RoutingSwitchApprovalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CrossProvider => "CrossProvider",
+            Self::CostExceedsThreshold => "CostExceedsThreshold",
+            Self::SafetyHold => "SafetyHold",
+            Self::UntilChangedFromModelOrigin => "UntilChangedFromModelOrigin",
+            Self::RealtimeDetachRequired => "RealtimeDetachRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingSwitchApprovalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CrossProvider" => Ok(Self::CrossProvider),
+            "CostExceedsThreshold" => Ok(Self::CostExceedsThreshold),
+            "SafetyHold" => Ok(Self::SafetyHold),
+            "UntilChangedFromModelOrigin" => Ok(Self::UntilChangedFromModelOrigin),
+            "RealtimeDetachRequired" => Ok(Self::RealtimeDetachRequired),
+            other => Err(format!(
+                "invalid RoutingSwitchApprovalReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingSwitchApprovalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingSwitchApprovalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2606,6 +6266,340 @@ impl std::convert::TryFrom<String> for RoutingSwitchTurnTerminal {
     }
 }
 impl std::fmt::Display for RoutingSwitchTurnTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RpcEventStreamTerminalErrorCode {
+    #[default]
+    #[serde(rename = "StreamQueueOverflow")]
+    StreamQueueOverflow,
+    #[serde(rename = "StreamReceiverGone")]
+    StreamReceiverGone,
+}
+impl RpcEventStreamTerminalErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StreamQueueOverflow => "StreamQueueOverflow",
+            Self::StreamReceiverGone => "StreamReceiverGone",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RpcEventStreamTerminalErrorCode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StreamQueueOverflow" => Ok(Self::StreamQueueOverflow),
+            "StreamReceiverGone" => Ok(Self::StreamReceiverGone),
+            other => Err(format!(
+                "invalid RpcEventStreamTerminalErrorCode value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RpcEventStreamTerminalErrorCode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RpcEventStreamTerminalErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RpcEventStreamTerminalObservationKind {
+    #[default]
+    #[serde(rename = "TransportEnded")]
+    TransportEnded,
+    #[serde(rename = "NotificationQueueOverflow")]
+    NotificationQueueOverflow,
+    #[serde(rename = "NotificationReceiverGone")]
+    NotificationReceiverGone,
+}
+impl RpcEventStreamTerminalObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TransportEnded => "TransportEnded",
+            Self::NotificationQueueOverflow => "NotificationQueueOverflow",
+            Self::NotificationReceiverGone => "NotificationReceiverGone",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RpcEventStreamTerminalObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TransportEnded" => Ok(Self::TransportEnded),
+            "NotificationQueueOverflow" => Ok(Self::NotificationQueueOverflow),
+            "NotificationReceiverGone" => Ok(Self::NotificationReceiverGone),
+            other => Err(format!(
+                "invalid RpcEventStreamTerminalObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RpcEventStreamTerminalObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RpcEventStreamTerminalObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RpcEventStreamTerminalReason {
+    #[default]
+    #[serde(rename = "RemoteEnd")]
+    RemoteEnd,
+    #[serde(rename = "TerminalError")]
+    TerminalError,
+    #[serde(rename = "ExplicitClose")]
+    ExplicitClose,
+}
+impl RpcEventStreamTerminalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RemoteEnd => "RemoteEnd",
+            Self::TerminalError => "TerminalError",
+            Self::ExplicitClose => "ExplicitClose",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RpcEventStreamTerminalReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RemoteEnd" => Ok(Self::RemoteEnd),
+            "TerminalError" => Ok(Self::TerminalError),
+            "ExplicitClose" => Ok(Self::ExplicitClose),
+            other => Err(format!(
+                "invalid RpcEventStreamTerminalReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RpcEventStreamTerminalReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RpcEventStreamTerminalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RunFailureSourceKind {
+    #[default]
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "Llm")]
+    Llm,
+    #[serde(rename = "StoreError")]
+    StoreError,
+    #[serde(rename = "ToolError")]
+    ToolError,
+    #[serde(rename = "McpError")]
+    McpError,
+    #[serde(rename = "SessionNotFound")]
+    SessionNotFound,
+    #[serde(rename = "TokenBudgetExceeded")]
+    TokenBudgetExceeded,
+    #[serde(rename = "TimeBudgetExceeded")]
+    TimeBudgetExceeded,
+    #[serde(rename = "ToolCallBudgetExceeded")]
+    ToolCallBudgetExceeded,
+    #[serde(rename = "MaxTokensReached")]
+    MaxTokensReached,
+    #[serde(rename = "ContentFiltered")]
+    ContentFiltered,
+    #[serde(rename = "MaxTurnsReached")]
+    MaxTurnsReached,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "InvalidStateTransition")]
+    InvalidStateTransition,
+    #[serde(rename = "OperationNotFound")]
+    OperationNotFound,
+    #[serde(rename = "DepthLimitExceeded")]
+    DepthLimitExceeded,
+    #[serde(rename = "ConcurrencyLimitExceeded")]
+    ConcurrencyLimitExceeded,
+    #[serde(rename = "ConfigError")]
+    ConfigError,
+    #[serde(rename = "InvalidToolAccess")]
+    InvalidToolAccess,
+    #[serde(rename = "InternalError")]
+    InternalError,
+    #[serde(rename = "BuildError")]
+    BuildError,
+    #[serde(rename = "AuthReauthRequired")]
+    AuthReauthRequired,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "StructuredOutputValidationFailed")]
+    StructuredOutputValidationFailed,
+    #[serde(rename = "InvalidOutputSchema")]
+    InvalidOutputSchema,
+    #[serde(rename = "HookDenied")]
+    HookDenied,
+    #[serde(rename = "HookTimeout")]
+    HookTimeout,
+    #[serde(rename = "HookExecutionFailed")]
+    HookExecutionFailed,
+    #[serde(rename = "HookConfigInvalid")]
+    HookConfigInvalid,
+    #[serde(rename = "TerminalFailure")]
+    TerminalFailure,
+    #[serde(rename = "NoPendingBoundary")]
+    NoPendingBoundary,
+    #[serde(rename = "LlmRetryExhausted")]
+    LlmRetryExhausted,
+}
+impl RunFailureSourceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Llm => "Llm",
+            Self::StoreError => "StoreError",
+            Self::ToolError => "ToolError",
+            Self::McpError => "McpError",
+            Self::SessionNotFound => "SessionNotFound",
+            Self::TokenBudgetExceeded => "TokenBudgetExceeded",
+            Self::TimeBudgetExceeded => "TimeBudgetExceeded",
+            Self::ToolCallBudgetExceeded => "ToolCallBudgetExceeded",
+            Self::MaxTokensReached => "MaxTokensReached",
+            Self::ContentFiltered => "ContentFiltered",
+            Self::MaxTurnsReached => "MaxTurnsReached",
+            Self::Cancelled => "Cancelled",
+            Self::InvalidStateTransition => "InvalidStateTransition",
+            Self::OperationNotFound => "OperationNotFound",
+            Self::DepthLimitExceeded => "DepthLimitExceeded",
+            Self::ConcurrencyLimitExceeded => "ConcurrencyLimitExceeded",
+            Self::ConfigError => "ConfigError",
+            Self::InvalidToolAccess => "InvalidToolAccess",
+            Self::InternalError => "InternalError",
+            Self::BuildError => "BuildError",
+            Self::AuthReauthRequired => "AuthReauthRequired",
+            Self::CallbackPending => "CallbackPending",
+            Self::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
+            Self::InvalidOutputSchema => "InvalidOutputSchema",
+            Self::HookDenied => "HookDenied",
+            Self::HookTimeout => "HookTimeout",
+            Self::HookExecutionFailed => "HookExecutionFailed",
+            Self::HookConfigInvalid => "HookConfigInvalid",
+            Self::TerminalFailure => "TerminalFailure",
+            Self::NoPendingBoundary => "NoPendingBoundary",
+            Self::LlmRetryExhausted => "LlmRetryExhausted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RunFailureSourceKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unknown" => Ok(Self::Unknown),
+            "Llm" => Ok(Self::Llm),
+            "StoreError" => Ok(Self::StoreError),
+            "ToolError" => Ok(Self::ToolError),
+            "McpError" => Ok(Self::McpError),
+            "SessionNotFound" => Ok(Self::SessionNotFound),
+            "TokenBudgetExceeded" => Ok(Self::TokenBudgetExceeded),
+            "TimeBudgetExceeded" => Ok(Self::TimeBudgetExceeded),
+            "ToolCallBudgetExceeded" => Ok(Self::ToolCallBudgetExceeded),
+            "MaxTokensReached" => Ok(Self::MaxTokensReached),
+            "ContentFiltered" => Ok(Self::ContentFiltered),
+            "MaxTurnsReached" => Ok(Self::MaxTurnsReached),
+            "Cancelled" => Ok(Self::Cancelled),
+            "InvalidStateTransition" => Ok(Self::InvalidStateTransition),
+            "OperationNotFound" => Ok(Self::OperationNotFound),
+            "DepthLimitExceeded" => Ok(Self::DepthLimitExceeded),
+            "ConcurrencyLimitExceeded" => Ok(Self::ConcurrencyLimitExceeded),
+            "ConfigError" => Ok(Self::ConfigError),
+            "InvalidToolAccess" => Ok(Self::InvalidToolAccess),
+            "InternalError" => Ok(Self::InternalError),
+            "BuildError" => Ok(Self::BuildError),
+            "AuthReauthRequired" => Ok(Self::AuthReauthRequired),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "StructuredOutputValidationFailed" => Ok(Self::StructuredOutputValidationFailed),
+            "InvalidOutputSchema" => Ok(Self::InvalidOutputSchema),
+            "HookDenied" => Ok(Self::HookDenied),
+            "HookTimeout" => Ok(Self::HookTimeout),
+            "HookExecutionFailed" => Ok(Self::HookExecutionFailed),
+            "HookConfigInvalid" => Ok(Self::HookConfigInvalid),
+            "TerminalFailure" => Ok(Self::TerminalFailure),
+            "NoPendingBoundary" => Ok(Self::NoPendingBoundary),
+            "LlmRetryExhausted" => Ok(Self::LlmRetryExhausted),
+            other => Err(format!("invalid RunFailureSourceKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RunFailureSourceKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RunFailureSourceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2730,6 +6724,582 @@ impl std::fmt::Display for RuntimeApplyFailureCause {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeCompletionCleanupAction {
+    #[default]
+    #[serde(rename = "RetainRuntime")]
+    RetainRuntime,
+    #[serde(rename = "CleanupRuntime")]
+    CleanupRuntime,
+}
+impl RuntimeCompletionCleanupAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RetainRuntime => "RetainRuntime",
+            Self::CleanupRuntime => "CleanupRuntime",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionCleanupAction {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RetainRuntime" => Ok(Self::RetainRuntime),
+            "CleanupRuntime" => Ok(Self::CleanupRuntime),
+            other => Err(format!(
+                "invalid RuntimeCompletionCleanupAction value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionCleanupAction {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionCleanupAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionFinalizationObservation {
+    #[default]
+    #[serde(rename = "Succeeded")]
+    Succeeded,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl RuntimeCompletionFinalizationObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Succeeded => "Succeeded",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionFinalizationObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Succeeded" => Ok(Self::Succeeded),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid RuntimeCompletionFinalizationObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionFinalizationObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionFinalizationObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionLiveSessionObservation {
+    #[default]
+    #[serde(rename = "NotObserved")]
+    NotObserved,
+    #[serde(rename = "Present")]
+    Present,
+    #[serde(rename = "Absent")]
+    Absent,
+}
+impl RuntimeCompletionLiveSessionObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotObserved => "NotObserved",
+            Self::Present => "Present",
+            Self::Absent => "Absent",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionLiveSessionObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotObserved" => Ok(Self::NotObserved),
+            "Present" => Ok(Self::Present),
+            "Absent" => Ok(Self::Absent),
+            other => Err(format!(
+                "invalid RuntimeCompletionLiveSessionObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionLiveSessionObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionLiveSessionObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionObservedOutcome {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "CompletedWithoutResult")]
+    CompletedWithoutResult,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+    #[serde(rename = "RuntimeApplyFailed")]
+    RuntimeApplyFailed,
+    #[serde(rename = "FinalizationFailed")]
+    FinalizationFailed,
+    #[serde(rename = "RuntimeTerminated")]
+    RuntimeTerminated,
+}
+impl RuntimeCompletionObservedOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::CompletedWithoutResult => "CompletedWithoutResult",
+            Self::CallbackPending => "CallbackPending",
+            Self::Cancelled => "Cancelled",
+            Self::Abandoned => "Abandoned",
+            Self::RuntimeApplyFailed => "RuntimeApplyFailed",
+            Self::FinalizationFailed => "FinalizationFailed",
+            Self::RuntimeTerminated => "RuntimeTerminated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionObservedOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "CompletedWithoutResult" => Ok(Self::CompletedWithoutResult),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Abandoned" => Ok(Self::Abandoned),
+            "RuntimeApplyFailed" => Ok(Self::RuntimeApplyFailed),
+            "FinalizationFailed" => Ok(Self::FinalizationFailed),
+            "RuntimeTerminated" => Ok(Self::RuntimeTerminated),
+            other => Err(format!(
+                "invalid RuntimeCompletionObservedOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionObservedOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionObservedOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionPreAdmissionAction {
+    #[default]
+    #[serde(rename = "RetainPreAdmission")]
+    RetainPreAdmission,
+    #[serde(rename = "ReleasePreAdmission")]
+    ReleasePreAdmission,
+}
+impl RuntimeCompletionPreAdmissionAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RetainPreAdmission => "RetainPreAdmission",
+            Self::ReleasePreAdmission => "ReleasePreAdmission",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionPreAdmissionAction {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RetainPreAdmission" => Ok(Self::RetainPreAdmission),
+            "ReleasePreAdmission" => Ok(Self::ReleasePreAdmission),
+            other => Err(format!(
+                "invalid RuntimeCompletionPreAdmissionAction value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionPreAdmissionAction {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionPreAdmissionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionResultClass {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "CompletedWithoutResult")]
+    CompletedWithoutResult,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "AbandonedWithError")]
+    AbandonedWithError,
+    #[serde(rename = "CompletedWithFinalizationFailure")]
+    CompletedWithFinalizationFailure,
+    #[serde(rename = "RuntimeTerminated")]
+    RuntimeTerminated,
+}
+impl RuntimeCompletionResultClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::CompletedWithoutResult => "CompletedWithoutResult",
+            Self::CallbackPending => "CallbackPending",
+            Self::Cancelled => "Cancelled",
+            Self::AbandonedWithError => "AbandonedWithError",
+            Self::CompletedWithFinalizationFailure => "CompletedWithFinalizationFailure",
+            Self::RuntimeTerminated => "RuntimeTerminated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionResultClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "CompletedWithoutResult" => Ok(Self::CompletedWithoutResult),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Cancelled" => Ok(Self::Cancelled),
+            "AbandonedWithError" => Ok(Self::AbandonedWithError),
+            "CompletedWithFinalizationFailure" => Ok(Self::CompletedWithFinalizationFailure),
+            "RuntimeTerminated" => Ok(Self::RuntimeTerminated),
+            other => Err(format!(
+                "invalid RuntimeCompletionResultClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionResultClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionResultClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionTerminalObservation {
+    #[default]
+    #[serde(rename = "RunResult")]
+    RunResult,
+    #[serde(rename = "NoResult")]
+    NoResult,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "MachineTerminal")]
+    MachineTerminal,
+    #[serde(rename = "RuntimeTerminated")]
+    RuntimeTerminated,
+}
+impl RuntimeCompletionTerminalObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunResult => "RunResult",
+            Self::NoResult => "NoResult",
+            Self::CallbackPending => "CallbackPending",
+            Self::MachineTerminal => "MachineTerminal",
+            Self::RuntimeTerminated => "RuntimeTerminated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionTerminalObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunResult" => Ok(Self::RunResult),
+            "NoResult" => Ok(Self::NoResult),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "MachineTerminal" => Ok(Self::MachineTerminal),
+            "RuntimeTerminated" => Ok(Self::RuntimeTerminated),
+            other => Err(format!(
+                "invalid RuntimeCompletionTerminalObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionTerminalObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionTerminalObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionWaitFailureObservation {
+    #[default]
+    #[serde(rename = "ChannelClosed")]
+    ChannelClosed,
+    #[serde(rename = "AuthorityUnavailable")]
+    AuthorityUnavailable,
+}
+impl RuntimeCompletionWaitFailureObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChannelClosed => "ChannelClosed",
+            Self::AuthorityUnavailable => "AuthorityUnavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionWaitFailureObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ChannelClosed" => Ok(Self::ChannelClosed),
+            "AuthorityUnavailable" => Ok(Self::AuthorityUnavailable),
+            other => Err(format!(
+                "invalid RuntimeCompletionWaitFailureObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionWaitFailureObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionWaitFailureObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionWaitFailurePublicErrorClass {
+    #[default]
+    #[serde(rename = "InternalError")]
+    InternalError,
+}
+impl RuntimeCompletionWaitFailurePublicErrorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InternalError => "InternalError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionWaitFailurePublicErrorClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InternalError" => Ok(Self::InternalError),
+            other => Err(format!(
+                "invalid RuntimeCompletionWaitFailurePublicErrorClass value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionWaitFailurePublicErrorClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionWaitFailurePublicErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionWaitFailurePublicReason {
+    #[default]
+    #[serde(rename = "CompletionChannelClosed")]
+    CompletionChannelClosed,
+    #[serde(rename = "CompletionAuthorityUnavailable")]
+    CompletionAuthorityUnavailable,
+}
+impl RuntimeCompletionWaitFailurePublicReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompletionChannelClosed => "CompletionChannelClosed",
+            Self::CompletionAuthorityUnavailable => "CompletionAuthorityUnavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionWaitFailurePublicReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CompletionChannelClosed" => Ok(Self::CompletionChannelClosed),
+            "CompletionAuthorityUnavailable" => Ok(Self::CompletionAuthorityUnavailable),
+            other => Err(format!(
+                "invalid RuntimeCompletionWaitFailurePublicReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionWaitFailurePublicReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionWaitFailurePublicReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeEffectKind {
     #[default]
     #[serde(rename = "CancelAfterBoundary")]
@@ -2762,6 +7332,316 @@ impl std::convert::TryFrom<String> for RuntimeEffectKind {
     }
 }
 impl std::fmt::Display for RuntimeEffectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RuntimeEpochId(pub String);
+impl From<String> for RuntimeEpochId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RuntimeEpochId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RuntimeEpochId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeIngressAdmission {
+    #[default]
+    #[serde(rename = "Open")]
+    Open,
+    #[serde(rename = "NotReady")]
+    NotReady,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl RuntimeIngressAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::NotReady => "NotReady",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeIngressAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Open" => Ok(Self::Open),
+            "NotReady" => Ok(Self::NotReady),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!("invalid RuntimeIngressAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeIngressAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeIngressAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeInputAdmission {
+    #[default]
+    #[serde(rename = "RejectsInput")]
+    RejectsInput,
+    #[serde(rename = "AcceptsInput")]
+    AcceptsInput,
+}
+impl RuntimeInputAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RejectsInput => "RejectsInput",
+            Self::AcceptsInput => "AcceptsInput",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeInputAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RejectsInput" => Ok(Self::RejectsInput),
+            "AcceptsInput" => Ok(Self::AcceptsInput),
+            other => Err(format!("invalid RuntimeInputAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeInputAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeInputAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeLifecycleObservedState {
+    #[default]
+    #[serde(rename = "Initializing")]
+    Initializing,
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Attached")]
+    Attached,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl RuntimeLifecycleObservedState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Initializing => "Initializing",
+            Self::Idle => "Idle",
+            Self::Attached => "Attached",
+            Self::Running => "Running",
+            Self::Retired => "Retired",
+            Self::Stopped => "Stopped",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeLifecycleObservedState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Initializing" => Ok(Self::Initializing),
+            "Idle" => Ok(Self::Idle),
+            "Attached" => Ok(Self::Attached),
+            "Running" => Ok(Self::Running),
+            "Retired" => Ok(Self::Retired),
+            "Stopped" => Ok(Self::Stopped),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!(
+                "invalid RuntimeLifecycleObservedState value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeLifecycleObservedState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeLifecycleObservedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeLifecycleTerminality {
+    #[default]
+    #[serde(rename = "NonTerminal")]
+    NonTerminal,
+    #[serde(rename = "Terminal")]
+    Terminal,
+}
+impl RuntimeLifecycleTerminality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NonTerminal => "NonTerminal",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeLifecycleTerminality {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NonTerminal" => Ok(Self::NonTerminal),
+            "Terminal" => Ok(Self::Terminal),
+            other => Err(format!(
+                "invalid RuntimeLifecycleTerminality value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeLifecycleTerminality {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeLifecycleTerminality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeLoopRunBinding {
+    #[default]
+    #[serde(rename = "Blocked")]
+    Blocked,
+    #[serde(rename = "AllocateNew")]
+    AllocateNew,
+    #[serde(rename = "UsePrebound")]
+    UsePrebound,
+}
+impl RuntimeLoopRunBinding {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocked => "Blocked",
+            Self::AllocateNew => "AllocateNew",
+            Self::UsePrebound => "UsePrebound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeLoopRunBinding {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Blocked" => Ok(Self::Blocked),
+            "AllocateNew" => Ok(Self::AllocateNew),
+            "UsePrebound" => Ok(Self::UsePrebound),
+            other => Err(format!("invalid RuntimeLoopRunBinding value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeLoopRunBinding {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeLoopRunBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2824,6 +7704,162 @@ impl std::convert::TryFrom<String> for RuntimeNoticeKind {
     }
 }
 impl std::fmt::Display for RuntimeNoticeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeOpsLifecycleDurabilityAction {
+    #[default]
+    #[serde(rename = "RetainSnapshot")]
+    RetainSnapshot,
+    #[serde(rename = "DeleteSnapshot")]
+    DeleteSnapshot,
+}
+impl RuntimeOpsLifecycleDurabilityAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RetainSnapshot => "RetainSnapshot",
+            Self::DeleteSnapshot => "DeleteSnapshot",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeOpsLifecycleDurabilityAction {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RetainSnapshot" => Ok(Self::RetainSnapshot),
+            "DeleteSnapshot" => Ok(Self::DeleteSnapshot),
+            other => Err(format!(
+                "invalid RuntimeOpsLifecycleDurabilityAction value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeOpsLifecycleDurabilityAction {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeOpsLifecycleDurabilityAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimePrepareAdmission {
+    #[default]
+    #[serde(rename = "NotReady")]
+    NotReady,
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl RuntimePrepareAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotReady => "NotReady",
+            Self::Ready => "Ready",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimePrepareAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotReady" => Ok(Self::NotReady),
+            "Ready" => Ok(Self::Ready),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!("invalid RuntimePrepareAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimePrepareAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimePrepareAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeQueueAdmission {
+    #[default]
+    #[serde(rename = "BlocksQueue")]
+    BlocksQueue,
+    #[serde(rename = "ProcessesQueue")]
+    ProcessesQueue,
+}
+impl RuntimeQueueAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BlocksQueue => "BlocksQueue",
+            Self::ProcessesQueue => "ProcessesQueue",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeQueueAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "BlocksQueue" => Ok(Self::BlocksQueue),
+            "ProcessesQueue" => Ok(Self::ProcessesQueue),
+            other => Err(format!("invalid RuntimeQueueAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeQueueAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeQueueAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3034,6 +8070,284 @@ impl std::fmt::Display for SessionToolVisibilityState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum StagedSessionPhase {
+    #[default]
+    #[serde(rename = "NotStaged")]
+    NotStaged,
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Promoting")]
+    Promoting,
+    #[serde(rename = "Closing")]
+    Closing,
+}
+impl StagedSessionPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotStaged => "NotStaged",
+            Self::Staged => "Staged",
+            Self::Promoting => "Promoting",
+            Self::Closing => "Closing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for StagedSessionPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotStaged" => Ok(Self::NotStaged),
+            "Staged" => Ok(Self::Staged),
+            "Promoting" => Ok(Self::Promoting),
+            "Closing" => Ok(Self::Closing),
+            other => Err(format!("invalid StagedSessionPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for StagedSessionPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for StagedSessionPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorAuthorizeAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Proceed")]
+    Proceed,
+    #[serde(rename = "IdempotentAck")]
+    IdempotentAck,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl SupervisorAuthorizeAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Proceed => "Proceed",
+            Self::IdempotentAck => "IdempotentAck",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorAuthorizeAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Proceed" => Ok(Self::Proceed),
+            "IdempotentAck" => Ok(Self::IdempotentAck),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid SupervisorAuthorizeAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorAuthorizeAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorAuthorizeAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorAuthorizeRejectionKind {
+    #[default]
+    #[serde(rename = "NotBound")]
+    NotBound,
+    #[serde(rename = "StaleSupervisor")]
+    StaleSupervisor,
+    #[serde(rename = "SenderMismatch")]
+    SenderMismatch,
+}
+impl SupervisorAuthorizeRejectionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotBound => "NotBound",
+            Self::StaleSupervisor => "StaleSupervisor",
+            Self::SenderMismatch => "SenderMismatch",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorAuthorizeRejectionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotBound" => Ok(Self::NotBound),
+            "StaleSupervisor" => Ok(Self::StaleSupervisor),
+            "SenderMismatch" => Ok(Self::SenderMismatch),
+            other => Err(format!(
+                "invalid SupervisorAuthorizeRejectionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorAuthorizeRejectionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorAuthorizeRejectionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorBindAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Bootstrap")]
+    Bootstrap,
+    #[serde(rename = "IdempotentAck")]
+    IdempotentAck,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl SupervisorBindAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bootstrap => "Bootstrap",
+            Self::IdempotentAck => "IdempotentAck",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorBindAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Bootstrap" => Ok(Self::Bootstrap),
+            "IdempotentAck" => Ok(Self::IdempotentAck),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid SupervisorBindAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorBindAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorBindAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorBindRejectionKind {
+    #[default]
+    #[serde(rename = "AlreadyBound")]
+    AlreadyBound,
+    #[serde(rename = "SenderMismatch")]
+    SenderMismatch,
+}
+impl SupervisorBindRejectionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyBound => "AlreadyBound",
+            Self::SenderMismatch => "SenderMismatch",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorBindRejectionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AlreadyBound" => Ok(Self::AlreadyBound),
+            "SenderMismatch" => Ok(Self::SenderMismatch),
+            other => Err(format!(
+                "invalid SupervisorBindRejectionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorBindRejectionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorBindRejectionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SupervisorBindingKind {
     #[default]
     #[serde(rename = "Unbound")]
@@ -3066,6 +8380,114 @@ impl std::convert::TryFrom<String> for SupervisorBindingKind {
     }
 }
 impl std::fmt::Display for SupervisorBindingKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorBridgeCommandAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl SupervisorBridgeCommandAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorBridgeCommandAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid SupervisorBridgeCommandAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorBridgeCommandAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorBridgeCommandAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorBridgeCommandRejectionKind {
+    #[default]
+    #[serde(rename = "NotBound")]
+    NotBound,
+    #[serde(rename = "StaleSupervisor")]
+    StaleSupervisor,
+    #[serde(rename = "SenderMismatch")]
+    SenderMismatch,
+}
+impl SupervisorBridgeCommandRejectionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotBound => "NotBound",
+            Self::StaleSupervisor => "StaleSupervisor",
+            Self::SenderMismatch => "SenderMismatch",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorBridgeCommandRejectionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotBound" => Ok(Self::NotBound),
+            "StaleSupervisor" => Ok(Self::StaleSupervisor),
+            "SenderMismatch" => Ok(Self::SenderMismatch),
+            other => Err(format!(
+                "invalid SupervisorBridgeCommandRejectionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorBridgeCommandRejectionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorBridgeCommandRejectionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3170,6 +8592,116 @@ impl std::convert::TryFrom<String> for SurfacePhase {
     }
 }
 impl std::fmt::Display for SurfacePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestPhase {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Published")]
+    Published,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Completed")]
+    Completed,
+}
+impl SurfaceRequestPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Published => "Published",
+            Self::Cancelled => "Cancelled",
+            Self::Completed => "Completed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Published" => Ok(Self::Published),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Completed" => Ok(Self::Completed),
+            other => Err(format!("invalid SurfaceRequestPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    #[serde(rename = "RespondWithoutPublish")]
+    RespondWithoutPublish,
+    #[serde(rename = "PublishOnSuccess")]
+    PublishOnSuccess,
+}
+impl SurfaceRequestTerminalPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RespondWithoutPublish => "RespondWithoutPublish",
+            Self::PublishOnSuccess => "PublishOnSuccess",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestTerminalPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RespondWithoutPublish" => Ok(Self::RespondWithoutPublish),
+            "PublishOnSuccess" => Ok(Self::PublishOnSuccess),
+            other => Err(format!(
+                "invalid SurfaceRequestTerminalPolicy value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestTerminalPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestTerminalPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3585,6 +9117,240 @@ impl std::fmt::Display for TurnTerminalOutcome {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum UserInterruptObservationKind {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "IdleNoop")]
+    IdleNoop,
+    #[serde(rename = "AttachedNoop")]
+    AttachedNoop,
+    #[serde(rename = "StagedNoop")]
+    StagedNoop,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+    #[serde(rename = "NotInterruptible")]
+    NotInterruptible,
+}
+impl UserInterruptObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::IdleNoop => "IdleNoop",
+            Self::AttachedNoop => "AttachedNoop",
+            Self::StagedNoop => "StagedNoop",
+            Self::Destroyed => "Destroyed",
+            Self::NotInterruptible => "NotInterruptible",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for UserInterruptObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "IdleNoop" => Ok(Self::IdleNoop),
+            "AttachedNoop" => Ok(Self::AttachedNoop),
+            "StagedNoop" => Ok(Self::StagedNoop),
+            "Destroyed" => Ok(Self::Destroyed),
+            "NotInterruptible" => Ok(Self::NotInterruptible),
+            other => Err(format!(
+                "invalid UserInterruptObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for UserInterruptObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for UserInterruptObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum UserInterruptPublicResultKind {
+    #[default]
+    #[serde(rename = "Interrupted")]
+    Interrupted,
+    #[serde(rename = "NotFound")]
+    NotFound,
+    #[serde(rename = "SessionBusy")]
+    SessionBusy,
+    #[serde(rename = "Conflict")]
+    Conflict,
+}
+impl UserInterruptPublicResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Interrupted => "Interrupted",
+            Self::NotFound => "NotFound",
+            Self::SessionBusy => "SessionBusy",
+            Self::Conflict => "Conflict",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for UserInterruptPublicResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Interrupted" => Ok(Self::Interrupted),
+            "NotFound" => Ok(Self::NotFound),
+            "SessionBusy" => Ok(Self::SessionBusy),
+            "Conflict" => Ok(Self::Conflict),
+            other => Err(format!(
+                "invalid UserInterruptPublicResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for UserInterruptPublicResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for UserInterruptPublicResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WaitAllAdmissionResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl WaitAllAdmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WaitAllAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid WaitAllAdmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WaitAllAdmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WaitAllAdmissionResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WaitAllRejectReasonKind {
+    #[default]
+    #[serde(rename = "DuplicateOperation")]
+    DuplicateOperation,
+    #[serde(rename = "WaitAlreadyActive")]
+    WaitAlreadyActive,
+    #[serde(rename = "OperationNotFound")]
+    OperationNotFound,
+}
+impl WaitAllRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DuplicateOperation => "DuplicateOperation",
+            Self::WaitAlreadyActive => "WaitAlreadyActive",
+            Self::OperationNotFound => "OperationNotFound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WaitAllRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DuplicateOperation" => Ok(Self::DuplicateOperation),
+            "WaitAlreadyActive" => Ok(Self::WaitAlreadyActive),
+            "OperationNotFound" => Ok(Self::OperationNotFound),
+            other => Err(format!("invalid WaitAllRejectReasonKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WaitAllRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WaitAllRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -3718,8 +9484,11 @@ pub struct State {
     pub session_id: Option<SessionId>,
     pub active_runtime_id: Option<AgentRuntimeId>,
     pub active_fence_token: Option<FenceToken>,
+    pub active_runtime_generation: Option<Generation>,
+    pub active_runtime_epoch_id: Option<RuntimeEpochId>,
     pub current_run_id: Option<RunId>,
     pub pre_run_phase: Option<PreRunPhase>,
+    pub runtime_stop_deferred: bool,
     pub turn_phase: TurnPhase,
     pub primitive_kind: Option<TurnPrimitiveKind>,
     pub admitted_content_shape: Option<ContentShape>,
@@ -3736,6 +9505,7 @@ pub struct State {
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub last_runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
     pub last_runtime_apply_failure_message: Option<String>,
+    pub runtime_completion_result_run_id: Option<RunId>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
     pub llm_retry_attempt: u64,
@@ -3762,30 +9532,76 @@ pub struct State {
     pub model_routing_switch_terminal:
         std::collections::BTreeMap<String, RoutingSwitchTurnTerminal>,
     pub model_routing_switch_denials: std::collections::BTreeMap<String, RoutingDenialReason>,
+    pub model_routing_switch_approval_reasons:
+        std::collections::BTreeMap<String, RoutingSwitchApprovalReason>,
     pub model_routing_image_operation_phases:
         std::collections::BTreeMap<String, RoutingImageOperationPhase>,
     pub model_routing_image_operation_target_models: std::collections::BTreeMap<String, String>,
     pub model_routing_image_operation_realtime: std::collections::BTreeMap<String, bool>,
     pub model_routing_image_operation_requires_scoped_override:
         std::collections::BTreeMap<String, bool>,
+    pub model_routing_image_classified_terminals:
+        std::collections::BTreeMap<String, RoutingImageTerminal>,
+    pub model_routing_image_classified_provider_text:
+        std::collections::BTreeMap<String, RoutingProviderTextDisposition>,
     pub model_routing_image_terminals: std::collections::BTreeMap<String, RoutingImageTerminal>,
     pub model_routing_image_terminal_payloads: std::collections::BTreeMap<String, String>,
     pub model_routing_image_denials: std::collections::BTreeMap<String, RoutingDenialReason>,
+    pub model_routing_image_approval_reasons:
+        std::collections::BTreeMap<String, RoutingImageApprovalReason>,
+    pub model_routing_image_plan_denials:
+        std::collections::BTreeMap<String, RoutingImagePlanDenialReason>,
     pub model_routing_approval_phases: std::collections::BTreeMap<String, RoutingApprovalPhase>,
     pub model_routing_approval_parent_kind:
         std::collections::BTreeMap<String, RoutingApprovalParentKind>,
     pub registration_phase: RegistrationPhase,
+    pub staged_session_phase: StagedSessionPhase,
+    pub staged_session_id: Option<SessionId>,
+    pub staged_session_keep_alive: Option<bool>,
+    pub staged_session_llm_identity: Option<SessionLlmIdentity>,
+    pub staged_session_machine_archived_resume_authorized: bool,
+    pub current_session_llm_identity: Option<SessionLlmIdentity>,
+    pub current_session_capability_surface: Option<SessionLlmCapabilitySurface>,
+    pub current_session_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+    pub current_session_capability_base_filter: ToolFilter,
+    pub session_llm_reconfigure_previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+    pub session_llm_reconfigure_current_capability_surface: Option<SessionLlmCapabilitySurface>,
+    pub session_llm_reconfigure_capability_changed: bool,
+    pub session_llm_reconfigure_previous_capability_base_filter: ToolFilter,
+    pub session_llm_reconfigure_current_capability_base_filter: ToolFilter,
+    pub session_llm_reconfigure_committed_visible_set_changed: bool,
+    pub session_llm_reconfigure_revision_bumped: bool,
+    pub session_llm_reconfigure_active_visibility_revision: u64,
+    pub mob_operator_authority_present: bool,
+    pub mob_operator_principal_token: Option<OpaquePrincipalToken>,
+    pub mob_operator_can_create_mobs: bool,
+    pub mob_operator_can_mutate_profiles: bool,
+    pub mob_operator_managed_mob_scope: std::collections::BTreeSet<String>,
+    pub mob_operator_spawn_profile_scope:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    pub mob_operator_caller_provenance: Option<MobToolCallerProvenance>,
+    pub mob_operator_audit_invocation_id: Option<String>,
     pub drain_phase: DrainPhase,
     pub drain_mode: Option<DrainMode>,
     pub next_staged_visibility_revision: u64,
+    pub inherited_base_filter: ToolFilter,
     pub active_filter: ToolFilter,
     pub staged_filter: ToolFilter,
     pub active_visibility_revision: u64,
     pub staged_visibility_revision: u64,
     pub active_deferred_names: std::collections::BTreeSet<String>,
     pub staged_deferred_names: std::collections::BTreeSet<String>,
+    pub requested_visibility_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub filter_visibility_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub deferred_visibility_authority_catalog:
+        std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub filter_visibility_authority_catalog:
+        std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub turn_tool_overlay_allow_active: bool,
+    pub turn_tool_overlay_allow_names: std::collections::BTreeSet<String>,
+    pub turn_tool_overlay_deny_names: std::collections::BTreeSet<String>,
     pub input_phases: std::collections::BTreeMap<String, InputPhase>,
     pub input_terminal_kind: std::collections::BTreeMap<String, InputTerminalKind>,
     pub input_superseded_by: std::collections::BTreeMap<String, String>,
@@ -3793,24 +9609,102 @@ pub struct State {
     pub input_abandon_reason: std::collections::BTreeMap<String, InputAbandonReason>,
     pub input_abandon_attempt_count: std::collections::BTreeMap<String, u64>,
     pub input_attempt_counts: std::collections::BTreeMap<String, u64>,
+    pub max_stage_attempts: u64,
     pub input_run_associations: std::collections::BTreeMap<String, String>,
     pub input_boundary_sequences: std::collections::BTreeMap<String, u64>,
+    pub live_boundary_context_sequence_by_run: std::collections::BTreeMap<RunId, u64>,
     pub next_admission_seq: u64,
+    pub next_priority_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
+    pub input_recovery_lanes: std::collections::BTreeMap<String, InputLane>,
+    pub admission_authorized_lanes: std::collections::BTreeMap<String, InputLane>,
+    pub admission_authorized_plans: std::collections::BTreeMap<String, AdmissionPlanKind>,
+    pub admission_authorized_existing_actions:
+        std::collections::BTreeMap<String, AdmissionExistingQueuedActionKind>,
+    pub admission_authorized_existing_targets: std::collections::BTreeMap<String, String>,
+    pub admission_idempotency_inputs: std::collections::BTreeMap<String, String>,
+    pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
+    pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
+    pub completion_sequence_claims: std::collections::BTreeSet<u64>,
+    pub completion_feed_sequences: std::collections::BTreeMap<String, u64>,
+    pub completion_feed_kinds: std::collections::BTreeMap<String, OperationKind>,
+    pub completion_feed_terminal_outcomes:
+        std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
+    pub completion_feed_terminal_payload: std::collections::BTreeMap<String, String>,
     pub op_terminal_outcomes: std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
     pub op_terminal_payload: std::collections::BTreeMap<String, String>,
     pub op_kinds: std::collections::BTreeMap<String, OperationKind>,
+    pub op_sources: std::collections::BTreeMap<String, OperationSource>,
     pub op_peer_ready: std::collections::BTreeMap<String, bool>,
     pub op_progress_counts: std::collections::BTreeMap<String, u64>,
     pub active_op_count: u64,
     pub wait_active: bool,
     pub wait_request_id: Option<WaitRequestId>,
+    pub wait_run_id: Option<RunId>,
     pub wait_operation_ids: std::collections::BTreeSet<String>,
     pub wait_operation_id_tokens: std::collections::BTreeSet<OperationId>,
     pub next_completion_seq: u64,
+    pub completion_agent_applied_cursor: u64,
+    pub completion_runtime_observed_cursor: u64,
+    pub completion_runtime_injected_cursor: u64,
+    pub surface_request_phases: std::collections::BTreeMap<String, SurfaceRequestPhase>,
+    pub surface_request_terminal_policies:
+        std::collections::BTreeMap<String, SurfaceRequestTerminalPolicy>,
+    pub live_open_admission_sequence: u64,
+    pub live_active_channel_by_session: std::collections::BTreeMap<String, String>,
+    pub live_channel_session_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_channel_identity_by_channel: std::collections::BTreeMap<String, SessionLlmIdentity>,
+    pub live_refresh_result_sequence: u64,
+    pub live_refresh_queue_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_refresh_status_by_channel: std::collections::BTreeMap<String, LiveRefreshPublicStatus>,
+    pub live_close_result_sequence: u64,
+    pub live_close_observation_sequence_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_close_status_by_channel: std::collections::BTreeMap<String, LiveClosePublicStatus>,
+    pub live_command_result_sequence: u64,
+    pub live_command_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_command_kind_by_channel: std::collections::BTreeMap<String, LiveCommandPublicKind>,
+    pub live_command_rejection_sequence: u64,
+    pub live_command_rejection_reason_by_channel:
+        std::collections::BTreeMap<String, LiveCommandRejectionReason>,
+    pub live_command_rejection_public_error_class_by_channel:
+        std::collections::BTreeMap<String, LiveCommandRejectionPublicErrorClass>,
+    pub live_channel_request_rejection_sequence: u64,
+    pub live_channel_request_rejection_reason_by_channel:
+        std::collections::BTreeMap<String, LiveChannelRequestRejectionReason>,
+    pub live_channel_request_rejection_public_error_class_by_channel:
+        std::collections::BTreeMap<String, LiveChannelRequestRejectionPublicErrorClass>,
+    pub live_webrtc_token_issue_sequence: u64,
+    pub live_webrtc_token_channel_by_token: std::collections::BTreeMap<String, String>,
+    pub live_webrtc_token_expires_at_ms_by_token: std::collections::BTreeMap<String, u64>,
+    pub live_webrtc_consumed_tokens: std::collections::BTreeSet<String>,
+    pub live_webrtc_answer_admission_sequence: u64,
+    pub live_webrtc_answer_result_sequence: u64,
+    pub live_webrtc_answer_observation_sequence_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_webrtc_answer_status_by_channel:
+        std::collections::BTreeMap<String, LiveWebrtcAnswerPublicStatus>,
+    pub live_websocket_token_issue_sequence: u64,
+    pub live_websocket_token_channel_by_token: std::collections::BTreeMap<String, String>,
+    pub live_websocket_token_expires_at_ms_by_token: std::collections::BTreeMap<String, u64>,
+    pub live_websocket_consumed_tokens: std::collections::BTreeSet<String>,
+    pub live_websocket_token_admission_sequence: u64,
+    pub live_channel_status_result_sequence: u64,
+    pub live_channel_status_observation_sequence_by_channel:
+        std::collections::BTreeMap<String, u64>,
+    pub live_channel_status_by_channel: std::collections::BTreeMap<String, LiveChannelPublicStatus>,
+    pub session_event_stream_open_result_sequence: u64,
+    pub session_event_stream_close_result_sequence: u64,
+    pub session_event_stream_terminal_sequence: u64,
+    pub active_session_event_streams: std::collections::BTreeSet<String>,
+    pub closed_session_event_streams: std::collections::BTreeSet<String>,
+    pub session_event_stream_session_ids: std::collections::BTreeMap<String, String>,
+    pub mob_event_stream_open_result_sequence: u64,
+    pub mob_event_stream_close_result_sequence: u64,
+    pub mob_event_stream_terminal_sequence: u64,
+    pub active_mob_event_streams: std::collections::BTreeSet<String>,
+    pub closed_mob_event_streams: std::collections::BTreeSet<String>,
     pub known_surfaces: std::collections::BTreeSet<String>,
     pub active_surfaces: std::collections::BTreeSet<String>,
     pub visible_surfaces: std::collections::BTreeSet<String>,
@@ -3839,17 +9733,30 @@ pub struct State {
         std::collections::BTreeMap<PeerCorrelationId, OutboundPeerRequestState>,
     pub inbound_peer_requests:
         std::collections::BTreeMap<PeerCorrelationId, InboundPeerRequestState>,
+    pub inbound_peer_request_lanes: std::collections::BTreeMap<PeerCorrelationId, InputLane>,
     pub last_session_context_updated_at_ms: u64,
     pub reserved_interaction_streams: std::collections::BTreeSet<PeerCorrelationId>,
     pub attached_interaction_streams: std::collections::BTreeSet<PeerCorrelationId>,
     pub peer_ingress_owner_kind: PeerIngressOwnerKind,
     pub peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
     pub peer_ingress_mob_id: Option<MobId>,
+    pub peer_ingress_authority_phase: PeerIngressAuthorityPhaseClass,
     pub supervisor_binding_kind: SupervisorBindingKind,
     pub supervisor_bound_name: Option<String>,
     pub supervisor_bound_peer_id: Option<String>,
     pub supervisor_bound_address: Option<String>,
+    pub supervisor_bound_signing_public_key: Option<String>,
     pub supervisor_bound_epoch: Option<u64>,
+    pub supervisor_publish_pending_name: Option<String>,
+    pub supervisor_publish_pending_peer_id: Option<String>,
+    pub supervisor_publish_pending_address: Option<String>,
+    pub supervisor_publish_pending_signing_public_key: Option<String>,
+    pub supervisor_publish_pending_epoch: Option<u64>,
+    pub supervisor_revoke_pending_name: Option<String>,
+    pub supervisor_revoke_pending_peer_id: Option<String>,
+    pub supervisor_revoke_pending_address: Option<String>,
+    pub supervisor_revoke_pending_signing_public_key: Option<String>,
+    pub supervisor_revoke_pending_epoch: Option<u64>,
     pub local_endpoint: Option<PeerEndpoint>,
     pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
@@ -3872,6 +9779,25 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnregisterSession {
         pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeOpsLifecycleDurability {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HydrateSessionLlmState {
+        pub current_identity: SessionLlmIdentity,
+        pub current_capability_surface: Option<SessionLlmCapabilitySurface>,
+        pub current_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        pub current_capability_base_filter: ToolFilter,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReconfigureSessionLlmIdentity {
@@ -3879,6 +9805,12 @@ pub mod inputs {
         pub previous_visibility_state: SessionToolVisibilityState,
         pub previous_capability_surface: Option<SessionLlmCapabilitySurface>,
         pub previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        pub previous_capability_base_filter: ToolFilter,
+        pub view_image_tool_available: bool,
+        pub previous_view_image_visible: bool,
+        pub next_view_image_visible: bool,
+        pub previous_active_visibility_revision: u64,
+        pub previous_staged_visibility_revision: u64,
         pub target_identity: SessionLlmIdentity,
         pub target_capability_surface: SessionLlmCapabilitySurface,
         pub next_visibility_state: SessionToolVisibilityState,
@@ -3887,15 +9819,34 @@ pub mod inputs {
         pub tool_visibility_delta: SessionToolVisibilityDelta,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClearSessionLlmState {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PrepareBindings {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
-        pub generation: Generation,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetPeerIngressContext {
         pub keep_alive: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePeerIngressReceive {
+        pub kind: PeerIngressAdmittedKind,
+        pub auth_required: bool,
+        pub auth_exempt: bool,
+        pub trusted: bool,
+        pub queued_work_present: bool,
+        pub queue_closed: bool,
+        pub queue_capacity_available: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePeerIngressDequeue {
+        pub kind: PeerIngressAdmittedKind,
+        pub auth: PeerIngressAuthClass,
+        pub queued_work_remaining: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct NotifyDrainExited {
@@ -3904,6 +9855,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InterruptCurrentRun {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveUserInterruptPublicResult {
+        pub observation: UserInterruptObservationKind,
+        pub target_present: bool,
+        pub staged_promotion_busy: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAfterBoundary {
         pub reason: String,
     }
@@ -3911,10 +9868,6 @@ pub mod inputs {
     pub struct StagePersistentFilter {
         pub filter: ToolFilter,
         pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RequestDeferredTools {
-        pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishCommittedVisibleSet {
@@ -3934,6 +9887,96 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StageDeferredSession {
+        pub session_id: SessionId,
+        pub keep_alive: bool,
+        pub has_comms_name: bool,
+        pub llm_identity: SessionLlmIdentity,
+        pub machine_archived_resume_authorized: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UpdateDeferredSessionKeepAlive {
+        pub session_id: SessionId,
+        pub keep_alive: bool,
+        pub has_comms_name: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UpdateDeferredSessionLlmIdentity {
+        pub session_id: SessionId,
+        pub llm_identity: SessionLlmIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeDeferredSessionSystemContextAppend {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginDeferredSessionPromotion {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeDeferredSessionMachineArchivedResume {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbandonDeferredSessionPromotion {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishDeferredSessionPromotion {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginDeferredSessionArchive {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreDeferredSessionArchive {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishDeferredSessionArchive {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DropDeferredSession {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMobOperatorCreateAuthority {
+        pub request_kind: MobOperatorAccessRequestKind,
+        pub principal_token: OpaquePrincipalToken,
+        pub caller_provenance: Option<MobToolCallerProvenance>,
+        pub audit_invocation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreMobOperatorAuthority {
+        pub principal_token: OpaquePrincipalToken,
+        pub can_create_mobs: bool,
+        pub can_mutate_profiles: bool,
+        pub managed_mob_scope: std::collections::BTreeSet<String>,
+        pub spawn_profile_scope:
+            std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        pub caller_provenance: Option<MobToolCallerProvenance>,
+        pub audit_invocation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetMobOperatorProfileMutation {
+        pub allowed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetMobOperatorCreateAuthority {
+        pub allowed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct GrantMobOperatorManageMob {
+        pub mob_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetMobOperatorSpawnProfilesInMob {
+        pub mob_id: String,
+        pub profiles: std::collections::BTreeSet<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Reset {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StopRuntimeExecutor {
@@ -3942,8 +9985,43 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeExecutorExited {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeCompletionResult {
+        pub run_id: Option<RunId>,
+        pub terminal: RuntimeCompletionTerminalObservation,
+        pub finalization: RuntimeCompletionFinalizationObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeCompletionCleanup {
+        pub session_id: SessionId,
+        pub observation_session_id: SessionId,
+        pub observation_agent_runtime_id: Option<AgentRuntimeId>,
+        pub observation_fence_token: Option<FenceToken>,
+        pub observation_runtime_generation: Option<Generation>,
+        pub observation_runtime_epoch_id: Option<RuntimeEpochId>,
+        pub outcome: RuntimeCompletionObservedOutcome,
+        pub archived_by_authority: bool,
+        pub live_session: RuntimeCompletionLiveSessionObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeCompletionWaitFailure {
+        pub session_id: SessionId,
+        pub failure: RuntimeCompletionWaitFailureObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Destroy {
         pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRuntimeAuthority {
+        pub session_id: SessionId,
+        pub state: RuntimeLifecycleObservedState,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub runtime_generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub current_run_id: Option<RunId>,
+        pub pre_run_phase: Option<PreRunPhase>,
+        pub silent_intent_overrides: std::collections::BTreeSet<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureSessionWithExecutor {
@@ -3991,7 +10069,11 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Ingest {
+        pub session_id: SessionId,
         pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
         pub work_id: WorkId,
         pub origin: WorkOrigin,
     }
@@ -4021,6 +10103,7 @@ pub mod inputs {
         pub requires_approval: bool,
         pub approval_available: bool,
         pub approval_denied: bool,
+        pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4031,6 +10114,7 @@ pub mod inputs {
         pub requires_approval: bool,
         pub approval_available: bool,
         pub approval_denied: bool,
+        pub approval_reason: Option<RoutingSwitchApprovalReason>,
         pub realtime_detach_allowed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4047,14 +10131,29 @@ pub mod inputs {
         pub requires_approval: bool,
         pub approval_available: bool,
         pub approval_denied: bool,
+        pub approval_reason: Option<RoutingImageApprovalReason>,
         pub realtime_detach_allowed: bool,
         pub requires_scoped_override: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DenyImageOperationPlan {
+        pub operation_id: String,
+        pub reason: RoutingImagePlanDenialReason,
+        pub terminal_payload: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ActivateImageOperationOverride {
         pub operation_id: String,
         pub target_model: String,
         pub target_realtime_capable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyImageOperationTerminal {
+        pub operation_id: String,
+        pub observation: RoutingImageTerminalObservation,
+        pub http_status_code: Option<u64>,
+        pub error_code: RoutingImageProviderErrorCode,
+        pub provider_text: RoutingProviderTextDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompleteImageOperation {
@@ -4081,6 +10180,100 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AcceptWithoutWake {
         pub input_id: InputId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveBoundaryContextReceipt {
+        pub run_id: RunId,
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdmissionPlan {
+        pub input_id: String,
+        pub input_kind: AdmissionInputKind,
+        pub requested_lane: Option<InputLane>,
+        pub silent_intent_match: bool,
+        pub existing_superseded_input_id: Option<String>,
+        pub runtime_running: bool,
+        pub active_turn_boundary_available: bool,
+        pub without_wake: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdmissionValidation {
+        pub input_id: String,
+        pub input_kind: AdmissionInputKind,
+        pub input_origin: AdmissionInputOriginKind,
+        pub durability: InputDurabilityKind,
+        pub peer_handling_mode_valid: bool,
+        pub peer_response_terminal_structurally_valid: bool,
+        pub peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdmissionIdempotency {
+        pub input_id: String,
+        pub idempotency_key: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RegisterAcceptedIdempotency {
+        pub input_id: String,
+        pub idempotency_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct NormalizeRecoveredInputLifecycle {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub applied_boundary_committed: Option<bool>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRecoveredInputDurability {
+        pub input_id: String,
+        pub durability: InputDurabilityKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveInputPublicLifecycle {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveInputPublicTerminalOutcome {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub abandon_reason: Option<InputAbandonReason>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyInputTerminality {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub abandon_reason: Option<InputAbandonReason>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeStoredInputStateSeed {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub superseded_by: Option<String>,
+        pub aggregate_id: Option<String>,
+        pub abandon_reason: Option<InputAbandonReason>,
+        pub abandon_attempt_count: u64,
+        pub attempt_count: u64,
+        pub run_id: Option<String>,
+        pub boundary_sequence: Option<u64>,
+        pub admission_sequence: Option<u64>,
+        pub recovery_lane: Option<InputLane>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRuntimeLifecycleState {
+        pub state: RuntimeLifecycleObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRuntimeLifecycleDurability {
+        pub state: RuntimeLifecycleObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRuntimeLoopQueueAdmission {
+        pub state: RuntimeLifecycleObservedState,
+        pub current_run_bound: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
@@ -4124,46 +10317,67 @@ pub mod inputs {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct PrimitiveApplied {}
+    pub struct PrimitiveApplied {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LlmReturnedToolCalls {
+        pub run_id: RunId,
         pub tool_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct LlmReturnedTerminal {}
+    pub struct LlmReturnedTerminal {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterPendingOps {
+        pub run_id: RunId,
         pub op_refs: std::collections::BTreeSet<String>,
         pub barrier_operation_ids: std::collections::BTreeSet<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ToolCallsResolved {}
+    pub struct ToolCallsResolved {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct OpsBarrierSatisfied {
+        pub run_id: RunId,
         pub operation_ids: std::collections::BTreeSet<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BoundaryContinue {}
+    pub struct BoundaryContinue {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BoundaryComplete {}
+    pub struct BoundaryComplete {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnterExtraction {
+        pub run_id: RunId,
         pub max_extraction_retries: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ExtractionStart {}
+    pub struct ExtractionStart {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ExtractionValidationPassed {}
+    pub struct ExtractionValidationPassed {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExtractionValidationFailed {
+        pub run_id: RunId,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExtractionFailed {
+        pub run_id: RunId,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverableFailure {
+        pub run_id: RunId,
         pub failure_kind: LlmRetryFailureKind,
         pub retry_attempt: u64,
         pub max_retries: u64,
@@ -4172,29 +10386,44 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FatalFailure {
-        pub terminal_cause_kind: TurnTerminalCauseKind,
+        pub run_id: RunId,
+        pub terminal_failure_source: RunFailureSourceKind,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RetryRequested {
+        pub run_id: RunId,
         pub retry_attempt: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct CancelNow {}
+    pub struct CancelNow {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RequestCancelAfterBoundary {}
+    pub struct RequestCancelAfterBoundary {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct CancellationObserved {}
+    pub struct CancellationObserved {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AcknowledgeTerminal {
+        pub run_id: RunId,
         pub outcome: TurnTerminalOutcome,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct TurnLimitReached {}
+    pub struct TurnLimitReached {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BudgetExhausted {}
+    pub struct BudgetExhausted {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct TimeBudgetExceeded {}
+    pub struct TimeBudgetExceeded {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ForceCancelNoRun {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4210,13 +10439,23 @@ pub mod inputs {
         pub run_id: RunId,
         pub runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
         pub runtime_apply_failure_message: Option<String>,
-        pub terminal_outcome: TurnTerminalOutcome,
-        pub terminal_cause_kind: TurnTerminalCauseKind,
+        pub machine_terminal_failure_observed: bool,
+        pub terminal_failure_source: Option<RunFailureSourceKind>,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RunCancelled {
         pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverAdmittedInput {
+        pub input_id: String,
+        pub input_kind: RecoveredInputKind,
+        pub runtime_boundary: RecoveredRunApplyBoundary,
+        pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
+        pub runtime_peer_response_terminal_apply_intent:
+            Option<RecoveredPeerResponseTerminalApplyIntent>,
+        pub lane: InputLane,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverInputLifecycle {
@@ -4230,6 +10469,9 @@ pub mod inputs {
         pub attempt_count: u64,
         pub run_id: Option<String>,
         pub boundary_sequence: Option<u64>,
+        pub admission_sequence: Option<u64>,
+        pub admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>,
+        pub recovery_lane: Option<InputLane>,
         pub lane: Option<InputLane>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4246,6 +10488,14 @@ pub mod inputs {
         pub new_lane: InputLane,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PrioritizeInput {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeferInputBehindBacklog {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageForRun {
         pub input_id: String,
         pub run_id: String,
@@ -4256,6 +10506,11 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RollbackStaged {
+        pub input_id: String,
+        pub lane: InputLane,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveStagedRollback {
         pub input_id: String,
         pub lane: InputLane,
     }
@@ -4300,6 +10555,8 @@ pub mod inputs {
     pub struct RegisterOp {
         pub operation_id: String,
         pub kind: OperationKind,
+        pub source: Option<OperationSource>,
+        pub max_concurrent: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartOp {
@@ -4354,18 +10611,268 @@ pub mod inputs {
         pub payload: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RequestWaitAll {
+    pub struct ResolveOpLifecycleTransitionRejection {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOpRecord {
+        pub operation_id: String,
+        pub status: OperationStatus,
+        pub kind: OperationKind,
+        pub source: Option<OperationSource>,
+        pub peer_ready: bool,
+        pub progress_count: u64,
+        pub terminal_outcome: Option<OperationTerminalOutcomeKind>,
+        pub terminal_payload: Option<String>,
+        pub completion_sequence: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationTerminality {
+        pub operation_id: String,
+        pub status: OperationStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationPublicResult {
+        pub operation_id: String,
+        pub status: OperationStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationTransitionIdempotence {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+        pub status: OperationStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationCompletionFeed {
+        pub operation_id: String,
+        pub kind: OperationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationCompletionWake {
+        pub operation_id: String,
+        pub kind: OperationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOperationDurability {
+        pub operation_id: String,
+        pub kind: OperationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRecoveredOperationRecord {
+        pub operation_id: String,
+        pub status: OperationStatus,
+        pub kind: OperationKind,
+        pub terminal_outcome_present: bool,
+        pub terminal_payload_present: bool,
+        pub completion_sequence_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverCompletionFeedEntry {
+        pub operation_id: String,
+        pub kind: OperationKind,
+        pub terminal_outcome: OperationTerminalOutcomeKind,
+        pub terminal_payload: String,
+        pub completion_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOpsCompletionCursor {
+        pub next_completion_seq: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverCompletionConsumerCursors {
+        pub agent_applied_cursor: u64,
+        pub runtime_observed_cursor: u64,
+        pub runtime_injected_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceAgentCompletionCursor {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceRuntimeObservedCompletionCursor {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceRuntimeInjectedCompletionCursor {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EvictCompletedOp {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CollectCompletedOp {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveWaitAllAdmission {
         pub wait_request_id: WaitRequestId,
+        pub operation_id_sequence: Vec<String>,
         pub operation_ids: std::collections::BTreeSet<String>,
         pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
+        pub operation_token_by_id: std::collections::BTreeMap<String, OperationId>,
+        pub operation_id_by_token: std::collections::BTreeMap<OperationId, String>,
+        pub duplicate_operation_id: Option<String>,
+        pub not_found_operation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestWaitAll {
+        pub run_id: RunId,
+        pub wait_request_id: WaitRequestId,
+        pub operation_id_sequence: Vec<String>,
+        pub operation_ids: std::collections::BTreeSet<String>,
+        pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
+        pub operation_token_by_id: std::collections::BTreeMap<String, OperationId>,
+        pub operation_id_by_token: std::collections::BTreeMap<OperationId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SatisfyWaitAll {
         pub wait_request_id: WaitRequestId,
+        pub run_id: RunId,
         pub operation_id_tokens: std::collections::BTreeSet<OperationId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelWaitAll {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitSurfaceRequest {
+        pub request_key: String,
+        pub terminal_policy: SurfaceRequestTerminalPolicy,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifySurfaceRequestTerminal {
+        pub request_key: String,
+        pub success: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelSurfaceRequest {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublishSurfaceRequest {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublishOrCancelSurfaceRequest {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishSurfaceRequestUnpublished {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveOpenAdmission {
+        pub session_id: String,
+        pub channel_id: String,
+        pub llm_identity: SessionLlmIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbandonLiveOpenAdmission {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveRefreshQueued {
+        pub channel_id: String,
+        pub queue_acceptance_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveCloseClosed {
+        pub session_id: String,
+        pub channel_id: String,
+        pub close_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveCommandAccepted {
+        pub channel_id: String,
+        pub command: LiveCommandPublicKind,
+        pub command_acceptance_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveCommandRejected {
+        pub channel_id: String,
+        pub command: LiveCommandPublicKind,
+        pub rejection: LiveCommandRejectionReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveChannelRequestRejected {
+        pub channel_id: String,
+        pub request: LiveChannelRequestPublicKind,
+        pub rejection: LiveChannelRequestRejectionReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveWebrtcTokenIssued {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub issued_at_ms: u64,
+        pub ttl_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveWebrtcAnswerAdmission {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub observed_at_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveWebrtcAnswerAccepted {
+        pub session_id: String,
+        pub channel_id: String,
+        pub answer_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveWebsocketTokenIssued {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub issued_at_ms: u64,
+        pub ttl_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveWebsocketTokenAdmission {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub observed_at_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionEventStreamOpened {
+        pub stream_id: String,
+        pub session_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSessionEventStreamTerminated {
+        pub stream_id: String,
+        pub observation: RpcEventStreamTerminalObservationKind,
+        pub detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSessionEventStreamClose {
+        pub stream_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMobEventStreamOpened {
+        pub stream_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMobEventStreamTerminated {
+        pub stream_id: String,
+        pub observation: RpcEventStreamTerminalObservationKind,
+        pub detail: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMobEventStreamClose {
+        pub stream_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveChannelStatus {
+        pub channel_id: String,
+        pub status: LiveChannelPublicStatus,
+        pub status_observation_sequence: u64,
+        pub degradation_reason: Option<LiveChannelDegradationReason>,
+        pub degradation_detail: Option<String>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrain {
         pub mode: DrainMode,
@@ -4373,12 +10880,13 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StopDrain {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DrainExitedClean {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DrainExitedRespawnable {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageVisibilityFilter {
         pub filter: ToolFilter,
+        pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReplaceFilterToolAuthorityCatalog {
+        pub catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitVisibilityFilter {
@@ -4390,21 +10898,47 @@ pub mod inputs {
         pub names: std::collections::BTreeSet<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestDeferredTools {
+        pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReplaceDeferredToolAuthorityCatalog {
+        pub catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitDeferredNames {
         pub authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetTurnToolOverlay {
+        pub allow_active: bool,
+        pub allow_names: std::collections::BTreeSet<String>,
+        pub deny_names: std::collections::BTreeSet<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClearTurnToolOverlay {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncVisibilityRevisions {
+        pub capability_base_filter: ToolFilter,
+        pub inherited_base_filter: ToolFilter,
+        pub active_filter: ToolFilter,
+        pub staged_filter: ToolFilter,
         pub active_revision: u64,
         pub staged_revision: u64,
         pub active_deferred_names: std::collections::BTreeSet<String>,
         pub staged_deferred_names: std::collections::BTreeSet<String>,
+        pub requested_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub filter_witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
         pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
         pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceRegister {
         pub surface_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceSetRemovalTimeout {
+        pub timeout_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceStageAdd {
@@ -4499,12 +11033,17 @@ pub mod inputs {
         pub disposition: PeerTerminalDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerResponseRejected {
+        pub corr_id: PeerCorrelationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestTimedOut {
         pub corr_id: PeerCorrelationId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerRequestReceived {
         pub corr_id: PeerCorrelationId,
+        pub handling_mode: InputLane,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerResponseReplied {
@@ -4546,10 +11085,23 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DetachIngress {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSupervisorBindAdmission {
+        pub supervisor_peer_id: String,
+        pub supervisor_epoch: u64,
+        pub sender_peer_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSupervisorAuthorizeAdmission {
+        pub supervisor_peer_id: String,
+        pub supervisor_epoch: u64,
+        pub sender_peer_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindSupervisor {
         pub name: String,
         pub peer_id: String,
         pub address: String,
+        pub signing_public_key: String,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4557,6 +11109,15 @@ pub mod inputs {
         pub name: String,
         pub peer_id: String,
         pub address: String,
+        pub signing_public_key: String,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestSupervisorTrustPublish {
+        pub name: String,
+        pub peer_id: String,
+        pub address: String,
+        pub signing_public_key: String,
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4601,6 +11162,24 @@ pub mod inputs {
         pub endpoint: PeerEndpoint,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSupervisorBridgeCommandAdmission {
+        pub supervisor_peer_id: String,
+        pub supervisor_epoch: u64,
+        pub sender_peer_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSupervisorMobPeerOverlay {
+        pub supervisor_peer_id: String,
+        pub supervisor_epoch: u64,
+        pub recipient_peer_id: String,
+        pub overlay_epoch: u64,
+        pub endpoints: std::collections::BTreeSet<PeerEndpoint>,
+        pub endpoint_count: u64,
+        pub command_peer_id: String,
+        pub command_endpoint: PeerEndpoint,
+        pub command_kind: MobPeerOverlayCommandKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyMobPeerOverlay {
         pub epoch: u64,
         pub endpoints: std::collections::BTreeSet<PeerEndpoint>,
@@ -4611,21 +11190,52 @@ pub mod inputs {
 pub enum Input {
     RegisterSession(inputs::RegisterSession),
     UnregisterSession(inputs::UnregisterSession),
+    ResolveRuntimeOpsLifecycleDurability(inputs::ResolveRuntimeOpsLifecycleDurability),
+    HydrateSessionLlmState(inputs::HydrateSessionLlmState),
     ReconfigureSessionLlmIdentity(inputs::ReconfigureSessionLlmIdentity),
+    ClearSessionLlmState(inputs::ClearSessionLlmState),
     PrepareBindings(inputs::PrepareBindings),
     SetPeerIngressContext(inputs::SetPeerIngressContext),
+    ResolvePeerIngressReceive(inputs::ResolvePeerIngressReceive),
+    ResolvePeerIngressDequeue(inputs::ResolvePeerIngressDequeue),
     NotifyDrainExited(inputs::NotifyDrainExited),
     InterruptCurrentRun(inputs::InterruptCurrentRun),
+    ResolveUserInterruptPublicResult(inputs::ResolveUserInterruptPublicResult),
     CancelAfterBoundary(inputs::CancelAfterBoundary),
     StagePersistentFilter(inputs::StagePersistentFilter),
-    RequestDeferredTools(inputs::RequestDeferredTools),
     PublishCommittedVisibleSet(inputs::PublishCommittedVisibleSet),
     Recover(inputs::Recover),
     Retire(inputs::Retire),
+    StageDeferredSession(inputs::StageDeferredSession),
+    UpdateDeferredSessionKeepAlive(inputs::UpdateDeferredSessionKeepAlive),
+    UpdateDeferredSessionLlmIdentity(inputs::UpdateDeferredSessionLlmIdentity),
+    AuthorizeDeferredSessionSystemContextAppend(
+        inputs::AuthorizeDeferredSessionSystemContextAppend,
+    ),
+    BeginDeferredSessionPromotion(inputs::BeginDeferredSessionPromotion),
+    AuthorizeDeferredSessionMachineArchivedResume(
+        inputs::AuthorizeDeferredSessionMachineArchivedResume,
+    ),
+    AbandonDeferredSessionPromotion(inputs::AbandonDeferredSessionPromotion),
+    FinishDeferredSessionPromotion(inputs::FinishDeferredSessionPromotion),
+    BeginDeferredSessionArchive(inputs::BeginDeferredSessionArchive),
+    RestoreDeferredSessionArchive(inputs::RestoreDeferredSessionArchive),
+    FinishDeferredSessionArchive(inputs::FinishDeferredSessionArchive),
+    DropDeferredSession(inputs::DropDeferredSession),
+    ResolveMobOperatorCreateAuthority(inputs::ResolveMobOperatorCreateAuthority),
+    RestoreMobOperatorAuthority(inputs::RestoreMobOperatorAuthority),
+    SetMobOperatorProfileMutation(inputs::SetMobOperatorProfileMutation),
+    SetMobOperatorCreateAuthority(inputs::SetMobOperatorCreateAuthority),
+    GrantMobOperatorManageMob(inputs::GrantMobOperatorManageMob),
+    SetMobOperatorSpawnProfilesInMob(inputs::SetMobOperatorSpawnProfilesInMob),
     Reset(inputs::Reset),
     StopRuntimeExecutor(inputs::StopRuntimeExecutor),
     RuntimeExecutorExited(inputs::RuntimeExecutorExited),
+    ResolveRuntimeCompletionResult(inputs::ResolveRuntimeCompletionResult),
+    ResolveRuntimeCompletionCleanup(inputs::ResolveRuntimeCompletionCleanup),
+    ResolveRuntimeCompletionWaitFailure(inputs::ResolveRuntimeCompletionWaitFailure),
     Destroy(inputs::Destroy),
+    RecoverRuntimeAuthority(inputs::RecoverRuntimeAuthority),
     EnsureSessionWithExecutor(inputs::EnsureSessionWithExecutor),
     SetSilentIntents(inputs::SetSilentIntents),
     ContainsSession(inputs::ContainsSession),
@@ -4647,12 +11257,28 @@ pub enum Input {
     CompleteUntilChangedSwitchTurnReconfigure(inputs::CompleteUntilChangedSwitchTurnReconfigure),
     AdmitModelRoutingAssistantTurn(inputs::AdmitModelRoutingAssistantTurn),
     BeginImageOperation(inputs::BeginImageOperation),
+    DenyImageOperationPlan(inputs::DenyImageOperationPlan),
     ActivateImageOperationOverride(inputs::ActivateImageOperationOverride),
+    ClassifyImageOperationTerminal(inputs::ClassifyImageOperationTerminal),
     CompleteImageOperation(inputs::CompleteImageOperation),
     RestoreImageOperationOverride(inputs::RestoreImageOperationOverride),
     LoadBoundaryReceipt(inputs::LoadBoundaryReceipt),
     AcceptWithCompletion(inputs::AcceptWithCompletion),
     AcceptWithoutWake(inputs::AcceptWithoutWake),
+    ResolveLiveBoundaryContextReceipt(inputs::ResolveLiveBoundaryContextReceipt),
+    ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
+    ResolveAdmissionValidation(inputs::ResolveAdmissionValidation),
+    ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
+    RegisterAcceptedIdempotency(inputs::RegisterAcceptedIdempotency),
+    NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
+    ClassifyRecoveredInputDurability(inputs::ClassifyRecoveredInputDurability),
+    ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
+    ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
+    ClassifyInputTerminality(inputs::ClassifyInputTerminality),
+    AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
+    ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
+    ClassifyRuntimeLifecycleDurability(inputs::ClassifyRuntimeLifecycleDurability),
+    ClassifyRuntimeLoopQueueAdmission(inputs::ClassifyRuntimeLoopQueueAdmission),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -4690,13 +11316,17 @@ pub enum Input {
     ServiceTurnCommitted(inputs::ServiceTurnCommitted),
     RunFailed(inputs::RunFailed),
     RunCancelled(inputs::RunCancelled),
+    RecoverAdmittedInput(inputs::RecoverAdmittedInput),
     RecoverInputLifecycle(inputs::RecoverInputLifecycle),
     QueueAccepted(inputs::QueueAccepted),
     SteerAccepted(inputs::SteerAccepted),
     ChangeLane(inputs::ChangeLane),
+    PrioritizeInput(inputs::PrioritizeInput),
+    DeferInputBehindBacklog(inputs::DeferInputBehindBacklog),
     StageForRun(inputs::StageForRun),
     IncrementAttemptCount(inputs::IncrementAttemptCount),
     RollbackStaged(inputs::RollbackStaged),
+    ResolveStagedRollback(inputs::ResolveStagedRollback),
     MarkApplied(inputs::MarkApplied),
     MarkAppliedPendingConsumption(inputs::MarkAppliedPendingConsumption),
     ConsumeInput(inputs::ConsumeInput),
@@ -4716,19 +11346,66 @@ pub enum Input {
     RetireRequestedOp(inputs::RetireRequestedOp),
     RetireCompletedOp(inputs::RetireCompletedOp),
     TerminateOp(inputs::TerminateOp),
+    ResolveOpLifecycleTransitionRejection(inputs::ResolveOpLifecycleTransitionRejection),
+    RecoverOpRecord(inputs::RecoverOpRecord),
+    ClassifyOperationTerminality(inputs::ClassifyOperationTerminality),
+    ClassifyOperationPublicResult(inputs::ClassifyOperationPublicResult),
+    ClassifyOperationTransitionIdempotence(inputs::ClassifyOperationTransitionIdempotence),
+    ClassifyOperationCompletionFeed(inputs::ClassifyOperationCompletionFeed),
+    ClassifyOperationCompletionWake(inputs::ClassifyOperationCompletionWake),
+    ClassifyOperationDurability(inputs::ClassifyOperationDurability),
+    ClassifyRecoveredOperationRecord(inputs::ClassifyRecoveredOperationRecord),
+    RecoverCompletionFeedEntry(inputs::RecoverCompletionFeedEntry),
+    RecoverOpsCompletionCursor(inputs::RecoverOpsCompletionCursor),
+    RecoverCompletionConsumerCursors(inputs::RecoverCompletionConsumerCursors),
+    AdvanceAgentCompletionCursor(inputs::AdvanceAgentCompletionCursor),
+    AdvanceRuntimeObservedCompletionCursor(inputs::AdvanceRuntimeObservedCompletionCursor),
+    AdvanceRuntimeInjectedCompletionCursor(inputs::AdvanceRuntimeInjectedCompletionCursor),
+    EvictCompletedOp(inputs::EvictCompletedOp),
+    CollectCompletedOp(inputs::CollectCompletedOp),
+    ResolveWaitAllAdmission(inputs::ResolveWaitAllAdmission),
     RequestWaitAll(inputs::RequestWaitAll),
     SatisfyWaitAll(inputs::SatisfyWaitAll),
     CancelWaitAll(inputs::CancelWaitAll),
+    AdmitSurfaceRequest(inputs::AdmitSurfaceRequest),
+    ClassifySurfaceRequestTerminal(inputs::ClassifySurfaceRequestTerminal),
+    CancelSurfaceRequest(inputs::CancelSurfaceRequest),
+    PublishSurfaceRequest(inputs::PublishSurfaceRequest),
+    PublishOrCancelSurfaceRequest(inputs::PublishOrCancelSurfaceRequest),
+    FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
+    ResolveLiveOpenAdmission(inputs::ResolveLiveOpenAdmission),
+    AbandonLiveOpenAdmission(inputs::AbandonLiveOpenAdmission),
+    RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
+    RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
+    RecordLiveCommandAccepted(inputs::RecordLiveCommandAccepted),
+    RecordLiveCommandRejected(inputs::RecordLiveCommandRejected),
+    RecordLiveChannelRequestRejected(inputs::RecordLiveChannelRequestRejected),
+    RecordLiveWebrtcTokenIssued(inputs::RecordLiveWebrtcTokenIssued),
+    ResolveLiveWebrtcAnswerAdmission(inputs::ResolveLiveWebrtcAnswerAdmission),
+    RecordLiveWebrtcAnswerAccepted(inputs::RecordLiveWebrtcAnswerAccepted),
+    RecordLiveWebsocketTokenIssued(inputs::RecordLiveWebsocketTokenIssued),
+    ResolveLiveWebsocketTokenAdmission(inputs::ResolveLiveWebsocketTokenAdmission),
+    RecordSessionEventStreamOpened(inputs::RecordSessionEventStreamOpened),
+    RecordSessionEventStreamTerminated(inputs::RecordSessionEventStreamTerminated),
+    ResolveSessionEventStreamClose(inputs::ResolveSessionEventStreamClose),
+    RecordMobEventStreamOpened(inputs::RecordMobEventStreamOpened),
+    RecordMobEventStreamTerminated(inputs::RecordMobEventStreamTerminated),
+    ResolveMobEventStreamClose(inputs::ResolveMobEventStreamClose),
+    RecordLiveChannelStatus(inputs::RecordLiveChannelStatus),
     SpawnDrain(inputs::SpawnDrain),
     StopDrain(inputs::StopDrain),
-    DrainExitedClean(inputs::DrainExitedClean),
-    DrainExitedRespawnable(inputs::DrainExitedRespawnable),
     StageVisibilityFilter(inputs::StageVisibilityFilter),
+    ReplaceFilterToolAuthorityCatalog(inputs::ReplaceFilterToolAuthorityCatalog),
     CommitVisibilityFilter(inputs::CommitVisibilityFilter),
     StageDeferredNames(inputs::StageDeferredNames),
+    RequestDeferredTools(inputs::RequestDeferredTools),
+    ReplaceDeferredToolAuthorityCatalog(inputs::ReplaceDeferredToolAuthorityCatalog),
     CommitDeferredNames(inputs::CommitDeferredNames),
+    SetTurnToolOverlay(inputs::SetTurnToolOverlay),
+    ClearTurnToolOverlay(inputs::ClearTurnToolOverlay),
     SyncVisibilityRevisions(inputs::SyncVisibilityRevisions),
     SurfaceRegister(inputs::SurfaceRegister),
+    SurfaceSetRemovalTimeout(inputs::SurfaceSetRemovalTimeout),
     SurfaceStageAdd(inputs::SurfaceStageAdd),
     SurfaceStageRemove(inputs::SurfaceStageRemove),
     SurfaceStageReload(inputs::SurfaceStageReload),
@@ -4749,6 +11426,7 @@ pub enum Input {
     PeerRequestSent(inputs::PeerRequestSent),
     PeerResponseProgressArrived(inputs::PeerResponseProgressArrived),
     PeerResponseTerminalArrived(inputs::PeerResponseTerminalArrived),
+    PeerResponseRejected(inputs::PeerResponseRejected),
     PeerRequestTimedOut(inputs::PeerRequestTimedOut),
     PeerRequestReceived(inputs::PeerRequestReceived),
     PeerResponseReplied(inputs::PeerResponseReplied),
@@ -4761,8 +11439,11 @@ pub enum Input {
     AttachSessionIngress(inputs::AttachSessionIngress),
     AttachMobIngress(inputs::AttachMobIngress),
     DetachIngress(inputs::DetachIngress),
+    ResolveSupervisorBindAdmission(inputs::ResolveSupervisorBindAdmission),
+    ResolveSupervisorAuthorizeAdmission(inputs::ResolveSupervisorAuthorizeAdmission),
     BindSupervisor(inputs::BindSupervisor),
     AuthorizeSupervisor(inputs::AuthorizeSupervisor),
+    RequestSupervisorTrustPublish(inputs::RequestSupervisorTrustPublish),
     RevokeSupervisor(inputs::RevokeSupervisor),
     SupervisorTrustEdgePublished(inputs::SupervisorTrustEdgePublished),
     SupervisorTrustEdgePublishFailed(inputs::SupervisorTrustEdgePublishFailed),
@@ -4772,6 +11453,8 @@ pub enum Input {
     ClearLocalEndpoint(inputs::ClearLocalEndpoint),
     AddDirectPeerEndpoint(inputs::AddDirectPeerEndpoint),
     RemoveDirectPeerEndpoint(inputs::RemoveDirectPeerEndpoint),
+    ResolveSupervisorBridgeCommandAdmission(inputs::ResolveSupervisorBridgeCommandAdmission),
+    AuthorizeSupervisorMobPeerOverlay(inputs::AuthorizeSupervisorMobPeerOverlay),
     ApplyMobPeerOverlay(inputs::ApplyMobPeerOverlay),
 }
 impl Input {
@@ -4779,21 +11462,64 @@ impl Input {
         match self {
             Self::RegisterSession(_) => InputKind::RegisterSession,
             Self::UnregisterSession(_) => InputKind::UnregisterSession,
+            Self::ResolveRuntimeOpsLifecycleDurability(_) => {
+                InputKind::ResolveRuntimeOpsLifecycleDurability
+            }
+            Self::HydrateSessionLlmState(_) => InputKind::HydrateSessionLlmState,
             Self::ReconfigureSessionLlmIdentity(_) => InputKind::ReconfigureSessionLlmIdentity,
+            Self::ClearSessionLlmState(_) => InputKind::ClearSessionLlmState,
             Self::PrepareBindings(_) => InputKind::PrepareBindings,
             Self::SetPeerIngressContext(_) => InputKind::SetPeerIngressContext,
+            Self::ResolvePeerIngressReceive(_) => InputKind::ResolvePeerIngressReceive,
+            Self::ResolvePeerIngressDequeue(_) => InputKind::ResolvePeerIngressDequeue,
             Self::NotifyDrainExited(_) => InputKind::NotifyDrainExited,
             Self::InterruptCurrentRun(_) => InputKind::InterruptCurrentRun,
+            Self::ResolveUserInterruptPublicResult(_) => {
+                InputKind::ResolveUserInterruptPublicResult
+            }
             Self::CancelAfterBoundary(_) => InputKind::CancelAfterBoundary,
             Self::StagePersistentFilter(_) => InputKind::StagePersistentFilter,
-            Self::RequestDeferredTools(_) => InputKind::RequestDeferredTools,
             Self::PublishCommittedVisibleSet(_) => InputKind::PublishCommittedVisibleSet,
             Self::Recover(_) => InputKind::Recover,
             Self::Retire(_) => InputKind::Retire,
+            Self::StageDeferredSession(_) => InputKind::StageDeferredSession,
+            Self::UpdateDeferredSessionKeepAlive(_) => InputKind::UpdateDeferredSessionKeepAlive,
+            Self::UpdateDeferredSessionLlmIdentity(_) => {
+                InputKind::UpdateDeferredSessionLlmIdentity
+            }
+            Self::AuthorizeDeferredSessionSystemContextAppend(_) => {
+                InputKind::AuthorizeDeferredSessionSystemContextAppend
+            }
+            Self::BeginDeferredSessionPromotion(_) => InputKind::BeginDeferredSessionPromotion,
+            Self::AuthorizeDeferredSessionMachineArchivedResume(_) => {
+                InputKind::AuthorizeDeferredSessionMachineArchivedResume
+            }
+            Self::AbandonDeferredSessionPromotion(_) => InputKind::AbandonDeferredSessionPromotion,
+            Self::FinishDeferredSessionPromotion(_) => InputKind::FinishDeferredSessionPromotion,
+            Self::BeginDeferredSessionArchive(_) => InputKind::BeginDeferredSessionArchive,
+            Self::RestoreDeferredSessionArchive(_) => InputKind::RestoreDeferredSessionArchive,
+            Self::FinishDeferredSessionArchive(_) => InputKind::FinishDeferredSessionArchive,
+            Self::DropDeferredSession(_) => InputKind::DropDeferredSession,
+            Self::ResolveMobOperatorCreateAuthority(_) => {
+                InputKind::ResolveMobOperatorCreateAuthority
+            }
+            Self::RestoreMobOperatorAuthority(_) => InputKind::RestoreMobOperatorAuthority,
+            Self::SetMobOperatorProfileMutation(_) => InputKind::SetMobOperatorProfileMutation,
+            Self::SetMobOperatorCreateAuthority(_) => InputKind::SetMobOperatorCreateAuthority,
+            Self::GrantMobOperatorManageMob(_) => InputKind::GrantMobOperatorManageMob,
+            Self::SetMobOperatorSpawnProfilesInMob(_) => {
+                InputKind::SetMobOperatorSpawnProfilesInMob
+            }
             Self::Reset(_) => InputKind::Reset,
             Self::StopRuntimeExecutor(_) => InputKind::StopRuntimeExecutor,
             Self::RuntimeExecutorExited(_) => InputKind::RuntimeExecutorExited,
+            Self::ResolveRuntimeCompletionResult(_) => InputKind::ResolveRuntimeCompletionResult,
+            Self::ResolveRuntimeCompletionCleanup(_) => InputKind::ResolveRuntimeCompletionCleanup,
+            Self::ResolveRuntimeCompletionWaitFailure(_) => {
+                InputKind::ResolveRuntimeCompletionWaitFailure
+            }
             Self::Destroy(_) => InputKind::Destroy,
+            Self::RecoverRuntimeAuthority(_) => InputKind::RecoverRuntimeAuthority,
             Self::EnsureSessionWithExecutor(_) => InputKind::EnsureSessionWithExecutor,
             Self::SetSilentIntents(_) => InputKind::SetSilentIntents,
             Self::ContainsSession(_) => InputKind::ContainsSession,
@@ -4817,12 +11543,40 @@ impl Input {
             }
             Self::AdmitModelRoutingAssistantTurn(_) => InputKind::AdmitModelRoutingAssistantTurn,
             Self::BeginImageOperation(_) => InputKind::BeginImageOperation,
+            Self::DenyImageOperationPlan(_) => InputKind::DenyImageOperationPlan,
             Self::ActivateImageOperationOverride(_) => InputKind::ActivateImageOperationOverride,
+            Self::ClassifyImageOperationTerminal(_) => InputKind::ClassifyImageOperationTerminal,
             Self::CompleteImageOperation(_) => InputKind::CompleteImageOperation,
             Self::RestoreImageOperationOverride(_) => InputKind::RestoreImageOperationOverride,
             Self::LoadBoundaryReceipt(_) => InputKind::LoadBoundaryReceipt,
             Self::AcceptWithCompletion(_) => InputKind::AcceptWithCompletion,
             Self::AcceptWithoutWake(_) => InputKind::AcceptWithoutWake,
+            Self::ResolveLiveBoundaryContextReceipt(_) => {
+                InputKind::ResolveLiveBoundaryContextReceipt
+            }
+            Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
+            Self::ResolveAdmissionValidation(_) => InputKind::ResolveAdmissionValidation,
+            Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
+            Self::RegisterAcceptedIdempotency(_) => InputKind::RegisterAcceptedIdempotency,
+            Self::NormalizeRecoveredInputLifecycle(_) => {
+                InputKind::NormalizeRecoveredInputLifecycle
+            }
+            Self::ClassifyRecoveredInputDurability(_) => {
+                InputKind::ClassifyRecoveredInputDurability
+            }
+            Self::ResolveInputPublicLifecycle(_) => InputKind::ResolveInputPublicLifecycle,
+            Self::ResolveInputPublicTerminalOutcome(_) => {
+                InputKind::ResolveInputPublicTerminalOutcome
+            }
+            Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
+            Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
+            Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
+            Self::ClassifyRuntimeLifecycleDurability(_) => {
+                InputKind::ClassifyRuntimeLifecycleDurability
+            }
+            Self::ClassifyRuntimeLoopQueueAdmission(_) => {
+                InputKind::ClassifyRuntimeLoopQueueAdmission
+            }
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -4860,13 +11614,17 @@ impl Input {
             Self::ServiceTurnCommitted(_) => InputKind::ServiceTurnCommitted,
             Self::RunFailed(_) => InputKind::RunFailed,
             Self::RunCancelled(_) => InputKind::RunCancelled,
+            Self::RecoverAdmittedInput(_) => InputKind::RecoverAdmittedInput,
             Self::RecoverInputLifecycle(_) => InputKind::RecoverInputLifecycle,
             Self::QueueAccepted(_) => InputKind::QueueAccepted,
             Self::SteerAccepted(_) => InputKind::SteerAccepted,
             Self::ChangeLane(_) => InputKind::ChangeLane,
+            Self::PrioritizeInput(_) => InputKind::PrioritizeInput,
+            Self::DeferInputBehindBacklog(_) => InputKind::DeferInputBehindBacklog,
             Self::StageForRun(_) => InputKind::StageForRun,
             Self::IncrementAttemptCount(_) => InputKind::IncrementAttemptCount,
             Self::RollbackStaged(_) => InputKind::RollbackStaged,
+            Self::ResolveStagedRollback(_) => InputKind::ResolveStagedRollback,
             Self::MarkApplied(_) => InputKind::MarkApplied,
             Self::MarkAppliedPendingConsumption(_) => InputKind::MarkAppliedPendingConsumption,
             Self::ConsumeInput(_) => InputKind::ConsumeInput,
@@ -4886,19 +11644,90 @@ impl Input {
             Self::RetireRequestedOp(_) => InputKind::RetireRequestedOp,
             Self::RetireCompletedOp(_) => InputKind::RetireCompletedOp,
             Self::TerminateOp(_) => InputKind::TerminateOp,
+            Self::ResolveOpLifecycleTransitionRejection(_) => {
+                InputKind::ResolveOpLifecycleTransitionRejection
+            }
+            Self::RecoverOpRecord(_) => InputKind::RecoverOpRecord,
+            Self::ClassifyOperationTerminality(_) => InputKind::ClassifyOperationTerminality,
+            Self::ClassifyOperationPublicResult(_) => InputKind::ClassifyOperationPublicResult,
+            Self::ClassifyOperationTransitionIdempotence(_) => {
+                InputKind::ClassifyOperationTransitionIdempotence
+            }
+            Self::ClassifyOperationCompletionFeed(_) => InputKind::ClassifyOperationCompletionFeed,
+            Self::ClassifyOperationCompletionWake(_) => InputKind::ClassifyOperationCompletionWake,
+            Self::ClassifyOperationDurability(_) => InputKind::ClassifyOperationDurability,
+            Self::ClassifyRecoveredOperationRecord(_) => {
+                InputKind::ClassifyRecoveredOperationRecord
+            }
+            Self::RecoverCompletionFeedEntry(_) => InputKind::RecoverCompletionFeedEntry,
+            Self::RecoverOpsCompletionCursor(_) => InputKind::RecoverOpsCompletionCursor,
+            Self::RecoverCompletionConsumerCursors(_) => {
+                InputKind::RecoverCompletionConsumerCursors
+            }
+            Self::AdvanceAgentCompletionCursor(_) => InputKind::AdvanceAgentCompletionCursor,
+            Self::AdvanceRuntimeObservedCompletionCursor(_) => {
+                InputKind::AdvanceRuntimeObservedCompletionCursor
+            }
+            Self::AdvanceRuntimeInjectedCompletionCursor(_) => {
+                InputKind::AdvanceRuntimeInjectedCompletionCursor
+            }
+            Self::EvictCompletedOp(_) => InputKind::EvictCompletedOp,
+            Self::CollectCompletedOp(_) => InputKind::CollectCompletedOp,
+            Self::ResolveWaitAllAdmission(_) => InputKind::ResolveWaitAllAdmission,
             Self::RequestWaitAll(_) => InputKind::RequestWaitAll,
             Self::SatisfyWaitAll(_) => InputKind::SatisfyWaitAll,
             Self::CancelWaitAll(_) => InputKind::CancelWaitAll,
+            Self::AdmitSurfaceRequest(_) => InputKind::AdmitSurfaceRequest,
+            Self::ClassifySurfaceRequestTerminal(_) => InputKind::ClassifySurfaceRequestTerminal,
+            Self::CancelSurfaceRequest(_) => InputKind::CancelSurfaceRequest,
+            Self::PublishSurfaceRequest(_) => InputKind::PublishSurfaceRequest,
+            Self::PublishOrCancelSurfaceRequest(_) => InputKind::PublishOrCancelSurfaceRequest,
+            Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
+            Self::ResolveLiveOpenAdmission(_) => InputKind::ResolveLiveOpenAdmission,
+            Self::AbandonLiveOpenAdmission(_) => InputKind::AbandonLiveOpenAdmission,
+            Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
+            Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
+            Self::RecordLiveCommandAccepted(_) => InputKind::RecordLiveCommandAccepted,
+            Self::RecordLiveCommandRejected(_) => InputKind::RecordLiveCommandRejected,
+            Self::RecordLiveChannelRequestRejected(_) => {
+                InputKind::RecordLiveChannelRequestRejected
+            }
+            Self::RecordLiveWebrtcTokenIssued(_) => InputKind::RecordLiveWebrtcTokenIssued,
+            Self::ResolveLiveWebrtcAnswerAdmission(_) => {
+                InputKind::ResolveLiveWebrtcAnswerAdmission
+            }
+            Self::RecordLiveWebrtcAnswerAccepted(_) => InputKind::RecordLiveWebrtcAnswerAccepted,
+            Self::RecordLiveWebsocketTokenIssued(_) => InputKind::RecordLiveWebsocketTokenIssued,
+            Self::ResolveLiveWebsocketTokenAdmission(_) => {
+                InputKind::ResolveLiveWebsocketTokenAdmission
+            }
+            Self::RecordSessionEventStreamOpened(_) => InputKind::RecordSessionEventStreamOpened,
+            Self::RecordSessionEventStreamTerminated(_) => {
+                InputKind::RecordSessionEventStreamTerminated
+            }
+            Self::ResolveSessionEventStreamClose(_) => InputKind::ResolveSessionEventStreamClose,
+            Self::RecordMobEventStreamOpened(_) => InputKind::RecordMobEventStreamOpened,
+            Self::RecordMobEventStreamTerminated(_) => InputKind::RecordMobEventStreamTerminated,
+            Self::ResolveMobEventStreamClose(_) => InputKind::ResolveMobEventStreamClose,
+            Self::RecordLiveChannelStatus(_) => InputKind::RecordLiveChannelStatus,
             Self::SpawnDrain(_) => InputKind::SpawnDrain,
             Self::StopDrain(_) => InputKind::StopDrain,
-            Self::DrainExitedClean(_) => InputKind::DrainExitedClean,
-            Self::DrainExitedRespawnable(_) => InputKind::DrainExitedRespawnable,
             Self::StageVisibilityFilter(_) => InputKind::StageVisibilityFilter,
+            Self::ReplaceFilterToolAuthorityCatalog(_) => {
+                InputKind::ReplaceFilterToolAuthorityCatalog
+            }
             Self::CommitVisibilityFilter(_) => InputKind::CommitVisibilityFilter,
             Self::StageDeferredNames(_) => InputKind::StageDeferredNames,
+            Self::RequestDeferredTools(_) => InputKind::RequestDeferredTools,
+            Self::ReplaceDeferredToolAuthorityCatalog(_) => {
+                InputKind::ReplaceDeferredToolAuthorityCatalog
+            }
             Self::CommitDeferredNames(_) => InputKind::CommitDeferredNames,
+            Self::SetTurnToolOverlay(_) => InputKind::SetTurnToolOverlay,
+            Self::ClearTurnToolOverlay(_) => InputKind::ClearTurnToolOverlay,
             Self::SyncVisibilityRevisions(_) => InputKind::SyncVisibilityRevisions,
             Self::SurfaceRegister(_) => InputKind::SurfaceRegister,
+            Self::SurfaceSetRemovalTimeout(_) => InputKind::SurfaceSetRemovalTimeout,
             Self::SurfaceStageAdd(_) => InputKind::SurfaceStageAdd,
             Self::SurfaceStageRemove(_) => InputKind::SurfaceStageRemove,
             Self::SurfaceStageReload(_) => InputKind::SurfaceStageReload,
@@ -4919,6 +11748,7 @@ impl Input {
             Self::PeerRequestSent(_) => InputKind::PeerRequestSent,
             Self::PeerResponseProgressArrived(_) => InputKind::PeerResponseProgressArrived,
             Self::PeerResponseTerminalArrived(_) => InputKind::PeerResponseTerminalArrived,
+            Self::PeerResponseRejected(_) => InputKind::PeerResponseRejected,
             Self::PeerRequestTimedOut(_) => InputKind::PeerRequestTimedOut,
             Self::PeerRequestReceived(_) => InputKind::PeerRequestReceived,
             Self::PeerResponseReplied(_) => InputKind::PeerResponseReplied,
@@ -4931,8 +11761,13 @@ impl Input {
             Self::AttachSessionIngress(_) => InputKind::AttachSessionIngress,
             Self::AttachMobIngress(_) => InputKind::AttachMobIngress,
             Self::DetachIngress(_) => InputKind::DetachIngress,
+            Self::ResolveSupervisorBindAdmission(_) => InputKind::ResolveSupervisorBindAdmission,
+            Self::ResolveSupervisorAuthorizeAdmission(_) => {
+                InputKind::ResolveSupervisorAuthorizeAdmission
+            }
             Self::BindSupervisor(_) => InputKind::BindSupervisor,
             Self::AuthorizeSupervisor(_) => InputKind::AuthorizeSupervisor,
+            Self::RequestSupervisorTrustPublish(_) => InputKind::RequestSupervisorTrustPublish,
             Self::RevokeSupervisor(_) => InputKind::RevokeSupervisor,
             Self::SupervisorTrustEdgePublished(_) => InputKind::SupervisorTrustEdgePublished,
             Self::SupervisorTrustEdgePublishFailed(_) => {
@@ -4944,6 +11779,12 @@ impl Input {
             Self::ClearLocalEndpoint(_) => InputKind::ClearLocalEndpoint,
             Self::AddDirectPeerEndpoint(_) => InputKind::AddDirectPeerEndpoint,
             Self::RemoveDirectPeerEndpoint(_) => InputKind::RemoveDirectPeerEndpoint,
+            Self::ResolveSupervisorBridgeCommandAdmission(_) => {
+                InputKind::ResolveSupervisorBridgeCommandAdmission
+            }
+            Self::AuthorizeSupervisorMobPeerOverlay(_) => {
+                InputKind::AuthorizeSupervisorMobPeerOverlay
+            }
             Self::ApplyMobPeerOverlay(_) => InputKind::ApplyMobPeerOverlay,
         }
     }
@@ -4952,21 +11793,48 @@ impl Input {
 pub enum InputKind {
     RegisterSession,
     UnregisterSession,
+    ResolveRuntimeOpsLifecycleDurability,
+    HydrateSessionLlmState,
     ReconfigureSessionLlmIdentity,
+    ClearSessionLlmState,
     PrepareBindings,
     SetPeerIngressContext,
+    ResolvePeerIngressReceive,
+    ResolvePeerIngressDequeue,
     NotifyDrainExited,
     InterruptCurrentRun,
+    ResolveUserInterruptPublicResult,
     CancelAfterBoundary,
     StagePersistentFilter,
-    RequestDeferredTools,
     PublishCommittedVisibleSet,
     Recover,
     Retire,
+    StageDeferredSession,
+    UpdateDeferredSessionKeepAlive,
+    UpdateDeferredSessionLlmIdentity,
+    AuthorizeDeferredSessionSystemContextAppend,
+    BeginDeferredSessionPromotion,
+    AuthorizeDeferredSessionMachineArchivedResume,
+    AbandonDeferredSessionPromotion,
+    FinishDeferredSessionPromotion,
+    BeginDeferredSessionArchive,
+    RestoreDeferredSessionArchive,
+    FinishDeferredSessionArchive,
+    DropDeferredSession,
+    ResolveMobOperatorCreateAuthority,
+    RestoreMobOperatorAuthority,
+    SetMobOperatorProfileMutation,
+    SetMobOperatorCreateAuthority,
+    GrantMobOperatorManageMob,
+    SetMobOperatorSpawnProfilesInMob,
     Reset,
     StopRuntimeExecutor,
     RuntimeExecutorExited,
+    ResolveRuntimeCompletionResult,
+    ResolveRuntimeCompletionCleanup,
+    ResolveRuntimeCompletionWaitFailure,
     Destroy,
+    RecoverRuntimeAuthority,
     EnsureSessionWithExecutor,
     SetSilentIntents,
     ContainsSession,
@@ -4988,12 +11856,28 @@ pub enum InputKind {
     CompleteUntilChangedSwitchTurnReconfigure,
     AdmitModelRoutingAssistantTurn,
     BeginImageOperation,
+    DenyImageOperationPlan,
     ActivateImageOperationOverride,
+    ClassifyImageOperationTerminal,
     CompleteImageOperation,
     RestoreImageOperationOverride,
     LoadBoundaryReceipt,
     AcceptWithCompletion,
     AcceptWithoutWake,
+    ResolveLiveBoundaryContextReceipt,
+    ResolveAdmissionPlan,
+    ResolveAdmissionValidation,
+    ResolveAdmissionIdempotency,
+    RegisterAcceptedIdempotency,
+    NormalizeRecoveredInputLifecycle,
+    ClassifyRecoveredInputDurability,
+    ResolveInputPublicLifecycle,
+    ResolveInputPublicTerminalOutcome,
+    ClassifyInputTerminality,
+    AuthorizeStoredInputStateSeed,
+    ClassifyRuntimeLifecycleState,
+    ClassifyRuntimeLifecycleDurability,
+    ClassifyRuntimeLoopQueueAdmission,
     Prepare,
     Commit,
     Fail,
@@ -5031,13 +11915,17 @@ pub enum InputKind {
     ServiceTurnCommitted,
     RunFailed,
     RunCancelled,
+    RecoverAdmittedInput,
     RecoverInputLifecycle,
     QueueAccepted,
     SteerAccepted,
     ChangeLane,
+    PrioritizeInput,
+    DeferInputBehindBacklog,
     StageForRun,
     IncrementAttemptCount,
     RollbackStaged,
+    ResolveStagedRollback,
     MarkApplied,
     MarkAppliedPendingConsumption,
     ConsumeInput,
@@ -5057,19 +11945,66 @@ pub enum InputKind {
     RetireRequestedOp,
     RetireCompletedOp,
     TerminateOp,
+    ResolveOpLifecycleTransitionRejection,
+    RecoverOpRecord,
+    ClassifyOperationTerminality,
+    ClassifyOperationPublicResult,
+    ClassifyOperationTransitionIdempotence,
+    ClassifyOperationCompletionFeed,
+    ClassifyOperationCompletionWake,
+    ClassifyOperationDurability,
+    ClassifyRecoveredOperationRecord,
+    RecoverCompletionFeedEntry,
+    RecoverOpsCompletionCursor,
+    RecoverCompletionConsumerCursors,
+    AdvanceAgentCompletionCursor,
+    AdvanceRuntimeObservedCompletionCursor,
+    AdvanceRuntimeInjectedCompletionCursor,
+    EvictCompletedOp,
+    CollectCompletedOp,
+    ResolveWaitAllAdmission,
     RequestWaitAll,
     SatisfyWaitAll,
     CancelWaitAll,
+    AdmitSurfaceRequest,
+    ClassifySurfaceRequestTerminal,
+    CancelSurfaceRequest,
+    PublishSurfaceRequest,
+    PublishOrCancelSurfaceRequest,
+    FinishSurfaceRequestUnpublished,
+    ResolveLiveOpenAdmission,
+    AbandonLiveOpenAdmission,
+    RecordLiveRefreshQueued,
+    RecordLiveCloseClosed,
+    RecordLiveCommandAccepted,
+    RecordLiveCommandRejected,
+    RecordLiveChannelRequestRejected,
+    RecordLiveWebrtcTokenIssued,
+    ResolveLiveWebrtcAnswerAdmission,
+    RecordLiveWebrtcAnswerAccepted,
+    RecordLiveWebsocketTokenIssued,
+    ResolveLiveWebsocketTokenAdmission,
+    RecordSessionEventStreamOpened,
+    RecordSessionEventStreamTerminated,
+    ResolveSessionEventStreamClose,
+    RecordMobEventStreamOpened,
+    RecordMobEventStreamTerminated,
+    ResolveMobEventStreamClose,
+    RecordLiveChannelStatus,
     SpawnDrain,
     StopDrain,
-    DrainExitedClean,
-    DrainExitedRespawnable,
     StageVisibilityFilter,
+    ReplaceFilterToolAuthorityCatalog,
     CommitVisibilityFilter,
     StageDeferredNames,
+    RequestDeferredTools,
+    ReplaceDeferredToolAuthorityCatalog,
     CommitDeferredNames,
+    SetTurnToolOverlay,
+    ClearTurnToolOverlay,
     SyncVisibilityRevisions,
     SurfaceRegister,
+    SurfaceSetRemovalTimeout,
     SurfaceStageAdd,
     SurfaceStageRemove,
     SurfaceStageReload,
@@ -5090,6 +12025,7 @@ pub enum InputKind {
     PeerRequestSent,
     PeerResponseProgressArrived,
     PeerResponseTerminalArrived,
+    PeerResponseRejected,
     PeerRequestTimedOut,
     PeerRequestReceived,
     PeerResponseReplied,
@@ -5102,8 +12038,11 @@ pub enum InputKind {
     AttachSessionIngress,
     AttachMobIngress,
     DetachIngress,
+    ResolveSupervisorBindAdmission,
+    ResolveSupervisorAuthorizeAdmission,
     BindSupervisor,
     AuthorizeSupervisor,
+    RequestSupervisorTrustPublish,
     RevokeSupervisor,
     SupervisorTrustEdgePublished,
     SupervisorTrustEdgePublishFailed,
@@ -5113,6 +12052,8 @@ pub enum InputKind {
     ClearLocalEndpoint,
     AddDirectPeerEndpoint,
     RemoveDirectPeerEndpoint,
+    ResolveSupervisorBridgeCommandAdmission,
+    AuthorizeSupervisorMobPeerOverlay,
     ApplyMobPeerOverlay,
 }
 
@@ -5141,6 +12082,10 @@ pub mod signals {
         pub in_reply_to: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyPeerResponseReply {
+        pub status: PeerIngressResponseStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyPlainEvent {
         pub source_name: String,
     }
@@ -5154,6 +12099,7 @@ pub enum Signal {
     BoundaryApplied(signals::BoundaryApplied),
     DrainQueuedRun(signals::DrainQueuedRun),
     ClassifyExternalEnvelope(signals::ClassifyExternalEnvelope),
+    ClassifyPeerResponseReply(signals::ClassifyPeerResponseReply),
     ClassifyPlainEvent(signals::ClassifyPlainEvent),
     EnsureDrainRunning(signals::EnsureDrainRunning),
 }
@@ -5164,6 +12110,7 @@ impl Signal {
             Self::BoundaryApplied(_) => SignalKind::BoundaryApplied,
             Self::DrainQueuedRun(_) => SignalKind::DrainQueuedRun,
             Self::ClassifyExternalEnvelope(_) => SignalKind::ClassifyExternalEnvelope,
+            Self::ClassifyPeerResponseReply(_) => SignalKind::ClassifyPeerResponseReply,
             Self::ClassifyPlainEvent(_) => SignalKind::ClassifyPlainEvent,
             Self::EnsureDrainRunning(_) => SignalKind::EnsureDrainRunning,
         }
@@ -5175,6 +12122,7 @@ pub enum SignalKind {
     BoundaryApplied,
     DrainQueuedRun,
     ClassifyExternalEnvelope,
+    ClassifyPeerResponseReply,
     ClassifyPlainEvent,
     EnsureDrainRunning,
 }
@@ -5204,6 +12152,13 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnBoundaryApplied {
         pub run_id: RunId,
+        pub boundary_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBoundaryContextReceiptResolved {
+        pub run_id: RunId,
+        pub input_id: String,
+        pub boundary: AdmissionRunApplyBoundary,
         pub boundary_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5243,6 +12198,45 @@ pub mod effects {
         pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeCompletionResultResolved {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub runtime_generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub run_id: Option<RunId>,
+        pub result_class: RuntimeCompletionResultClass,
+        pub cleanup_outcome: RuntimeCompletionObservedOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeCompletionCleanupResolved {
+        pub session_id: SessionId,
+        pub action: RuntimeCompletionCleanupAction,
+        pub pre_admission_action: RuntimeCompletionPreAdmissionAction,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeCompletionWaitFailureResolved {
+        pub session_id: SessionId,
+        pub failure: RuntimeCompletionWaitFailureObservation,
+        pub pre_admission_action: RuntimeCompletionPreAdmissionAction,
+        pub public_error_class: RuntimeCompletionWaitFailurePublicErrorClass,
+        pub public_reason: RuntimeCompletionWaitFailurePublicReason,
+        pub resumable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeOpsLifecycleDurabilityResolved {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub action: RuntimeOpsLifecycleDurabilityAction,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UserInterruptPublicResultResolved {
+        pub result: UserInterruptPublicResultKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ModelRoutingStatusChanged {
         pub topology_epoch: u64,
     }
@@ -5272,6 +12266,12 @@ pub mod effects {
         pub phase: RoutingImageOperationPhase,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ImageOperationTerminalClassified {
+        pub operation_id: String,
+        pub terminal: RoutingImageTerminal,
+        pub provider_text: RoutingProviderTextDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ImageOperationDenied {
         pub operation_id: String,
         pub reason: RoutingDenialReason,
@@ -5295,6 +12295,98 @@ pub mod effects {
     pub struct InitiateRecycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct IngressAccepted {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmissionResolved {
+        pub input_id: String,
+        pub policy_version: u64,
+        pub policy_apply_mode: AdmissionPolicyApplyMode,
+        pub policy_wake_mode: AdmissionPolicyWakeMode,
+        pub policy_queue_mode: AdmissionPolicyQueueMode,
+        pub policy_consume_point: AdmissionPolicyConsumePoint,
+        pub policy_drain_policy: AdmissionPolicyDrainPolicy,
+        pub policy_routing_disposition: AdmissionRoutingDisposition,
+        pub lane: InputLane,
+        pub plan: AdmissionPlanKind,
+        pub queue_action: AdmissionQueueActionKind,
+        pub existing_action: AdmissionExistingQueuedActionKind,
+        pub existing_input_id: Option<String>,
+        pub requires_active_pre_admission: bool,
+        pub runtime_boundary: AdmissionRunApplyBoundary,
+        pub runtime_execution_kind: AdmissionRuntimeExecutionKind,
+        pub runtime_peer_response_terminal_apply_intent:
+            Option<AdmissionPeerResponseTerminalApplyIntent>,
+        pub record_transcript: bool,
+        pub request_immediate_processing: bool,
+        pub interrupt_yielding: bool,
+        pub wake_if_idle: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmissionValidationResolved {
+        pub input_id: String,
+        pub result: AdmissionValidationResultKind,
+        pub reject_reason: Option<AdmissionRejectReasonKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmissionIdempotencyResolved {
+        pub input_id: String,
+        pub result: AdmissionIdempotencyResultKind,
+        pub existing_input_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoveredInputLifecycleNormalized {
+        pub input_id: String,
+        pub phase: InputPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub recovered: bool,
+        pub abandoned: bool,
+        pub requeued: bool,
+        pub history_reason: Option<RecoveredInputNormalizationReasonKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoveredInputDurabilityClassified {
+        pub input_id: String,
+        pub disposition: RecoveredInputRecoveryDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputPublicLifecycleResolved {
+        pub input_id: String,
+        pub phase: InputPublicLifecycleState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputPublicTerminalOutcomeResolved {
+        pub input_id: String,
+        pub terminal_outcome: Option<InputPublicTerminalOutcome>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InputBehavioralTerminalityResolved {
+        pub input_id: String,
+        pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StoredInputStateSeedAuthorized {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLifecycleStateClassified {
+        pub state: RuntimeLifecycleObservedState,
+        pub terminality: RuntimeLifecycleTerminality,
+        pub input_admission: RuntimeInputAdmission,
+        pub queue_admission: RuntimeQueueAdmission,
+        pub prepare_admission: RuntimePrepareAdmission,
+        pub ingress_admission: RuntimeIngressAdmission,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLifecycleDurabilityClassified {
+        pub state: RuntimeLifecycleObservedState,
+        pub durable_state: RuntimeLifecycleObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeLoopQueueAdmissionClassified {
+        pub state: RuntimeLifecycleObservedState,
+        pub current_run_bound: bool,
+        pub queue_admission: RuntimeQueueAdmission,
+        pub run_binding: RuntimeLoopRunBinding,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
@@ -5334,8 +12426,60 @@ pub mod effects {
         pub operation_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DiscardRecoveredOperationRecord {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationTerminal {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationNonTerminal {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationPublicResultClassified {
+        pub operation_id: String,
+        pub result: OperationPublicResultClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationCompletionFeedClassified {
+        pub operation_id: String,
+        pub result: OperationCompletionFeedClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationCompletionWakeClassified {
+        pub operation_id: String,
+        pub result: OperationCompletionWakeClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationDurabilityClassified {
+        pub operation_id: String,
+        pub result: OperationDurabilityClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationTransitionIdempotentSuccess {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+        pub status: OperationStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperationTransitionNotIdempotent {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+        pub status: OperationStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EvictCompletedRecord {
         pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompletionFeedEntryRecovered {
+        pub operation_id: String,
+        pub seq: u64,
+        pub kind: OperationKind,
+        pub terminal_outcome: OperationTerminalOutcomeKind,
+        pub terminal_payload: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompletionProduced {
@@ -5344,12 +12488,256 @@ pub mod effects {
         pub kind: OperationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AgentCompletionCursorAdvanced {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeObservedCompletionCursorAdvanced {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeInjectedCompletionCursorAdvanced {
+        pub cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OpRegistrationAdmissionResolved {
+        pub operation_id: String,
+        pub result: OpRegistrationAdmissionResultKind,
+        pub reject_reason: Option<OpRegistrationRejectReasonKind>,
+        pub max_concurrent_limit: Option<u64>,
+        pub active_op_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OpLifecycleTransitionRejected {
+        pub operation_id: String,
+        pub action: OpLifecycleActionKind,
+        pub reason: OpLifecycleRejectReasonKind,
+        pub status: Option<OperationStatus>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WaitAllAdmissionResolved {
+        pub wait_request_id: WaitRequestId,
+        pub result: WaitAllAdmissionResultKind,
+        pub reject_reason: Option<WaitAllRejectReasonKind>,
+        pub rejected_operation_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WaitAllSatisfied {
         pub wait_request_id: WaitRequestId,
+        pub run_id: RunId,
         pub operation_ids: std::collections::BTreeSet<OperationId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CollectCompletedResult {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAdmissionAccepted {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAdmissionDuplicate {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestNotFound {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestTerminalPublish {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestTerminalRespondWithoutPublish {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCancelled {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyCancelled {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyPublished {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyCompleted {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestPublished {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestAlreadyTerminal {
+        pub request_key: String,
+        pub current: SurfaceRequestPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCancelledBeforePublish {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCompleted {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestSupersededByCancel {
+        pub request_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveRefreshResultResolved {
+        pub channel_id: String,
+        pub status: LiveRefreshPublicStatus,
+        pub refresh_enqueued: bool,
+        pub sequence: u64,
+        pub queue_acceptance_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCloseResultResolved {
+        pub channel_id: String,
+        pub status: LiveClosePublicStatus,
+        pub closed: bool,
+        pub sequence: u64,
+        pub close_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCommandResultResolved {
+        pub channel_id: String,
+        pub command: LiveCommandPublicKind,
+        pub accepted: bool,
+        pub sequence: u64,
+        pub command_acceptance_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCommandRejectionResolved {
+        pub channel_id: String,
+        pub command: LiveCommandPublicKind,
+        pub rejection: LiveCommandRejectionReason,
+        pub public_error_class: LiveCommandRejectionPublicErrorClass,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveChannelRequestRejectionResolved {
+        pub channel_id: String,
+        pub request: LiveChannelRequestPublicKind,
+        pub rejection: LiveChannelRequestRejectionReason,
+        pub public_error_class: LiveChannelRequestRejectionPublicErrorClass,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveWebrtcTokenIssued {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub expires_at_ms: u64,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveWebrtcAnswerAdmissionResolved {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub admitted: bool,
+        pub rejection: Option<LiveWebrtcAnswerAdmissionRejection>,
+        pub public_error_class: Option<LiveChannelRequestRejectionPublicErrorClass>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveWebrtcAnswerResultResolved {
+        pub channel_id: String,
+        pub status: LiveWebrtcAnswerPublicStatus,
+        pub answered: bool,
+        pub sequence: u64,
+        pub answer_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveWebsocketTokenIssued {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub expires_at_ms: u64,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveWebsocketTokenAdmissionResolved {
+        pub session_id: String,
+        pub channel_id: String,
+        pub token: String,
+        pub admitted: bool,
+        pub rejection: Option<LiveWebsocketTokenAdmissionRejection>,
+        pub public_error_class: Option<LiveWebsocketTokenAdmissionPublicErrorClass>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveOpenAdmissionResolved {
+        pub session_id: String,
+        pub channel_id: String,
+        pub bound_llm_identity: Option<SessionLlmIdentity>,
+        pub admitted: bool,
+        pub rejection: Option<LiveOpenAdmissionRejection>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveOpenAdmissionAbandoned {
+        pub session_id: String,
+        pub channel_id: String,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventStreamOpenResolved {
+        pub stream_id: String,
+        pub session_id: String,
+        pub opened: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventStreamTerminalResolved {
+        pub stream_id: String,
+        pub session_id: String,
+        pub reason: RpcEventStreamTerminalReason,
+        pub error_code: Option<RpcEventStreamTerminalErrorCode>,
+        pub detail: Option<String>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionEventStreamCloseResolved {
+        pub stream_id: String,
+        pub closed: bool,
+        pub already_closed: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobEventStreamOpenResolved {
+        pub stream_id: String,
+        pub opened: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobEventStreamTerminalResolved {
+        pub stream_id: String,
+        pub reason: RpcEventStreamTerminalReason,
+        pub error_code: Option<RpcEventStreamTerminalErrorCode>,
+        pub detail: Option<String>,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MobEventStreamCloseResolved {
+        pub stream_id: String,
+        pub closed: bool,
+        pub already_closed: bool,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveChannelStatusResolved {
+        pub channel_id: String,
+        pub status: LiveChannelPublicStatus,
+        pub sequence: u64,
+        pub status_observation_sequence: u64,
+        pub degradation_reason: Option<LiveChannelDegradationReason>,
+        pub degradation_detail: Option<String>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5361,6 +12749,20 @@ pub mod effects {
         pub lifecycle_peer: Option<String>,
         pub request_id: Option<String>,
         pub response_terminality: Option<PeerIngressResponseTerminality>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerResponseReplyClassified {
+        pub response_terminality: PeerIngressResponseTerminality,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerIngressReceiveResolved {
+        pub outcome: PeerIngressReceiveOutcomeClass,
+        pub admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>,
+        pub phase: PeerIngressAuthorityPhaseClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerIngressDequeueResolved {
+        pub phase: PeerIngressAuthorityPhaseClass,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrainTask {}
@@ -5394,6 +12796,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishSupervisorTrustEdge {
+        pub local_endpoint: Option<PeerEndpoint>,
         pub peer_id: String,
         pub name: String,
         pub address: String,
@@ -5402,6 +12805,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RevokeSupervisorTrustEdge {
+        pub local_endpoint: Option<PeerEndpoint>,
         pub peer_id: String,
         pub epoch: u64,
     }
@@ -5446,12 +12850,46 @@ pub mod effects {
         pub endpoint: Option<PeerEndpoint>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorBindAdmissionResolved {
+        pub result: SupervisorBindAdmissionResultKind,
+        pub rejection: Option<SupervisorBindRejectionKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorAuthorizeAdmissionResolved {
+        pub result: SupervisorAuthorizeAdmissionResultKind,
+        pub rejection: Option<SupervisorAuthorizeRejectionKind>,
+        pub previous_name: Option<String>,
+        pub previous_peer_id: Option<String>,
+        pub previous_address: Option<String>,
+        pub previous_signing_public_key: Option<String>,
+        pub previous_epoch: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorBridgeCommandAdmissionResolved {
+        pub result: SupervisorBridgeCommandAdmissionResultKind,
+        pub rejection: Option<SupervisorBridgeCommandRejectionKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionLlmReconfigurePlanResolved {
+        pub previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+        pub current_capability_surface: Option<SessionLlmCapabilitySurface>,
+        pub capability_changed: bool,
+        pub previous_capability_base_filter: ToolFilter,
+        pub current_capability_base_filter: ToolFilter,
+        pub committed_visible_set_changed: bool,
+        pub revision_bumped: bool,
+        pub active_visibility_revision: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerProjectionChanged {
         pub peer_projection_epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommsTrustReconcileRequested {
+        pub local_endpoint: Option<PeerEndpoint>,
         pub peer_projection_epoch: u64,
+        pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
+        pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     }
 }
 
@@ -5462,6 +12900,7 @@ pub enum Effect {
     RuntimeDestroyed(effects::RuntimeDestroyed),
     TurnRunStarted(effects::TurnRunStarted),
     TurnBoundaryApplied(effects::TurnBoundaryApplied),
+    LiveBoundaryContextReceiptResolved(effects::LiveBoundaryContextReceiptResolved),
     TurnRunCompleted(effects::TurnRunCompleted),
     TurnRunFailed(effects::TurnRunFailed),
     TurnRunCancelled(effects::TurnRunCancelled),
@@ -5471,12 +12910,18 @@ pub enum Effect {
     CommittedVisibleSetPublished(effects::CommittedVisibleSetPublished),
     RuntimeNotice(effects::RuntimeNotice),
     RuntimeEffectFact(effects::RuntimeEffectFact),
+    RuntimeCompletionResultResolved(effects::RuntimeCompletionResultResolved),
+    RuntimeCompletionCleanupResolved(effects::RuntimeCompletionCleanupResolved),
+    RuntimeCompletionWaitFailureResolved(effects::RuntimeCompletionWaitFailureResolved),
+    RuntimeOpsLifecycleDurabilityResolved(effects::RuntimeOpsLifecycleDurabilityResolved),
+    UserInterruptPublicResultResolved(effects::UserInterruptPublicResultResolved),
     ModelRoutingStatusChanged(effects::ModelRoutingStatusChanged),
     SwitchTurnDenied(effects::SwitchTurnDenied),
     SwitchTurnPersistentReconfigureRequested(effects::SwitchTurnPersistentReconfigureRequested),
     SwitchTurnFiniteOverrideActivated(effects::SwitchTurnFiniteOverrideActivated),
     SwitchTurnFiniteOverrideRestored(effects::SwitchTurnFiniteOverrideRestored),
     ImageOperationPhaseChanged(effects::ImageOperationPhaseChanged),
+    ImageOperationTerminalClassified(effects::ImageOperationTerminalClassified),
     ImageOperationDenied(effects::ImageOperationDenied),
     ModelRoutingApprovalTerminalized(effects::ModelRoutingApprovalTerminalized),
     ResolveAdmission(effects::ResolveAdmission),
@@ -5486,6 +12931,18 @@ pub enum Effect {
     ApplyControlPlaneCommand(effects::ApplyControlPlaneCommand),
     InitiateRecycle(effects::InitiateRecycle),
     IngressAccepted(effects::IngressAccepted),
+    AdmissionResolved(effects::AdmissionResolved),
+    AdmissionValidationResolved(effects::AdmissionValidationResolved),
+    AdmissionIdempotencyResolved(effects::AdmissionIdempotencyResolved),
+    RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
+    RecoveredInputDurabilityClassified(effects::RecoveredInputDurabilityClassified),
+    InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
+    InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
+    InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
+    StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
+    RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
+    RuntimeLifecycleDurabilityClassified(effects::RuntimeLifecycleDurabilityClassified),
+    RuntimeLoopQueueAdmissionClassified(effects::RuntimeLoopQueueAdmissionClassified),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -5500,12 +12957,66 @@ pub enum Effect {
     NotifyOpWatcher(effects::NotifyOpWatcher),
     ExposeOperationPeer(effects::ExposeOperationPeer),
     RetainTerminalRecord(effects::RetainTerminalRecord),
+    DiscardRecoveredOperationRecord(effects::DiscardRecoveredOperationRecord),
+    OperationTerminal(effects::OperationTerminal),
+    OperationNonTerminal(effects::OperationNonTerminal),
+    OperationPublicResultClassified(effects::OperationPublicResultClassified),
+    OperationCompletionFeedClassified(effects::OperationCompletionFeedClassified),
+    OperationCompletionWakeClassified(effects::OperationCompletionWakeClassified),
+    OperationDurabilityClassified(effects::OperationDurabilityClassified),
+    OperationTransitionIdempotentSuccess(effects::OperationTransitionIdempotentSuccess),
+    OperationTransitionNotIdempotent(effects::OperationTransitionNotIdempotent),
     EvictCompletedRecord(effects::EvictCompletedRecord),
+    CompletionFeedEntryRecovered(effects::CompletionFeedEntryRecovered),
     CompletionProduced(effects::CompletionProduced),
+    AgentCompletionCursorAdvanced(effects::AgentCompletionCursorAdvanced),
+    RuntimeObservedCompletionCursorAdvanced(effects::RuntimeObservedCompletionCursorAdvanced),
+    RuntimeInjectedCompletionCursorAdvanced(effects::RuntimeInjectedCompletionCursorAdvanced),
+    OpRegistrationAdmissionResolved(effects::OpRegistrationAdmissionResolved),
+    OpLifecycleTransitionRejected(effects::OpLifecycleTransitionRejected),
+    WaitAllAdmissionResolved(effects::WaitAllAdmissionResolved),
     WaitAllSatisfied(effects::WaitAllSatisfied),
     CollectCompletedResult(effects::CollectCompletedResult),
+    SurfaceRequestAdmissionAccepted(effects::SurfaceRequestAdmissionAccepted),
+    SurfaceRequestAdmissionDuplicate(effects::SurfaceRequestAdmissionDuplicate),
+    SurfaceRequestNotFound(effects::SurfaceRequestNotFound),
+    SurfaceRequestTerminalPublish(effects::SurfaceRequestTerminalPublish),
+    SurfaceRequestTerminalRespondWithoutPublish(
+        effects::SurfaceRequestTerminalRespondWithoutPublish,
+    ),
+    SurfaceRequestCancelled(effects::SurfaceRequestCancelled),
+    SurfaceRequestAlreadyCancelled(effects::SurfaceRequestAlreadyCancelled),
+    SurfaceRequestAlreadyPublished(effects::SurfaceRequestAlreadyPublished),
+    SurfaceRequestAlreadyCompleted(effects::SurfaceRequestAlreadyCompleted),
+    SurfaceRequestPublished(effects::SurfaceRequestPublished),
+    SurfaceRequestAlreadyTerminal(effects::SurfaceRequestAlreadyTerminal),
+    SurfaceRequestCancelledBeforePublish(effects::SurfaceRequestCancelledBeforePublish),
+    SurfaceRequestCompleted(effects::SurfaceRequestCompleted),
+    SurfaceRequestSupersededByCancel(effects::SurfaceRequestSupersededByCancel),
+    LiveRefreshResultResolved(effects::LiveRefreshResultResolved),
+    LiveCloseResultResolved(effects::LiveCloseResultResolved),
+    LiveCommandResultResolved(effects::LiveCommandResultResolved),
+    LiveCommandRejectionResolved(effects::LiveCommandRejectionResolved),
+    LiveChannelRequestRejectionResolved(effects::LiveChannelRequestRejectionResolved),
+    LiveWebrtcTokenIssued(effects::LiveWebrtcTokenIssued),
+    LiveWebrtcAnswerAdmissionResolved(effects::LiveWebrtcAnswerAdmissionResolved),
+    LiveWebrtcAnswerResultResolved(effects::LiveWebrtcAnswerResultResolved),
+    LiveWebsocketTokenIssued(effects::LiveWebsocketTokenIssued),
+    LiveWebsocketTokenAdmissionResolved(effects::LiveWebsocketTokenAdmissionResolved),
+    LiveOpenAdmissionResolved(effects::LiveOpenAdmissionResolved),
+    LiveOpenAdmissionAbandoned(effects::LiveOpenAdmissionAbandoned),
+    SessionEventStreamOpenResolved(effects::SessionEventStreamOpenResolved),
+    SessionEventStreamTerminalResolved(effects::SessionEventStreamTerminalResolved),
+    SessionEventStreamCloseResolved(effects::SessionEventStreamCloseResolved),
+    MobEventStreamOpenResolved(effects::MobEventStreamOpenResolved),
+    MobEventStreamTerminalResolved(effects::MobEventStreamTerminalResolved),
+    MobEventStreamCloseResolved(effects::MobEventStreamCloseResolved),
+    LiveChannelStatusResolved(effects::LiveChannelStatusResolved),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
     PeerIngressClassified(effects::PeerIngressClassified),
+    PeerResponseReplyClassified(effects::PeerResponseReplyClassified),
+    PeerIngressReceiveResolved(effects::PeerIngressReceiveResolved),
+    PeerIngressDequeueResolved(effects::PeerIngressDequeueResolved),
     SpawnDrainTask(effects::SpawnDrainTask),
     ScheduleSurfaceCompletion(effects::ScheduleSurfaceCompletion),
     RefreshVisibleSurfaceSet(effects::RefreshVisibleSurfaceSet),
@@ -5523,6 +13034,10 @@ pub enum Effect {
     InteractionStreamStateChanged(effects::InteractionStreamStateChanged),
     InteractionStreamCleanup(effects::InteractionStreamCleanup),
     LocalEndpointChanged(effects::LocalEndpointChanged),
+    SupervisorBindAdmissionResolved(effects::SupervisorBindAdmissionResolved),
+    SupervisorAuthorizeAdmissionResolved(effects::SupervisorAuthorizeAdmissionResolved),
+    SupervisorBridgeCommandAdmissionResolved(effects::SupervisorBridgeCommandAdmissionResolved),
+    SessionLlmReconfigurePlanResolved(effects::SessionLlmReconfigurePlanResolved),
     PeerProjectionChanged(effects::PeerProjectionChanged),
     CommsTrustReconcileRequested(effects::CommsTrustReconcileRequested),
 }
@@ -5533,6 +13048,7 @@ pub enum EffectKind {
     RuntimeDestroyed,
     TurnRunStarted,
     TurnBoundaryApplied,
+    LiveBoundaryContextReceiptResolved,
     TurnRunCompleted,
     TurnRunFailed,
     TurnRunCancelled,
@@ -5542,12 +13058,18 @@ pub enum EffectKind {
     CommittedVisibleSetPublished,
     RuntimeNotice,
     RuntimeEffectFact,
+    RuntimeCompletionResultResolved,
+    RuntimeCompletionCleanupResolved,
+    RuntimeCompletionWaitFailureResolved,
+    RuntimeOpsLifecycleDurabilityResolved,
+    UserInterruptPublicResultResolved,
     ModelRoutingStatusChanged,
     SwitchTurnDenied,
     SwitchTurnPersistentReconfigureRequested,
     SwitchTurnFiniteOverrideActivated,
     SwitchTurnFiniteOverrideRestored,
     ImageOperationPhaseChanged,
+    ImageOperationTerminalClassified,
     ImageOperationDenied,
     ModelRoutingApprovalTerminalized,
     ResolveAdmission,
@@ -5557,6 +13079,18 @@ pub enum EffectKind {
     ApplyControlPlaneCommand,
     InitiateRecycle,
     IngressAccepted,
+    AdmissionResolved,
+    AdmissionValidationResolved,
+    AdmissionIdempotencyResolved,
+    RecoveredInputLifecycleNormalized,
+    RecoveredInputDurabilityClassified,
+    InputPublicLifecycleResolved,
+    InputPublicTerminalOutcomeResolved,
+    InputBehavioralTerminalityResolved,
+    StoredInputStateSeedAuthorized,
+    RuntimeLifecycleStateClassified,
+    RuntimeLifecycleDurabilityClassified,
+    RuntimeLoopQueueAdmissionClassified,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -5571,12 +13105,64 @@ pub enum EffectKind {
     NotifyOpWatcher,
     ExposeOperationPeer,
     RetainTerminalRecord,
+    DiscardRecoveredOperationRecord,
+    OperationTerminal,
+    OperationNonTerminal,
+    OperationPublicResultClassified,
+    OperationCompletionFeedClassified,
+    OperationCompletionWakeClassified,
+    OperationDurabilityClassified,
+    OperationTransitionIdempotentSuccess,
+    OperationTransitionNotIdempotent,
     EvictCompletedRecord,
+    CompletionFeedEntryRecovered,
     CompletionProduced,
+    AgentCompletionCursorAdvanced,
+    RuntimeObservedCompletionCursorAdvanced,
+    RuntimeInjectedCompletionCursorAdvanced,
+    OpRegistrationAdmissionResolved,
+    OpLifecycleTransitionRejected,
+    WaitAllAdmissionResolved,
     WaitAllSatisfied,
     CollectCompletedResult,
+    SurfaceRequestAdmissionAccepted,
+    SurfaceRequestAdmissionDuplicate,
+    SurfaceRequestNotFound,
+    SurfaceRequestTerminalPublish,
+    SurfaceRequestTerminalRespondWithoutPublish,
+    SurfaceRequestCancelled,
+    SurfaceRequestAlreadyCancelled,
+    SurfaceRequestAlreadyPublished,
+    SurfaceRequestAlreadyCompleted,
+    SurfaceRequestPublished,
+    SurfaceRequestAlreadyTerminal,
+    SurfaceRequestCancelledBeforePublish,
+    SurfaceRequestCompleted,
+    SurfaceRequestSupersededByCancel,
+    LiveRefreshResultResolved,
+    LiveCloseResultResolved,
+    LiveCommandResultResolved,
+    LiveCommandRejectionResolved,
+    LiveChannelRequestRejectionResolved,
+    LiveWebrtcTokenIssued,
+    LiveWebrtcAnswerAdmissionResolved,
+    LiveWebrtcAnswerResultResolved,
+    LiveWebsocketTokenIssued,
+    LiveWebsocketTokenAdmissionResolved,
+    LiveOpenAdmissionResolved,
+    LiveOpenAdmissionAbandoned,
+    SessionEventStreamOpenResolved,
+    SessionEventStreamTerminalResolved,
+    SessionEventStreamCloseResolved,
+    MobEventStreamOpenResolved,
+    MobEventStreamTerminalResolved,
+    MobEventStreamCloseResolved,
+    LiveChannelStatusResolved,
     EnqueueClassifiedEntry,
     PeerIngressClassified,
+    PeerResponseReplyClassified,
+    PeerIngressReceiveResolved,
+    PeerIngressDequeueResolved,
     SpawnDrainTask,
     ScheduleSurfaceCompletion,
     RefreshVisibleSurfaceSet,
@@ -5594,6 +13180,10 @@ pub enum EffectKind {
     InteractionStreamStateChanged,
     InteractionStreamCleanup,
     LocalEndpointChanged,
+    SupervisorBindAdmissionResolved,
+    SupervisorAuthorizeAdmissionResolved,
+    SupervisorBridgeCommandAdmissionResolved,
+    SessionLlmReconfigurePlanResolved,
     PeerProjectionChanged,
     CommsTrustReconcileRequested,
 }
@@ -5607,13 +13197,47 @@ pub enum TransitionId {
     RegisterSessionRunning,
     RegisterSessionRetired,
     RegisterSessionStopped,
+    StageDeferredSession,
+    UpdateDeferredSessionKeepAlive,
+    BeginDeferredSessionPromotion,
+    UpdateDeferredSessionLlmIdentity,
+    AuthorizeDeferredSessionSystemContextAppendStaged,
+    AuthorizeDeferredSessionSystemContextAppendPromoting,
+    AuthorizeDeferredSessionMachineArchivedResume,
+    AbandonDeferredSessionPromotion,
+    FinishDeferredSessionPromotion,
+    BeginDeferredSessionArchive,
+    RestoreDeferredSessionArchive,
+    FinishDeferredSessionArchive,
+    DropDeferredSessionStaged,
+    DropDeferredSessionPromoting,
+    DropDeferredSessionClosing,
+    ResolveMobOperatorCreateAuthority,
+    ResolveMobOperatorCreateAuthorityAbsent,
+    RestoreMobOperatorAuthority,
+    SetMobOperatorProfileMutation,
+    SetMobOperatorCreateAuthority,
+    GrantMobOperatorManageMob,
+    SetMobOperatorSpawnProfilesInMob,
     UnregisterSessionIdle,
     UnregisterSessionAttached,
     UnregisterSessionRunning,
     UnregisterSessionRetired,
     UnregisterSessionStopped,
+    ResolveRuntimeOpsLifecycleDurabilityIdle,
+    ResolveRuntimeOpsLifecycleDurabilityAttached,
+    ResolveRuntimeOpsLifecycleDurabilityRunning,
+    ResolveRuntimeOpsLifecycleDurabilityRetired,
+    ResolveRuntimeOpsLifecycleDurabilityStopped,
+    HydrateSessionLlmStateIdle,
+    HydrateSessionLlmStateAttached,
+    HydrateSessionLlmStateRunning,
     ReconfigureSessionLlmIdentityAttached,
     ReconfigureSessionLlmIdentityRunning,
+    ReconfigureSessionLlmIdentityIdle,
+    ClearSessionLlmStateIdle,
+    ClearSessionLlmStateAttached,
+    ClearSessionLlmStateRunning,
     SetModelRoutingBaselineIdle,
     SetModelRoutingBaselineAttached,
     SetModelRoutingBaselineRunning,
@@ -5664,9 +13288,36 @@ pub enum TransitionId {
     BeginImageOperationAcceptedIdle,
     BeginImageOperationAcceptedAttached,
     BeginImageOperationAcceptedRunning,
+    DenyImageOperationPlanIdle,
+    DenyImageOperationPlanAttached,
+    DenyImageOperationPlanRunning,
     ActivateImageOperationOverrideIdle,
     ActivateImageOperationOverrideAttached,
     ActivateImageOperationOverrideRunning,
+    ClassifyImageOperationTerminalGeneratedIdle,
+    ClassifyImageOperationTerminalGeneratedAttached,
+    ClassifyImageOperationTerminalGeneratedRunning,
+    ClassifyImageOperationTerminalEmptyIdle,
+    ClassifyImageOperationTerminalEmptyAttached,
+    ClassifyImageOperationTerminalEmptyRunning,
+    ClassifyImageOperationTerminalMechanicalFailureIdle,
+    ClassifyImageOperationTerminalMechanicalFailureAttached,
+    ClassifyImageOperationTerminalMechanicalFailureRunning,
+    ClassifyImageOperationTerminalTimeoutIdle,
+    ClassifyImageOperationTerminalTimeoutAttached,
+    ClassifyImageOperationTerminalTimeoutRunning,
+    ClassifyImageOperationTerminalCancelledIdle,
+    ClassifyImageOperationTerminalCancelledAttached,
+    ClassifyImageOperationTerminalCancelledRunning,
+    ClassifyImageOperationTerminalSafetyFilteredIdle,
+    ClassifyImageOperationTerminalSafetyFilteredAttached,
+    ClassifyImageOperationTerminalSafetyFilteredRunning,
+    ClassifyImageOperationTerminalRefusedIdle,
+    ClassifyImageOperationTerminalRefusedAttached,
+    ClassifyImageOperationTerminalRefusedRunning,
+    ClassifyImageOperationTerminalProviderFailedIdle,
+    ClassifyImageOperationTerminalProviderFailedAttached,
+    ClassifyImageOperationTerminalProviderFailedRunning,
     CompleteImageOperationIdle,
     CompleteImageOperationAttached,
     CompleteImageOperationRunning,
@@ -5686,6 +13337,12 @@ pub enum TransitionId {
     RequestDeferredToolsRunning,
     RequestDeferredToolsRetired,
     RequestDeferredToolsStopped,
+    PrepareBindingsIdempotentInitializing,
+    PrepareBindingsIdempotentIdle,
+    PrepareBindingsIdempotentAttached,
+    PrepareBindingsIdempotentRunning,
+    PrepareBindingsIdempotentRetired,
+    PrepareBindingsIdempotentStopped,
     PrepareBindingsInitializing,
     PrepareBindingsIdle,
     PrepareBindingsAttached,
@@ -5697,6 +13354,66 @@ pub enum TransitionId {
     SetPeerIngressContextRunning,
     SetPeerIngressContextRetired,
     SetPeerIngressContextStopped,
+    ResolvePeerIngressReceiveClosedIdle,
+    ResolvePeerIngressReceiveClosedAttached,
+    ResolvePeerIngressReceiveClosedRunning,
+    ResolvePeerIngressReceiveClosedRetired,
+    ResolvePeerIngressReceiveClosedStopped,
+    ResolvePeerIngressReceiveFullIdle,
+    ResolvePeerIngressReceiveFullAttached,
+    ResolvePeerIngressReceiveFullRunning,
+    ResolvePeerIngressReceiveFullRetired,
+    ResolvePeerIngressReceiveFullStopped,
+    ResolvePeerIngressReceivePlainEventIdle,
+    ResolvePeerIngressReceivePlainEventAttached,
+    ResolvePeerIngressReceivePlainEventRunning,
+    ResolvePeerIngressReceivePlainEventRetired,
+    ResolvePeerIngressReceivePlainEventStopped,
+    ResolvePeerIngressReceiveTrustedIdle,
+    ResolvePeerIngressReceiveTrustedAttached,
+    ResolvePeerIngressReceiveTrustedRunning,
+    ResolvePeerIngressReceiveTrustedRetired,
+    ResolvePeerIngressReceiveTrustedStopped,
+    ResolvePeerIngressReceiveAuthExemptUntrustedIdle,
+    ResolvePeerIngressReceiveAuthExemptUntrustedAttached,
+    ResolvePeerIngressReceiveAuthExemptUntrustedRunning,
+    ResolvePeerIngressReceiveAuthExemptUntrustedRetired,
+    ResolvePeerIngressReceiveAuthExemptUntrustedStopped,
+    ResolvePeerIngressReceiveAuthOpenUntrustedIdle,
+    ResolvePeerIngressReceiveAuthOpenUntrustedAttached,
+    ResolvePeerIngressReceiveAuthOpenUntrustedRunning,
+    ResolvePeerIngressReceiveAuthOpenUntrustedRetired,
+    ResolvePeerIngressReceiveAuthOpenUntrustedStopped,
+    ResolvePeerIngressReceiveUntrustedQueuedDropIdle,
+    ResolvePeerIngressReceiveUntrustedQueuedDropAttached,
+    ResolvePeerIngressReceiveUntrustedQueuedDropRunning,
+    ResolvePeerIngressReceiveUntrustedQueuedDropRetired,
+    ResolvePeerIngressReceiveUntrustedQueuedDropStopped,
+    ResolvePeerIngressReceiveUntrustedEmptyDropIdle,
+    ResolvePeerIngressReceiveUntrustedEmptyDropAttached,
+    ResolvePeerIngressReceiveUntrustedEmptyDropRunning,
+    ResolvePeerIngressReceiveUntrustedEmptyDropRetired,
+    ResolvePeerIngressReceiveUntrustedEmptyDropStopped,
+    ResolvePeerIngressDequeuePlainEventIdle,
+    ResolvePeerIngressDequeuePlainEventAttached,
+    ResolvePeerIngressDequeuePlainEventRunning,
+    ResolvePeerIngressDequeuePlainEventRetired,
+    ResolvePeerIngressDequeuePlainEventStopped,
+    ResolvePeerIngressDequeueAuthExemptExternalIdle,
+    ResolvePeerIngressDequeueAuthExemptExternalAttached,
+    ResolvePeerIngressDequeueAuthExemptExternalRunning,
+    ResolvePeerIngressDequeueAuthExemptExternalRetired,
+    ResolvePeerIngressDequeueAuthExemptExternalStopped,
+    ResolvePeerIngressDequeueRequiredRemainingIdle,
+    ResolvePeerIngressDequeueRequiredRemainingAttached,
+    ResolvePeerIngressDequeueRequiredRemainingRunning,
+    ResolvePeerIngressDequeueRequiredRemainingRetired,
+    ResolvePeerIngressDequeueRequiredRemainingStopped,
+    ResolvePeerIngressDequeueRequiredEmptyIdle,
+    ResolvePeerIngressDequeueRequiredEmptyAttached,
+    ResolvePeerIngressDequeueRequiredEmptyRunning,
+    ResolvePeerIngressDequeueRequiredEmptyRetired,
+    ResolvePeerIngressDequeueRequiredEmptyStopped,
     NotifyDrainExitedIdle,
     NotifyDrainExitedAttached,
     NotifyDrainExitedRunning,
@@ -5704,6 +13421,42 @@ pub enum TransitionId {
     NotifyDrainExitedStopped,
     InterruptCurrentRunAttached,
     InterruptCurrentRun,
+    ResolveUserInterruptPublicResultAcceptedInitializing,
+    ResolveUserInterruptPublicResultAcceptedIdle,
+    ResolveUserInterruptPublicResultAcceptedAttached,
+    ResolveUserInterruptPublicResultAcceptedRunning,
+    ResolveUserInterruptPublicResultAcceptedRetired,
+    ResolveUserInterruptPublicResultAcceptedStopped,
+    ResolveUserInterruptPublicResultNoopInitializing,
+    ResolveUserInterruptPublicResultNoopIdle,
+    ResolveUserInterruptPublicResultNoopAttached,
+    ResolveUserInterruptPublicResultNoopRunning,
+    ResolveUserInterruptPublicResultNoopRetired,
+    ResolveUserInterruptPublicResultNoopStopped,
+    ResolveUserInterruptPublicResultDestroyedPresentInitializing,
+    ResolveUserInterruptPublicResultDestroyedPresentIdle,
+    ResolveUserInterruptPublicResultDestroyedPresentAttached,
+    ResolveUserInterruptPublicResultDestroyedPresentRunning,
+    ResolveUserInterruptPublicResultDestroyedPresentRetired,
+    ResolveUserInterruptPublicResultDestroyedPresentStopped,
+    ResolveUserInterruptPublicResultDestroyedMissingInitializing,
+    ResolveUserInterruptPublicResultDestroyedMissingIdle,
+    ResolveUserInterruptPublicResultDestroyedMissingAttached,
+    ResolveUserInterruptPublicResultDestroyedMissingRunning,
+    ResolveUserInterruptPublicResultDestroyedMissingRetired,
+    ResolveUserInterruptPublicResultDestroyedMissingStopped,
+    ResolveUserInterruptPublicResultPromotingConflictInitializing,
+    ResolveUserInterruptPublicResultPromotingConflictIdle,
+    ResolveUserInterruptPublicResultPromotingConflictAttached,
+    ResolveUserInterruptPublicResultPromotingConflictRunning,
+    ResolveUserInterruptPublicResultPromotingConflictRetired,
+    ResolveUserInterruptPublicResultPromotingConflictStopped,
+    ResolveUserInterruptPublicResultNotInterruptibleConflictInitializing,
+    ResolveUserInterruptPublicResultNotInterruptibleConflictIdle,
+    ResolveUserInterruptPublicResultNotInterruptibleConflictAttached,
+    ResolveUserInterruptPublicResultNotInterruptibleConflictRunning,
+    ResolveUserInterruptPublicResultNotInterruptibleConflictRetired,
+    ResolveUserInterruptPublicResultNotInterruptibleConflictStopped,
     CancelAfterBoundaryAttached,
     CancelAfterBoundary,
     BoundaryAppliedPublish,
@@ -5713,7 +13466,9 @@ pub enum TransitionId {
     PublishCommittedVisibleSetRetired,
     PublishCommittedVisibleSetStopped,
     RetireRequestedFromIdle,
+    RetireRequestedFromIdleUnbound,
     RetireAlreadyRetired,
+    RetireAlreadyRetiredUnbound,
     Reset,
     StopRuntimeExecutorInitializing,
     StopRuntimeExecutorIdle,
@@ -5725,6 +13480,115 @@ pub enum TransitionId {
     RuntimeExecutorExitedFromIdle,
     RuntimeExecutorExitedFromRetired,
     RuntimeExecutorExitedFromStopped,
+    ResolveRuntimeCompletionResultCompletedInitializing,
+    ResolveRuntimeCompletionResultCompletedIdle,
+    ResolveRuntimeCompletionResultCompletedAttached,
+    ResolveRuntimeCompletionResultCompletedRunning,
+    ResolveRuntimeCompletionResultCompletedRetired,
+    ResolveRuntimeCompletionResultCompletedStopped,
+    ResolveRuntimeCompletionResultWithoutResultInitializing,
+    ResolveRuntimeCompletionResultWithoutResultIdle,
+    ResolveRuntimeCompletionResultWithoutResultAttached,
+    ResolveRuntimeCompletionResultWithoutResultRunning,
+    ResolveRuntimeCompletionResultWithoutResultRetired,
+    ResolveRuntimeCompletionResultWithoutResultStopped,
+    ResolveRuntimeCompletionResultCallbackPendingInitializing,
+    ResolveRuntimeCompletionResultCallbackPendingIdle,
+    ResolveRuntimeCompletionResultCallbackPendingAttached,
+    ResolveRuntimeCompletionResultCallbackPendingRunning,
+    ResolveRuntimeCompletionResultCallbackPendingRetired,
+    ResolveRuntimeCompletionResultCallbackPendingStopped,
+    ResolveRuntimeCompletionResultCancelledInitializing,
+    ResolveRuntimeCompletionResultCancelledIdle,
+    ResolveRuntimeCompletionResultCancelledAttached,
+    ResolveRuntimeCompletionResultCancelledRunning,
+    ResolveRuntimeCompletionResultCancelledRetired,
+    ResolveRuntimeCompletionResultCancelledStopped,
+    ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing,
+    ResolveRuntimeCompletionResultRuntimeApplyFailedIdle,
+    ResolveRuntimeCompletionResultRuntimeApplyFailedAttached,
+    ResolveRuntimeCompletionResultRuntimeApplyFailedRunning,
+    ResolveRuntimeCompletionResultRuntimeApplyFailedRetired,
+    ResolveRuntimeCompletionResultRuntimeApplyFailedStopped,
+    ResolveRuntimeCompletionResultMachineFailedInitializing,
+    ResolveRuntimeCompletionResultMachineFailedIdle,
+    ResolveRuntimeCompletionResultMachineFailedAttached,
+    ResolveRuntimeCompletionResultMachineFailedRunning,
+    ResolveRuntimeCompletionResultMachineFailedRetired,
+    ResolveRuntimeCompletionResultMachineFailedStopped,
+    ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing,
+    ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle,
+    ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached,
+    ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning,
+    ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired,
+    ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped,
+    ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing,
+    ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle,
+    ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached,
+    ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning,
+    ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired,
+    ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped,
+    ResolveRuntimeCompletionResultRuntimeTerminatedInitializing,
+    ResolveRuntimeCompletionResultRuntimeTerminatedIdle,
+    ResolveRuntimeCompletionResultRuntimeTerminatedAttached,
+    ResolveRuntimeCompletionResultRuntimeTerminatedRunning,
+    ResolveRuntimeCompletionResultRuntimeTerminatedRetired,
+    ResolveRuntimeCompletionResultRuntimeTerminatedStopped,
+    ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed,
+    ResolveRuntimeCompletionCleanupArchivedInitializing,
+    ResolveRuntimeCompletionCleanupArchivedIdle,
+    ResolveRuntimeCompletionCleanupArchivedAttached,
+    ResolveRuntimeCompletionCleanupArchivedRunning,
+    ResolveRuntimeCompletionCleanupArchivedRetired,
+    ResolveRuntimeCompletionCleanupArchivedStopped,
+    ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing,
+    ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle,
+    ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached,
+    ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning,
+    ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired,
+    ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped,
+    ResolveRuntimeCompletionCleanupFinalizationFailedInitializing,
+    ResolveRuntimeCompletionCleanupFinalizationFailedIdle,
+    ResolveRuntimeCompletionCleanupFinalizationFailedAttached,
+    ResolveRuntimeCompletionCleanupFinalizationFailedRunning,
+    ResolveRuntimeCompletionCleanupFinalizationFailedRetired,
+    ResolveRuntimeCompletionCleanupFinalizationFailedStopped,
+    ResolveRuntimeCompletionCleanupRuntimeApplyFailedInitializing,
+    ResolveRuntimeCompletionCleanupRuntimeApplyFailedIdle,
+    ResolveRuntimeCompletionCleanupRuntimeApplyFailedAttached,
+    ResolveRuntimeCompletionCleanupRuntimeApplyFailedRunning,
+    ResolveRuntimeCompletionCleanupRuntimeApplyFailedRetired,
+    ResolveRuntimeCompletionCleanupRuntimeApplyFailedStopped,
+    ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionInitializing,
+    ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionIdle,
+    ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionAttached,
+    ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionRunning,
+    ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionRetired,
+    ResolveRuntimeCompletionCleanupAbandonedWithoutLiveSessionStopped,
+    ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionInitializing,
+    ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionIdle,
+    ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionAttached,
+    ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionRunning,
+    ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionRetired,
+    ResolveRuntimeCompletionCleanupCancelledWithoutLiveSessionStopped,
+    ResolveRuntimeCompletionCleanupRetainInitializing,
+    ResolveRuntimeCompletionCleanupRetainIdle,
+    ResolveRuntimeCompletionCleanupRetainAttached,
+    ResolveRuntimeCompletionCleanupRetainRunning,
+    ResolveRuntimeCompletionCleanupRetainRetired,
+    ResolveRuntimeCompletionCleanupRetainStopped,
+    ResolveRuntimeCompletionWaitFailureChannelClosedInitializing,
+    ResolveRuntimeCompletionWaitFailureChannelClosedIdle,
+    ResolveRuntimeCompletionWaitFailureChannelClosedAttached,
+    ResolveRuntimeCompletionWaitFailureChannelClosedRunning,
+    ResolveRuntimeCompletionWaitFailureChannelClosedRetired,
+    ResolveRuntimeCompletionWaitFailureChannelClosedStopped,
+    ResolveRuntimeCompletionWaitFailureAuthorityUnavailableInitializing,
+    ResolveRuntimeCompletionWaitFailureAuthorityUnavailableIdle,
+    ResolveRuntimeCompletionWaitFailureAuthorityUnavailableAttached,
+    ResolveRuntimeCompletionWaitFailureAuthorityUnavailableRunning,
+    ResolveRuntimeCompletionWaitFailureAuthorityUnavailableRetired,
+    ResolveRuntimeCompletionWaitFailureAuthorityUnavailableStopped,
     DestroyInitializing,
     Destroy,
     RecoverInitializing,
@@ -5732,6 +13596,13 @@ pub enum TransitionId {
     RecoverAttached,
     RecoverRetired,
     RecoverStopped,
+    RecoverRuntimeAuthorityInitializing,
+    RecoverRuntimeAuthorityIdle,
+    RecoverRuntimeAuthorityAttached,
+    RecoverRuntimeAuthorityRunning,
+    RecoverRuntimeAuthorityRetired,
+    RecoverRuntimeAuthorityStopped,
+    RecoverRuntimeAuthorityDestroyed,
     EnsureSessionWithExecutorIdle,
     EnsureSessionWithExecutorAttached,
     EnsureSessionWithExecutorRunning,
@@ -5778,6 +13649,153 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
+    ResolveAdmissionValidationDurabilityRejectedIdle,
+    ResolveAdmissionValidationDurabilityRejectedAttached,
+    ResolveAdmissionValidationDurabilityRejectedRunning,
+    ResolveAdmissionValidationPeerHandlingRejectedIdle,
+    ResolveAdmissionValidationPeerHandlingRejectedAttached,
+    ResolveAdmissionValidationPeerHandlingRejectedRunning,
+    ResolveAdmissionValidationPeerTerminalRejectedIdle,
+    ResolveAdmissionValidationPeerTerminalRejectedAttached,
+    ResolveAdmissionValidationPeerTerminalRejectedRunning,
+    ResolveAdmissionValidationAcceptedIdle,
+    ResolveAdmissionValidationAcceptedAttached,
+    ResolveAdmissionValidationAcceptedRunning,
+    NormalizeRecoveredInputAcceptedQueueInitializing,
+    NormalizeRecoveredInputAcceptedQueueIdle,
+    NormalizeRecoveredInputAcceptedQueueAttached,
+    NormalizeRecoveredInputAcceptedQueueRunning,
+    NormalizeRecoveredInputAcceptedQueueRetired,
+    NormalizeRecoveredInputAcceptedQueueStopped,
+    NormalizeRecoveredInputStagedInitializing,
+    NormalizeRecoveredInputStagedIdle,
+    NormalizeRecoveredInputStagedAttached,
+    NormalizeRecoveredInputStagedRunning,
+    NormalizeRecoveredInputStagedRetired,
+    NormalizeRecoveredInputStagedStopped,
+    NormalizeRecoveredInputAppliedCommittedInitializing,
+    NormalizeRecoveredInputAppliedCommittedIdle,
+    NormalizeRecoveredInputAppliedCommittedAttached,
+    NormalizeRecoveredInputAppliedCommittedRunning,
+    NormalizeRecoveredInputAppliedCommittedRetired,
+    NormalizeRecoveredInputAppliedCommittedStopped,
+    NormalizeRecoveredInputAppliedMissingReceiptInitializing,
+    NormalizeRecoveredInputAppliedMissingReceiptIdle,
+    NormalizeRecoveredInputAppliedMissingReceiptAttached,
+    NormalizeRecoveredInputAppliedMissingReceiptRunning,
+    NormalizeRecoveredInputAppliedMissingReceiptRetired,
+    NormalizeRecoveredInputAppliedMissingReceiptStopped,
+    NormalizeRecoveredInputAppliedUnobservedReceiptInitializing,
+    NormalizeRecoveredInputAppliedUnobservedReceiptIdle,
+    NormalizeRecoveredInputAppliedUnobservedReceiptAttached,
+    NormalizeRecoveredInputAppliedUnobservedReceiptRunning,
+    NormalizeRecoveredInputAppliedUnobservedReceiptRetired,
+    NormalizeRecoveredInputAppliedUnobservedReceiptStopped,
+    NormalizeRecoveredInputQueuedInitializing,
+    NormalizeRecoveredInputQueuedIdle,
+    NormalizeRecoveredInputQueuedAttached,
+    NormalizeRecoveredInputQueuedRunning,
+    NormalizeRecoveredInputQueuedRetired,
+    NormalizeRecoveredInputQueuedStopped,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralIdle,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralAttached,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralRunning,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralRetired,
+    ClassifyRecoveredInputDurabilityDiscardEphemeralStopped,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired,
+    ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped,
+    ResolveInputPublicLifecycleAcceptedIdle,
+    ResolveInputPublicLifecycleQueuedIdle,
+    ResolveInputPublicLifecycleStagedIdle,
+    ResolveInputPublicLifecycleAppliedIdle,
+    ResolveInputPublicLifecycleAppliedPendingConsumptionIdle,
+    ResolveInputPublicLifecycleConsumedIdle,
+    ResolveInputPublicLifecycleSupersededIdle,
+    ResolveInputPublicLifecycleCoalescedIdle,
+    ResolveInputPublicLifecycleAbandonedIdle,
+    ResolveInputPublicTerminalOutcomeNonTerminalIdle,
+    ResolveInputPublicTerminalOutcomeConsumedIdle,
+    ResolveInputPublicTerminalOutcomeSupersededIdle,
+    ResolveInputPublicTerminalOutcomeCoalescedIdle,
+    ResolveInputPublicTerminalOutcomeCancelledIdle,
+    ResolveInputPublicTerminalOutcomeAbandonedIdle,
+    ClassifyInputTerminalityNonTerminalIdle,
+    ClassifyInputTerminalityConsumedIdle,
+    ClassifyInputTerminalitySupersededIdle,
+    ClassifyInputTerminalityCoalescedIdle,
+    ClassifyInputTerminalityAbandonedIdle,
+    AuthorizeStoredInputStateSeedIdle,
+    ClassifyRuntimeLifecycleInitializingIdle,
+    ClassifyRuntimeLifecycleIdleIdle,
+    ClassifyRuntimeLifecycleAttachedIdle,
+    ClassifyRuntimeLifecycleRunningIdle,
+    ClassifyRuntimeLifecycleRetiredIdle,
+    ClassifyRuntimeLifecycleStoppedIdle,
+    ClassifyRuntimeLifecycleDestroyedIdle,
+    ClassifyRuntimeDurabilityInitializingIdle,
+    ClassifyRuntimeDurabilityIdleIdle,
+    ClassifyRuntimeDurabilityAttachedIdle,
+    ClassifyRuntimeDurabilityRunningIdle,
+    ClassifyRuntimeDurabilityRetiredIdle,
+    ClassifyRuntimeDurabilityStoppedIdle,
+    ClassifyRuntimeDurabilityDestroyedIdle,
+    ClassifyRuntimeLoopQueueInitializingIdle,
+    ClassifyRuntimeLoopQueueIdleIdle,
+    ClassifyRuntimeLoopQueueAttachedIdle,
+    ClassifyRuntimeLoopQueueRunningWithoutBindingIdle,
+    ClassifyRuntimeLoopQueueRunningWithBindingIdle,
+    ClassifyRuntimeLoopQueueRetiredIdle,
+    ClassifyRuntimeLoopQueueStoppedIdle,
+    ClassifyRuntimeLoopQueueDestroyedIdle,
+    ResolveAdmissionIdempotencyNoKeyIdle,
+    ResolveAdmissionIdempotencyNoKeyAttached,
+    ResolveAdmissionIdempotencyNoKeyRunning,
+    ResolveAdmissionIdempotencyNewKeyIdle,
+    ResolveAdmissionIdempotencyNewKeyAttached,
+    ResolveAdmissionIdempotencyNewKeyRunning,
+    ResolveAdmissionIdempotencyDuplicateIdle,
+    ResolveAdmissionIdempotencyDuplicateAttached,
+    ResolveAdmissionIdempotencyDuplicateRunning,
+    RegisterAcceptedIdempotencyIdle,
+    RegisterAcceptedIdempotencyAttached,
+    RegisterAcceptedIdempotencyRunning,
+    RegisterAcceptedIdempotencyRetired,
+    RegisterAcceptedIdempotencyStopped,
+    ResolveAdmissionPlanRequestedTerminalQueueIdle,
+    ResolveAdmissionPlanRequestedTerminalQueueAttached,
+    ResolveAdmissionPlanRequestedTerminalQueueRunning,
+    ResolveAdmissionPlanRequestedTerminalSteerIdle,
+    ResolveAdmissionPlanRequestedTerminalSteerAttached,
+    ResolveAdmissionPlanRequestedTerminalSteerRunning,
+    ResolveAdmissionPlanRequestedQueueIdle,
+    ResolveAdmissionPlanRequestedQueueAttached,
+    ResolveAdmissionPlanRequestedQueueRunning,
+    ResolveAdmissionPlanRequestedSteerIdle,
+    ResolveAdmissionPlanRequestedSteerAttached,
+    ResolveAdmissionPlanRequestedSteerRunning,
+    ResolveAdmissionPlanDefaultQueueKindIdle,
+    ResolveAdmissionPlanDefaultQueueKindAttached,
+    ResolveAdmissionPlanDefaultQueueKindRunning,
+    ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle,
+    ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached,
+    ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning,
+    ResolveAdmissionPlanPeerResponseProgressIdle,
+    ResolveAdmissionPlanPeerResponseProgressAttached,
+    ResolveAdmissionPlanPeerResponseProgressRunning,
+    ResolveAdmissionPlanDefaultPeerResponseTerminalIdle,
+    ResolveAdmissionPlanDefaultPeerResponseTerminalAttached,
+    ResolveAdmissionPlanDefaultPeerResponseTerminalRunning,
+    ResolveAdmissionPlanDefaultContinuationIdle,
+    ResolveAdmissionPlanDefaultContinuationAttached,
+    ResolveAdmissionPlanDefaultContinuationRunning,
+    ResolveAdmissionPlanOperationIdle,
+    ResolveAdmissionPlanOperationAttached,
+    ResolveAdmissionPlanOperationRunning,
     ClassifyExternalEnvelopeMessageAttached,
     ClassifyExternalEnvelopeMessageRunning,
     ClassifyExternalEnvelopeRequestPeerAddedAttached,
@@ -5794,10 +13812,12 @@ pub enum TransitionId {
     ClassifyExternalEnvelopeRequestPeerUnwiredStopped,
     ClassifyExternalEnvelopeRequestPeerUnwiredRunning,
     ClassifyExternalEnvelopeRequestSupervisorSilentAttached,
+    ClassifyExternalEnvelopeRequestSupervisorSilentIdle,
     ClassifyExternalEnvelopeRequestSupervisorSilentRunning,
     ClassifyExternalEnvelopeRequestSilentAttached,
     ClassifyExternalEnvelopeRequestSilentRunning,
     ClassifyExternalEnvelopeRequestSupervisorAttached,
+    ClassifyExternalEnvelopeRequestSupervisorIdle,
     ClassifyExternalEnvelopeRequestSupervisorRunning,
     ClassifyExternalEnvelopeRequestActionableAttached,
     ClassifyExternalEnvelopeRequestActionableRunning,
@@ -5824,9 +13844,28 @@ pub enum TransitionId {
     ClassifyExternalEnvelopeAckRunning,
     ClassifyPlainEventAttached,
     ClassifyPlainEventRunning,
+    ClassifyPeerResponseReplyAcceptedInitializing,
+    ClassifyPeerResponseReplyAcceptedIdle,
+    ClassifyPeerResponseReplyAcceptedAttached,
+    ClassifyPeerResponseReplyAcceptedRunning,
+    ClassifyPeerResponseReplyAcceptedRetired,
+    ClassifyPeerResponseReplyAcceptedStopped,
+    ClassifyPeerResponseReplyCompletedInitializing,
+    ClassifyPeerResponseReplyCompletedIdle,
+    ClassifyPeerResponseReplyCompletedAttached,
+    ClassifyPeerResponseReplyCompletedRunning,
+    ClassifyPeerResponseReplyCompletedRetired,
+    ClassifyPeerResponseReplyCompletedStopped,
+    ClassifyPeerResponseReplyFailedInitializing,
+    ClassifyPeerResponseReplyFailedIdle,
+    ClassifyPeerResponseReplyFailedAttached,
+    ClassifyPeerResponseReplyFailedRunning,
+    ClassifyPeerResponseReplyFailedRetired,
+    ClassifyPeerResponseReplyFailedStopped,
     PrepareIdle,
     PrepareAttached,
     DrainQueuedRunRetired,
+    StartConversationRunIdleWithBinding,
     StartConversationRunInitializing,
     StartConversationRunAttached,
     StartConversationRunRunning,
@@ -5873,26 +13912,40 @@ pub enum TransitionId {
     ServiceTurnCommittedRunningToRetired,
     RunFailed,
     RunCancelled,
+    SurfaceRegisterIdle,
     SurfaceRegisterAttached,
     SurfaceRegisterRunning,
+    SurfaceStageAddIdle,
     SurfaceStageAddAttached,
     SurfaceStageAddRunning,
+    SurfaceStageRemoveIdle,
     SurfaceStageRemoveAttached,
     SurfaceStageRemoveRunning,
+    SurfaceSetRemovalTimeoutIdle,
+    SurfaceSetRemovalTimeoutAttached,
+    SurfaceSetRemovalTimeoutRunning,
+    SurfaceStageReloadIdle,
     SurfaceStageReloadAttached,
     SurfaceStageReloadRunning,
+    SurfaceApplyBoundaryAddIdle,
     SurfaceApplyBoundaryAddAttached,
     SurfaceApplyBoundaryAddRunning,
+    SurfaceApplyBoundaryReloadIdle,
     SurfaceApplyBoundaryReloadAttached,
     SurfaceApplyBoundaryReloadRunning,
+    SurfaceApplyBoundaryRemoveDrainingIdle,
     SurfaceApplyBoundaryRemoveDrainingAttached,
     SurfaceApplyBoundaryRemoveDrainingRunning,
+    SurfaceApplyBoundaryRemoveNoopIdle,
     SurfaceApplyBoundaryRemoveNoopAttached,
     SurfaceApplyBoundaryRemoveNoopRunning,
+    SurfaceMarkPendingSucceededAddIdle,
     SurfaceMarkPendingSucceededAddAttached,
     SurfaceMarkPendingSucceededAddRunning,
+    SurfaceMarkPendingSucceededReloadIdle,
     SurfaceMarkPendingSucceededReloadAttached,
     SurfaceMarkPendingSucceededReloadRunning,
+    SurfaceMarkPendingFailedIdle,
     SurfaceMarkPendingFailedAttached,
     SurfaceMarkPendingFailedRunning,
     SurfaceCallStartedActiveAttached,
@@ -5903,12 +13956,16 @@ pub enum TransitionId {
     SurfaceCallStartedRejectUnavailableRunning,
     SurfaceCallFinishedAttached,
     SurfaceCallFinishedRunning,
+    SurfaceFinalizeRemovalCleanIdle,
     SurfaceFinalizeRemovalCleanAttached,
     SurfaceFinalizeRemovalCleanRunning,
+    SurfaceFinalizeRemovalForcedIdle,
     SurfaceFinalizeRemovalForcedAttached,
     SurfaceFinalizeRemovalForcedRunning,
+    SurfaceSnapshotAlignedIdle,
     SurfaceSnapshotAlignedAttached,
     SurfaceSnapshotAlignedRunning,
+    SurfaceShutdownIdle,
     SurfaceShutdownAttached,
     SurfaceShutdownRunning,
     CommitRunningToIdle,
@@ -5925,6 +13982,11 @@ pub enum TransitionId {
     RollbackRunRunningToRetired,
     RecycleFromIdleOrRetired,
     RecycleFromAttached,
+    RecoverAdmittedInputIdle,
+    RecoverAdmittedInputAttached,
+    RecoverAdmittedInputRunning,
+    RecoverAdmittedInputRetired,
+    RecoverAdmittedInputStopped,
     RecoverInputLifecycleIdle,
     RecoverInputLifecycleAttached,
     RecoverInputLifecycleRunning,
@@ -5945,6 +14007,16 @@ pub enum TransitionId {
     ChangeLaneRunning,
     ChangeLaneRetired,
     ChangeLaneStopped,
+    PrioritizeInputIdle,
+    PrioritizeInputAttached,
+    PrioritizeInputRunning,
+    PrioritizeInputRetired,
+    PrioritizeInputStopped,
+    DeferInputBehindBacklogIdle,
+    DeferInputBehindBacklogAttached,
+    DeferInputBehindBacklogRunning,
+    DeferInputBehindBacklogRetired,
+    DeferInputBehindBacklogStopped,
     StageForRunIdle,
     StageForRunAttached,
     StageForRunRunning,
@@ -5960,6 +14032,16 @@ pub enum TransitionId {
     RollbackStagedRunning,
     RollbackStagedRetired,
     RollbackStagedStopped,
+    ResolveStagedRollbackQueuedIdle,
+    ResolveStagedRollbackQueuedAttached,
+    ResolveStagedRollbackQueuedRunning,
+    ResolveStagedRollbackQueuedRetired,
+    ResolveStagedRollbackQueuedStopped,
+    ResolveStagedRollbackMaxAttemptsExhaustedIdle,
+    ResolveStagedRollbackMaxAttemptsExhaustedAttached,
+    ResolveStagedRollbackMaxAttemptsExhaustedRunning,
+    ResolveStagedRollbackMaxAttemptsExhaustedRetired,
+    ResolveStagedRollbackMaxAttemptsExhaustedStopped,
     MarkAppliedIdle,
     MarkAppliedAttached,
     MarkAppliedRunning,
@@ -5970,6 +14052,7 @@ pub enum TransitionId {
     MarkAppliedPendingConsumptionRunning,
     MarkAppliedPendingConsumptionRetired,
     MarkAppliedPendingConsumptionStopped,
+    ResolveLiveBoundaryContextReceiptRunning,
     ConsumeOnAcceptIdle,
     ConsumeOnAcceptAttached,
     ConsumeOnAcceptRunning,
@@ -6000,11 +14083,41 @@ pub enum TransitionId {
     AbandonInputRunning,
     AbandonInputRetired,
     AbandonInputStopped,
-    RegisterOpIdle,
-    RegisterOpAttached,
-    RegisterOpRunning,
-    RegisterOpRetired,
-    RegisterOpStopped,
+    RegisterOpAlreadyRegisteredRejectedIdle,
+    RegisterOpAlreadyRegisteredRejectedAttached,
+    RegisterOpAlreadyRegisteredRejectedRunning,
+    RegisterOpAlreadyRegisteredRejectedRetired,
+    RegisterOpAlreadyRegisteredRejectedStopped,
+    RegisterOpMaxConcurrentRejectedIdle,
+    RegisterOpMaxConcurrentRejectedAttached,
+    RegisterOpMaxConcurrentRejectedRunning,
+    RegisterOpMaxConcurrentRejectedRetired,
+    RegisterOpMaxConcurrentRejectedStopped,
+    RegisterOpAcceptedIdle,
+    RegisterOpAcceptedAttached,
+    RegisterOpAcceptedRunning,
+    RegisterOpAcceptedRetired,
+    RegisterOpAcceptedStopped,
+    ResolveOpLifecycleTransitionNotFoundRejectedIdle,
+    ResolveOpLifecycleTransitionNotFoundRejectedAttached,
+    ResolveOpLifecycleTransitionNotFoundRejectedRunning,
+    ResolveOpLifecycleTransitionNotFoundRejectedRetired,
+    ResolveOpLifecycleTransitionNotFoundRejectedStopped,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedIdle,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedAttached,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedRunning,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedRetired,
+    ResolveOpLifecycleTransitionPeerNotExpectedRejectedStopped,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedIdle,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedAttached,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRunning,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedRetired,
+    ResolveOpLifecycleTransitionAlreadyPeerReadyRejectedStopped,
+    ResolveOpLifecycleTransitionInvalidRejectedIdle,
+    ResolveOpLifecycleTransitionInvalidRejectedAttached,
+    ResolveOpLifecycleTransitionInvalidRejectedRunning,
+    ResolveOpLifecycleTransitionInvalidRejectedRetired,
+    ResolveOpLifecycleTransitionInvalidRejectedStopped,
     StartOpIdle,
     StartOpAttached,
     StartOpRunning,
@@ -6055,6 +14168,276 @@ pub enum TransitionId {
     TerminateOpRunning,
     TerminateOpRetired,
     TerminateOpStopped,
+    RecoverOpRecordIdle,
+    RecoverOpRecordAttached,
+    RecoverOpRecordRunning,
+    RecoverOpRecordRetired,
+    RecoverOpRecordStopped,
+    ClassifyOperationTerminalityTerminalIdle,
+    ClassifyOperationTerminalityNonTerminalIdle,
+    ClassifyOperationPublicResultMissingAuthorityIdle,
+    ClassifyOperationPublicResultRunningIdle,
+    ClassifyOperationPublicResultCompletedIdle,
+    ClassifyOperationPublicResultFailedIdle,
+    ClassifyOperationPublicResultCancelledIdle,
+    ClassifyOperationTransitionIdempotentSuccessIdle,
+    ClassifyOperationTransitionNotIdempotentIdle,
+    ClassifyOperationCompletionFeedSuppressIdle,
+    ClassifyOperationCompletionFeedEmitIdle,
+    ClassifyOperationCompletionWakeWakeIdle,
+    ClassifyOperationCompletionWakeIgnoreIdle,
+    ClassifyOperationDurabilityDiscardIdle,
+    ClassifyOperationDurabilityRetainIdle,
+    ClassifyRecoveredOperationRecordCapacitySlotDiscardIdle,
+    ClassifyRecoveredOperationRecordRetainIdle,
+    ClassifyRecoveredOperationRecordDiscardIdle,
+    RecoverCompletionFeedEntryIdle,
+    RecoverCompletionFeedEntryAttached,
+    RecoverCompletionFeedEntryRunning,
+    RecoverCompletionFeedEntryRetired,
+    RecoverCompletionFeedEntryStopped,
+    RecoverOpsCompletionCursorIdle,
+    RecoverOpsCompletionCursorAttached,
+    RecoverOpsCompletionCursorRunning,
+    RecoverOpsCompletionCursorRetired,
+    RecoverOpsCompletionCursorStopped,
+    RecoverCompletionConsumerCursorsIdle,
+    RecoverCompletionConsumerCursorsAttached,
+    RecoverCompletionConsumerCursorsRunning,
+    RecoverCompletionConsumerCursorsRetired,
+    RecoverCompletionConsumerCursorsStopped,
+    AdvanceAgentCompletionCursorIdle,
+    AdvanceAgentCompletionCursorAttached,
+    AdvanceAgentCompletionCursorRunning,
+    AdvanceAgentCompletionCursorRetired,
+    AdvanceAgentCompletionCursorStopped,
+    AdvanceRuntimeObservedCompletionCursorIdle,
+    AdvanceRuntimeObservedCompletionCursorAttached,
+    AdvanceRuntimeObservedCompletionCursorRunning,
+    AdvanceRuntimeObservedCompletionCursorRetired,
+    AdvanceRuntimeObservedCompletionCursorStopped,
+    AdvanceRuntimeInjectedCompletionCursorIdle,
+    AdvanceRuntimeInjectedCompletionCursorAttached,
+    AdvanceRuntimeInjectedCompletionCursorRunning,
+    AdvanceRuntimeInjectedCompletionCursorRetired,
+    AdvanceRuntimeInjectedCompletionCursorStopped,
+    EvictCompletedOpIdle,
+    EvictCompletedOpAttached,
+    EvictCompletedOpRunning,
+    EvictCompletedOpRetired,
+    EvictCompletedOpStopped,
+    CollectCompletedOpIdle,
+    CollectCompletedOpAttached,
+    CollectCompletedOpRunning,
+    CollectCompletedOpRetired,
+    CollectCompletedOpStopped,
+    AdmitSurfaceRequestAcceptedInitializing,
+    AdmitSurfaceRequestDuplicateInitializing,
+    ClassifySurfaceRequestTerminalMissingInitializing,
+    ClassifySurfaceRequestTerminalPublishInitializing,
+    ClassifySurfaceRequestTerminalFailedInitializing,
+    ClassifySurfaceRequestTerminalObservationInitializing,
+    CancelSurfaceRequestMissingInitializing,
+    CancelSurfaceRequestPendingInitializing,
+    CancelSurfaceRequestAlreadyCancelledInitializing,
+    CancelSurfaceRequestAlreadyPublishedInitializing,
+    CancelSurfaceRequestAlreadyCompletedInitializing,
+    PublishSurfaceRequestMissingInitializing,
+    PublishSurfaceRequestPendingInitializing,
+    PublishSurfaceRequestAlreadyTerminalInitializing,
+    PublishOrCancelSurfaceRequestMissingInitializing,
+    PublishOrCancelSurfaceRequestPendingInitializing,
+    PublishOrCancelSurfaceRequestCancelledInitializing,
+    PublishOrCancelSurfaceRequestAlreadyTerminalInitializing,
+    FinishSurfaceRequestUnpublishedMissingInitializing,
+    FinishSurfaceRequestUnpublishedPendingInitializing,
+    FinishSurfaceRequestUnpublishedCancelledInitializing,
+    FinishSurfaceRequestUnpublishedTerminalInitializing,
+    ResolveLiveOpenAdmissionAcceptedIdle,
+    ResolveLiveOpenAdmissionAcceptedAttached,
+    ResolveLiveOpenAdmissionAcceptedRunning,
+    ResolveLiveOpenAdmissionAcceptedRetired,
+    ResolveLiveOpenAdmissionAcceptedStopped,
+    ResolveLiveOpenAdmissionSessionAlreadyBoundIdle,
+    ResolveLiveOpenAdmissionSessionAlreadyBoundAttached,
+    ResolveLiveOpenAdmissionSessionAlreadyBoundRunning,
+    ResolveLiveOpenAdmissionSessionAlreadyBoundRetired,
+    ResolveLiveOpenAdmissionSessionAlreadyBoundStopped,
+    ResolveLiveOpenAdmissionChannelAlreadyBoundIdle,
+    ResolveLiveOpenAdmissionChannelAlreadyBoundAttached,
+    ResolveLiveOpenAdmissionChannelAlreadyBoundRunning,
+    ResolveLiveOpenAdmissionChannelAlreadyBoundRetired,
+    ResolveLiveOpenAdmissionChannelAlreadyBoundStopped,
+    AbandonLiveOpenAdmissionIdle,
+    AbandonLiveOpenAdmissionAttached,
+    AbandonLiveOpenAdmissionRunning,
+    AbandonLiveOpenAdmissionRetired,
+    AbandonLiveOpenAdmissionStopped,
+    RecordLiveRefreshQueuedIdle,
+    RecordLiveRefreshQueuedAttached,
+    RecordLiveRefreshQueuedRunning,
+    RecordLiveRefreshQueuedRetired,
+    RecordLiveRefreshQueuedStopped,
+    RecordLiveCloseClosedIdle,
+    RecordLiveCloseClosedAttached,
+    RecordLiveCloseClosedRunning,
+    RecordLiveCloseClosedRetired,
+    RecordLiveCloseClosedStopped,
+    RecordLiveCommandAcceptedIdle,
+    RecordLiveCommandAcceptedAttached,
+    RecordLiveCommandAcceptedRunning,
+    RecordLiveCommandAcceptedRetired,
+    RecordLiveCommandAcceptedStopped,
+    RecordLiveCommandRejectedIdle,
+    RecordLiveCommandRejectedAttached,
+    RecordLiveCommandRejectedRunning,
+    RecordLiveCommandRejectedRetired,
+    RecordLiveCommandRejectedStopped,
+    RecordLiveChannelRequestRejectedIdle,
+    RecordLiveChannelRequestRejectedAttached,
+    RecordLiveChannelRequestRejectedRunning,
+    RecordLiveChannelRequestRejectedRetired,
+    RecordLiveChannelRequestRejectedStopped,
+    RecordLiveWebrtcTokenIssuedIdle,
+    RecordLiveWebrtcTokenIssuedAttached,
+    RecordLiveWebrtcTokenIssuedRunning,
+    RecordLiveWebrtcTokenIssuedRetired,
+    RecordLiveWebrtcTokenIssuedStopped,
+    ResolveLiveWebrtcAnswerAdmissionAcceptedIdle,
+    ResolveLiveWebrtcAnswerAdmissionAcceptedAttached,
+    ResolveLiveWebrtcAnswerAdmissionAcceptedRunning,
+    ResolveLiveWebrtcAnswerAdmissionAcceptedRetired,
+    ResolveLiveWebrtcAnswerAdmissionAcceptedStopped,
+    ResolveLiveWebrtcAnswerAdmissionChannelNotBoundIdle,
+    ResolveLiveWebrtcAnswerAdmissionChannelNotBoundAttached,
+    ResolveLiveWebrtcAnswerAdmissionChannelNotBoundRunning,
+    ResolveLiveWebrtcAnswerAdmissionChannelNotBoundRetired,
+    ResolveLiveWebrtcAnswerAdmissionChannelNotBoundStopped,
+    ResolveLiveWebrtcAnswerAdmissionTokenNotFoundIdle,
+    ResolveLiveWebrtcAnswerAdmissionTokenNotFoundAttached,
+    ResolveLiveWebrtcAnswerAdmissionTokenNotFoundRunning,
+    ResolveLiveWebrtcAnswerAdmissionTokenNotFoundRetired,
+    ResolveLiveWebrtcAnswerAdmissionTokenNotFoundStopped,
+    ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedIdle,
+    ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedAttached,
+    ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedRunning,
+    ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedRetired,
+    ResolveLiveWebrtcAnswerAdmissionTokenAlreadyConsumedStopped,
+    ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchIdle,
+    ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchAttached,
+    ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchRunning,
+    ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchRetired,
+    ResolveLiveWebrtcAnswerAdmissionTokenChannelMismatchStopped,
+    ResolveLiveWebrtcAnswerAdmissionTokenExpiredIdle,
+    ResolveLiveWebrtcAnswerAdmissionTokenExpiredAttached,
+    ResolveLiveWebrtcAnswerAdmissionTokenExpiredRunning,
+    ResolveLiveWebrtcAnswerAdmissionTokenExpiredRetired,
+    ResolveLiveWebrtcAnswerAdmissionTokenExpiredStopped,
+    RecordLiveWebrtcAnswerAcceptedIdle,
+    RecordLiveWebrtcAnswerAcceptedAttached,
+    RecordLiveWebrtcAnswerAcceptedRunning,
+    RecordLiveWebrtcAnswerAcceptedRetired,
+    RecordLiveWebrtcAnswerAcceptedStopped,
+    RecordLiveWebsocketTokenIssuedIdle,
+    RecordLiveWebsocketTokenIssuedAttached,
+    RecordLiveWebsocketTokenIssuedRunning,
+    RecordLiveWebsocketTokenIssuedRetired,
+    RecordLiveWebsocketTokenIssuedStopped,
+    ResolveLiveWebsocketTokenAdmissionAcceptedIdle,
+    ResolveLiveWebsocketTokenAdmissionAcceptedAttached,
+    ResolveLiveWebsocketTokenAdmissionAcceptedRunning,
+    ResolveLiveWebsocketTokenAdmissionAcceptedRetired,
+    ResolveLiveWebsocketTokenAdmissionAcceptedStopped,
+    ResolveLiveWebsocketTokenAdmissionChannelNotBoundIdle,
+    ResolveLiveWebsocketTokenAdmissionChannelNotBoundAttached,
+    ResolveLiveWebsocketTokenAdmissionChannelNotBoundRunning,
+    ResolveLiveWebsocketTokenAdmissionChannelNotBoundRetired,
+    ResolveLiveWebsocketTokenAdmissionChannelNotBoundStopped,
+    ResolveLiveWebsocketTokenAdmissionTokenNotFoundIdle,
+    ResolveLiveWebsocketTokenAdmissionTokenNotFoundAttached,
+    ResolveLiveWebsocketTokenAdmissionTokenNotFoundRunning,
+    ResolveLiveWebsocketTokenAdmissionTokenNotFoundRetired,
+    ResolveLiveWebsocketTokenAdmissionTokenNotFoundStopped,
+    ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedIdle,
+    ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedAttached,
+    ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedRunning,
+    ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedRetired,
+    ResolveLiveWebsocketTokenAdmissionTokenAlreadyConsumedStopped,
+    ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchIdle,
+    ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchAttached,
+    ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchRunning,
+    ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchRetired,
+    ResolveLiveWebsocketTokenAdmissionTokenChannelMismatchStopped,
+    ResolveLiveWebsocketTokenAdmissionTokenExpiredIdle,
+    ResolveLiveWebsocketTokenAdmissionTokenExpiredAttached,
+    ResolveLiveWebsocketTokenAdmissionTokenExpiredRunning,
+    ResolveLiveWebsocketTokenAdmissionTokenExpiredRetired,
+    ResolveLiveWebsocketTokenAdmissionTokenExpiredStopped,
+    RecordSessionEventStreamOpenedIdle,
+    RecordSessionEventStreamOpenedAttached,
+    RecordSessionEventStreamOpenedRunning,
+    RecordSessionEventStreamOpenedRetired,
+    RecordSessionEventStreamOpenedStopped,
+    RecordSessionEventStreamTerminatedIdle,
+    RecordSessionEventStreamTerminatedAttached,
+    RecordSessionEventStreamTerminatedRunning,
+    RecordSessionEventStreamTerminatedRetired,
+    RecordSessionEventStreamTerminatedStopped,
+    ResolveSessionEventStreamCloseActiveIdle,
+    ResolveSessionEventStreamCloseActiveAttached,
+    ResolveSessionEventStreamCloseActiveRunning,
+    ResolveSessionEventStreamCloseActiveRetired,
+    ResolveSessionEventStreamCloseActiveStopped,
+    ResolveSessionEventStreamCloseAlreadyClosedIdle,
+    ResolveSessionEventStreamCloseAlreadyClosedAttached,
+    ResolveSessionEventStreamCloseAlreadyClosedRunning,
+    ResolveSessionEventStreamCloseAlreadyClosedRetired,
+    ResolveSessionEventStreamCloseAlreadyClosedStopped,
+    RecordMobEventStreamOpenedIdle,
+    RecordMobEventStreamOpenedAttached,
+    RecordMobEventStreamOpenedRunning,
+    RecordMobEventStreamOpenedRetired,
+    RecordMobEventStreamOpenedStopped,
+    RecordMobEventStreamTerminatedIdle,
+    RecordMobEventStreamTerminatedAttached,
+    RecordMobEventStreamTerminatedRunning,
+    RecordMobEventStreamTerminatedRetired,
+    RecordMobEventStreamTerminatedStopped,
+    ResolveMobEventStreamCloseActiveIdle,
+    ResolveMobEventStreamCloseActiveAttached,
+    ResolveMobEventStreamCloseActiveRunning,
+    ResolveMobEventStreamCloseActiveRetired,
+    ResolveMobEventStreamCloseActiveStopped,
+    ResolveMobEventStreamCloseAlreadyClosedIdle,
+    ResolveMobEventStreamCloseAlreadyClosedAttached,
+    ResolveMobEventStreamCloseAlreadyClosedRunning,
+    ResolveMobEventStreamCloseAlreadyClosedRetired,
+    ResolveMobEventStreamCloseAlreadyClosedStopped,
+    RecordLiveChannelStatusIdle,
+    RecordLiveChannelStatusAttached,
+    RecordLiveChannelStatusRunning,
+    RecordLiveChannelStatusRetired,
+    RecordLiveChannelStatusStopped,
+    ResolveWaitAllAdmissionDuplicateRejectedIdle,
+    ResolveWaitAllAdmissionDuplicateRejectedAttached,
+    ResolveWaitAllAdmissionDuplicateRejectedRunning,
+    ResolveWaitAllAdmissionDuplicateRejectedRetired,
+    ResolveWaitAllAdmissionDuplicateRejectedStopped,
+    ResolveWaitAllAdmissionActiveRejectedIdle,
+    ResolveWaitAllAdmissionActiveRejectedAttached,
+    ResolveWaitAllAdmissionActiveRejectedRunning,
+    ResolveWaitAllAdmissionActiveRejectedRetired,
+    ResolveWaitAllAdmissionActiveRejectedStopped,
+    ResolveWaitAllAdmissionNotFoundRejectedIdle,
+    ResolveWaitAllAdmissionNotFoundRejectedAttached,
+    ResolveWaitAllAdmissionNotFoundRejectedRunning,
+    ResolveWaitAllAdmissionNotFoundRejectedRetired,
+    ResolveWaitAllAdmissionNotFoundRejectedStopped,
+    ResolveWaitAllAdmissionAcceptedIdle,
+    ResolveWaitAllAdmissionAcceptedAttached,
+    ResolveWaitAllAdmissionAcceptedRunning,
+    ResolveWaitAllAdmissionAcceptedRetired,
+    ResolveWaitAllAdmissionAcceptedStopped,
     RequestWaitAllIdle,
     RequestWaitAllAttached,
     RequestWaitAllRunning,
@@ -6080,21 +14463,16 @@ pub enum TransitionId {
     StopDrainRunning,
     StopDrainRetired,
     StopDrainStopped,
-    DrainExitedCleanIdle,
-    DrainExitedCleanAttached,
-    DrainExitedCleanRunning,
-    DrainExitedCleanRetired,
-    DrainExitedCleanStopped,
-    DrainExitedRespawnableIdle,
-    DrainExitedRespawnableAttached,
-    DrainExitedRespawnableRunning,
-    DrainExitedRespawnableRetired,
-    DrainExitedRespawnableStopped,
     StageVisibilityFilterIdle,
     StageVisibilityFilterAttached,
     StageVisibilityFilterRunning,
     StageVisibilityFilterRetired,
     StageVisibilityFilterStopped,
+    ReplaceFilterToolAuthorityCatalogIdle,
+    ReplaceFilterToolAuthorityCatalogAttached,
+    ReplaceFilterToolAuthorityCatalogRunning,
+    ReplaceFilterToolAuthorityCatalogRetired,
+    ReplaceFilterToolAuthorityCatalogStopped,
     CommitVisibilityFilterIdle,
     CommitVisibilityFilterAttached,
     CommitVisibilityFilterRunning,
@@ -6105,11 +14483,26 @@ pub enum TransitionId {
     StageDeferredNamesRunning,
     StageDeferredNamesRetired,
     StageDeferredNamesStopped,
+    ReplaceDeferredToolAuthorityCatalogIdle,
+    ReplaceDeferredToolAuthorityCatalogAttached,
+    ReplaceDeferredToolAuthorityCatalogRunning,
+    ReplaceDeferredToolAuthorityCatalogRetired,
+    ReplaceDeferredToolAuthorityCatalogStopped,
     CommitDeferredNamesIdle,
     CommitDeferredNamesAttached,
     CommitDeferredNamesRunning,
     CommitDeferredNamesRetired,
     CommitDeferredNamesStopped,
+    SetTurnToolOverlayIdle,
+    SetTurnToolOverlayAttached,
+    SetTurnToolOverlayRunning,
+    SetTurnToolOverlayRetired,
+    SetTurnToolOverlayStopped,
+    ClearTurnToolOverlayIdle,
+    ClearTurnToolOverlayAttached,
+    ClearTurnToolOverlayRunning,
+    ClearTurnToolOverlayRetired,
+    ClearTurnToolOverlayStopped,
     SyncVisibilityRevisionsIdle,
     SyncVisibilityRevisionsAttached,
     SyncVisibilityRevisionsRunning,
@@ -6160,6 +14553,11 @@ pub enum TransitionId {
     PeerResponseTerminalArrivedFailedRunning,
     PeerResponseTerminalArrivedFailedRetired,
     PeerResponseTerminalArrivedFailedStopped,
+    PeerResponseRejectedIdle,
+    PeerResponseRejectedAttached,
+    PeerResponseRejectedRunning,
+    PeerResponseRejectedRetired,
+    PeerResponseRejectedStopped,
     PeerRequestTimedOutIdle,
     PeerRequestTimedOutAttached,
     PeerRequestTimedOutRunning,
@@ -6220,6 +14618,33 @@ pub enum TransitionId {
     DetachIngressRunning,
     DetachIngressRetired,
     DetachIngressStopped,
+    ResolveSupervisorBindAdmissionBootstrapIdle,
+    ResolveSupervisorBindAdmissionBootstrapAttached,
+    ResolveSupervisorBindAdmissionBootstrapRunning,
+    ResolveSupervisorBindAdmissionIdempotentAckIdle,
+    ResolveSupervisorBindAdmissionIdempotentAckAttached,
+    ResolveSupervisorBindAdmissionIdempotentAckRunning,
+    ResolveSupervisorBindAdmissionSenderMismatchIdle,
+    ResolveSupervisorBindAdmissionSenderMismatchAttached,
+    ResolveSupervisorBindAdmissionSenderMismatchRunning,
+    ResolveSupervisorBindAdmissionAlreadyBoundIdle,
+    ResolveSupervisorBindAdmissionAlreadyBoundAttached,
+    ResolveSupervisorBindAdmissionAlreadyBoundRunning,
+    ResolveSupervisorAuthorizeAdmissionNotBoundIdle,
+    ResolveSupervisorAuthorizeAdmissionNotBoundAttached,
+    ResolveSupervisorAuthorizeAdmissionNotBoundRunning,
+    ResolveSupervisorAuthorizeAdmissionStaleSupervisorIdle,
+    ResolveSupervisorAuthorizeAdmissionStaleSupervisorAttached,
+    ResolveSupervisorAuthorizeAdmissionStaleSupervisorRunning,
+    ResolveSupervisorAuthorizeAdmissionSenderMismatchIdle,
+    ResolveSupervisorAuthorizeAdmissionSenderMismatchAttached,
+    ResolveSupervisorAuthorizeAdmissionSenderMismatchRunning,
+    ResolveSupervisorAuthorizeAdmissionIdempotentAckIdle,
+    ResolveSupervisorAuthorizeAdmissionIdempotentAckAttached,
+    ResolveSupervisorAuthorizeAdmissionIdempotentAckRunning,
+    ResolveSupervisorAuthorizeAdmissionProceedIdle,
+    ResolveSupervisorAuthorizeAdmissionProceedAttached,
+    ResolveSupervisorAuthorizeAdmissionProceedRunning,
     BindSupervisorIdle,
     BindSupervisorAttached,
     BindSupervisorRunning,
@@ -6230,6 +14655,11 @@ pub enum TransitionId {
     AuthorizeSupervisorRunning,
     AuthorizeSupervisorRetired,
     AuthorizeSupervisorStopped,
+    RequestSupervisorTrustPublishIdle,
+    RequestSupervisorTrustPublishAttached,
+    RequestSupervisorTrustPublishRunning,
+    RequestSupervisorTrustPublishRetired,
+    RequestSupervisorTrustPublishStopped,
     RevokeSupervisorIdle,
     RevokeSupervisorAttached,
     RevokeSupervisorRunning,
@@ -6264,12 +14694,39 @@ pub enum TransitionId {
     AddDirectPeerEndpointIdle,
     AddDirectPeerEndpointAttached,
     AddDirectPeerEndpointRunning,
+    RepairAddDirectPeerEndpointIdle,
+    RepairAddDirectPeerEndpointAttached,
+    RepairAddDirectPeerEndpointRunning,
     RemoveDirectPeerEndpointIdle,
     RemoveDirectPeerEndpointAttached,
     RemoveDirectPeerEndpointRunning,
+    RepairRemoveDirectPeerEndpointIdle,
+    RepairRemoveDirectPeerEndpointAttached,
+    RepairRemoveDirectPeerEndpointRunning,
+    ResolveSupervisorBridgeCommandAdmissionAcceptedIdle,
+    ResolveSupervisorBridgeCommandAdmissionAcceptedAttached,
+    ResolveSupervisorBridgeCommandAdmissionAcceptedRunning,
+    ResolveSupervisorBridgeCommandAdmissionNotBoundIdle,
+    ResolveSupervisorBridgeCommandAdmissionNotBoundAttached,
+    ResolveSupervisorBridgeCommandAdmissionNotBoundRunning,
+    ResolveSupervisorBridgeCommandAdmissionStaleSupervisorIdle,
+    ResolveSupervisorBridgeCommandAdmissionStaleSupervisorAttached,
+    ResolveSupervisorBridgeCommandAdmissionStaleSupervisorRunning,
+    ResolveSupervisorBridgeCommandAdmissionSenderMismatchIdle,
+    ResolveSupervisorBridgeCommandAdmissionSenderMismatchAttached,
+    ResolveSupervisorBridgeCommandAdmissionSenderMismatchRunning,
+    AuthorizeSupervisorMobPeerOverlayIdle,
+    AuthorizeSupervisorMobPeerOverlayAttached,
+    AuthorizeSupervisorMobPeerOverlayRunning,
+    RepairSupervisorMobPeerOverlayIdle,
+    RepairSupervisorMobPeerOverlayAttached,
+    RepairSupervisorMobPeerOverlayRunning,
     ApplyMobPeerOverlayIdle,
     ApplyMobPeerOverlayAttached,
     ApplyMobPeerOverlayRunning,
+    RepairMobPeerOverlayIdle,
+    RepairMobPeerOverlayAttached,
+    RepairMobPeerOverlayRunning,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -6346,8 +14803,11 @@ pub fn initial_state() -> State {
         session_id: None,
         active_runtime_id: None,
         active_fence_token: None,
+        active_runtime_generation: None,
+        active_runtime_epoch_id: None,
         current_run_id: None,
         pre_run_phase: None,
+        runtime_stop_deferred: false,
         turn_phase: TurnPhase::Ready,
         primitive_kind: None,
         admitted_content_shape: None,
@@ -6364,6 +14824,7 @@ pub fn initial_state() -> State {
         terminal_cause_kind: None,
         last_runtime_apply_failure_cause: None,
         last_runtime_apply_failure_message: None,
+        runtime_completion_result_run_id: None,
         extraction_attempts: 0,
         max_extraction_retries: 0,
         llm_retry_attempt: 0,
@@ -6389,27 +14850,65 @@ pub fn initial_state() -> State {
         model_routing_pending_switch_phase: None,
         model_routing_switch_terminal: Default::default(),
         model_routing_switch_denials: Default::default(),
+        model_routing_switch_approval_reasons: Default::default(),
         model_routing_image_operation_phases: Default::default(),
         model_routing_image_operation_target_models: Default::default(),
         model_routing_image_operation_realtime: Default::default(),
         model_routing_image_operation_requires_scoped_override: Default::default(),
+        model_routing_image_classified_terminals: Default::default(),
+        model_routing_image_classified_provider_text: Default::default(),
         model_routing_image_terminals: Default::default(),
         model_routing_image_terminal_payloads: Default::default(),
         model_routing_image_denials: Default::default(),
+        model_routing_image_approval_reasons: Default::default(),
+        model_routing_image_plan_denials: Default::default(),
         model_routing_approval_phases: Default::default(),
         model_routing_approval_parent_kind: Default::default(),
         registration_phase: RegistrationPhase::Queuing,
+        staged_session_phase: StagedSessionPhase::NotStaged,
+        staged_session_id: None,
+        staged_session_keep_alive: None,
+        staged_session_llm_identity: None,
+        staged_session_machine_archived_resume_authorized: false,
+        current_session_llm_identity: None,
+        current_session_capability_surface: None,
+        current_session_capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
+        current_session_capability_base_filter: ToolFilter::All,
+        session_llm_reconfigure_previous_capability_surface: None,
+        session_llm_reconfigure_current_capability_surface: None,
+        session_llm_reconfigure_capability_changed: false,
+        session_llm_reconfigure_previous_capability_base_filter: ToolFilter::All,
+        session_llm_reconfigure_current_capability_base_filter: ToolFilter::All,
+        session_llm_reconfigure_committed_visible_set_changed: false,
+        session_llm_reconfigure_revision_bumped: false,
+        session_llm_reconfigure_active_visibility_revision: 0,
+        mob_operator_authority_present: false,
+        mob_operator_principal_token: None,
+        mob_operator_can_create_mobs: false,
+        mob_operator_can_mutate_profiles: false,
+        mob_operator_managed_mob_scope: Default::default(),
+        mob_operator_spawn_profile_scope: Default::default(),
+        mob_operator_caller_provenance: None,
+        mob_operator_audit_invocation_id: None,
         drain_phase: DrainPhase::Inactive,
         drain_mode: None,
         next_staged_visibility_revision: 0,
+        inherited_base_filter: ToolFilter::All,
         active_filter: ToolFilter::All,
         staged_filter: ToolFilter::All,
         active_visibility_revision: 0,
         staged_visibility_revision: 0,
         active_deferred_names: Default::default(),
         staged_deferred_names: Default::default(),
+        requested_visibility_witnesses: Default::default(),
+        filter_visibility_witnesses: Default::default(),
         active_deferred_authorities: Default::default(),
         staged_deferred_authorities: Default::default(),
+        deferred_visibility_authority_catalog: Default::default(),
+        filter_visibility_authority_catalog: Default::default(),
+        turn_tool_overlay_allow_active: false,
+        turn_tool_overlay_allow_names: Default::default(),
+        turn_tool_overlay_deny_names: Default::default(),
         input_phases: Default::default(),
         input_terminal_kind: Default::default(),
         input_superseded_by: Default::default(),
@@ -6417,24 +14916,93 @@ pub fn initial_state() -> State {
         input_abandon_reason: Default::default(),
         input_abandon_attempt_count: Default::default(),
         input_attempt_counts: Default::default(),
+        max_stage_attempts: 3,
         input_run_associations: Default::default(),
         input_boundary_sequences: Default::default(),
-        next_admission_seq: 0,
+        live_boundary_context_sequence_by_run: Default::default(),
+        next_admission_seq: 1000000000,
+        next_priority_admission_seq: 999999999,
         input_admission_seq: Default::default(),
         input_lane: Default::default(),
+        input_recovery_lanes: Default::default(),
+        admission_authorized_lanes: Default::default(),
+        admission_authorized_plans: Default::default(),
+        admission_authorized_existing_actions: Default::default(),
+        admission_authorized_existing_targets: Default::default(),
+        admission_idempotency_inputs: Default::default(),
+        recovered_admitted_inputs: Default::default(),
+        recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),
+        completion_sequence_claims: Default::default(),
+        completion_feed_sequences: Default::default(),
+        completion_feed_kinds: Default::default(),
+        completion_feed_terminal_outcomes: Default::default(),
+        completion_feed_terminal_payload: Default::default(),
         op_terminal_outcomes: Default::default(),
         op_terminal_payload: Default::default(),
         op_kinds: Default::default(),
+        op_sources: Default::default(),
         op_peer_ready: Default::default(),
         op_progress_counts: Default::default(),
         active_op_count: 0,
         wait_active: false,
         wait_request_id: None,
+        wait_run_id: None,
         wait_operation_ids: Default::default(),
         wait_operation_id_tokens: Default::default(),
         next_completion_seq: 0,
+        completion_agent_applied_cursor: 0,
+        completion_runtime_observed_cursor: 0,
+        completion_runtime_injected_cursor: 0,
+        surface_request_phases: Default::default(),
+        surface_request_terminal_policies: Default::default(),
+        live_open_admission_sequence: 0,
+        live_active_channel_by_session: Default::default(),
+        live_channel_session_by_channel: Default::default(),
+        live_channel_identity_by_channel: Default::default(),
+        live_refresh_result_sequence: 0,
+        live_refresh_queue_acceptance_sequence_by_channel: Default::default(),
+        live_refresh_status_by_channel: Default::default(),
+        live_close_result_sequence: 0,
+        live_close_observation_sequence_by_channel: Default::default(),
+        live_close_status_by_channel: Default::default(),
+        live_command_result_sequence: 0,
+        live_command_acceptance_sequence_by_channel: Default::default(),
+        live_command_kind_by_channel: Default::default(),
+        live_command_rejection_sequence: 0,
+        live_command_rejection_reason_by_channel: Default::default(),
+        live_command_rejection_public_error_class_by_channel: Default::default(),
+        live_channel_request_rejection_sequence: 0,
+        live_channel_request_rejection_reason_by_channel: Default::default(),
+        live_channel_request_rejection_public_error_class_by_channel: Default::default(),
+        live_webrtc_token_issue_sequence: 0,
+        live_webrtc_token_channel_by_token: Default::default(),
+        live_webrtc_token_expires_at_ms_by_token: Default::default(),
+        live_webrtc_consumed_tokens: Default::default(),
+        live_webrtc_answer_admission_sequence: 0,
+        live_webrtc_answer_result_sequence: 0,
+        live_webrtc_answer_observation_sequence_by_channel: Default::default(),
+        live_webrtc_answer_status_by_channel: Default::default(),
+        live_websocket_token_issue_sequence: 0,
+        live_websocket_token_channel_by_token: Default::default(),
+        live_websocket_token_expires_at_ms_by_token: Default::default(),
+        live_websocket_consumed_tokens: Default::default(),
+        live_websocket_token_admission_sequence: 0,
+        live_channel_status_result_sequence: 0,
+        live_channel_status_observation_sequence_by_channel: Default::default(),
+        live_channel_status_by_channel: Default::default(),
+        session_event_stream_open_result_sequence: 0,
+        session_event_stream_close_result_sequence: 0,
+        session_event_stream_terminal_sequence: 0,
+        active_session_event_streams: Default::default(),
+        closed_session_event_streams: Default::default(),
+        session_event_stream_session_ids: Default::default(),
+        mob_event_stream_open_result_sequence: 0,
+        mob_event_stream_close_result_sequence: 0,
+        mob_event_stream_terminal_sequence: 0,
+        active_mob_event_streams: Default::default(),
+        closed_mob_event_streams: Default::default(),
         known_surfaces: Default::default(),
         active_surfaces: Default::default(),
         visible_surfaces: Default::default(),
@@ -6460,17 +15028,30 @@ pub fn initial_state() -> State {
         mcp_server_states: Default::default(),
         pending_peer_requests: Default::default(),
         inbound_peer_requests: Default::default(),
+        inbound_peer_request_lanes: Default::default(),
         last_session_context_updated_at_ms: 0,
         reserved_interaction_streams: Default::default(),
         attached_interaction_streams: Default::default(),
         peer_ingress_owner_kind: PeerIngressOwnerKind::Unattached,
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,
+        peer_ingress_authority_phase: PeerIngressAuthorityPhaseClass::Absent,
         supervisor_binding_kind: SupervisorBindingKind::Unbound,
         supervisor_bound_name: None,
         supervisor_bound_peer_id: None,
         supervisor_bound_address: None,
+        supervisor_bound_signing_public_key: None,
         supervisor_bound_epoch: None,
+        supervisor_publish_pending_name: None,
+        supervisor_publish_pending_peer_id: None,
+        supervisor_publish_pending_address: None,
+        supervisor_publish_pending_signing_public_key: None,
+        supervisor_publish_pending_epoch: None,
+        supervisor_revoke_pending_name: None,
+        supervisor_revoke_pending_peer_id: None,
+        supervisor_revoke_pending_address: None,
+        supervisor_revoke_pending_signing_public_key: None,
+        supervisor_revoke_pending_epoch: None,
         local_endpoint: None,
         direct_peer_endpoints: Default::default(),
         mob_overlay_peer_endpoints: Default::default(),

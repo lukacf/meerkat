@@ -10,10 +10,15 @@
 //! - `push_batch()` adds multiple messages with a single timestamp update
 
 use crate::Provider;
+use crate::generated::{
+    session_deferred_turn_authority, session_durable_config_authority,
+    session_persistence_version_authority, session_realtime_transcript_authority,
+    session_realtime_transcript_authority::SessionRealtimeTranscriptState,
+    session_system_context_authority,
+};
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
-    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
-    RealtimeTranscriptRole, SESSION_REALTIME_TRANSCRIPT_STATE_KEY, TranscriptLane,
+    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
@@ -38,7 +43,7 @@ use std::sync::Arc;
 ///   a `schema_version` byte. Opportunistic upgrade-on-read —
 ///   `meerkat_session::persistent::migrations::migrate` rewrites v1 rows
 ///   into v2 shape; the next `save()` persists v2.
-pub const SESSION_VERSION: u32 = 2;
+pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
 /// so `SessionMetadata` can evolve independently of the Session envelope.
@@ -48,7 +53,17 @@ pub const SESSION_VERSION: u32 = 2;
 /// - v2 — wave-c C-3. Typed `AuthBindingRef` inner fields; any future
 ///   `SessionMetadata`-local shape change bumps this without moving
 ///   `SESSION_VERSION`.
-pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
+pub use crate::generated::session_persistence_version_authority::SESSION_METADATA_SCHEMA_VERSION;
+
+/// Current session format version accepted by generated persistence authority.
+pub fn session_version() -> u32 {
+    session_persistence_version_authority::session_envelope_version()
+}
+
+/// Current `SessionMetadata` schema version accepted by generated persistence authority.
+pub fn session_metadata_schema_version() -> u32 {
+    session_persistence_version_authority::session_metadata_schema_version()
+}
 
 /// Typed transcript replacement used to create an edited fork.
 ///
@@ -621,90 +636,6 @@ fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_
     Ok(format!("sha256:{out}"))
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct SessionRealtimeTranscriptState {
-    #[serde(default)]
-    items: BTreeMap<String, RealtimeTranscriptItemState>,
-    #[serde(default)]
-    first_seen_order: Vec<String>,
-    #[serde(default)]
-    seen_delta_ids: BTreeSet<String>,
-    #[serde(default)]
-    assistant_completions: BTreeMap<String, RealtimeAssistantCompletion>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    discarded_assistant_response_ids: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct RealtimeTranscriptItemState {
-    role: RealtimeTranscriptRole,
-    #[serde(default)]
-    previous_item_id: Option<String>,
-    #[serde(default)]
-    response_id: Option<String>,
-    #[serde(default)]
-    content_segments: BTreeMap<u32, String>,
-    #[serde(default)]
-    skipped: bool,
-    #[serde(default)]
-    ready: bool,
-    #[serde(default)]
-    materialized: bool,
-    /// T9/T10: output lane this assistant item carries. `Display` is the
-    /// default (matches all pre-T10 sessions on disk); promoted to `Spoken`
-    /// the first time an [`RealtimeTranscriptEvent::AssistantTranscriptDelta`]
-    /// fragment arrives for the item. User-role items always carry
-    /// `Display` (the field is unused for user transcripts).
-    #[serde(default)]
-    lane: TranscriptLane,
-}
-
-impl RealtimeTranscriptItemState {
-    fn new(
-        role: RealtimeTranscriptRole,
-        previous_item_id: Option<String>,
-        response_id: Option<String>,
-    ) -> Self {
-        Self {
-            role,
-            previous_item_id,
-            response_id,
-            content_segments: BTreeMap::new(),
-            skipped: false,
-            ready: false,
-            materialized: false,
-            lane: TranscriptLane::Display,
-        }
-    }
-
-    fn skipped(previous_item_id: Option<String>) -> Self {
-        Self {
-            role: RealtimeTranscriptRole::Assistant,
-            previous_item_id,
-            response_id: None,
-            content_segments: BTreeMap::new(),
-            skipped: true,
-            ready: true,
-            materialized: false,
-            lane: TranscriptLane::Display,
-        }
-    }
-
-    fn text(&self) -> String {
-        self.content_segments.values().cloned().collect()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct RealtimeAssistantCompletion {
-    stop_reason: StopReason,
-    usage: Usage,
-    usage_consumed: bool,
-}
-
 /// A conversation session with full history
 ///
 /// Uses Arc<Vec<Message>> internally for efficient forking (copy-on-write).
@@ -766,8 +697,12 @@ impl<'de> Deserialize<'de> for Session {
         D: Deserializer<'de>,
     {
         let serde_repr = SessionSerde::deserialize(deserializer)?;
+        let version = session_persistence_version_authority::restore_session_envelope_version(
+            serde_repr.version,
+        )
+        .map_err(<D::Error as serde::de::Error>::custom)?;
         Ok(Session {
-            version: serde_repr.version,
+            version,
             id: serde_repr.id,
             messages: Arc::new(serde_repr.messages),
             created_at: serde_repr.created_at,
@@ -779,7 +714,7 @@ impl<'de> Deserialize<'de> for Session {
 }
 
 fn default_version() -> u32 {
-    SESSION_VERSION
+    session_persistence_version_authority::legacy_session_envelope_version()
 }
 
 /// Metadata key used to store durable system-context control state.
@@ -800,18 +735,262 @@ pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("metadata key `{key}` is reserved for session authority")]
+pub struct ReservedSessionMetadataKey {
+    key: String,
+}
+
+impl ReservedSessionMetadataKey {
+    fn new(key: &str) -> Self {
+        Self {
+            key: key.to_string(),
+        }
+    }
+}
+
+fn is_session_authority_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        SESSION_METADATA_KEY
+            | SESSION_BUILD_STATE_KEY
+            | SESSION_SYSTEM_CONTEXT_STATE_KEY
+            | SESSION_DEFERRED_TURN_STATE_KEY
+            | SESSION_TOOL_VISIBILITY_STATE_KEY
+            | SESSION_TRANSCRIPT_HISTORY_STATE_KEY
+            | SESSION_REALTIME_TRANSCRIPT_STATE_KEY
+    )
+}
+
+#[allow(clippy::panic)]
+fn fail_closed_generated_restore(authority: &'static str, err: serde_json::Error) -> ! {
+    tracing::error!(
+        authority,
+        error = %err,
+        "generated authority rejected durable restore"
+    );
+    panic!("generated {authority} authority rejected durable restore: {err}");
+}
+
+/// Shared runtime system-context authority handle.
+///
+/// This handle is intentionally narrower than `Arc<Mutex<SessionSystemContextState>>`:
+/// callers can read snapshots or request generated-authority transitions, but
+/// cannot replace the machine-owned state by taking a mutable guard.
+#[derive(Clone)]
+pub struct SystemContextStateHandle {
+    inner: Arc<std::sync::Mutex<SessionSystemContextState>>,
+}
+
+impl std::fmt::Debug for SystemContextStateHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemContextStateHandle")
+            .field("inner", &"<Arc<Mutex<SessionSystemContextState>>>")
+            .finish()
+    }
+}
+
+impl SystemContextStateHandle {
+    pub fn new(state: SessionSystemContextState) -> Result<Self, serde_json::Error> {
+        let state = session_system_context_authority::restore_system_context_state(state)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        Ok(Self {
+            inner: Arc::new(std::sync::Mutex::new(state)),
+        })
+    }
+
+    pub fn from_shared_authority_state(
+        inner: Arc<std::sync::Mutex<SessionSystemContextState>>,
+    ) -> Self {
+        Self { inner }
+    }
+
+    pub fn snapshot(&self) -> SessionSystemContextState {
+        match self.inner.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while reading snapshot");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    pub fn replace_from_generated_restore(
+        &self,
+        state: SessionSystemContextState,
+    ) -> Result<(), serde_json::Error> {
+        let state = session_system_context_authority::restore_system_context_state(state)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        match self.inner.lock() {
+            Ok(mut guard) => {
+                *guard = state;
+            }
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while restoring state");
+                *poisoned.into_inner() = state;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn replace_from_generated_restore_if_changed(
+        &self,
+        state: SessionSystemContextState,
+    ) -> Result<bool, serde_json::Error> {
+        let state = session_system_context_authority::restore_system_context_state(state)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while replacing generated-restored state"
+                );
+                poisoned.into_inner()
+            }
+        };
+        if *guard == state {
+            return Ok(false);
+        }
+        *guard = state;
+        Ok(true)
+    }
+
+    pub fn replace_from_generated_restore_if_current(
+        &self,
+        current: &SessionSystemContextState,
+        replacement: SessionSystemContextState,
+    ) -> Result<bool, serde_json::Error> {
+        let replacement =
+            session_system_context_authority::restore_system_context_state(replacement)
+                .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while conditionally replacing generated-restored state"
+                );
+                poisoned.into_inner()
+            }
+        };
+        if *guard != *current {
+            return Ok(false);
+        }
+        *guard = replacement;
+        Ok(true)
+    }
+
+    pub fn stage_append_with_snapshot(
+        &self,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+    ) -> Result<
+        (
+            crate::service::AppendSystemContextStatus,
+            SessionSystemContextState,
+            SessionSystemContextState,
+        ),
+        SystemContextStageError,
+    > {
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while staging append");
+                poisoned.into_inner()
+            }
+        };
+        let snapshot = guard.clone();
+        let status = guard.stage_append(req, accepted_at)?;
+        let staged = guard.clone();
+        Ok((status, snapshot, staged))
+    }
+
+    pub fn stage_active_turn_appends_with_snapshot(
+        &self,
+        appends: Vec<(AppendSystemContextRequest, SystemTime)>,
+    ) -> Result<(SessionSystemContextState, SessionSystemContextState), SystemContextStageError>
+    {
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while staging active-turn appends"
+                );
+                poisoned.into_inner()
+            }
+        };
+        let snapshot = guard.clone();
+        let mut candidate = snapshot.clone();
+        for (req, accepted_at) in appends {
+            candidate.stage_active_turn_append(&req, accepted_at)?;
+        }
+        *guard = candidate.clone();
+        let staged = candidate;
+        Ok((snapshot, staged))
+    }
+
+    pub fn discard_unapplied_active_turn_pending(&self) -> usize {
+        let discarded = match self.inner.lock() {
+            Ok(mut guard) => guard.discard_unapplied_active_turn_pending(),
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while discarding active-turn context"
+                );
+                poisoned
+                    .into_inner()
+                    .discard_unapplied_active_turn_pending()
+            }
+        };
+        discarded.len()
+    }
+
+    pub fn discard_active_turn_pending_by_keys(
+        &self,
+        idempotency_keys: &[String],
+    ) -> Vec<PendingSystemContextAppend> {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.discard_active_turn_pending_by_keys(idempotency_keys),
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while discarding active-turn pending appends"
+                );
+                poisoned
+                    .into_inner()
+                    .discard_active_turn_pending_by_keys(idempotency_keys)
+            }
+        }
+    }
+
+    pub fn stage_active_turn_append(
+        &self,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.stage_active_turn_append(req, accepted_at),
+            Err(poisoned) => {
+                tracing::warn!(
+                    "system-context state lock poisoned while staging active-turn context"
+                );
+                poisoned
+                    .into_inner()
+                    .stage_active_turn_append(req, accepted_at)
+            }
+        }
+    }
+}
+
 /// Durable control state for runtime system-context append requests.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionSystemContextState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending: Vec<PendingSystemContextAppend>,
+    pub(crate) pending: Vec<PendingSystemContextAppend>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub applied: Vec<PendingSystemContextAppend>,
+    pub(crate) applied: Vec<PendingSystemContextAppend>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
+    pub(crate) seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub active_turn_pending_keys: std::collections::BTreeSet<String>,
+    pub(crate) active_turn_pending_keys: std::collections::BTreeSet<String>,
 }
 
 /// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
@@ -831,11 +1010,11 @@ pub struct PendingSystemContextAppend {
 #[serde(rename_all = "snake_case")]
 pub struct SessionDeferredTurnState {
     #[serde(default, skip_serializing_if = "DeferredFirstTurnPhase::is_inactive")]
-    pub first_turn_phase: DeferredFirstTurnPhase,
+    pub(crate) first_turn_phase: DeferredFirstTurnPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_initial_prompt: Option<PendingDeferredPrompt>,
+    pub(crate) pending_initial_prompt: Option<PendingDeferredPrompt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_tool_results: Vec<PendingToolResultsMessage>,
+    pub(crate) pending_tool_results: Vec<PendingToolResultsMessage>,
 }
 
 /// Canonical lifecycle phase for the session's deferred first turn.
@@ -854,6 +1033,26 @@ pub enum DeferredFirstTurnPhase {
 impl DeferredFirstTurnPhase {
     pub fn is_inactive(&self) -> bool {
         matches!(self, Self::Inactive)
+    }
+}
+
+impl From<DeferredFirstTurnPhase> for session_deferred_turn_authority::DeferredTurnFirstTurnPhase {
+    fn from(value: DeferredFirstTurnPhase) -> Self {
+        match value {
+            DeferredFirstTurnPhase::Inactive => Self::Inactive,
+            DeferredFirstTurnPhase::Pending => Self::Pending,
+            DeferredFirstTurnPhase::Consumed => Self::Consumed,
+        }
+    }
+}
+
+impl From<session_deferred_turn_authority::DeferredTurnFirstTurnPhase> for DeferredFirstTurnPhase {
+    fn from(value: session_deferred_turn_authority::DeferredTurnFirstTurnPhase) -> Self {
+        match value {
+            session_deferred_turn_authority::DeferredTurnFirstTurnPhase::Inactive => Self::Inactive,
+            session_deferred_turn_authority::DeferredTurnFirstTurnPhase::Pending => Self::Pending,
+            session_deferred_turn_authority::DeferredTurnFirstTurnPhase::Consumed => Self::Consumed,
+        }
     }
 }
 
@@ -947,6 +1146,43 @@ impl WitnessedToolFilter {
     }
 }
 
+/// Opaque parent/composition-authorized inherited tool visibility handoff.
+///
+/// The filter and witnesses are intentionally not public fields. Callers that
+/// need to hand inherited visibility to a child build must obtain this from an
+/// AgentFactory-minted parent composition authority; they cannot write
+/// canonical session visibility state directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedToolVisibilityAuthority {
+    filter: ToolFilter,
+    witnesses: BTreeMap<String, ToolVisibilityWitness>,
+}
+
+impl InheritedToolVisibilityAuthority {
+    pub(crate) fn from_generated_composition_authority(
+        filter: ToolFilter,
+        witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    ) -> Self {
+        Self { filter, witnesses }
+    }
+
+    pub fn filter(&self) -> &ToolFilter {
+        &self.filter
+    }
+
+    pub fn witnesses(&self) -> &BTreeMap<String, ToolVisibilityWitness> {
+        &self.witnesses
+    }
+
+    pub(crate) fn into_initial_visibility_state(self) -> SessionToolVisibilityState {
+        SessionToolVisibilityState {
+            inherited_base_filter: self.filter,
+            filter_witnesses: self.witnesses,
+            ..Default::default()
+        }
+    }
+}
+
 /// Canonical durable session-local tool visibility intent.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -971,6 +1207,30 @@ pub struct SessionToolVisibilityState {
     pub requested_witnesses: BTreeMap<String, ToolVisibilityWitness>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub filter_witnesses: BTreeMap<String, ToolVisibilityWitness>,
+}
+
+/// Generated-authority-approved durable tool visibility projection.
+///
+/// Session metadata stores this as a projection of the generated visibility
+/// owner. Code that only has raw `SessionToolVisibilityState` must first route
+/// it through a `ToolVisibilityOwner`/`ToolScope` restore path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedSessionToolVisibilityState {
+    state: SessionToolVisibilityState,
+}
+
+impl AuthorizedSessionToolVisibilityState {
+    pub(crate) fn from_generated_authority(state: SessionToolVisibilityState) -> Self {
+        Self { state }
+    }
+
+    pub fn as_state(&self) -> &SessionToolVisibilityState {
+        &self.state
+    }
+
+    pub fn into_state(self) -> SessionToolVisibilityState {
+        self.state
+    }
 }
 
 /// Durable build-only session state required to faithfully recover and rebuild
@@ -998,6 +1258,11 @@ pub struct SessionBuildState {
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<HashMap<String, String>>,
+    /// Compatibility projection of mob operator authority.
+    ///
+    /// `MobToolAuthorityContext` deliberately loses its generated authority
+    /// seal when serialized; restored behavior must be approved by the
+    /// generated runtime bridge before this projection can affect tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     #[serde(default, skip_serializing_if = "is_default_call_timeout_override")]
@@ -1027,6 +1292,30 @@ impl PartialEq for PendingToolResultsMessage {
     }
 }
 
+/// Deferred first-turn inputs consumed at the generated start-turn authority seam.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConsumedDeferredTurnInputs {
+    pub(crate) restore_first_turn_pending: bool,
+    pub(crate) pending_initial_prompt: Option<PendingDeferredPrompt>,
+    pub(crate) pending_tool_results: Vec<PendingToolResultsMessage>,
+}
+
+impl ConsumedDeferredTurnInputs {
+    pub fn is_empty(&self) -> bool {
+        !self.restore_first_turn_pending
+            && self.pending_initial_prompt.is_none()
+            && self.pending_tool_results.is_empty()
+    }
+
+    pub fn pending_initial_prompt(&self) -> Option<&PendingDeferredPrompt> {
+        self.pending_initial_prompt.as_ref()
+    }
+
+    pub fn pending_tool_results(&self) -> &[PendingToolResultsMessage] {
+        &self.pending_tool_results
+    }
+}
+
 /// Seen idempotency-key entry for system-context append requests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1046,56 +1335,58 @@ pub enum SeenSystemContextState {
 }
 
 impl SessionSystemContextState {
+    pub fn pending(&self) -> &[PendingSystemContextAppend] {
+        &self.pending
+    }
+
+    pub fn applied(&self) -> &[PendingSystemContextAppend] {
+        &self.applied
+    }
+
+    pub fn seen(&self) -> &BTreeMap<String, SeenSystemContextKey> {
+        &self.seen
+    }
+
+    pub fn active_turn_pending_keys(&self) -> &BTreeSet<String> {
+        &self.active_turn_pending_keys
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn applied_len(&self) -> usize {
+        self.applied.len()
+    }
+
+    pub fn active_turn_pending_len(&self) -> usize {
+        self.active_turn_pending_keys.len()
+    }
+
+    pub fn realtime_projection_appends(&self) -> Vec<PendingSystemContextAppend> {
+        self.applied
+            .iter()
+            .chain(self.pending.iter())
+            .cloned()
+            .collect()
+    }
+
     /// Stage an append request, enforcing per-session idempotency.
     pub fn stage_append(
         &mut self,
         req: &AppendSystemContextRequest,
         accepted_at: SystemTime,
     ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        let text = req.text.trim();
-        if text.is_empty() {
-            return Err(SystemContextStageError::InvalidRequest(
-                "system context text must not be empty".to_string(),
-            ));
-        }
+        session_system_context_authority::stage_append(self, req, accepted_at, false)
+    }
 
-        if let Some(key) = req.idempotency_key.as_ref() {
-            match self.seen.get(key) {
-                Some(existing)
-                    if existing.text == text
-                        && existing.source.as_deref() == req.source.as_deref() =>
-                {
-                    return Ok(crate::service::AppendSystemContextStatus::Duplicate);
-                }
-                Some(existing) => {
-                    return Err(SystemContextStageError::Conflict {
-                        key: key.clone(),
-                        existing_text: existing.text.clone(),
-                        existing_source: existing.source.clone(),
-                    });
-                }
-                None => {}
-            }
-        }
-
-        let append = PendingSystemContextAppend {
-            text: text.to_string(),
-            source: req.source.clone(),
-            idempotency_key: req.idempotency_key.clone(),
-            accepted_at,
-        };
-        if let Some(key) = req.idempotency_key.as_ref() {
-            self.seen.insert(
-                key.clone(),
-                SeenSystemContextKey {
-                    text: append.text.clone(),
-                    source: append.source.clone(),
-                    state: SeenSystemContextState::Pending,
-                },
-            );
-        }
-        self.pending.push(append);
-        Ok(crate::service::AppendSystemContextStatus::Staged)
+    fn stage_append_with_generated_authority(
+        &mut self,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+        active_turn_scoped: bool,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
+        session_system_context_authority::stage_append(self, req, accepted_at, active_turn_scoped)
     }
 
     /// Stage an append that is scoped to the currently-active turn only.
@@ -1109,77 +1400,18 @@ impl SessionSystemContextState {
         req: &AppendSystemContextRequest,
         accepted_at: SystemTime,
     ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        let idempotency_key = req.idempotency_key.clone();
-        let status = self.stage_append(req, accepted_at)?;
-        if matches!(status, crate::service::AppendSystemContextStatus::Staged)
-            && let Some(key) = idempotency_key
-        {
-            self.active_turn_pending_keys.insert(key);
-        }
-        Ok(status)
+        self.stage_append_with_generated_authority(req, accepted_at, true)
     }
 
     /// Mark all currently-pending appends as applied and clear the pending queue.
     pub fn mark_pending_applied(&mut self) {
-        for pending in &self.pending {
-            if is_runtime_steer_append(pending) {
-                continue;
-            }
-            if !self.applied.contains(pending) {
-                self.applied.push(pending.clone());
-            }
-        }
-        let mut seen_to_remove = Vec::new();
-        for pending in &self.pending {
-            if let Some(key) = pending.idempotency_key.as_ref()
-                && let Some(seen) = self.seen.get_mut(key)
-            {
-                if is_runtime_steer_append(pending) {
-                    seen_to_remove.push(key.clone());
-                } else {
-                    seen.state = SeenSystemContextState::Applied;
-                }
-            }
-        }
-        for key in seen_to_remove {
-            self.seen.remove(&key);
-        }
-        self.pending.clear();
-        self.active_turn_pending_keys.clear();
+        session_system_context_authority::mark_pending_applied(self);
     }
 
     /// Discard active-turn-only appends that were not consumed by the turn's
     /// next LLM boundary.
     pub fn discard_unapplied_active_turn_pending(&mut self) -> Vec<PendingSystemContextAppend> {
-        if self.active_turn_pending_keys.is_empty() {
-            return Vec::new();
-        }
-
-        let active_keys = std::mem::take(&mut self.active_turn_pending_keys);
-        let mut discarded = Vec::new();
-        self.pending.retain(|append| {
-            let should_discard = append
-                .idempotency_key
-                .as_ref()
-                .is_some_and(|key| active_keys.contains(key));
-            if should_discard {
-                discarded.push(append.clone());
-            }
-            !should_discard
-        });
-
-        for append in &discarded {
-            if let Some(key) = append.idempotency_key.as_ref()
-                && self
-                    .seen
-                    .get(key)
-                    .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
-            {
-                self.seen.remove(key);
-            }
-        }
-
-        discarded
+        session_system_context_authority::discard_unapplied_active_turn_pending(self)
     }
 
     /// Discard specific active-turn-only appends that are still pending.
@@ -1192,80 +1424,96 @@ impl SessionSystemContextState {
         &mut self,
         idempotency_keys: &[String],
     ) -> Vec<PendingSystemContextAppend> {
-        if idempotency_keys.is_empty() || self.active_turn_pending_keys.is_empty() {
-            return Vec::new();
-        }
-
-        let requested_keys: std::collections::BTreeSet<&str> =
-            idempotency_keys.iter().map(String::as_str).collect();
-        let mut discarded = Vec::new();
-        let mut discarded_keys = Vec::new();
-        self.pending.retain(|append| {
-            let should_discard = append.idempotency_key.as_ref().is_some_and(|key| {
-                requested_keys.contains(key.as_str()) && self.active_turn_pending_keys.contains(key)
-            });
-            if should_discard {
-                if let Some(key) = append.idempotency_key.as_ref() {
-                    discarded_keys.push(key.clone());
-                }
-                discarded.push(append.clone());
-            }
-            !should_discard
-        });
-
-        for key in discarded_keys {
-            self.active_turn_pending_keys.remove(&key);
-            if self
-                .seen
-                .get(&key)
-                .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
-            {
-                self.seen.remove(&key);
-            }
-        }
-
-        discarded
+        session_system_context_authority::discard_active_turn_pending_by_keys(
+            self,
+            idempotency_keys,
+        )
     }
 }
 
 impl SessionDeferredTurnState {
+    pub fn first_turn_phase(&self) -> DeferredFirstTurnPhase {
+        self.first_turn_phase
+    }
+
+    pub fn pending_initial_prompt(&self) -> Option<&PendingDeferredPrompt> {
+        self.pending_initial_prompt.as_ref()
+    }
+
+    pub fn pending_tool_results(&self) -> &[PendingToolResultsMessage] {
+        &self.pending_tool_results
+    }
+
+    pub fn pending_tool_results_len(&self) -> usize {
+        self.pending_tool_results.len()
+    }
+
+    pub(crate) fn pending_initial_prompt_mut_for_blob_rewrite(
+        &mut self,
+    ) -> Option<&mut PendingDeferredPrompt> {
+        self.pending_initial_prompt.as_mut()
+    }
+
+    pub(crate) fn pending_tool_results_mut_for_blob_rewrite(
+        &mut self,
+    ) -> &mut [PendingToolResultsMessage] {
+        &mut self.pending_tool_results
+    }
+
     /// Mark that this session has a deferred first turn waiting to start.
     pub fn mark_initial_turn_pending(&mut self) {
-        self.first_turn_phase = DeferredFirstTurnPhase::Pending;
+        match session_deferred_turn_authority::mark_initial_turn_pending(self) {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(
+                error = %err,
+                "generated deferred-turn authority rejected pending mark"
+            ),
+        }
     }
 
     /// Mark the deferred first turn as started.
     ///
     /// Returns true when the phase transitioned from `Pending`.
     pub fn mark_initial_turn_started(&mut self) -> bool {
-        let was_pending = matches!(self.first_turn_phase, DeferredFirstTurnPhase::Pending);
-        if was_pending {
-            self.first_turn_phase = DeferredFirstTurnPhase::Consumed;
+        match session_deferred_turn_authority::mark_initial_turn_started(self) {
+            Ok(was_pending) => was_pending,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated deferred-turn authority rejected first-turn start"
+                );
+                false
+            }
         }
-        was_pending
     }
 
     /// Restore the deferred first-turn pending phase after a failed pre-run setup.
     pub fn restore_initial_turn_pending(&mut self) {
-        self.first_turn_phase = DeferredFirstTurnPhase::Pending;
+        match session_deferred_turn_authority::restore_initial_turn_pending(self) {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(
+                error = %err,
+                "generated deferred-turn authority rejected pending restore"
+            ),
+        }
     }
 
     /// Whether build-only first-turn overrides are still legal for this session.
     pub fn allows_initial_turn_overrides(&self) -> bool {
-        matches!(self.first_turn_phase, DeferredFirstTurnPhase::Pending)
+        session_deferred_turn_authority::allows_initial_turn_overrides(self.first_turn_phase.into())
+            .unwrap_or(false)
     }
 
     /// Stage the create-time prompt for a later first turn.
     pub fn stage_initial_prompt(&mut self, prompt: ContentInput, accepted_at: SystemTime) {
-        if !prompt.has_images() && prompt.text_content().trim().is_empty() {
-            self.pending_initial_prompt = None;
-            return;
+        if let Err(err) =
+            session_deferred_turn_authority::stage_initial_prompt(self, prompt, accepted_at)
+        {
+            tracing::warn!(
+                error = %err,
+                "generated deferred-turn authority rejected initial prompt stage"
+            );
         }
-
-        self.pending_initial_prompt = Some(PendingDeferredPrompt {
-            prompt,
-            accepted_at,
-        });
     }
 
     /// Stage one callback tool-results message for the next turn.
@@ -1274,33 +1522,45 @@ impl SessionDeferredTurnState {
         results: Vec<ToolResult>,
         accepted_at: SystemTime,
     ) -> usize {
-        if results.is_empty() {
-            return 0;
-        }
-
-        let accepted = results.len();
-        self.pending_tool_results.push(PendingToolResultsMessage {
-            results,
-            accepted_at,
-        });
-        accepted
-    }
-
-    /// Consume the staged initial prompt, if any.
-    pub fn take_initial_prompt(&mut self) -> Option<ContentInput> {
-        self.pending_initial_prompt
-            .take()
-            .map(|pending| pending.prompt)
-    }
-
-    /// Consume all staged callback tool-results messages.
-    pub fn take_tool_results(&mut self) -> Vec<PendingToolResultsMessage> {
-        std::mem::take(&mut self.pending_tool_results)
+        session_deferred_turn_authority::stage_tool_results(self, results, accepted_at)
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "generated deferred-turn authority rejected tool-results stage"
+                );
+                0
+            })
     }
 
     /// Whether any callback tool results are currently staged.
     pub fn has_pending_tool_results(&self) -> bool {
         !self.pending_tool_results.is_empty()
+    }
+
+    /// Start a turn and consume all inputs generated-authorized for that seam.
+    pub fn consume_for_started_turn(&mut self) -> ConsumedDeferredTurnInputs {
+        session_deferred_turn_authority::consume_for_started_turn(self).unwrap_or_else(|err| {
+            tracing::warn!(
+                error = %err,
+                "generated deferred-turn authority rejected started-turn consumption"
+            );
+            ConsumedDeferredTurnInputs::default()
+        })
+    }
+
+    /// Restore inputs previously consumed by `consume_for_started_turn`.
+    pub fn restore_consumed_turn_inputs(&mut self, consumed: ConsumedDeferredTurnInputs) {
+        if consumed.is_empty() {
+            return;
+        }
+        if let Err(err) =
+            session_deferred_turn_authority::restore_consumed_turn_inputs(self, consumed)
+        {
+            tracing::warn!(
+                error = %err,
+                "generated deferred-turn authority rejected consumed input restore"
+            );
+        }
     }
 }
 
@@ -1316,40 +1576,7 @@ pub enum SystemContextStageError {
 }
 
 fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
-    let mut rendered = String::from("[Runtime System Context]");
-    if let Some(source) = &append.source {
-        rendered.push_str("\nsource: ");
-        rendered.push_str(source);
-    }
-    rendered.push_str("\n\n");
-    rendered.push_str(&append.text);
-    rendered
-}
-
-fn is_runtime_steer_key(value: &str) -> bool {
-    value.starts_with("runtime:steer:")
-}
-
-fn is_runtime_steer_append(append: &PendingSystemContextAppend) -> bool {
-    append.source.as_deref().is_some_and(is_runtime_steer_key)
-        || append
-            .idempotency_key
-            .as_deref()
-            .is_some_and(is_runtime_steer_key)
-}
-
-fn seen_system_context_matches(
-    seen: &SeenSystemContextKey,
-    append: &PendingSystemContextAppend,
-) -> bool {
-    seen.text == append.text && seen.source.as_deref() == append.source.as_deref()
-}
-
-fn pending_system_context_matches(
-    existing: &PendingSystemContextAppend,
-    append: &PendingSystemContextAppend,
-) -> bool {
-    existing.text == append.text && existing.source.as_deref() == append.source.as_deref()
+    session_system_context_authority::render_system_context_block(append)
 }
 
 impl Session {
@@ -1357,7 +1584,7 @@ impl Session {
     pub fn new() -> Self {
         let now = SystemTime::now();
         Self {
-            version: SESSION_VERSION,
+            version: session_version(),
             id: SessionId::new(),
             messages: Arc::new(Vec::new()),
             created_at: now,
@@ -1513,17 +1740,6 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
-    /// Whether the conversation has a pending turn boundary.
-    ///
-    /// Returns `true` if the last message is `User` or `ToolResults`, meaning
-    /// the conversation is waiting for an assistant turn and `run_pending` can
-    /// resume without a new user message.
-    pub fn has_pending_boundary(&self) -> bool {
-        self.messages
-            .last()
-            .is_some_and(|m| matches!(m, Message::User(_) | Message::ToolResults { .. }))
-    }
-
     /// Get the last N messages
     pub fn last_n(&self, n: usize) -> &[Message] {
         let start = self.messages.len().saturating_sub(n);
@@ -1583,359 +1799,21 @@ impl Session {
         event: RealtimeTranscriptEvent,
     ) -> RealtimeTranscriptApplyOutcome {
         let mut state = self.realtime_transcript_state();
-        match event {
-            RealtimeTranscriptEvent::ItemObserved {
-                item_id,
-                previous_item_id,
-                role,
-                response_id,
-            } => {
-                let response_id = normalize_realtime_optional_response_id(response_id);
-                if role == RealtimeTranscriptRole::Assistant
-                    && response_id
-                        .as_ref()
-                        .is_some_and(|id| state.discarded_assistant_response_ids.contains(id))
-                {
-                    observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
-                } else {
-                    observe_realtime_item(&mut state, item_id, previous_item_id, role, response_id);
-                }
-            }
-            RealtimeTranscriptEvent::ItemSkipped {
-                item_id,
-                previous_item_id,
-            } => {
-                observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
-            }
-            RealtimeTranscriptEvent::UserTranscriptFinal {
-                item_id,
-                previous_item_id,
-                content_index,
-                text,
-            } => {
-                if let Some(item) = observe_realtime_item(
-                    &mut state,
-                    item_id,
-                    previous_item_id,
-                    RealtimeTranscriptRole::User,
-                    None,
-                ) {
-                    let segment = item.content_segments.entry(content_index).or_default();
-                    if segment.is_empty() && !text.is_empty() {
-                        *segment = text;
-                    } else if !text.is_empty() && segment.as_str() != text {
-                        tracing::warn!(
-                            content_index,
-                            "ignoring conflicting realtime user transcript segment replay"
-                        );
-                    }
-                    item.ready = true;
-                }
-            }
-            RealtimeTranscriptEvent::AssistantTextDelta {
-                response_id,
-                delta_id,
-                item_id,
-                previous_item_id,
-                content_index,
-                delta,
-            } => {
-                let Some(response_id) = normalize_realtime_response_id(response_id) else {
-                    return RealtimeTranscriptApplyOutcome::default();
-                };
-                if state
-                    .discarded_assistant_response_ids
-                    .contains(&response_id)
-                {
-                    observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
-                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
-                    self.store_realtime_transcript_state(&state);
-                    return outcome;
-                }
-                if !delta_id.trim().is_empty() && !state.seen_delta_ids.insert(delta_id) {
-                    return RealtimeTranscriptApplyOutcome::default();
-                }
-                let response_completed = state.assistant_completions.contains_key(&response_id);
-                if let Some(item) = observe_realtime_item(
-                    &mut state,
-                    item_id,
-                    previous_item_id,
-                    RealtimeTranscriptRole::Assistant,
-                    Some(response_id),
-                ) {
-                    if promote_item_lane(item, TranscriptLane::Display) {
-                        item.content_segments
-                            .entry(content_index)
-                            .or_default()
-                            .push_str(&delta);
-                        if response_completed && !item.text().is_empty() {
-                            item.ready = true;
-                        }
-                    } else {
-                        // R5-6 sibling: this delta was routed at a
-                        // Spoken-classified item (e.g. truncation arrived
-                        // first and locked the lane). `promote_item_lane`
-                        // already warned about the lane conflict; drop the
-                        // delta to preserve the lane invariant rather than
-                        // clobbering Spoken content with Display text.
-                        tracing::warn!(
-                            "AssistantTextDelta routed to a Spoken-lane item; dropping delta to preserve lane invariant — this indicates a provider lane-classification bug"
-                        );
-                    }
-                }
-            }
-            RealtimeTranscriptEvent::AssistantTranscriptDelta {
-                response_id,
-                delta_id,
-                item_id,
-                previous_item_id,
-                content_index,
-                delta,
-            } => {
-                // T9/T10: spoken-transcript lane. Identical staging shape to
-                // `AssistantTextDelta` (same idempotency / ordering / dedup
-                // logic owns both lanes); the only difference is that the
-                // owning item is tagged `Spoken` so the materializer flushes
-                // `AssistantBlock::Transcript` instead of `AssistantBlock::Text`.
-                let Some(response_id) = normalize_realtime_response_id(response_id) else {
-                    return RealtimeTranscriptApplyOutcome::default();
-                };
-                if state
-                    .discarded_assistant_response_ids
-                    .contains(&response_id)
-                {
-                    observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
-                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
-                    self.store_realtime_transcript_state(&state);
-                    return outcome;
-                }
-                if !delta_id.trim().is_empty() && !state.seen_delta_ids.insert(delta_id) {
-                    return RealtimeTranscriptApplyOutcome::default();
-                }
-                let response_completed = state.assistant_completions.contains_key(&response_id);
-                if let Some(item) = observe_realtime_item(
-                    &mut state,
-                    item_id,
-                    previous_item_id,
-                    RealtimeTranscriptRole::Assistant,
-                    Some(response_id),
-                ) {
-                    if promote_item_lane(item, TranscriptLane::Spoken) {
-                        item.content_segments
-                            .entry(content_index)
-                            .or_default()
-                            .push_str(&delta);
-                        if response_completed && !item.text().is_empty() {
-                            item.ready = true;
-                        }
-                    } else {
-                        // R5-6 sibling: this transcript delta arrived for a
-                        // Display-classified item (a Display delta or other
-                        // Display-lane event landed first). `promote_item_lane`
-                        // already warned; drop the delta rather than appending
-                        // Spoken text into a Display-locked content_segment.
-                        tracing::warn!(
-                            "AssistantTranscriptDelta routed to a Display-lane item; dropping delta to preserve lane invariant — this indicates a provider lane-classification bug"
-                        );
-                    }
-                }
-            }
-            RealtimeTranscriptEvent::AssistantTranscriptTruncated {
-                response_id,
-                item_id,
-                content_index,
-                text,
-            } => {
-                let Some(response_id) = normalize_realtime_response_id(response_id) else {
-                    return RealtimeTranscriptApplyOutcome::default();
-                };
-                if state
-                    .discarded_assistant_response_ids
-                    .contains(&response_id)
-                {
-                    observe_realtime_skipped_item(&mut state, item_id, None);
-                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
-                    self.store_realtime_transcript_state(&state);
-                    return outcome;
-                }
-                let response_completed = state.assistant_completions.contains_key(&response_id);
-                let item_id_for_log = item_id.clone();
-                let response_id_for_log = response_id.clone();
-                if let Some(item) = observe_realtime_item(
-                    &mut state,
-                    item_id,
-                    None,
-                    RealtimeTranscriptRole::Assistant,
-                    Some(response_id),
-                ) {
-                    // R5-7-sibling: a late truncation arriving after the
-                    // canonical message has already committed cannot mutate
-                    // history (append-only invariant). Same shape as the
-                    // late-FinalText guard above — warn and skip.
-                    if item.materialized {
-                        tracing::warn!(
-                            target: "meerkat::session",
-                            item_id = %item_id_for_log,
-                            response_id = %response_id_for_log,
-                            "AssistantTranscriptTruncated arrived after item already materialized; canonical message is locked, late truncation dropped",
-                        );
-                    } else if promote_item_lane(item, TranscriptLane::Spoken) {
-                        // R5-6: truncation is a Spoken-lane-only semantic —
-                        // it describes the audio output that was actually
-                        // heard before barge-in cut it short. Promote to
-                        // Spoken so the materializer commits as
-                        // `AssistantBlock::Transcript`. If a Display delta
-                        // arrived first, `promote_item_lane` keeps the
-                        // existing lane and returns `false` — that's a
-                        // provider bug; warn already emitted inside
-                        // `promote_item_lane`.
-                        item.content_segments.insert(content_index, text);
-                        if response_completed && !item.text().is_empty() {
-                            item.ready = true;
-                        }
-                    }
-                }
-            }
-            RealtimeTranscriptEvent::AssistantTranscriptFinalText {
-                response_id,
-                item_id,
-                content_index,
-                text,
-            } => {
-                // R5-7: authoritative final text overrides any incomplete
-                // delta accumulation for this `(response_id, item_id,
-                // content_index)`. If no item is staged yet (final-only
-                // provider, or all deltas dropped), create one on the
-                // Spoken lane so the materializer flushes it as
-                // `AssistantBlock::Transcript`. Flush gating is unchanged:
-                // `AssistantTurnCompleted` still drives readiness.
-                let Some(response_id) = normalize_realtime_response_id(response_id) else {
-                    return RealtimeTranscriptApplyOutcome::default();
-                };
-                if state
-                    .discarded_assistant_response_ids
-                    .contains(&response_id)
-                {
-                    observe_realtime_skipped_item(&mut state, item_id, None);
-                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
-                    self.store_realtime_transcript_state(&state);
-                    return outcome;
-                }
-                let response_completed = state.assistant_completions.contains_key(&response_id);
-                if let Some(item) = observe_realtime_item(
-                    &mut state,
-                    item_id,
-                    None,
-                    RealtimeTranscriptRole::Assistant,
-                    Some(response_id),
-                ) {
-                    // R5-7: late `AssistantTranscriptFinalText` after the
-                    // item has already been committed to canonical history.
-                    // The staged item is `materialized = true` and the
-                    // session's `Message::BlockAssistant` already carries
-                    // the delta-accumulated text. Append-only history is a
-                    // stronger invariant than typed text repair: rewriting
-                    // the canonical message would violate it (consumers may
-                    // already have observed the prior text via the event
-                    // stream / projector). Warn-and-skip; the SDK or human
-                    // can decide whether the provider-side ordering bug
-                    // matters.
-                    if item.materialized {
-                        tracing::warn!(
-                            "AssistantTranscriptFinalText arrived after item already materialized; canonical message is locked, late repair dropped"
-                        );
-                        self.store_realtime_transcript_state(&state);
-                        return RealtimeTranscriptApplyOutcome::default();
-                    }
-                    // Spoken lane: this variant is the authoritative
-                    // transcript-final text path. Display-text finals come
-                    // through a different seam. If the item is locked to
-                    // Display (e.g. an earlier `AssistantTextDelta` staged
-                    // it), drop the final to preserve the lane invariant —
-                    // append-only history would otherwise silently switch
-                    // block type at materialize time.
-                    if promote_item_lane(item, TranscriptLane::Spoken) {
-                        // Replace, not append: the final's text is
-                        // authoritative and supersedes any (possibly
-                        // partial) accumulated segment text.
-                        item.content_segments.insert(content_index, text);
-                        if response_completed && !item.text().is_empty() {
-                            item.ready = true;
-                        }
-                    } else {
-                        tracing::warn!(
-                            "AssistantTranscriptFinalText routed to a Display-lane item; dropping authoritative final to preserve lane invariant — this indicates a provider lane-classification bug"
-                        );
-                    }
-                }
-            }
-            RealtimeTranscriptEvent::AssistantTurnCompleted {
-                response_id,
-                stop_reason,
-                usage,
-            } => {
-                let Some(response_id) = normalize_realtime_response_id(response_id) else {
-                    return RealtimeTranscriptApplyOutcome::default();
-                };
-                if state
-                    .discarded_assistant_response_ids
-                    .contains(&response_id)
-                {
-                    discard_realtime_assistant_response(&mut state, &response_id);
-                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
-                    self.store_realtime_transcript_state(&state);
-                    return outcome;
-                }
-                match stop_reason {
-                    StopReason::Cancelled => {
-                        discard_realtime_assistant_response(&mut state, &response_id);
-                    }
-                    StopReason::ToolUse => {
-                        state.assistant_completions.remove(&response_id);
-                    }
-                    _ => {
-                        state
-                            .assistant_completions
-                            .entry(response_id.clone())
-                            .or_insert(RealtimeAssistantCompletion {
-                                stop_reason,
-                                usage,
-                                usage_consumed: false,
-                            });
-                        mark_realtime_assistant_response_ready(&mut state, &response_id);
-                    }
-                }
-            }
-            RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id } => {
-                let Some(response_id) = normalize_realtime_response_id(response_id) else {
-                    return RealtimeTranscriptApplyOutcome::default();
-                };
-                // R5-5: barge-in invalidates the spoken/audio lane (the user
-                // is speaking over what they heard) but preserves the
-                // Display lane (sideband display text from the same response
-                // is not "spoken over"). The interrupt is also terminal for
-                // the response on the realtime-staging path: any later
-                // `AssistantTurnCompleted` arrives with `StopReason::Cancelled`
-                // and short-circuits via the discarded-set guard. Therefore
-                // we must materialize retained Display items immediately here
-                // by inserting a synthetic `assistant_completions` entry —
-                // otherwise they would never commit.
-                discard_realtime_assistant_response_by_lane(&mut state, &response_id);
-                state
-                    .assistant_completions
-                    .entry(response_id.clone())
-                    .or_insert(RealtimeAssistantCompletion {
-                        stop_reason: StopReason::Cancelled,
-                        usage: Usage::default(),
-                        usage_consumed: false,
-                    });
-                mark_realtime_assistant_response_ready(&mut state, &response_id);
-            }
-        }
-
-        let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
+        let commit = session_realtime_transcript_authority::apply_realtime_transcript_event(
+            &mut state, event,
+        )
+        .unwrap_or_else(|err| {
+            fail_closed_generated_restore(
+                "realtime-transcript",
+                <serde_json::Error as serde::de::Error>::custom(err),
+            )
+        });
         self.store_realtime_transcript_state(&state);
-        outcome
+        self.push_batch(commit.messages);
+        if commit.usage != Usage::default() {
+            self.record_usage(commit.usage);
+        }
+        commit.outcome
     }
 
     /// Return every distinct provider `response_id` currently staged in the
@@ -1959,238 +1837,46 @@ impl Session {
     #[must_use]
     pub fn in_flight_realtime_assistant_response_ids(&self) -> Vec<String> {
         let state = self.realtime_transcript_state();
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut out: Vec<String> = Vec::new();
-        for item_id in &state.first_seen_order {
-            let Some(item) = state.items.get(item_id) else {
-                continue;
-            };
-            if item.role != RealtimeTranscriptRole::Assistant {
-                continue;
-            }
-            if item.materialized || item.skipped {
-                continue;
-            }
-            let Some(response_id) = item.response_id.as_ref() else {
-                continue;
-            };
-            if state.discarded_assistant_response_ids.contains(response_id) {
-                continue;
-            }
-            if seen.insert(response_id.clone()) {
-                out.push(response_id.clone());
-            }
-        }
-        out
+        session_realtime_transcript_authority::in_flight_realtime_assistant_response_ids(&state)
     }
 
     fn realtime_transcript_state(&self) -> SessionRealtimeTranscriptState {
+        match self.try_realtime_transcript_state() {
+            Ok(Some(state)) => state,
+            Ok(None) => SessionRealtimeTranscriptState::default(),
+            Err(err) => fail_closed_generated_restore("realtime-transcript", err),
+        }
+    }
+
+    fn try_realtime_transcript_state(
+        &self,
+    ) -> Result<Option<SessionRealtimeTranscriptState>, serde_json::Error> {
         self.metadata
             .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+            .map(|value| {
+                let state = serde_json::from_value(value.clone())?;
+                session_realtime_transcript_authority::restore_realtime_transcript_state(state)
+                    .map_err(<serde_json::Error as serde::de::Error>::custom)
+            })
+            .transpose()
     }
 
     fn store_realtime_transcript_state(&mut self, state: &SessionRealtimeTranscriptState) {
         match serde_json::to_value(state) {
-            Ok(value) => self.set_metadata(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value),
+            Ok(value) => self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value),
             Err(error) => {
                 tracing::warn!(error = %error, "failed to serialize realtime transcript state");
             }
         }
     }
 
-    fn materialize_realtime_transcript_ready_items(
+    fn apply_authorized_system_prompt(
         &mut self,
-        state: &mut SessionRealtimeTranscriptState,
-    ) -> RealtimeTranscriptApplyOutcome {
-        let mut materialized = Vec::new();
-
-        // Round-4 CC7: when a single response_id produces both display-text
-        // and spoken-transcript items (mixed-modality response), we emit a
-        // SINGLE `Message::BlockAssistant` whose `blocks` interleave
-        // `AssistantBlock::Text` and `AssistantBlock::Transcript` in
-        // arrival order — not multiple messages. Pending state lives across
-        // outer-loop batches: when chained items (`previous_item_id`) force
-        // serial materialization, batch N may emit the display item and
-        // batch N+1 may emit the spoken item under the same response_id —
-        // we still want one combined message.
-        //
-        // The pending group is flushed when:
-        //   - a User item lands (canonical-history ordering boundary)
-        //   - an assistant item with a different response_id lands
-        //   - the outer materialization loop terminates
-        let mut pending_blocks: Vec<AssistantBlock> = Vec::new();
-        let mut pending_response_id: Option<String> = None;
-        let mut pending_stop_reason: StopReason = StopReason::EndTurn;
-        let mut pending_usage: Usage = Usage::default();
-
-        loop {
-            let order = realtime_transcript_order(state);
-            let mut skipped_batch = Vec::new();
-            let mut batch = Vec::new();
-            for item_id in order {
-                let Some(item) = state.items.get(&item_id) else {
-                    continue;
-                };
-                if item.materialized {
-                    continue;
-                }
-                if !realtime_predecessor_materialized(state, item.previous_item_id.as_deref()) {
-                    continue;
-                }
-                if item.skipped {
-                    skipped_batch.push(item_id.clone());
-                    continue;
-                }
-                if !item.ready {
-                    continue;
-                }
-                let text = item.text();
-                if text.is_empty() {
-                    continue;
-                }
-                match item.role {
-                    RealtimeTranscriptRole::User => {
-                        batch.push(RealtimeTranscriptMaterializedMessage::User {
-                            item_id: item_id.clone(),
-                            text,
-                        });
-                    }
-                    RealtimeTranscriptRole::Assistant => {
-                        let Some(response_id) = item.response_id.as_ref() else {
-                            continue;
-                        };
-                        let Some(completion) = state.assistant_completions.get(response_id) else {
-                            continue;
-                        };
-                        let usage = if completion.usage_consumed {
-                            Usage::default()
-                        } else {
-                            completion.usage.clone()
-                        };
-                        batch.push(RealtimeTranscriptMaterializedMessage::Assistant {
-                            item_id: item_id.clone(),
-                            response_id: response_id.clone(),
-                            text,
-                            stop_reason: completion.stop_reason,
-                            usage,
-                            lane: item.lane,
-                        });
-                    }
-                }
-            }
-            if skipped_batch.is_empty() && batch.is_empty() {
-                break;
-            }
-            for item_id in skipped_batch {
-                if let Some(item) = state.items.get_mut(&item_id) {
-                    item.materialized = true;
-                }
-            }
-
-            for message in batch {
-                match &message {
-                    RealtimeTranscriptMaterializedMessage::User { item_id, text } => {
-                        if !pending_blocks.is_empty() {
-                            let drained = std::mem::take(&mut pending_blocks);
-                            self.append_external_assistant_blocks(
-                                drained,
-                                pending_stop_reason,
-                                std::mem::take(&mut pending_usage),
-                            );
-                            pending_response_id = None;
-                        }
-                        if let Some(item) = state.items.get_mut(item_id) {
-                            item.materialized = true;
-                        }
-                        self.append_external_user_content(ContentInput::Text(text.clone()));
-                    }
-                    RealtimeTranscriptMaterializedMessage::Assistant {
-                        item_id,
-                        response_id,
-                        text,
-                        stop_reason,
-                        usage,
-                        lane,
-                    } => {
-                        // Flush if this assistant item belongs to a different
-                        // response than the pending group. (Same response_id
-                        // → accumulate; different → emit prior message.)
-                        if pending_response_id
-                            .as_ref()
-                            .is_some_and(|existing| existing != response_id)
-                            && !pending_blocks.is_empty()
-                        {
-                            let drained = std::mem::take(&mut pending_blocks);
-                            self.append_external_assistant_blocks(
-                                drained,
-                                pending_stop_reason,
-                                std::mem::take(&mut pending_usage),
-                            );
-                            pending_response_id = None;
-                        }
-                        if let Some(item) = state.items.get_mut(item_id) {
-                            item.materialized = true;
-                        }
-                        if let Some(completion) = state.assistant_completions.get_mut(response_id) {
-                            completion.usage_consumed = true;
-                        }
-                        // T9/T10: route to the correct canonical block by
-                        // lane. `Display` keeps the legacy `AssistantBlock::Text`
-                        // shape; `Spoken` flushes
-                        // `AssistantBlock::Transcript { source: Spoken }` so
-                        // OpenAI realtime audio transcripts stop being
-                        // persisted as authored display text.
-                        let block = match lane {
-                            TranscriptLane::Display => AssistantBlock::Text {
-                                text: text.clone(),
-                                meta: None,
-                            },
-                            TranscriptLane::Spoken => AssistantBlock::Transcript {
-                                text: text.clone(),
-                                source: crate::types::TranscriptSource::Spoken,
-                                meta: None,
-                            },
-                        };
-                        // First item in a group seeds the response_id /
-                        // stop_reason / usage. `usage_consumed` is flipped
-                        // to true above as the first item is processed, so
-                        // every subsequent item sees `Usage::default()` from
-                        // the materializer's per-item builder — accumulating
-                        // across items in one group is naturally
-                        // single-counted.
-                        if pending_response_id.is_none() {
-                            pending_response_id = Some(response_id.clone());
-                            pending_stop_reason = *stop_reason;
-                            pending_usage = usage.clone();
-                        }
-                        pending_blocks.push(block);
-                    }
-                }
-                materialized.push(message);
-            }
-        }
-
-        // Final flush after the outer materialization loop has drained.
-        if !pending_blocks.is_empty() {
-            self.append_external_assistant_blocks(
-                pending_blocks,
-                pending_stop_reason,
-                pending_usage,
-            );
-        }
-
-        RealtimeTranscriptApplyOutcome {
-            materialized_messages: materialized,
-        }
-    }
-
-    /// Set a system prompt (adds or replaces System message at start)
-    pub fn set_system_prompt(&mut self, prompt: String) {
+        prompt: session_durable_config_authority::AuthorizedSystemPrompt,
+    ) {
         use crate::types::SystemMessage;
 
+        let (prompt, _replacing_existing) = prompt.into_parts();
         let inner = Arc::make_mut(&mut self.messages);
         // Check if first message is system
         if let Some(Message::System(_)) = inner.first() {
@@ -2202,6 +1888,32 @@ impl Session {
         self.refresh_transcript_head_after_message_mutation();
     }
 
+    /// Set a system prompt through generated durable-config authority.
+    pub fn set_system_prompt_with_source(
+        &mut self,
+        prompt: String,
+        source: session_durable_config_authority::SessionSystemPromptSource,
+    ) -> Result<(), session_durable_config_authority::SessionDurableConfigAuthorityError> {
+        let replacing_existing = matches!(self.messages.first(), Some(Message::System(_)));
+        let prompt = session_durable_config_authority::authorize_system_prompt_mutation(
+            prompt,
+            source,
+            replacing_existing,
+        )?;
+        self.apply_authorized_system_prompt(prompt);
+        Ok(())
+    }
+
+    /// Set a system prompt (adds or replaces System message at start).
+    pub fn set_system_prompt(&mut self, prompt: String) {
+        if let Err(err) = self.set_system_prompt_with_source(
+            prompt,
+            session_durable_config_authority::SessionSystemPromptSource::DirectMutation,
+        ) {
+            tracing::warn!(error = %err, "generated session durable-config authority rejected system prompt mutation");
+        }
+    }
+
     /// Remove transient active-turn steer context from persisted session state.
     ///
     /// Operator steers accepted into an already-running turn are request-local:
@@ -2211,51 +1923,36 @@ impl Session {
         let mut removed = 0usize;
 
         if let Some(Message::System(system)) = self.messages.first() {
-            let parts = system
-                .content
-                .split(SYSTEM_CONTEXT_SEPARATOR)
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            let original_len = parts.len();
-            let retained = parts
-                .into_iter()
-                .filter(|part| {
-                    !(part.starts_with("[Runtime System Context]")
-                        && part.contains("\nsource: runtime:steer:"))
-                })
-                .collect::<Vec<_>>();
-            let removed_blocks = original_len.saturating_sub(retained.len());
+            let (retained_prompt, removed_blocks) =
+                session_system_context_authority::remove_runtime_steer_prompt_blocks(
+                    &system.content,
+                );
             if removed_blocks > 0 {
                 removed += removed_blocks;
-                self.set_system_prompt(retained.join(SYSTEM_CONTEXT_SEPARATOR));
+                if let Err(err) = self.set_system_prompt_with_source(
+                    retained_prompt,
+                    session_durable_config_authority::SessionSystemPromptSource::RuntimeSteerCleanup,
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        "generated session durable-config authority rejected runtime steer prompt cleanup"
+                    );
+                }
             }
         }
 
-        let mut state = self.system_context_state().unwrap_or_default();
-
-        let before_pending = state.pending.len();
-        state
-            .pending
-            .retain(|append| !is_runtime_steer_append(append));
-        removed += before_pending.saturating_sub(state.pending.len());
-
-        let before_applied = state.applied.len();
-        state
-            .applied
-            .retain(|append| !is_runtime_steer_append(append));
-        removed += before_applied.saturating_sub(state.applied.len());
-
-        let before_seen = state.seen.len();
-        state.seen.retain(|key, seen| {
-            !is_runtime_steer_key(key) && !seen.source.as_deref().is_some_and(is_runtime_steer_key)
-        });
-        removed += before_seen.saturating_sub(state.seen.len());
-
-        let before_active = state.active_turn_pending_keys.len();
-        state
-            .active_turn_pending_keys
-            .retain(|key| !is_runtime_steer_key(key));
-        removed += before_active.saturating_sub(state.active_turn_pending_keys.len());
+        let mut state = match self.try_system_context_state() {
+            Ok(state) => state.unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated system-context authority rejected runtime steer cleanup state"
+                );
+                return removed;
+            }
+        };
+        removed +=
+            session_system_context_authority::discard_transient_runtime_steer_state(&mut state);
 
         if removed > 0
             && let Err(err) = self.set_system_context_state(state)
@@ -2283,81 +1980,23 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_default();
-        let mut state = self.system_context_state().unwrap_or_default();
-        let mut state_dirty = false;
-        let mut new_appends: Vec<PendingSystemContextAppend> = Vec::new();
-        for append in appends {
-            if append.text.trim().is_empty() {
-                continue;
+        let mut state = match self.try_system_context_state() {
+            Ok(state) => state.unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated system-context authority rejected applied context state"
+                );
+                return;
             }
-            let rendered = render_system_context_block(append);
-            if let Some(key) = append.idempotency_key.as_ref() {
-                if let Some(existing) = state.seen.get(key)
-                    && !seen_system_context_matches(existing, append)
-                {
-                    tracing::warn!(
-                        idempotency_key = %key,
-                        "skipping conflicting runtime system-context append"
-                    );
-                    continue;
-                }
-                if let Some(existing) = state
-                    .applied
-                    .iter()
-                    .find(|applied| applied.idempotency_key.as_ref() == Some(key))
-                    && !pending_system_context_matches(existing, append)
-                {
-                    tracing::warn!(
-                        idempotency_key = %key,
-                        "skipping conflicting runtime system-context append"
-                    );
-                    continue;
-                }
-                if let Some(existing) = new_appends
-                    .iter()
-                    .find(|pending| pending.idempotency_key.as_ref() == Some(key))
-                {
-                    if !pending_system_context_matches(existing, append) {
-                        tracing::warn!(
-                            idempotency_key = %key,
-                            "skipping conflicting runtime system-context append"
-                        );
-                    }
-                    continue;
-                }
-                if current_system_prompt.contains(&rendered) {
-                    if !state
-                        .applied
-                        .iter()
-                        .any(|applied| applied.idempotency_key.as_ref() == Some(key))
-                    {
-                        state.applied.push(append.clone());
-                        state_dirty = true;
-                    }
-                    if state
-                        .seen
-                        .get(key)
-                        .is_none_or(|seen| seen.state != SeenSystemContextState::Applied)
-                    {
-                        state.seen.insert(
-                            key.clone(),
-                            SeenSystemContextKey {
-                                text: append.text.clone(),
-                                source: append.source.clone(),
-                                state: SeenSystemContextState::Applied,
-                            },
-                        );
-                        state_dirty = true;
-                    }
-                    continue;
-                }
-            } else if new_appends.contains(append) || current_system_prompt.contains(&rendered) {
-                continue;
-            }
-            new_appends.push(append.clone());
-        }
+        };
+        let new_appends = session_system_context_authority::record_applied_system_context_blocks(
+            &mut state,
+            appends,
+            current_system_prompt,
+        );
         if new_appends.is_empty() {
-            if state_dirty && let Err(err) = self.set_system_context_state(state) {
+            if let Err(err) = self.set_system_context_state(state) {
                 tracing::warn!(error = %err, "failed to persist applied system-context state");
             }
             return;
@@ -2375,29 +2014,15 @@ impl Session {
             }
             _ => rendered,
         };
-        self.set_system_prompt(next);
-
-        for append in new_appends {
-            if let Some(key) = append.idempotency_key.as_ref() {
-                state.seen.insert(
-                    key.clone(),
-                    SeenSystemContextKey {
-                        text: append.text.clone(),
-                        source: append.source.clone(),
-                        state: SeenSystemContextState::Applied,
-                    },
-                );
-                if state
-                    .applied
-                    .iter()
-                    .any(|applied| applied.idempotency_key.as_ref() == Some(key))
-                {
-                    continue;
-                }
-            } else if state.applied.contains(&append) {
-                continue;
-            }
-            state.applied.push(append);
+        if let Err(err) = self.set_system_prompt_with_source(
+            next,
+            session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+        ) {
+            tracing::warn!(
+                error = %err,
+                "generated session durable-config authority rejected system-context prompt append"
+            );
+            return;
         }
         if let Err(err) = self.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to persist applied system-context state");
@@ -2452,10 +2077,48 @@ impl Session {
         &self.metadata
     }
 
-    /// Set a metadata value
-    pub fn set_metadata(&mut self, key: &str, value: serde_json::Value) {
+    fn set_metadata_unchecked(&mut self, key: &str, value: serde_json::Value) {
         self.metadata.insert(key.to_string(), value);
         self.updated_at = SystemTime::now();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_metadata_unchecked_for_test(&mut self, key: &str, value: serde_json::Value) {
+        self.set_metadata_unchecked(key, value);
+    }
+
+    fn fork_metadata_projection(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut metadata = self.metadata.clone();
+        metadata.retain(|key, _| !is_session_authority_metadata_key(key));
+        metadata
+    }
+
+    fn remove_metadata_unchecked(&mut self, key: &str) {
+        self.metadata.remove(key);
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Set a metadata value when the key is not reserved for generated authority.
+    pub fn try_set_metadata(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), ReservedSessionMetadataKey> {
+        if is_session_authority_metadata_key(key) {
+            return Err(ReservedSessionMetadataKey::new(key));
+        }
+        self.set_metadata_unchecked(key, value);
+        Ok(())
+    }
+
+    /// Set a metadata value.
+    ///
+    /// Reserved generated-authority metadata keys fail closed and are left
+    /// untouched. Use the typed setters for those keys.
+    pub fn set_metadata(&mut self, key: &str, value: serde_json::Value) {
+        if let Err(err) = self.try_set_metadata(key, value) {
+            tracing::warn!(error = %err, "rejected raw session metadata mutation");
+        }
     }
 
     /// Backfill a missing metadata value without changing `updated_at`.
@@ -2464,6 +2127,13 @@ impl Session {
     /// an older projection. Semantic metadata mutations must use
     /// [`Session::set_metadata`] so the session timestamp advances.
     pub fn backfill_metadata_if_absent(&mut self, key: &str, value: serde_json::Value) -> bool {
+        if is_session_authority_metadata_key(key) {
+            tracing::warn!(
+                metadata_key = key,
+                "rejected raw session metadata backfill for authority key"
+            );
+            return false;
+        }
         if self.metadata.contains_key(key) {
             false
         } else {
@@ -2474,6 +2144,13 @@ impl Session {
 
     /// Remove a metadata value.
     pub fn remove_metadata(&mut self, key: &str) {
+        if is_session_authority_metadata_key(key) {
+            tracing::warn!(
+                metadata_key = key,
+                "rejected raw session metadata removal for authority key"
+            );
+            return;
+        }
         self.metadata.remove(key);
         self.updated_at = SystemTime::now();
     }
@@ -2483,16 +2160,40 @@ impl Session {
         &mut self,
         metadata: SessionMetadata,
     ) -> Result<(), serde_json::Error> {
+        let metadata =
+            session_durable_config_authority::authorize_session_metadata_persist(metadata)
+                .map_err(<serde_json::Error as serde::ser::Error>::custom)?
+                .into_metadata();
         let value = serde_json::to_value(metadata)?;
-        self.set_metadata(SESSION_METADATA_KEY, value);
+        self.set_metadata_unchecked(SESSION_METADATA_KEY, value);
         Ok(())
     }
 
     /// Load SessionMetadata from the session metadata map.
+    ///
+    /// If the reserved key exists but cannot pass typed generated restore,
+    /// fail closed instead of treating corrupted machine facts as absent.
     pub fn session_metadata(&self) -> Option<SessionMetadata> {
-        self.metadata
-            .get(SESSION_METADATA_KEY)
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+        match self.try_session_metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => fail_closed_generated_restore("session-metadata", err),
+        }
+    }
+
+    /// Try to load SessionMetadata through generated restore authority.
+    pub fn try_session_metadata(&self) -> Result<Option<SessionMetadata>, serde_json::Error> {
+        let Some(value) = self.metadata.get(SESSION_METADATA_KEY) else {
+            return Ok(None);
+        };
+        let mut metadata = serde_json::from_value::<SessionMetadata>(value.clone())?;
+        metadata.schema_version =
+            session_persistence_version_authority::restore_session_metadata_schema_version(
+                metadata.schema_version,
+            )
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        session_durable_config_authority::restore_session_metadata(metadata)
+            .map(Some)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
     }
 
     /// Store durable system-context control state in the session metadata map.
@@ -2500,16 +2201,37 @@ impl Session {
         &mut self,
         state: SessionSystemContextState,
     ) -> Result<(), serde_json::Error> {
+        let state = session_system_context_authority::restore_system_context_state(state)
+            .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
         let value = serde_json::to_value(state)?;
-        self.set_metadata(SESSION_SYSTEM_CONTEXT_STATE_KEY, value);
+        self.set_metadata_unchecked(SESSION_SYSTEM_CONTEXT_STATE_KEY, value);
         Ok(())
     }
 
-    /// Load durable system-context control state from the session metadata map.
-    pub fn system_context_state(&self) -> Option<SessionSystemContextState> {
+    /// Try to load durable system-context control state through generated restore authority.
+    pub fn try_system_context_state(
+        &self,
+    ) -> Result<Option<SessionSystemContextState>, serde_json::Error> {
         self.metadata
             .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .map(|value| {
+                let state = serde_json::from_value(value.clone())?;
+                session_system_context_authority::restore_system_context_state(state)
+                    .map_err(<serde_json::Error as serde::de::Error>::custom)
+            })
+            .transpose()
+    }
+
+    /// Load durable system-context control state from the session metadata map.
+    ///
+    /// Rejected durable facts fail closed through the generated restore
+    /// authority. Callers that need the typed rejection must use
+    /// [`Self::try_system_context_state`].
+    pub fn system_context_state(&self) -> Option<SessionSystemContextState> {
+        match self.try_system_context_state() {
+            Ok(state) => state,
+            Err(err) => fail_closed_generated_restore("system-context", err),
+        }
     }
 
     /// Store durable deferred-turn control state in the session metadata map.
@@ -2517,40 +2239,88 @@ impl Session {
         &mut self,
         state: SessionDeferredTurnState,
     ) -> Result<(), serde_json::Error> {
+        let state = session_deferred_turn_authority::restore_deferred_turn_state(state)
+            .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
         let value = serde_json::to_value(state)?;
-        self.set_metadata(SESSION_DEFERRED_TURN_STATE_KEY, value);
+        self.set_metadata_unchecked(SESSION_DEFERRED_TURN_STATE_KEY, value);
         Ok(())
     }
 
-    /// Load durable deferred-turn control state from the session metadata map.
-    pub fn deferred_turn_state(&self) -> Option<SessionDeferredTurnState> {
+    /// Try to load durable deferred-turn control state through generated restore authority.
+    pub fn try_deferred_turn_state(
+        &self,
+    ) -> Result<Option<SessionDeferredTurnState>, serde_json::Error> {
         self.metadata
             .get(SESSION_DEFERRED_TURN_STATE_KEY)
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .map(|value| {
+                let state = serde_json::from_value(value.clone())?;
+                session_deferred_turn_authority::restore_deferred_turn_state(state)
+                    .map_err(<serde_json::Error as serde::de::Error>::custom)
+            })
+            .transpose()
+    }
+
+    /// Load durable deferred-turn control state from the session metadata map.
+    ///
+    /// Rejected durable facts fail closed through the generated restore
+    /// authority. Callers that need the typed rejection must use
+    /// [`Self::try_deferred_turn_state`].
+    pub fn deferred_turn_state(&self) -> Option<SessionDeferredTurnState> {
+        match self.try_deferred_turn_state() {
+            Ok(state) => state,
+            Err(err) => fail_closed_generated_restore("deferred-turn", err),
+        }
     }
 
     /// Store recoverable build-only session state in the session metadata map.
     pub fn set_build_state(&mut self, state: SessionBuildState) -> Result<(), serde_json::Error> {
+        let state = session_durable_config_authority::authorize_session_build_state_persist(state)
+            .map_err(<serde_json::Error as serde::ser::Error>::custom)?
+            .into_state();
         let value = serde_json::to_value(state)?;
-        self.set_metadata(SESSION_BUILD_STATE_KEY, value);
+        self.set_metadata_unchecked(SESSION_BUILD_STATE_KEY, value);
         Ok(())
     }
 
     /// Load recoverable build-only session state from the session metadata map.
+    ///
+    /// If the reserved key exists but cannot pass typed generated restore,
+    /// fail closed instead of treating corrupted machine facts as absent.
     pub fn build_state(&self) -> Option<SessionBuildState> {
-        self.metadata
-            .get(SESSION_BUILD_STATE_KEY)
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+        match self.try_build_state() {
+            Ok(state) => state,
+            Err(err) => fail_closed_generated_restore("session-build-state", err),
+        }
+    }
+
+    /// Try to load recoverable build-only session state through generated restore authority.
+    pub fn try_build_state(&self) -> Result<Option<SessionBuildState>, serde_json::Error> {
+        let Some(value) = self.metadata.get(SESSION_BUILD_STATE_KEY) else {
+            return Ok(None);
+        };
+        let state = serde_json::from_value::<SessionBuildState>(value.clone())?;
+        session_durable_config_authority::restore_session_build_state(state)
+            .map(Some)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
     }
 
     /// Store durable tool-visibility control state in the session metadata map.
     pub fn set_tool_visibility_state(
         &mut self,
-        state: SessionToolVisibilityState,
+        state: AuthorizedSessionToolVisibilityState,
     ) -> Result<(), serde_json::Error> {
-        let value = serde_json::to_value(state)?;
-        self.set_metadata(SESSION_TOOL_VISIBILITY_STATE_KEY, value);
+        let value = serde_json::to_value(state.into_state())?;
+        self.set_metadata_unchecked(SESSION_TOOL_VISIBILITY_STATE_KEY, value);
         Ok(())
+    }
+
+    /// Test-only metadata clear for compatibility assertions.
+    ///
+    /// Production paths persist an explicit generated-authority projection
+    /// rather than making durable absence carry semantic default truth.
+    #[cfg(test)]
+    pub(crate) fn clear_tool_visibility_state(&mut self) {
+        self.remove_metadata_unchecked(SESSION_TOOL_VISIBILITY_STATE_KEY);
     }
 
     /// Load durable tool-visibility control state from the session metadata map.
@@ -2590,6 +2360,12 @@ impl Session {
             return Ok(());
         };
         validate_transcript_history_state(&state)
+    }
+
+    /// Clear retained transcript revision metadata after a caller has
+    /// materialized the desired message projection.
+    pub fn clear_transcript_history_state(&mut self) {
+        self.remove_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
     }
 
     /// Return the retained immutable body for a transcript revision.
@@ -2634,7 +2410,7 @@ impl Session {
             .clone();
         let value = serde_json::to_value(&state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        self.set_metadata(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
         let mut updated_at = head_body.created_at;
         for commit in &state.commits {
             if commit.committed_at > updated_at {
@@ -2757,7 +2533,7 @@ impl Session {
         state.commits.push(commit.clone());
         let value = serde_json::to_value(state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        self.set_metadata(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
 
         self.messages = Arc::new(rewritten);
         self.updated_at = SystemTime::now();
@@ -2796,7 +2572,7 @@ impl Session {
         }
         state.head = head;
         match serde_json::to_value(state) {
-            Ok(value) => self.set_metadata(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value),
+            Ok(value) => self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value),
             Err(error) => {
                 tracing::warn!(
                     session_id = %self.id,
@@ -2808,19 +2584,41 @@ impl Session {
     }
 
     /// Store typed mob operator authority inside canonical build-state metadata.
+    ///
+    /// Store the mob operator authority projection inside build-state metadata.
+    ///
+    /// The projection is durable compatibility data only: serialization drops
+    /// the generated authority seal, so behavior must re-enter generated
+    /// authority before using restored facts.
     pub fn set_mob_tool_authority_context(
         &mut self,
         authority_context: Option<MobToolAuthorityContext>,
     ) -> Result<(), serde_json::Error> {
-        let mut build_state = self.build_state().unwrap_or_default();
+        if let Some(authority_context) = authority_context.as_ref()
+            && !authority_context.is_generated_authority_context()
+        {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "mob authority context was not minted by generated authority",
+            ));
+        }
+        let mut build_state = self.build_state().ok_or_else(|| {
+            <serde_json::Error as serde::de::Error>::custom(format!(
+                "session {} is missing session build state",
+                self.id
+            ))
+        })?;
         build_state.mob_tool_authority_context = authority_context;
         self.set_build_state(build_state)
     }
 
-    /// Load typed mob operator authority from canonical build-state metadata.
+    /// Load the in-memory generated mob operator authority, if still present.
+    ///
+    /// Stored/deserialized contexts deliberately fail this check and are not
+    /// returned as behavior authority.
     pub fn mob_tool_authority_context(&self) -> Option<MobToolAuthorityContext> {
         self.build_state()
             .and_then(|state| state.mob_tool_authority_context)
+            .filter(MobToolAuthorityContext::is_generated_authority_context)
     }
 
     /// Fork the session at a specific message index
@@ -2831,12 +2629,12 @@ impl Session {
         let now = SystemTime::now();
         let truncated = self.messages[..index.min(self.messages.len())].to_vec();
         Self {
-            version: SESSION_VERSION,
+            version: session_version(),
             id: SessionId::new(),
             messages: Arc::new(truncated),
             created_at: now,
             updated_at: now,
-            metadata: self.branch_metadata(),
+            metadata: self.fork_metadata_projection(),
             usage: self.usage.clone(),
         }
     }
@@ -2950,20 +2748,14 @@ impl Session {
     pub fn fork(&self) -> Self {
         let now = SystemTime::now();
         Self {
-            version: SESSION_VERSION,
+            version: session_version(),
             id: SessionId::new(),
             messages: Arc::clone(&self.messages),
             created_at: now,
             updated_at: now,
-            metadata: self.branch_metadata(),
+            metadata: self.fork_metadata_projection(),
             usage: self.usage.clone(),
         }
-    }
-
-    fn branch_metadata(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut metadata = self.metadata.clone();
-        metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
-        metadata
     }
 }
 
@@ -3043,7 +2835,7 @@ fn default_structured_output_retries() -> u32 {
 }
 
 fn default_session_metadata_schema_version() -> u32 {
-    1
+    session_persistence_version_authority::legacy_session_metadata_schema_version()
 }
 
 /// Canonical durable LLM identity for a session.
@@ -3359,312 +3151,6 @@ where
     deserializer.deserialize_any(ToolCategoryVisitor)
 }
 
-fn normalize_realtime_item_id(item_id: String) -> Option<String> {
-    let trimmed = item_id.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-fn normalize_realtime_previous_item_id(previous_item_id: Option<String>) -> Option<String> {
-    previous_item_id.and_then(normalize_realtime_item_id)
-}
-
-fn normalize_realtime_response_id(response_id: String) -> Option<String> {
-    normalize_realtime_item_id(response_id)
-}
-
-fn normalize_realtime_optional_response_id(response_id: Option<String>) -> Option<String> {
-    response_id.and_then(normalize_realtime_response_id)
-}
-
-/// T9/T10: tag the assistant item with its output lane (Display vs Spoken).
-///
-/// First lane wins: if a later delta tries to promote an item already
-/// classified as the other lane, we keep the existing lane and emit a
-/// `tracing::warn!`. The materializer can only flush one block-type per
-/// item; mixed-lane content on the same `item_id` is not expected from
-/// any provider and would be a provider-side bug. Items with empty
-/// content (no deltas yet observed) accept any lane.
-///
-/// Returns `true` when the item now carries the requested `lane` (either
-/// the lane already matched, or the item was empty so the lane was
-/// promoted). Returns `false` when the item already carried the *other*
-/// lane with staged content — in that case the caller MUST skip any
-/// content insert it was about to perform on `lane`, otherwise it would
-/// clobber the locked-in lane content (R5-6 sibling: silent-clobber bug).
-#[must_use]
-fn promote_item_lane(item: &mut RealtimeTranscriptItemState, lane: TranscriptLane) -> bool {
-    if item.lane == lane {
-        return true;
-    }
-    let has_content = item.content_segments.values().any(|s| !s.is_empty());
-    if !has_content {
-        // No content has been staged on the original lane yet; safe to
-        // re-classify.
-        item.lane = lane;
-        return true;
-    }
-    tracing::warn!(
-        existing_lane = ?item.lane,
-        observed_lane = ?lane,
-        "ignoring realtime transcript lane conflict on item with staged content"
-    );
-    false
-}
-
-fn observe_realtime_item(
-    state: &mut SessionRealtimeTranscriptState,
-    item_id: String,
-    previous_item_id: Option<String>,
-    role: RealtimeTranscriptRole,
-    response_id: Option<String>,
-) -> Option<&mut RealtimeTranscriptItemState> {
-    let item_id = normalize_realtime_item_id(item_id)?;
-    let previous_item_id = normalize_realtime_previous_item_id(previous_item_id);
-    let response_id = normalize_realtime_optional_response_id(response_id);
-    if !state
-        .first_seen_order
-        .iter()
-        .any(|existing| existing == &item_id)
-    {
-        state.first_seen_order.push(item_id.clone());
-    }
-    let item = state.items.entry(item_id.clone()).or_insert_with(|| {
-        RealtimeTranscriptItemState::new(role, previous_item_id.clone(), response_id.clone())
-    });
-    if item.skipped {
-        if item.previous_item_id.is_none() && previous_item_id.is_some() {
-            item.previous_item_id = previous_item_id;
-        }
-        tracing::warn!(
-            item_id = %item_id,
-            observed_role = ?role,
-            "ignoring realtime transcript content for item already marked as a contentless causal anchor"
-        );
-        return None;
-    }
-    if item.role != role {
-        tracing::warn!(
-            item_id = %item_id,
-            existing_role = ?item.role,
-            observed_role = ?role,
-            "ignoring realtime transcript item role conflict"
-        );
-        return None;
-    }
-    if item.previous_item_id.is_none() && previous_item_id.is_some() {
-        item.previous_item_id = previous_item_id;
-    }
-    if let Some(response_id) = response_id {
-        match item.response_id.as_ref() {
-            Some(existing) if existing != &response_id => {
-                tracing::warn!(
-                    item_id = %item_id,
-                    existing_response_id = %existing,
-                    observed_response_id = %response_id,
-                    "ignoring realtime transcript item response conflict"
-                );
-                return None;
-            }
-            Some(_) => {}
-            None => item.response_id = Some(response_id),
-        }
-    }
-    Some(item)
-}
-
-fn observe_realtime_skipped_item(
-    state: &mut SessionRealtimeTranscriptState,
-    item_id: String,
-    previous_item_id: Option<String>,
-) {
-    let Some(item_id) = normalize_realtime_item_id(item_id) else {
-        return;
-    };
-    let previous_item_id = normalize_realtime_previous_item_id(previous_item_id);
-    if !state
-        .first_seen_order
-        .iter()
-        .any(|existing| existing == &item_id)
-    {
-        state.first_seen_order.push(item_id.clone());
-    }
-    let item = state
-        .items
-        .entry(item_id)
-        .or_insert_with(|| RealtimeTranscriptItemState::skipped(previous_item_id.clone()));
-    if item.previous_item_id.is_none() && previous_item_id.is_some() {
-        item.previous_item_id = previous_item_id;
-    }
-    if item.materialized || item.skipped {
-        return;
-    }
-    if item.role != RealtimeTranscriptRole::Assistant {
-        tracing::warn!(
-            existing_role = ?item.role,
-            "ignoring realtime skipped-item observation for non-assistant item"
-        );
-        return;
-    }
-    if !item.content_segments.is_empty() {
-        tracing::warn!("ignoring realtime skipped-item observation for content-bearing item");
-        return;
-    }
-    item.skipped = true;
-    item.ready = true;
-}
-
-fn mark_realtime_assistant_response_ready(
-    state: &mut SessionRealtimeTranscriptState,
-    response_id: &str,
-) {
-    for item in state.items.values_mut() {
-        if item.role == RealtimeTranscriptRole::Assistant
-            && item.response_id.as_deref() == Some(response_id)
-            && !item.materialized
-            && !item.text().is_empty()
-        {
-            item.ready = true;
-        }
-    }
-}
-
-fn discard_realtime_assistant_response(
-    state: &mut SessionRealtimeTranscriptState,
-    response_id: &str,
-) {
-    state
-        .discarded_assistant_response_ids
-        .insert(response_id.to_string());
-    for item in state.items.values_mut() {
-        if item.role == RealtimeTranscriptRole::Assistant
-            && item.response_id.as_deref() == Some(response_id)
-            && !item.materialized
-        {
-            item.content_segments.clear();
-            item.skipped = true;
-            item.ready = true;
-        }
-    }
-    state.assistant_completions.remove(response_id);
-}
-
-/// R5-5: lane-scoped discard for barge-in (`AssistantTurnInterrupted`).
-///
-/// Drops Spoken-lane staged items (the heard audio + transcript the user
-/// spoke over) and preserves Display-lane items as committable content.
-/// Items with empty content (no deltas observed yet, lane still defaulting
-/// to `Display`) are also discarded — they carry no preserveable Display
-/// text. The caller is responsible for inserting a synthetic
-/// `assistant_completions` entry so the materializer can flush retained
-/// Display items immediately.
-///
-/// Unlike [`discard_realtime_assistant_response`], this helper does NOT
-/// remove the response from `assistant_completions`: barge-in must seed a
-/// completion entry so retained Display items can materialize before any
-/// late `AssistantTurnCompleted` (which would short-circuit on the
-/// discarded-set membership) arrives.
-fn discard_realtime_assistant_response_by_lane(
-    state: &mut SessionRealtimeTranscriptState,
-    response_id: &str,
-) {
-    state
-        .discarded_assistant_response_ids
-        .insert(response_id.to_string());
-    for item in state.items.values_mut() {
-        if item.role != RealtimeTranscriptRole::Assistant
-            || item.response_id.as_deref() != Some(response_id)
-            || item.materialized
-        {
-            continue;
-        }
-        let has_content = item.content_segments.values().any(|s| !s.is_empty());
-        if item.lane == TranscriptLane::Display && has_content {
-            // Retain the Display content; the caller's synthetic
-            // completion entry + `mark_realtime_assistant_response_ready`
-            // will flag it ready for the next materializer pass.
-            continue;
-        }
-        // Spoken (or empty Display, which carries no preserveable text):
-        // drop content and mark as a contentless predecessor so chained
-        // items downstream of it can still materialize.
-        item.content_segments.clear();
-        item.skipped = true;
-        item.ready = true;
-    }
-}
-
-fn realtime_transcript_order(state: &SessionRealtimeTranscriptState) -> Vec<String> {
-    let mut roots = Vec::new();
-    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for item_id in &state.first_seen_order {
-        let Some(item) = state.items.get(item_id) else {
-            continue;
-        };
-        if let Some(previous) = item.previous_item_id.as_ref()
-            && state.items.contains_key(previous)
-        {
-            children
-                .entry(previous.clone())
-                .or_default()
-                .push(item_id.clone());
-        } else {
-            roots.push(item_id.clone());
-        }
-    }
-    roots.sort_by_key(|item_id| realtime_first_seen_index(state, item_id));
-    for child_ids in children.values_mut() {
-        child_ids.sort_by_key(|item_id| realtime_first_seen_index(state, item_id));
-    }
-
-    let mut ordered = Vec::new();
-    let mut visited = BTreeSet::new();
-    for root in roots {
-        visit_realtime_transcript_item(&root, &children, &mut visited, &mut ordered);
-    }
-    for item_id in &state.first_seen_order {
-        visit_realtime_transcript_item(item_id, &children, &mut visited, &mut ordered);
-    }
-    ordered
-}
-
-fn realtime_first_seen_index(state: &SessionRealtimeTranscriptState, item_id: &str) -> usize {
-    state
-        .first_seen_order
-        .iter()
-        .position(|existing| existing == item_id)
-        .unwrap_or(usize::MAX)
-}
-
-fn visit_realtime_transcript_item(
-    item_id: &str,
-    children: &BTreeMap<String, Vec<String>>,
-    visited: &mut BTreeSet<String>,
-    ordered: &mut Vec<String>,
-) {
-    if !visited.insert(item_id.to_string()) {
-        return;
-    }
-    ordered.push(item_id.to_string());
-    if let Some(child_ids) = children.get(item_id) {
-        for child_id in child_ids {
-            visit_realtime_transcript_item(child_id, children, visited, ordered);
-        }
-    }
-}
-
-fn realtime_predecessor_materialized(
-    state: &SessionRealtimeTranscriptState,
-    previous_item_id: Option<&str>,
-) -> bool {
-    match previous_item_id {
-        None => true,
-        Some(previous_item_id) => state
-            .items
-            .get(previous_item_id)
-            .is_some_and(|item| item.materialized),
-    }
-}
-
 /// Tooling intent captured at session creation time.
 ///
 /// Fields use [`ToolCategoryOverride`] to distinguish "no opinion" from
@@ -3720,6 +3206,7 @@ impl From<&Session> for SessionMeta {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::realtime_transcript::RealtimeTranscriptRole;
     use crate::types::{
         AssistantMessage, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
         UserMessage,
@@ -5566,6 +5053,84 @@ mod tests {
     }
 
     #[test]
+    fn test_session_forks_drop_generated_authority_metadata() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("original")));
+        session.set_metadata("ordinary", serde_json::json!("keep"));
+        session
+            .set_build_state(SessionBuildState::default())
+            .expect("build state should serialize");
+        session
+            .set_system_context_state(SessionSystemContextState::default())
+            .expect("system-context state should serialize");
+        session
+            .set_deferred_turn_state(SessionDeferredTurnState::default())
+            .expect("deferred-turn state should serialize");
+        session
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState::default(),
+                ),
+            )
+            .expect("visibility state should serialize");
+        let _ = session.append_realtime_transcript_event(RealtimeTranscriptEvent::ItemObserved {
+            item_id: "rt-item".to_string(),
+            previous_item_id: None,
+            role: RealtimeTranscriptRole::User,
+            response_id: None,
+        });
+        assert!(
+            session
+                .metadata()
+                .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            "test setup should install realtime transcript authority state"
+        );
+
+        let forked_at = session.fork_at(1);
+        let full_fork = session.fork();
+        let replaced = session
+            .fork_replacing(
+                0,
+                TranscriptReplacement::Message {
+                    message: Message::User(UserMessage::text("replacement")),
+                },
+            )
+            .expect("replacement fork should succeed");
+
+        for forked in [&forked_at, &full_fork, &replaced] {
+            assert_eq!(forked.metadata().get("ordinary").unwrap(), "keep");
+            assert!(
+                !forked.metadata().contains_key(SESSION_BUILD_STATE_KEY),
+                "forked sessions must not raw-copy durable build-state authority"
+            );
+            assert!(
+                !forked
+                    .metadata()
+                    .contains_key(SESSION_SYSTEM_CONTEXT_STATE_KEY),
+                "forked sessions must not raw-copy system-context authority state"
+            );
+            assert!(
+                !forked
+                    .metadata()
+                    .contains_key(SESSION_DEFERRED_TURN_STATE_KEY),
+                "forked sessions must not raw-copy deferred-turn authority state"
+            );
+            assert!(
+                !forked
+                    .metadata()
+                    .contains_key(SESSION_TOOL_VISIBILITY_STATE_KEY),
+                "forked sessions must not raw-copy tool-visibility authority state"
+            );
+            assert!(
+                !forked
+                    .metadata()
+                    .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+                "forked sessions must not raw-copy realtime transcript authority state"
+            );
+        }
+    }
+
+    #[test]
     fn test_session_metadata() {
         let mut session = Session::new();
         session.set_metadata("key", serde_json::json!("value"));
@@ -5589,24 +5154,221 @@ mod tests {
     }
 
     #[test]
-    fn test_session_mob_tool_authority_context_roundtrip() {
+    fn test_reserved_generated_authority_metadata_rejects_raw_mutation() {
         let mut session = Session::new();
-        let authority = MobToolAuthorityContext::new(
+
+        assert!(
+            session
+                .try_set_metadata(SESSION_SYSTEM_CONTEXT_STATE_KEY, serde_json::json!({}))
+                .is_err()
+        );
+        assert!(
+            session
+                .try_set_metadata(SESSION_METADATA_KEY, serde_json::json!({}))
+                .is_err()
+        );
+        assert!(
+            session
+                .try_set_metadata(SESSION_BUILD_STATE_KEY, serde_json::json!({}))
+                .is_err()
+        );
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: SESSION_METADATA_SCHEMA_VERSION,
+                model: "test-model".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+            })
+            .expect("typed metadata setter should route through generated authority");
+        session
+            .set_build_state(SessionBuildState::default())
+            .expect("typed build-state setter should route through generated authority");
+        session.remove_metadata(SESSION_METADATA_KEY);
+        session.remove_metadata(SESSION_BUILD_STATE_KEY);
+        assert!(
+            session.metadata().contains_key(SESSION_METADATA_KEY),
+            "raw removal must not delete generated-authority session metadata"
+        );
+        assert!(
+            session.metadata().contains_key(SESSION_BUILD_STATE_KEY),
+            "raw removal must not delete generated-authority build state"
+        );
+        session.set_metadata(SESSION_DEFERRED_TURN_STATE_KEY, serde_json::json!({}));
+        assert!(
+            !session
+                .metadata()
+                .contains_key(SESSION_DEFERRED_TURN_STATE_KEY)
+        );
+        assert!(
+            !session.backfill_metadata_if_absent(
+                SESSION_SYSTEM_CONTEXT_STATE_KEY,
+                serde_json::json!({})
+            )
+        );
+
+        let state = SessionSystemContextState::default();
+        session
+            .set_system_context_state(state.clone())
+            .expect("typed setter should route through generated authority");
+        session.remove_metadata(SESSION_SYSTEM_CONTEXT_STATE_KEY);
+        assert_eq!(
+            session
+                .try_system_context_state()
+                .expect("typed state should restore"),
+            Some(state)
+        );
+
+        session.metadata.insert(
+            SESSION_SYSTEM_CONTEXT_STATE_KEY.to_string(),
+            serde_json::json!("not-a-state"),
+        );
+        assert!(
+            session.try_system_context_state().is_err(),
+            "malformed generated authority state must not decode as absent/default"
+        );
+
+        session.metadata.insert(
+            SESSION_METADATA_KEY.to_string(),
+            serde_json::json!("not-metadata"),
+        );
+        assert!(
+            session.try_session_metadata().is_err(),
+            "malformed session metadata must not decode as absent/default"
+        );
+
+        session.metadata.insert(
+            SESSION_BUILD_STATE_KEY.to_string(),
+            serde_json::json!("not-build-state"),
+        );
+        assert!(
+            session.try_build_state().is_err(),
+            "malformed build state must not decode as absent/default"
+        );
+
+        assert!(
+            session
+                .try_set_metadata(SESSION_TOOL_VISIBILITY_STATE_KEY, serde_json::json!({}))
+                .is_err()
+        );
+        session
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    SessionToolVisibilityState::default(),
+                ),
+            )
+            .expect("typed visibility setter should route through typed authority handoff");
+        session.remove_metadata(SESSION_TOOL_VISIBILITY_STATE_KEY);
+        assert!(
+            session
+                .metadata()
+                .contains_key(SESSION_TOOL_VISIBILITY_STATE_KEY)
+        );
+        session.clear_tool_visibility_state();
+        assert!(
+            !session
+                .metadata()
+                .contains_key(SESSION_TOOL_VISIBILITY_STATE_KEY)
+        );
+        assert!(
+            session
+                .try_set_metadata(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, serde_json::json!({}))
+                .is_err()
+        );
+        let _ = session.append_realtime_transcript_event(RealtimeTranscriptEvent::ItemObserved {
+            item_id: "rt-item".to_string(),
+            previous_item_id: None,
+            role: RealtimeTranscriptRole::User,
+            response_id: None,
+        });
+        assert!(
+            session
+                .metadata()
+                .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            "typed realtime transcript append should retain authority to persist its state"
+        );
+        session.metadata.insert(
+            SESSION_REALTIME_TRANSCRIPT_STATE_KEY.to_string(),
+            serde_json::json!("not-a-state"),
+        );
+        assert!(
+            session.try_realtime_transcript_state().is_err(),
+            "malformed realtime generated authority state must not decode as absent/default"
+        );
+    }
+
+    #[test]
+    fn test_session_mob_tool_authority_context_persists_projection_without_authority_seal() {
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState::default())
+            .expect("session build state should serialize");
+        let authority = MobToolAuthorityContext::generated_for_test(
             crate::service::OpaquePrincipalToken::new("opaque-principal"),
             false,
-        )
-        .with_managed_mob_scope(["mob-a"])
-        .with_audit_invocation_id("audit-1");
+            false,
+            std::collections::BTreeSet::from(["mob-a".to_string()]),
+            std::collections::BTreeMap::new(),
+            None,
+            Some("audit-1".to_string()),
+        );
 
         session
-            .set_mob_tool_authority_context(Some(authority.clone()))
+            .set_mob_tool_authority_context(Some(authority))
             .expect("authority should serialize");
-        assert_eq!(session.mob_tool_authority_context(), Some(authority));
+        assert!(session.mob_tool_authority_context().is_none());
+        let stored = session
+            .build_state()
+            .and_then(|state| state.mob_tool_authority_context)
+            .expect("stored projection should deserialize");
+        assert!(!stored.is_generated_authority_context());
+        assert!(!stored.can_manage_mob("mob-a"));
 
         session
             .set_mob_tool_authority_context(None)
             .expect("authority should clear");
         assert!(session.mob_tool_authority_context().is_none());
+    }
+
+    #[test]
+    fn test_session_build_state_rejects_forged_mob_authority_projection() {
+        let mut session = Session::new();
+        let authority = MobToolAuthorityContext::generated_for_test(
+            crate::service::OpaquePrincipalToken::new("opaque-principal"),
+            false,
+            false,
+            std::collections::BTreeSet::from(["mob-a".to_string()]),
+            std::collections::BTreeMap::new(),
+            None,
+            Some("audit-1".to_string()),
+        );
+        let forged_projection: MobToolAuthorityContext =
+            serde_json::from_value(serde_json::to_value(authority).expect("serialize authority"))
+                .expect("deserialize projection");
+        assert!(!forged_projection.is_generated_authority_context());
+
+        let err = session
+            .set_build_state(SessionBuildState {
+                mob_tool_authority_context: Some(forged_projection),
+                ..Default::default()
+            })
+            .expect_err("forged build state must be rejected by generated authority");
+        assert!(
+            err.to_string()
+                .contains("generated session durable-config authority rejected"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -5630,7 +5392,9 @@ mod tests {
         };
 
         session
-            .set_tool_visibility_state(state.clone())
+            .set_tool_visibility_state(
+                AuthorizedSessionToolVisibilityState::from_generated_authority(state.clone()),
+            )
             .expect("tool visibility state should serialize");
         assert_eq!(session.tool_visibility_state().unwrap(), Some(state));
     }
@@ -5638,8 +5402,8 @@ mod tests {
     #[test]
     fn test_session_tool_visibility_state_malformed_returns_error() {
         let mut session = Session::new();
-        session.set_metadata(
-            SESSION_TOOL_VISIBILITY_STATE_KEY,
+        session.metadata.insert(
+            SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
             serde_json::json!({
                 "active_filter": {
                     "unexpected_filter_kind": ["secret"]
@@ -5693,45 +5457,6 @@ mod tests {
         assert_eq!(meta.id, *session.id());
         assert_eq!(meta.message_count, 2);
         assert_eq!(meta.total_tokens, 15);
-    }
-
-    #[test]
-    fn has_pending_boundary_empty_session() {
-        let session = Session::new();
-        assert!(!session.has_pending_boundary());
-    }
-
-    #[test]
-    fn has_pending_boundary_after_user_message() {
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("hello")));
-        assert!(session.has_pending_boundary());
-    }
-
-    #[test]
-    fn has_pending_boundary_after_assistant_message() {
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("hello")));
-        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
-            vec![],
-            StopReason::EndTurn,
-        )));
-        assert!(!session.has_pending_boundary());
-    }
-
-    #[test]
-    fn has_pending_boundary_after_tool_results() {
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("hello")));
-        session.push(Message::tool_results(vec![]));
-        assert!(session.has_pending_boundary());
-    }
-
-    #[test]
-    fn has_pending_boundary_after_system() {
-        let mut session = Session::new();
-        session.push(Message::System(SystemMessage::new("system")));
-        assert!(!session.has_pending_boundary());
     }
 
     #[test]

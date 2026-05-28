@@ -1,7 +1,7 @@
 //! §8 Input types — the 6 input variants accepted by the runtime layer.
 //!
-//! Core never sees these. The runtime's policy table resolves each Input
-//! to a PolicyDecision, then the runtime translates accepted Inputs into
+//! Core never sees these. Generated admission authority resolves each accepted
+//! Input to a PolicyDecision, then the runtime translates accepted Inputs into
 //! RunPrimitive for core consumption.
 
 use chrono::{DateTime, Utc};
@@ -946,14 +946,7 @@ fn peer_response_terminal_context_append(
                 }),
                 request_id: Some(fact.correlation_id.to_string()),
                 intent: None,
-                status: Some(
-                    match fact.status {
-                        PeerResponseTerminalProjectionStatus::Completed => "completed",
-                        PeerResponseTerminalProjectionStatus::Failed => "failed",
-                        PeerResponseTerminalProjectionStatus::Cancelled => "cancelled",
-                    }
-                    .to_string(),
-                ),
+                status: Some(fact.status.label().to_string()),
                 summary: Some("Peer terminal response".to_string()),
                 payload: fact.render_payload.as_ref().cloned(),
                 content: Vec::new(),
@@ -1801,8 +1794,8 @@ mod tests {
             peer_id,
             Some(display_name),
             request_id,
-            meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled,
-            serde_json::json!({"ok": false}),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"ok": true}),
         );
 
         match input {
@@ -1834,11 +1827,32 @@ mod tests {
                         uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000162").unwrap()
                     ))
                 );
-                assert_eq!(status, ResponseTerminalStatus::Cancelled);
-                assert_eq!(payload["ok"], false);
+                assert_eq!(status, ResponseTerminalStatus::Completed);
+                assert_eq!(payload["ok"], true);
             }
             other => panic!("expected terminal peer input, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn peer_response_terminal_validation_is_structural_only() {
+        let peer_id = meerkat_core::comms::PeerId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000161").unwrap(),
+        );
+        let display_name = meerkat_core::comms::PeerName::new("analyst").unwrap();
+        let request_id = meerkat_core::PeerCorrelationId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000162").unwrap(),
+        );
+        let input = peer_response_terminal_input(
+            peer_id,
+            Some(display_name),
+            request_id,
+            meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled,
+            serde_json::json!({"ok": false}),
+        );
+
+        validate_peer_response_terminal_fact(&input)
+            .expect("status support is generated admission authority, structural fact validation should pass");
     }
 
     #[test]

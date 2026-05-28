@@ -6,7 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::comms::{
@@ -55,19 +54,6 @@ pub enum TerminalityClass {
 pub enum TerminalDisposition {
     Completed,
     Failed,
-}
-
-/// Single source of truth for "is this response terminal?".
-pub fn classify_response_terminality(status: ResponseStatus) -> TerminalityClass {
-    match status {
-        ResponseStatus::Accepted => TerminalityClass::Progress,
-        ResponseStatus::Completed => TerminalityClass::Terminal {
-            disposition: TerminalDisposition::Completed,
-        },
-        ResponseStatus::Failed => TerminalityClass::Terminal {
-            disposition: TerminalDisposition::Failed,
-        },
-    }
 }
 
 /// Simplified interaction content for the core agent loop.
@@ -594,8 +580,8 @@ impl PeerIngressClassification {
 /// Parsed transport facts for one peer-envelope ingress item.
 ///
 /// This is intentionally a typed adapter shape: comms may parse the envelope
-/// mechanics into this struct, but the policy below owns all semantic
-/// classification derived from it.
+/// mechanics into this struct, but generated peer-ingress authority owns all
+/// semantic classification derived from it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerIngressEnvelopeFacts {
     pub item_id: String,
@@ -643,167 +629,55 @@ pub struct PeerIngressAdmission {
     pub rendered_text: String,
 }
 
-/// Standalone compatibility adapter for peer ingress classification.
+/// Admission-time observations for one classified peer envelope.
 ///
-/// Runtime-backed comms must use the MeerkatMachine
-/// `PeerIngressClassified` effect as authority. This adapter exists only for
-/// standalone comms runtimes without a session DSL and for tests that need a
-/// wire-compatible projection of machine behavior. Raw inbox ingress and
-/// runtime-required classified ingress must not use it as a second authority
-/// for auth exemptions, lifecycle intent, or response terminality.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerIngressMachinePolicy {
-    silent_request_intents: BTreeSet<String>,
-    auth_exemptions: BTreeSet<PeerIngressAuthExemption>,
+/// The shell may observe these facts while holding the classified queue lock,
+/// but the peer-ingress authority owns the derived admission outcome and public
+/// phase emitted from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressReceiveFacts {
+    pub kind: PeerIngressKind,
+    pub current_phase: PeerIngressAuthorityPhase,
+    pub auth_required: bool,
+    pub auth_exempt: bool,
+    pub trusted: bool,
+    pub queued_work_present: bool,
+    pub queue_closed: bool,
+    pub queue_capacity_available: bool,
 }
 
-impl Default for PeerIngressMachinePolicy {
-    fn default() -> Self {
-        Self::from_silent_intents(std::iter::empty::<String>())
-    }
+/// Machine-owned receive/admission result for a classified peer envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressReceiveAuthority {
+    pub outcome: PeerIngressReceiveOutcome,
+    pub admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
+    pub authority_phase: PeerIngressAuthorityPhase,
 }
 
-impl PeerIngressMachinePolicy {
-    pub fn from_silent_intents<I, S>(silent_intents: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self {
-            silent_request_intents: silent_intents.into_iter().map(Into::into).collect(),
-            auth_exemptions: BTreeSet::from([PeerIngressAuthExemption::SupervisorBridge]),
-        }
-    }
+/// Machine-owned admission outcome for peer ingress receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerIngressReceiveOutcome {
+    Admitted,
+    DroppedUntrustedSender,
+    DroppedSessionClosed,
+    DroppedInboxFull,
+}
 
-    pub fn classify_message(&self) -> PeerIngressClassification {
-        PeerIngressClassification::required(
-            PeerInputClass::ActionableMessage,
-            PeerIngressKind::Message,
-        )
-    }
+/// Dequeue-time observations for one classified ingress entry.
+///
+/// These are queue mechanics only. The peer-ingress authority owns whether the
+/// observation changes the public phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressDequeueFacts {
+    pub kind: PeerIngressKind,
+    pub auth: PeerIngressAuthDecision,
+    pub queued_work_remaining: bool,
+}
 
-    pub fn classify_request_intent(&self, intent: &str) -> PeerIngressClassification {
-        let auth = self
-            .auth_exemptions
-            .iter()
-            .copied()
-            .find(|exemption| exemption.matches_intent(intent))
-            .map(PeerIngressAuthDecision::Exempt)
-            .unwrap_or(PeerIngressAuthDecision::Required);
-
-        let mut classification = if let Some(kind) = classify_lifecycle_intent(intent) {
-            PeerIngressClassification::lifecycle(kind)
-        } else if self.silent_request_intents.contains(intent) {
-            PeerIngressClassification::required(
-                PeerInputClass::SilentRequest,
-                PeerIngressKind::Request,
-            )
-        } else {
-            PeerIngressClassification::required(
-                PeerInputClass::ActionableRequest,
-                PeerIngressKind::Request,
-            )
-        };
-        classification.auth = auth;
-        classification
-    }
-
-    pub fn classify_lifecycle(&self, kind: PeerLifecycleKind) -> PeerIngressClassification {
-        PeerIngressClassification::lifecycle(kind)
-    }
-
-    pub fn classify_response(&self, status: ResponseStatus) -> PeerIngressClassification {
-        let terminality = classify_response_terminality(status);
-        let class = match terminality {
-            TerminalityClass::Progress => PeerInputClass::ResponseProgress,
-            TerminalityClass::Terminal { .. } => PeerInputClass::ResponseTerminal,
-        };
-        let mut classification =
-            PeerIngressClassification::required(class, PeerIngressKind::Response);
-        classification.response_terminality = Some(terminality);
-        classification
-    }
-
-    pub fn classify_ack(&self) -> PeerIngressClassification {
-        PeerIngressClassification::required(PeerInputClass::Ack, PeerIngressKind::Ack)
-    }
-
-    pub fn classify_plain_event(&self) -> PeerIngressClassification {
-        PeerIngressClassification::required(PeerInputClass::PlainEvent, PeerIngressKind::PlainEvent)
-    }
-
-    pub fn classify_external_envelope(
-        &self,
-        facts: &PeerIngressEnvelopeFacts,
-    ) -> PeerIngressAdmission {
-        match &facts.kind {
-            PeerIngressEnvelopeKind::Message { .. } => {
-                let classification = self.classify_message();
-                PeerIngressAdmission {
-                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
-                    classification,
-                    lifecycle_peer: None,
-                    request_id: None,
-                }
-            }
-            PeerIngressEnvelopeKind::Request { intent, params } => {
-                let classification = self.classify_request_intent(intent);
-                let lifecycle_peer = classification
-                    .lifecycle_kind
-                    .map(|_| peer_lifecycle_subject(params, facts.from_peer.as_str()));
-                let rendered_text = render_peer_ingress_admitted_text(facts, &classification);
-                PeerIngressAdmission {
-                    classification,
-                    lifecycle_peer,
-                    request_id: Some(facts.item_id.clone()),
-                    rendered_text,
-                }
-            }
-            PeerIngressEnvelopeKind::Lifecycle { kind, params } => {
-                let classification = self.classify_lifecycle(*kind);
-                PeerIngressAdmission {
-                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
-                    classification,
-                    lifecycle_peer: Some(peer_lifecycle_subject(params, facts.from_peer.as_str())),
-                    request_id: None,
-                }
-            }
-            PeerIngressEnvelopeKind::Response {
-                in_reply_to,
-                status,
-                ..
-            } => {
-                let classification = self.classify_response(*status);
-                PeerIngressAdmission {
-                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
-                    classification,
-                    lifecycle_peer: None,
-                    request_id: Some(in_reply_to.clone()),
-                }
-            }
-            PeerIngressEnvelopeKind::Ack { in_reply_to } => {
-                let classification = self.classify_ack();
-                PeerIngressAdmission {
-                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
-                    classification,
-                    lifecycle_peer: None,
-                    request_id: Some(in_reply_to.clone()),
-                }
-            }
-        }
-    }
-
-    pub fn classify_plain_event_facts(
-        &self,
-        facts: &PeerIngressPlainEventFacts,
-    ) -> PeerIngressAdmission {
-        PeerIngressAdmission {
-            classification: self.classify_plain_event(),
-            lifecycle_peer: None,
-            request_id: None,
-            rendered_text: format_external_event_projection(&facts.source_name, Some(&facts.body)),
-        }
-    }
+/// Machine-owned phase result after a classified dequeue observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIngressDequeueAuthority {
+    pub authority_phase: PeerIngressAuthorityPhase,
 }
 
 /// Derive model-facing text after typed peer ingress admission.
@@ -852,18 +726,6 @@ pub fn peer_lifecycle_subject(params: &Value, fallback_peer: &str) -> String {
         .filter(|peer| !peer.is_empty())
         .unwrap_or(fallback_peer)
         .to_string()
-}
-
-fn classify_lifecycle_intent(intent: &str) -> Option<PeerLifecycleKind> {
-    if intent == PeerLifecycleKind::PeerAdded.as_str() {
-        Some(PeerLifecycleKind::PeerAdded)
-    } else if intent == PeerLifecycleKind::PeerRetired.as_str() {
-        Some(PeerLifecycleKind::PeerRetired)
-    } else if intent == PeerLifecycleKind::PeerUnwired.as_str() {
-        Some(PeerLifecycleKind::PeerUnwired)
-    } else {
-        None
-    }
 }
 
 /// Canonical peer/event ingress candidate handed to runtime admission.
@@ -1134,72 +996,6 @@ mod tests {
             let parsed: ResponseStatus = serde_json::from_value(json).unwrap();
             assert_eq!(variant, parsed);
         }
-    }
-
-    #[test]
-    fn classify_response_terminality_covers_all_variants() {
-        assert_eq!(
-            classify_response_terminality(ResponseStatus::Accepted),
-            TerminalityClass::Progress
-        );
-        assert_eq!(
-            classify_response_terminality(ResponseStatus::Completed),
-            TerminalityClass::Terminal {
-                disposition: TerminalDisposition::Completed
-            }
-        );
-        assert_eq!(
-            classify_response_terminality(ResponseStatus::Failed),
-            TerminalityClass::Terminal {
-                disposition: TerminalDisposition::Failed
-            }
-        );
-    }
-
-    #[test]
-    fn peer_ingress_policy_owns_response_terminal_classification() {
-        let policy = PeerIngressMachinePolicy::default();
-
-        assert_eq!(
-            policy.classify_response(ResponseStatus::Accepted).class,
-            PeerInputClass::ResponseProgress
-        );
-        assert_eq!(
-            policy.classify_response(ResponseStatus::Completed).class,
-            PeerInputClass::ResponseTerminal
-        );
-        assert_eq!(
-            policy.classify_response(ResponseStatus::Failed).class,
-            PeerInputClass::ResponseTerminal
-        );
-    }
-
-    #[test]
-    fn peer_ingress_policy_auth_exempts_supervisor_bridge() {
-        let policy = PeerIngressMachinePolicy::default();
-        let classification = policy.classify_request_intent(crate::SUPERVISOR_BRIDGE_INTENT);
-
-        assert_eq!(classification.class, PeerInputClass::ActionableRequest);
-        assert_eq!(
-            classification.auth,
-            PeerIngressAuthDecision::Exempt(PeerIngressAuthExemption::SupervisorBridge)
-        );
-    }
-
-    #[test]
-    fn peer_ingress_policy_owns_lifecycle_and_silent_routing() {
-        let policy = PeerIngressMachinePolicy::from_silent_intents(["probe.silent"]);
-
-        let lifecycle = policy.classify_request_intent(PeerLifecycleKind::PeerUnwired.as_str());
-        assert_eq!(lifecycle.class, PeerInputClass::PeerLifecycleUnwired);
-        assert_eq!(
-            lifecycle.lifecycle_kind,
-            Some(PeerLifecycleKind::PeerUnwired)
-        );
-
-        let silent = policy.classify_request_intent("probe.silent");
-        assert_eq!(silent.class, PeerInputClass::SilentRequest);
-        assert_eq!(silent.auth, PeerIngressAuthDecision::Required);
     }
 
     #[test]

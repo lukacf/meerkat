@@ -12,13 +12,249 @@ use crate::ids::{
 use crate::machines::mob_machine as mob_dsl;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
+use meerkat_machine_kernels::generated::mob as generated_mob;
 use meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub mod flow_frame;
 pub mod flow_run;
 pub mod loop_iteration;
+
+pub const FLOW_RUN_PROVENANCE_AGENT_ID: &str = "__flow_system_member__";
+
+#[must_use]
+pub fn mob_run_schema_version() -> u32 {
+    u32::try_from(
+        mob_dsl::MobMachineAuthority::new()
+            .state()
+            .flow_authority_schema_version,
+    )
+    .expect("generated MobMachine flow authority schema version exceeds u32")
+}
+
+fn generated_record_payload<T, U>(value: &T, label: &'static str) -> Result<U, MobError>
+where
+    T: Serialize,
+    U: DeserializeOwned,
+{
+    let encoded = serde_json::to_value(value).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine flow authority {label} failed generated witness encoding: {error}"
+        ))
+    })?;
+    serde_json::from_value(encoded).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine flow authority {label} is not accepted by the generated Mob input witness: {error}"
+        ))
+    })
+}
+
+fn generated_flow_authority_record(
+    record: &FlowAuthorityInputRecord,
+) -> Result<generated_mob::Input, MobError> {
+    Ok(match record {
+        FlowAuthorityInputRecord::RunFlow(payload) => {
+            generated_mob::Input::RunFlow(generated_record_payload(payload, "RunFlow")?)
+        }
+        FlowAuthorityInputRecord::CreateRunSeed(payload) => {
+            generated_mob::Input::CreateRunSeed(generated_record_payload(payload, "CreateRunSeed")?)
+        }
+        FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
+            run_id,
+            command,
+            step_id,
+            step_status,
+            target_count,
+            frame_id,
+            node_id,
+            loop_instance_id,
+            retry_key,
+        } => generated_mob::Input::AuthorizeFlowRunReducerCommand(
+            generated_mob::inputs::AuthorizeFlowRunReducerCommand {
+                run_id: generated_record_payload(run_id, "AuthorizeFlowRunReducerCommand.run_id")?,
+                command: generated_record_payload(
+                    command,
+                    "AuthorizeFlowRunReducerCommand.command",
+                )?,
+                step_id: generated_record_payload(
+                    step_id,
+                    "AuthorizeFlowRunReducerCommand.step_id",
+                )?,
+                step_status: generated_record_payload(
+                    step_status,
+                    "AuthorizeFlowRunReducerCommand.step_status",
+                )?,
+                target_count: *target_count,
+                frame_id: generated_record_payload(
+                    frame_id,
+                    "AuthorizeFlowRunReducerCommand.frame_id",
+                )?,
+                node_id: generated_record_payload(
+                    node_id,
+                    "AuthorizeFlowRunReducerCommand.node_id",
+                )?,
+                loop_instance_id: generated_record_payload(
+                    loop_instance_id,
+                    "AuthorizeFlowRunReducerCommand.loop_instance_id",
+                )?,
+                retry_key: retry_key.clone(),
+            },
+        ),
+        FlowAuthorityInputRecord::CreateFrameSeed(payload) => {
+            generated_mob::Input::CreateFrameSeed(generated_record_payload(
+                payload,
+                "CreateFrameSeed",
+            )?)
+        }
+        FlowAuthorityInputRecord::AuthorizeFlowFrameReducerCommand {
+            frame_id,
+            command,
+            node_id,
+            node_status,
+            terminal_status,
+        } => generated_mob::Input::AuthorizeFlowFrameReducerCommand(
+            generated_mob::inputs::AuthorizeFlowFrameReducerCommand {
+                frame_id: generated_record_payload(
+                    frame_id,
+                    "AuthorizeFlowFrameReducerCommand.frame_id",
+                )?,
+                command: generated_record_payload(
+                    command,
+                    "AuthorizeFlowFrameReducerCommand.command",
+                )?,
+                node_id: generated_record_payload(
+                    node_id,
+                    "AuthorizeFlowFrameReducerCommand.node_id",
+                )?,
+                node_status: generated_record_payload(
+                    node_status,
+                    "AuthorizeFlowFrameReducerCommand.node_status",
+                )?,
+                terminal_status: generated_record_payload(
+                    terminal_status,
+                    "AuthorizeFlowFrameReducerCommand.terminal_status",
+                )?,
+            },
+        ),
+        FlowAuthorityInputRecord::CreateLoopSeed {
+            loop_instance_id,
+            parent_frame_id,
+            parent_node_id,
+            loop_id,
+            depth,
+            max_iterations,
+        } => generated_mob::Input::CreateLoopSeed(generated_mob::inputs::CreateLoopSeed {
+            loop_instance_id: generated_record_payload(
+                loop_instance_id,
+                "CreateLoopSeed.loop_instance_id",
+            )?,
+            parent_frame_id: generated_record_payload(
+                parent_frame_id,
+                "CreateLoopSeed.parent_frame_id",
+            )?,
+            parent_node_id: generated_record_payload(
+                parent_node_id,
+                "CreateLoopSeed.parent_node_id",
+            )?,
+            loop_id: generated_record_payload(loop_id, "CreateLoopSeed.loop_id")?,
+            depth: *depth,
+            max_iterations: *max_iterations,
+        }),
+        FlowAuthorityInputRecord::RecordLoopBodyFrameCompleted {
+            loop_instance_id,
+            iteration,
+        } => generated_mob::Input::RecordLoopBodyFrameCompleted(
+            generated_mob::inputs::RecordLoopBodyFrameCompleted {
+                loop_instance_id: generated_record_payload(
+                    loop_instance_id,
+                    "RecordLoopBodyFrameCompleted.loop_instance_id",
+                )?,
+                iteration: *iteration,
+            },
+        ),
+        FlowAuthorityInputRecord::RecordLoopUntilConditionMet {
+            loop_instance_id,
+            iteration,
+        } => generated_mob::Input::RecordLoopUntilConditionMet(
+            generated_mob::inputs::RecordLoopUntilConditionMet {
+                loop_instance_id: generated_record_payload(
+                    loop_instance_id,
+                    "RecordLoopUntilConditionMet.loop_instance_id",
+                )?,
+                iteration: *iteration,
+            },
+        ),
+        FlowAuthorityInputRecord::RecordLoopUntilConditionFailed {
+            loop_instance_id,
+            iteration,
+        } => generated_mob::Input::RecordLoopUntilConditionFailed(
+            generated_mob::inputs::RecordLoopUntilConditionFailed {
+                loop_instance_id: generated_record_payload(
+                    loop_instance_id,
+                    "RecordLoopUntilConditionFailed.loop_instance_id",
+                )?,
+                iteration: *iteration,
+            },
+        ),
+        FlowAuthorityInputRecord::AuthorizeLoopIterationReducerCommand {
+            loop_instance_id,
+            command,
+            body_frame_id,
+            body_frame_iteration,
+        } => generated_mob::Input::AuthorizeLoopIterationReducerCommand(
+            generated_mob::inputs::AuthorizeLoopIterationReducerCommand {
+                loop_instance_id: generated_record_payload(
+                    loop_instance_id,
+                    "AuthorizeLoopIterationReducerCommand.loop_instance_id",
+                )?,
+                command: generated_record_payload(
+                    command,
+                    "AuthorizeLoopIterationReducerCommand.command",
+                )?,
+                body_frame_id: generated_record_payload(
+                    body_frame_id,
+                    "AuthorizeLoopIterationReducerCommand.body_frame_id",
+                )?,
+                body_frame_iteration: *body_frame_iteration,
+            },
+        ),
+    })
+}
+
+fn generated_flow_authority_record_variant(
+    record: &FlowAuthorityInputRecord,
+) -> Result<MobMachineInputVariant, MobError> {
+    Ok(match generated_flow_authority_record(record)? {
+        generated_mob::Input::RunFlow(_) => MobMachineInputVariant::RunFlow,
+        generated_mob::Input::CreateRunSeed(_) => MobMachineInputVariant::CreateRunSeed,
+        generated_mob::Input::CreateFrameSeed(_) => MobMachineInputVariant::CreateFrameSeed,
+        generated_mob::Input::CreateLoopSeed(_) => MobMachineInputVariant::CreateLoopSeed,
+        generated_mob::Input::RecordLoopBodyFrameCompleted(_) => {
+            MobMachineInputVariant::RecordLoopBodyFrameCompleted
+        }
+        generated_mob::Input::RecordLoopUntilConditionMet(_) => {
+            MobMachineInputVariant::RecordLoopUntilConditionMet
+        }
+        generated_mob::Input::RecordLoopUntilConditionFailed(_) => {
+            MobMachineInputVariant::RecordLoopUntilConditionFailed
+        }
+        generated_mob::Input::AuthorizeFlowRunReducerCommand(_) => {
+            MobMachineInputVariant::AuthorizeFlowRunReducerCommand
+        }
+        generated_mob::Input::AuthorizeFlowFrameReducerCommand(_) => {
+            MobMachineInputVariant::AuthorizeFlowFrameReducerCommand
+        }
+        generated_mob::Input::AuthorizeLoopIterationReducerCommand(_) => {
+            MobMachineInputVariant::AuthorizeLoopIterationReducerCommand
+        }
+        other => {
+            return Err(MobError::Internal(format!(
+                "generated Mob input witness {other:?} is not a flow authority input"
+            )));
+        }
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowProjectionKernelRole {
@@ -123,19 +359,45 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
         mob_dsl::MobMachineInput::RunFlow { .. }
             | mob_dsl::MobMachineInput::CancelFlow { .. }
             | mob_dsl::MobMachineInput::FlowStatus
+            | mob_dsl::MobMachineInput::ClassifyFlowRunTerminality { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowRunPublicResult { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowStepTerminality { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowFrameTerminalStatus { .. }
             | mob_dsl::MobMachineInput::Spawn { .. }
+            | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
+            | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::RetireAbsent { .. }
+            | mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy { .. }
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
             | mob_dsl::MobMachineInput::WireMembers { .. }
+            | mob_dsl::MobMachineInput::WireMembersWithTrust { .. }
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberPeerRebind { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberPeerOverlay { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanupObserved { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::ProvisionSupervisorAuthority { .. }
+            | mob_dsl::MobMachineInput::ClearSupervisorPendingRotation { .. }
+            | mob_dsl::MobMachineInput::RecordSupervisorPendingRotation { .. }
+            | mob_dsl::MobMachineInput::CommitSupervisorRotation { .. }
+            | mob_dsl::MobMachineInput::ClearSupervisorAuthorityForDestroy { .. }
+            | mob_dsl::MobMachineInput::RestoreSupervisorAuthorityAfterDestroyRollback { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
+            | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
+            | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
             | mob_dsl::MobMachineInput::Stop
             | mob_dsl::MobMachineInput::Resume
             | mob_dsl::MobMachineInput::Complete
@@ -146,16 +408,22 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
             | mob_dsl::MobMachineInput::ListAllMembers
             | mob_dsl::MobMachineInput::MemberStatus
-            | mob_dsl::MobMachineInput::SubscribeAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeMobEvents
+            | mob_dsl::MobMachineInput::SubscribeAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeMobEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeStructuralEvents { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval { .. }
             | mob_dsl::MobMachineInput::PollEvents
+            | mob_dsl::MobMachineInput::PollEventsStrict { .. }
             | mob_dsl::MobMachineInput::ReplayAllEvents
-            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance
+            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
-            | mob_dsl::MobMachineInput::SetSpawnPolicy
+            | mob_dsl::MobMachineInput::SetSpawnPolicy { .. }
+            | mob_dsl::MobMachineInput::ResolveSpawnPolicy { .. }
+            | mob_dsl::MobMachineInput::BindOwnerBridgeSession { .. }
             | mob_dsl::MobMachineInput::Shutdown
-            | mob_dsl::MobMachineInput::ForceCancel
+            | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
             | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
             | mob_dsl::MobMachineInput::StartupMarkReady { .. }
@@ -410,9 +678,6 @@ impl MobMachineFlowRunCommand {
             step_id: self
                 .step_id()
                 .map(|step_id| mob_dsl::StepId::from(step_id.as_str())),
-            run_step_key: self.step_id().map(|step_id| {
-                mob_dsl::RunStepKey::from(format!("{}\u{0}{}", run_id, step_id.as_str()))
-            }),
             step_status: self.step_status(),
             target_count: self.target_count().map(u64::from),
             frame_id: self
@@ -570,9 +835,6 @@ impl MobMachineFlowFrameCommand {
             node_id: self
                 .node_id()
                 .map(|node_id| mob_dsl::FlowNodeId::from(node_id.as_str())),
-            frame_node_key: self.node_id().map(|node_id| {
-                mob_dsl::FrameNodeKey::from(format!("{frame_id}\u{0}{}", node_id.as_str()))
-            }),
             node_status: self.node_status(),
             terminal_status: self.terminal_status(),
         }
@@ -922,13 +1184,25 @@ pub struct FlowRunSeedAuthorityRecord {
     pub run_id: mob_dsl::RunId,
     pub step_ids: BTreeSet<mob_dsl::StepId>,
     pub ordered_steps: Vec<mob_dsl::StepId>,
+    #[serde(default)]
+    pub step_status: BTreeMap<mob_dsl::StepId, Option<mob_dsl::StepRunStatus>>,
+    #[serde(default)]
+    pub output_recorded: BTreeMap<mob_dsl::StepId, bool>,
+    #[serde(default)]
+    pub step_condition_results: BTreeMap<mob_dsl::StepId, Option<bool>>,
     pub step_has_conditions: BTreeMap<mob_dsl::StepId, bool>,
     pub step_dependencies: BTreeMap<mob_dsl::StepId, Vec<mob_dsl::StepId>>,
     pub step_dependency_modes: BTreeMap<mob_dsl::StepId, mob_dsl::DependencyMode>,
     pub step_branches: BTreeMap<mob_dsl::StepId, Option<mob_dsl::BranchId>>,
     pub step_collection_policies: BTreeMap<mob_dsl::StepId, mob_dsl::CollectionPolicyKind>,
     pub step_quorum_thresholds: BTreeMap<mob_dsl::StepId, u32>,
-    pub escalation_threshold: u32,
+    #[serde(default)]
+    pub step_target_counts: BTreeMap<mob_dsl::StepId, u64>,
+    #[serde(default)]
+    pub step_target_success_counts: BTreeMap<mob_dsl::StepId, u64>,
+    #[serde(default)]
+    pub step_target_terminal_failure_counts: BTreeMap<mob_dsl::StepId, u64>,
+    pub escalation_threshold: u64,
     pub max_step_retries: u32,
     pub max_active_nodes: u64,
     pub max_active_frames: u64,
@@ -952,6 +1226,12 @@ pub struct FlowFrameSeedAuthorityRecord {
     pub node_loop_ids: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::LoopId>,
     pub node_status: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::NodeRunStatus>,
     pub ready_queue: Vec<mob_dsl::FlowNodeId>,
+    #[serde(default)]
+    pub output_recorded: BTreeMap<mob_dsl::FlowNodeId, bool>,
+    #[serde(default)]
+    pub node_condition_results: BTreeMap<mob_dsl::FlowNodeId, Option<bool>>,
+    #[serde(default)]
+    pub last_admitted_node: Option<mob_dsl::FlowNodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -963,7 +1243,6 @@ pub enum FlowAuthorityInputRecord {
         run_id: mob_dsl::RunId,
         command: FlowRunReducerCommandRecord,
         step_id: Option<mob_dsl::StepId>,
-        run_step_key: Option<mob_dsl::RunStepKey>,
         step_status: Option<mob_dsl::StepRunStatus>,
         target_count: Option<u64>,
         frame_id: Option<mob_dsl::FrameId>,
@@ -976,7 +1255,6 @@ pub enum FlowAuthorityInputRecord {
         frame_id: mob_dsl::FrameId,
         command: FlowFrameReducerCommandRecord,
         node_id: Option<mob_dsl::FlowNodeId>,
-        frame_node_key: Option<mob_dsl::FrameNodeKey>,
         node_status: Option<mob_dsl::NodeRunStatus>,
         terminal_status: Option<mob_dsl::FrameStatus>,
     },
@@ -1015,12 +1293,18 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 step_ids,
                 ordered_steps,
+                step_status,
+                output_recorded,
+                step_condition_results,
                 step_has_conditions,
                 step_dependencies,
                 step_dependency_modes,
                 step_branches,
                 step_collection_policies,
                 step_quorum_thresholds,
+                step_target_counts,
+                step_target_success_counts,
+                step_target_terminal_failure_counts,
                 escalation_threshold,
                 max_step_retries,
                 max_active_nodes,
@@ -1030,12 +1314,18 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 step_ids,
                 ordered_steps,
+                step_status,
+                output_recorded,
+                step_condition_results,
                 step_has_conditions,
                 step_dependencies,
                 step_dependency_modes,
                 step_branches,
                 step_collection_policies,
                 step_quorum_thresholds,
+                step_target_counts,
+                step_target_success_counts,
+                step_target_terminal_failure_counts,
                 escalation_threshold,
                 max_step_retries,
                 max_active_nodes,
@@ -1046,12 +1336,18 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 step_ids,
                 ordered_steps,
+                step_status,
+                output_recorded,
+                step_condition_results,
                 step_has_conditions,
                 step_dependencies,
                 step_dependency_modes,
                 step_branches,
                 step_collection_policies,
                 step_quorum_thresholds,
+                step_target_counts,
+                step_target_success_counts,
+                step_target_terminal_failure_counts,
                 escalation_threshold,
                 max_step_retries,
                 max_active_nodes,
@@ -1061,12 +1357,18 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 step_ids,
                 ordered_steps,
+                step_status,
+                output_recorded,
+                step_condition_results,
                 step_has_conditions,
                 step_dependencies,
                 step_dependency_modes,
                 step_branches,
                 step_collection_policies,
                 step_quorum_thresholds,
+                step_target_counts,
+                step_target_success_counts,
+                step_target_terminal_failure_counts,
                 escalation_threshold,
                 max_step_retries,
                 max_active_nodes,
@@ -1077,7 +1379,6 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 command,
                 step_id,
-                run_step_key,
                 step_status,
                 target_count,
                 frame_id,
@@ -1088,7 +1389,6 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 command: command.into(),
                 step_id,
-                run_step_key,
                 step_status,
                 target_count,
                 frame_id,
@@ -1112,6 +1412,9 @@ impl FlowAuthorityInputRecord {
                 node_loop_ids,
                 node_status,
                 ready_queue,
+                output_recorded,
+                node_condition_results,
+                last_admitted_node,
             } => Self::CreateFrameSeed(FlowFrameSeedAuthorityRecord {
                 run_id,
                 frame_id,
@@ -1128,19 +1431,20 @@ impl FlowAuthorityInputRecord {
                 node_loop_ids,
                 node_status,
                 ready_queue,
+                output_recorded,
+                node_condition_results,
+                last_admitted_node,
             }),
             mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
                 frame_id,
                 command,
                 node_id,
-                frame_node_key,
                 node_status,
                 terminal_status,
             } => Self::AuthorizeFlowFrameReducerCommand {
                 frame_id,
                 command: command.into(),
                 node_id,
-                frame_node_key,
                 node_status,
                 terminal_status,
             },
@@ -1193,19 +1497,47 @@ impl FlowAuthorityInputRecord {
             },
             mob_dsl::MobMachineInput::CancelFlow { .. }
             | mob_dsl::MobMachineInput::FlowStatus
+            | mob_dsl::MobMachineInput::ClassifyFlowRunTerminality { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowRunPublicResult { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowStepTerminality { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowFrameTerminalStatus { .. }
             | mob_dsl::MobMachineInput::Spawn { .. }
+            | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
+            | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::RetireAbsent { .. }
+            | mob_dsl::MobMachineInput::RequestPendingSessionIngressDetachForMobDestroy {
+                ..
+            }
             | mob_dsl::MobMachineInput::Respawn { .. }
             | mob_dsl::MobMachineInput::RetireAll
             | mob_dsl::MobMachineInput::WireMembers { .. }
+            | mob_dsl::MobMachineInput::WireMembersWithTrust { .. }
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberPeerRebind { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberPeerOverlay { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanupObserved { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::ProvisionSupervisorAuthority { .. }
+            | mob_dsl::MobMachineInput::ClearSupervisorPendingRotation { .. }
+            | mob_dsl::MobMachineInput::RecordSupervisorPendingRotation { .. }
+            | mob_dsl::MobMachineInput::CommitSupervisorRotation { .. }
+            | mob_dsl::MobMachineInput::ClearSupervisorAuthorityForDestroy { .. }
+            | mob_dsl::MobMachineInput::RestoreSupervisorAuthorityAfterDestroyRollback { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
+            | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
+            | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
             | mob_dsl::MobMachineInput::Stop
             | mob_dsl::MobMachineInput::Resume
             | mob_dsl::MobMachineInput::Complete
@@ -1216,16 +1548,22 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
             | mob_dsl::MobMachineInput::ListAllMembers
             | mob_dsl::MobMachineInput::MemberStatus
-            | mob_dsl::MobMachineInput::SubscribeAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents
-            | mob_dsl::MobMachineInput::SubscribeMobEvents
+            | mob_dsl::MobMachineInput::SubscribeAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeMobEvents { .. }
+            | mob_dsl::MobMachineInput::SubscribeStructuralEvents { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberSubscription { .. }
+            | mob_dsl::MobMachineInput::AuthorizeMobEventRouterMemberRemoval { .. }
             | mob_dsl::MobMachineInput::PollEvents
+            | mob_dsl::MobMachineInput::PollEventsStrict { .. }
             | mob_dsl::MobMachineInput::ReplayAllEvents
-            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance
+            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance { .. }
             | mob_dsl::MobMachineInput::GetMember
-            | mob_dsl::MobMachineInput::SetSpawnPolicy
+            | mob_dsl::MobMachineInput::SetSpawnPolicy { .. }
+            | mob_dsl::MobMachineInput::ResolveSpawnPolicy { .. }
+            | mob_dsl::MobMachineInput::BindOwnerBridgeSession { .. }
             | mob_dsl::MobMachineInput::Shutdown
-            | mob_dsl::MobMachineInput::ForceCancel
+            | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
             | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
             | mob_dsl::MobMachineInput::StartupMarkReady { .. }
@@ -1244,10 +1582,10 @@ impl FlowAuthorityInputRecord {
                 )));
             }
         };
-        let input_variant = record.input_variant();
+        let input_variant = generated_flow_authority_record_variant(&record)?;
         if !canonical_flow_authority_input_variant_manifest().contains(&input_variant) {
             return Err(MobError::Internal(format!(
-                "MobMachine input variant {input_variant:?} is not in the typed flow authority manifest"
+                "MobMachine input variant {input_variant:?} is not in the generated flow authority manifest"
             )));
         }
         Ok(record)
@@ -1292,12 +1630,18 @@ impl FlowAuthorityInputRecord {
                 run_id: record.run_id,
                 step_ids: record.step_ids,
                 ordered_steps: record.ordered_steps,
+                step_status: record.step_status,
+                output_recorded: record.output_recorded,
+                step_condition_results: record.step_condition_results,
                 step_has_conditions: record.step_has_conditions,
                 step_dependencies: record.step_dependencies,
                 step_dependency_modes: record.step_dependency_modes,
                 step_branches: record.step_branches,
                 step_collection_policies: record.step_collection_policies,
                 step_quorum_thresholds: record.step_quorum_thresholds,
+                step_target_counts: record.step_target_counts,
+                step_target_success_counts: record.step_target_success_counts,
+                step_target_terminal_failure_counts: record.step_target_terminal_failure_counts,
                 escalation_threshold: record.escalation_threshold,
                 max_step_retries: record.max_step_retries,
                 max_active_nodes: record.max_active_nodes,
@@ -1308,12 +1652,18 @@ impl FlowAuthorityInputRecord {
                 run_id: record.run_id,
                 step_ids: record.step_ids,
                 ordered_steps: record.ordered_steps,
+                step_status: record.step_status,
+                output_recorded: record.output_recorded,
+                step_condition_results: record.step_condition_results,
                 step_has_conditions: record.step_has_conditions,
                 step_dependencies: record.step_dependencies,
                 step_dependency_modes: record.step_dependency_modes,
                 step_branches: record.step_branches,
                 step_collection_policies: record.step_collection_policies,
                 step_quorum_thresholds: record.step_quorum_thresholds,
+                step_target_counts: record.step_target_counts,
+                step_target_success_counts: record.step_target_success_counts,
+                step_target_terminal_failure_counts: record.step_target_terminal_failure_counts,
                 escalation_threshold: record.escalation_threshold,
                 max_step_retries: record.max_step_retries,
                 max_active_nodes: record.max_active_nodes,
@@ -1324,7 +1674,6 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 command,
                 step_id,
-                run_step_key,
                 step_status,
                 target_count,
                 frame_id,
@@ -1335,7 +1684,6 @@ impl FlowAuthorityInputRecord {
                 run_id,
                 command: command.into(),
                 step_id,
-                run_step_key,
                 step_status,
                 target_count,
                 frame_id,
@@ -1359,19 +1707,20 @@ impl FlowAuthorityInputRecord {
                 node_loop_ids: record.node_loop_ids,
                 node_status: record.node_status,
                 ready_queue: record.ready_queue,
+                output_recorded: record.output_recorded,
+                node_condition_results: record.node_condition_results,
+                last_admitted_node: record.last_admitted_node,
             },
             Self::AuthorizeFlowFrameReducerCommand {
                 frame_id,
                 command,
                 node_id,
-                frame_node_key,
                 node_status,
                 terminal_status,
             } => mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
                 frame_id,
                 command: command.into(),
                 node_id,
-                frame_node_key,
                 node_status,
                 terminal_status,
             },
@@ -1432,6 +1781,7 @@ pub(crate) fn apply_mob_machine_flow_run_command(
     run_id: &RunId,
     command: MobMachineFlowRunCommand,
     authority: MobMachineFlowAuthorityToken,
+    machine_effects: &[mob_dsl::MobMachineEffect],
 ) -> Result<flow_run::Outcome, MobError> {
     authority.require(MobMachineFlowAuthorityKind::FlowRun(command.kind()))?;
     match command {
@@ -1518,6 +1868,7 @@ pub(crate) fn apply_mob_machine_flow_run_command(
             machine_state,
             run_id,
             &payload.step_id,
+            machine_effects,
         ),
         MobMachineFlowRunCommand::SkipStep(payload) => project_flow_run_step_status_from_machine(
             state,
@@ -1535,7 +1886,7 @@ pub(crate) fn apply_mob_machine_flow_run_command(
                 &payload.step_id,
                 &payload.frame_id,
                 &payload.node_id,
-                payload.append_failure_ledger,
+                machine_effects,
             )
         }
         MobMachineFlowRunCommand::CancelStep(payload) => project_flow_run_step_status_from_machine(
@@ -1912,45 +2263,27 @@ pub(crate) fn project_flow_run_state_from_machine(
     state.tracked_steps = tracked_steps;
     state.ordered_steps = ordered_steps;
     state.step_status = project_step_option_status_map(
-        machine_state
-            .run_step_status
-            .get(&run_key)
-            .cloned()
-            .unwrap_or_default(),
+        required_machine_value(&machine_state.run_step_status, &run_key, "run_step_status")?
+            .clone(),
     );
-    for (key, status) in &machine_state.run_step_status_flat {
-        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
-            state
-                .step_status
-                .insert(step_id, Some(project_step_run_status(*status)));
-        }
-    }
     state.output_recorded = project_step_map(
-        machine_state
-            .run_output_recorded
-            .get(&run_key)
-            .cloned()
-            .unwrap_or_default(),
+        required_machine_value(
+            &machine_state.run_output_recorded,
+            &run_key,
+            "run_output_recorded",
+        )?
+        .clone(),
         |v| v,
     );
-    for (key, recorded) in &machine_state.run_output_recorded_flat {
-        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
-            state.output_recorded.insert(step_id, *recorded);
-        }
-    }
     state.step_condition_results = project_step_map(
-        machine_state
-            .run_step_condition_results
-            .get(&run_key)
-            .cloned()
-            .unwrap_or_default(),
+        required_machine_value(
+            &machine_state.run_step_condition_results,
+            &run_key,
+            "run_step_condition_results",
+        )?
+        .clone(),
         |v| v,
     );
-    for (key, result) in &machine_state.run_step_condition_results_flat {
-        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
-            state.step_condition_results.insert(step_id, *result);
-        }
-    }
     state.step_has_conditions = project_step_map(
         required_machine_value(
             &machine_state.run_step_has_conditions,
@@ -2006,64 +2339,51 @@ pub(crate) fn project_flow_run_state_from_machine(
         |v| v,
     );
     state.step_target_counts = project_step_map(
-        machine_state
-            .run_step_target_counts
-            .get(&run_key)
-            .cloned()
-            .unwrap_or_default(),
+        required_machine_value(
+            &machine_state.run_step_target_counts,
+            &run_key,
+            "run_step_target_counts",
+        )?
+        .clone(),
         saturating_u64_to_u32,
     );
-    for (key, count) in &machine_state.run_step_target_counts_flat {
-        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
-            state
-                .step_target_counts
-                .insert(step_id, saturating_u64_to_u32(*count));
-        }
-    }
     state.step_target_success_counts = project_step_map(
-        machine_state
-            .run_step_target_success_counts
-            .get(&run_key)
-            .cloned()
-            .unwrap_or_default(),
+        required_machine_value(
+            &machine_state.run_step_target_success_counts,
+            &run_key,
+            "run_step_target_success_counts",
+        )?
+        .clone(),
         saturating_u64_to_u32,
     );
-    for (key, count) in &machine_state.run_step_target_success_counts_flat {
-        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
-            state
-                .step_target_success_counts
-                .insert(step_id, saturating_u64_to_u32(*count));
-        }
-    }
     state.step_target_terminal_failure_counts = project_step_map(
-        machine_state
-            .run_step_target_terminal_failure_counts
-            .get(&run_key)
-            .cloned()
-            .unwrap_or_default(),
+        required_machine_value(
+            &machine_state.run_step_target_terminal_failure_counts,
+            &run_key,
+            "run_step_target_terminal_failure_counts",
+        )?
+        .clone(),
         saturating_u64_to_u32,
     );
-    for (key, count) in &machine_state.run_step_target_terminal_failure_counts_flat {
-        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
-            state
-                .step_target_terminal_failure_counts
-                .insert(step_id, saturating_u64_to_u32(*count));
-        }
-    }
     state.target_retry_counts = machine_state
         .run_target_retry_counts
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_target_retry_counts missing key {run_key:?}"
+            ))
+        })?
         .into_iter()
         .map(|(key, value)| (key, saturating_u64_to_u32(value)))
         .collect();
     project_flow_run_counters_from_machine(&mut state, machine_state, &run_key)?;
-    state.escalation_threshold = *required_machine_value(
+    state.escalation_threshold = required_machine_value(
         &machine_state.run_escalation_threshold,
         &run_key,
         "run_escalation_threshold",
-    )?;
+    )
+    .map(|value| saturating_u64_to_u32(*value))?;
     state.max_step_retries = *required_machine_value(
         &machine_state.run_max_step_retries,
         &run_key,
@@ -2073,7 +2393,11 @@ pub(crate) fn project_flow_run_state_from_machine(
         .run_ready_frames
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_ready_frames missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_frame_id)
         .collect();
@@ -2081,7 +2405,11 @@ pub(crate) fn project_flow_run_state_from_machine(
         .run_ready_frame_membership
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_ready_frame_membership missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_frame_id)
         .collect();
@@ -2099,7 +2427,11 @@ pub(crate) fn project_flow_run_state_from_machine(
         .run_pending_body_frame_loops
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_pending_body_frame_loops missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_loop_instance_id)
         .collect();
@@ -2107,7 +2439,11 @@ pub(crate) fn project_flow_run_state_from_machine(
         .run_pending_body_frame_loop_membership
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_pending_body_frame_loop_membership missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_loop_instance_id)
         .collect();
@@ -2141,10 +2477,18 @@ pub(crate) fn project_flow_run_state_from_machine(
         "run_active_frame_count",
     )
     .map(|value| saturating_u64_to_u32(*value))?;
-    if let Some(frame_id) = machine_state.run_last_granted_frame.get(&run_key) {
+    if let Some(frame_id) = required_machine_value(
+        &machine_state.run_last_granted_frame,
+        &run_key,
+        "run_last_granted_frame",
+    )? {
         state.last_granted_frame = project_frame_id(frame_id);
     }
-    if let Some(loop_instance_id) = machine_state.run_last_granted_loop.get(&run_key) {
+    if let Some(loop_instance_id) = required_machine_value(
+        &machine_state.run_last_granted_loop,
+        &run_key,
+        "run_last_granted_loop",
+    )? {
         state.last_granted_loop = project_loop_instance_id(loop_instance_id);
     }
     state.max_active_nodes = required_machine_value(
@@ -2166,42 +2510,103 @@ pub(crate) fn project_flow_run_state_from_machine(
     )
     .map(|value| saturating_u64_to_u32(*value))?;
 
-    for step_id in state.tracked_steps.clone() {
-        state.step_status.entry(step_id.clone()).or_insert(None);
-        state
-            .output_recorded
-            .entry(step_id.clone())
-            .or_insert(false);
-        state
-            .step_condition_results
-            .entry(step_id.clone())
-            .or_insert(None);
-        state.step_dependencies.entry(step_id.clone()).or_default();
-        state
-            .step_dependency_modes
-            .entry(step_id.clone())
-            .or_insert(flow_run::DependencyMode::All);
-        state.step_branches.entry(step_id.clone()).or_insert(None);
-        state
-            .step_collection_policies
-            .entry(step_id.clone())
-            .or_insert(flow_run::CollectionPolicyKind::All);
-        state
-            .step_quorum_thresholds
-            .entry(step_id.clone())
-            .or_insert(0);
-        state.step_target_counts.entry(step_id.clone()).or_insert(0);
-        state
-            .step_target_success_counts
-            .entry(step_id.clone())
-            .or_insert(0);
-        state
-            .step_target_terminal_failure_counts
-            .entry(step_id)
-            .or_insert(0);
-    }
+    validate_flow_run_projection_facts(&state)?;
 
     Ok(state)
+}
+
+fn validate_flow_run_projection_facts(state: &flow_run::State) -> Result<(), MobError> {
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_status.keys(),
+        "run_step_status",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.output_recorded.keys(),
+        "run_output_recorded",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_condition_results.keys(),
+        "run_step_condition_results",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_dependencies.keys(),
+        "run_step_dependencies",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_dependency_modes.keys(),
+        "run_step_dependency_modes",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_branches.keys(),
+        "run_step_branches",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_collection_policies.keys(),
+        "run_step_collection_policies",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_quorum_thresholds.keys(),
+        "run_step_quorum_thresholds",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_target_counts.keys(),
+        "run_step_target_counts",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_target_success_counts.keys(),
+        "run_step_target_success_counts",
+    )?;
+    validate_step_projection_keys(
+        &state.phase,
+        &state.tracked_steps,
+        state.step_target_terminal_failure_counts.keys(),
+        "run_step_target_terminal_failure_counts",
+    )?;
+    Ok(())
+}
+
+fn validate_step_projection_keys<'a>(
+    phase: &flow_run::Phase,
+    tracked_steps: &BTreeSet<StepId>,
+    keys: impl Iterator<Item = &'a StepId>,
+    field: &'static str,
+) -> Result<(), MobError> {
+    let keys = keys.cloned().collect::<BTreeSet<_>>();
+    for step_id in tracked_steps {
+        if !keys.contains(step_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine run projection field {field} missing tracked step '{step_id}' in phase {phase:?}"
+            )));
+        }
+    }
+    for step_id in &keys {
+        if !tracked_steps.contains(step_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine run projection field {field} contains untracked step '{step_id}' in phase {phase:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn project_flow_run_terminal_from_machine(
@@ -2239,16 +2644,22 @@ fn project_flow_run_step_status_from_machine(
     expected_status: flow_run::StepRunStatus,
     transition_id: flow_run::TransitionId,
 ) -> Result<flow_run::Outcome, MobError> {
-    let key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
-    let Some(status) = machine_state.run_step_status_flat.get(&key) else {
+    let run_key = mob_dsl::RunId::from(run_id.to_string());
+    let step_key = mob_dsl::StepId::from(step_id.as_str());
+    let status = required_machine_value(
+        required_machine_value(&machine_state.run_step_status, &run_key, "run_step_status")?,
+        &step_key,
+        "run_step_status",
+    )?;
+    let Some(status) = status else {
         return Err(MobError::Internal(format!(
-            "MobMachine run_step_status_flat missing accepted projection for run '{run_id}' step '{step_id}'"
+            "MobMachine run_step_status missing accepted projection for run '{run_id}' step '{step_id}'"
         )));
     };
     let projected_status = project_step_run_status(*status);
     if projected_status != expected_status {
         return Err(MobError::Internal(format!(
-            "MobMachine run_step_status_flat projected {projected_status:?} for run '{run_id}' step '{step_id}', expected {expected_status:?}"
+            "MobMachine run_step_status projected {projected_status:?} for run '{run_id}' step '{step_id}', expected {expected_status:?}"
         )));
     }
     let mut next_state = state.clone();
@@ -2307,6 +2718,7 @@ fn project_flow_run_failed_step_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     run_id: &RunId,
     step_id: &StepId,
+    machine_effects: &[mob_dsl::MobMachineEffect],
 ) -> Result<flow_run::Outcome, MobError> {
     let mut outcome = project_flow_run_step_status_from_machine(
         state,
@@ -2318,11 +2730,7 @@ fn project_flow_run_failed_step_from_machine(
     )?;
     let run_key = mob_dsl::RunId::from(run_id.to_string());
     project_flow_run_counters_from_machine(&mut outcome.next_state, machine_state, &run_key)?;
-    outcome.effects.push(flow_run::Effect::AppendFailureLedger(
-        flow_run::effects::AppendFailureLedger {
-            step_id: step_id.clone(),
-        },
-    ));
+    append_generated_flow_run_effects(&mut outcome.effects, machine_effects, step_id);
     Ok(outcome)
 }
 
@@ -2333,7 +2741,7 @@ fn project_flow_run_frame_step_status_from_machine(
     step_id: &StepId,
     frame_id: &FrameId,
     node_id: &FlowNodeId,
-    append_failure_ledger: bool,
+    machine_effects: &[mob_dsl::MobMachineEffect],
 ) -> Result<flow_run::Outcome, MobError> {
     let expected_status =
         machine_projected_frame_step_status(machine_state, run_id, step_id, frame_id, node_id)?;
@@ -2353,23 +2761,7 @@ fn project_flow_run_frame_step_status_from_machine(
                 machine_state,
                 &run_key,
             )?;
-            if append_failure_ledger {
-                outcome.effects.push(flow_run::Effect::AppendFailureLedger(
-                    flow_run::effects::AppendFailureLedger {
-                        step_id: step_id.clone(),
-                    },
-                ));
-            }
-            if outcome.next_state.escalation_threshold > 0
-                && outcome.next_state.consecutive_failure_count
-                    >= outcome.next_state.escalation_threshold
-            {
-                outcome.effects.push(flow_run::Effect::EscalateSupervisor(
-                    flow_run::effects::EscalateSupervisor {
-                        step_id: step_id.clone(),
-                    },
-                ));
-            }
+            append_generated_flow_run_effects(&mut outcome.effects, machine_effects, step_id);
         }
         flow_run::StepRunStatus::Completed => {
             let run_key = mob_dsl::RunId::from(run_id.to_string());
@@ -2382,6 +2774,32 @@ fn project_flow_run_frame_step_status_from_machine(
         _ => {}
     }
     Ok(outcome)
+}
+
+fn append_generated_flow_run_effects(
+    effects: &mut Vec<flow_run::Effect>,
+    machine_effects: &[mob_dsl::MobMachineEffect],
+    step_id: &StepId,
+) {
+    for effect in machine_effects {
+        match effect {
+            mob_dsl::MobMachineEffect::AppendFailureLedger => {
+                effects.push(flow_run::Effect::AppendFailureLedger(
+                    flow_run::effects::AppendFailureLedger {
+                        step_id: step_id.clone(),
+                    },
+                ));
+            }
+            mob_dsl::MobMachineEffect::EscalateSupervisor => {
+                effects.push(flow_run::Effect::EscalateSupervisor(
+                    flow_run::effects::EscalateSupervisor {
+                        step_id: step_id.clone(),
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn machine_projected_frame_step_status(
@@ -2461,23 +2879,12 @@ fn project_flow_run_step_output_from_machine(
     run_id: &RunId,
     step_id: &StepId,
 ) -> Result<flow_run::Outcome, MobError> {
-    let key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
-    let recorded = machine_state
-        .run_output_recorded_flat
-        .get(&key)
-        .copied()
-        .or_else(|| {
-            machine_state
-                .run_output_recorded
-                .get(&mob_dsl::RunId::from(run_id.to_string()))
-                .and_then(|outputs| outputs.get(&mob_dsl::StepId::from(step_id.as_str())))
-                .copied()
-        })
-        .ok_or_else(|| {
-            MobError::Internal(format!(
-                "MobMachine output projection missing accepted record for run '{run_id}' step '{step_id}'"
-            ))
-        })?;
+    let recorded = projected_run_step_value(
+        &machine_state.run_output_recorded,
+        run_id,
+        step_id,
+        "run_output_recorded",
+    )?;
     if !recorded {
         return Err(MobError::Internal(format!(
             "MobMachine output projection for run '{run_id}' step '{step_id}' was false"
@@ -2506,20 +2913,12 @@ fn project_flow_run_condition_from_machine(
 ) -> Result<flow_run::Outcome, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
     let step_key = mob_dsl::StepId::from(step_id.as_str());
-    let flat_key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
     let projected = machine_state
-        .run_step_condition_results_flat
-        .get(&flat_key)
-        .copied()
-        .flatten()
-        .or_else(|| {
-            machine_state
         .run_step_condition_results
         .get(&run_key)
         .and_then(|conditions| conditions.get(&step_key))
         .copied()
         .flatten()
-        })
         .ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine condition projection missing accepted result for run '{run_id}' step '{step_id}'"
@@ -2549,7 +2948,6 @@ fn project_flow_run_target_count_from_machine(
     expected_count: u32,
 ) -> Result<flow_run::Outcome, MobError> {
     let count = projected_run_step_value(
-        Some(&machine_state.run_step_target_counts_flat),
         &machine_state.run_step_target_counts,
         run_id,
         step_id,
@@ -2579,7 +2977,6 @@ fn project_flow_run_target_success_from_machine(
     target_id: &MeerkatId,
 ) -> Result<flow_run::Outcome, MobError> {
     let count = projected_run_step_value(
-        Some(&machine_state.run_step_target_success_counts_flat),
         &machine_state.run_step_target_success_counts,
         run_id,
         step_id,
@@ -2608,7 +3005,6 @@ fn project_flow_run_target_terminal_failure_from_machine(
     step_id: &StepId,
 ) -> Result<flow_run::Outcome, MobError> {
     let count = projected_run_step_value(
-        Some(&machine_state.run_step_target_terminal_failure_counts_flat),
         &machine_state.run_step_target_terminal_failure_counts,
         run_id,
         step_id,
@@ -2660,18 +3056,11 @@ fn project_flow_run_target_failure_from_machine(
     retry_key: &str,
 ) -> Result<flow_run::Outcome, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
-    let flat_key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
     let count = machine_state
-        .run_target_retry_counts_flat
-        .get(&flat_key)
+        .run_target_retry_counts
+        .get(&run_key)
+        .and_then(|counts| counts.get(retry_key))
         .copied()
-        .or_else(|| {
-            machine_state
-                .run_target_retry_counts
-                .get(&run_key)
-                .and_then(|counts| counts.get(retry_key))
-                .copied()
-        })
         .ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine target retry projection missing key '{retry_key}' for run '{run_id}'"
@@ -2706,7 +3095,11 @@ fn project_flow_run_ready_frames_from_machine(
         .run_ready_frames
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_ready_frames missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_frame_id)
         .collect::<Vec<_>>();
@@ -2714,7 +3107,11 @@ fn project_flow_run_ready_frames_from_machine(
         .run_ready_frame_membership
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_ready_frame_membership missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_frame_id)
         .collect::<BTreeSet<_>>();
@@ -2747,12 +3144,14 @@ fn project_flow_run_ready_frames_from_machine(
         "run_active_node_count",
     )
     .map(|value| saturating_u64_to_u32(*value))?;
-    if let Some(last_granted_frame) = last_granted_frame.or_else(|| {
-        machine_state
-            .run_last_granted_frame
-            .get(&run_key)
-            .map(project_frame_id)
-    }) {
+    let machine_last_granted_frame = required_machine_value(
+        &machine_state.run_last_granted_frame,
+        &run_key,
+        "run_last_granted_frame",
+    )?;
+    if let Some(last_granted_frame) =
+        last_granted_frame.or_else(|| machine_last_granted_frame.as_ref().map(project_frame_id))
+    {
         next_state.last_granted_frame = last_granted_frame;
     }
     Ok(flow_run::Outcome {
@@ -2775,7 +3174,11 @@ fn project_flow_run_pending_body_frames_from_machine(
         .run_pending_body_frame_loops
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_pending_body_frame_loops missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_loop_instance_id)
         .collect::<Vec<_>>();
@@ -2783,7 +3186,11 @@ fn project_flow_run_pending_body_frames_from_machine(
         .run_pending_body_frame_loop_membership
         .get(&run_key)
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine projection field run_pending_body_frame_loop_membership missing key {run_key:?}"
+            ))
+        })?
         .iter()
         .map(project_loop_instance_id)
         .collect::<BTreeSet<_>>();
@@ -2819,10 +3226,14 @@ fn project_flow_run_pending_body_frames_from_machine(
         "run_active_frame_count",
     )
     .map(|value| saturating_u64_to_u32(*value))?;
+    let machine_last_granted_loop = required_machine_value(
+        &machine_state.run_last_granted_loop,
+        &run_key,
+        "run_last_granted_loop",
+    )?;
     if let Some(last_granted_loop) = last_granted_loop.or_else(|| {
-        machine_state
-            .run_last_granted_loop
-            .get(&run_key)
+        machine_last_granted_loop
+            .as_ref()
             .map(project_loop_instance_id)
     }) {
         next_state.last_granted_loop = last_granted_loop;
@@ -2844,7 +3255,7 @@ fn project_flow_run_node_scheduler_from_machine(
     let granted = machine_state
         .run_last_granted_frame
         .get(&run_key)
-        .map(project_frame_id)
+        .and_then(|frame_id| frame_id.as_ref().map(project_frame_id))
         .ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine node scheduler projection did not grant a frame for run '{run_id}'"
@@ -2874,7 +3285,7 @@ fn project_flow_run_frame_scheduler_from_machine(
     let granted = machine_state
         .run_last_granted_loop
         .get(&run_key)
-        .map(project_loop_instance_id)
+        .and_then(|loop_instance_id| loop_instance_id.as_ref().map(project_loop_instance_id))
         .ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine frame scheduler projection did not grant a loop for run '{run_id}'"
@@ -2897,7 +3308,6 @@ fn project_flow_run_frame_scheduler_from_machine(
 }
 
 fn projected_run_step_value<V: Copy>(
-    flat_map: Option<&BTreeMap<mob_dsl::RunStepKey, V>>,
     map: &BTreeMap<mob_dsl::RunId, BTreeMap<mob_dsl::StepId, V>>,
     run_id: &RunId,
     step_id: &StepId,
@@ -2905,15 +3315,9 @@ fn projected_run_step_value<V: Copy>(
 ) -> Result<V, MobError> {
     let run_key = mob_dsl::RunId::from(run_id.to_string());
     let step_key = mob_dsl::StepId::from(step_id.as_str());
-    let flat_key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
-    flat_map
-        .and_then(|values| values.get(&flat_key))
+    map.get(&run_key)
+        .and_then(|values| values.get(&step_key))
         .copied()
-        .or_else(|| {
-            map.get(&run_key)
-                .and_then(|values| values.get(&step_key))
-                .copied()
-        })
         .ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine projection field {field} missing run '{run_id}' step '{step_id}'"
@@ -2952,12 +3356,26 @@ pub(crate) fn project_flow_frame_state_from_machine(
             mob_dsl::FrameScope::Root => flow_frame::FrameScope::Root,
             mob_dsl::FrameScope::Body => flow_frame::FrameScope::Body,
         };
-    let loop_instance_id = machine_state
-        .frame_parent_loop
-        .get(&frame_key)
-        .and_then(Clone::clone)
-        .map(|id| project_loop_instance_id(&id))
-        .unwrap_or_else(|| LoopInstanceId::from(String::new()));
+    let frame_parent_loop = required_machine_value(
+        &machine_state.frame_parent_loop,
+        &frame_key,
+        "frame_parent_loop",
+    )?;
+    let loop_instance_id = match (frame_scope, frame_parent_loop) {
+        (flow_frame::FrameScope::Root, None) => LoopInstanceId::from(String::new()),
+        (flow_frame::FrameScope::Root, Some(parent)) => {
+            return Err(MobError::Internal(format!(
+                "MobMachine root frame '{frame_id}' unexpectedly projected parent loop '{}'",
+                parent.0
+            )));
+        }
+        (flow_frame::FrameScope::Body, Some(parent)) => project_loop_instance_id(parent),
+        (flow_frame::FrameScope::Body, None) => {
+            return Err(MobError::Internal(format!(
+                "MobMachine body frame '{frame_id}' missing generated parent loop"
+            )));
+        }
+    };
     let iteration = *required_machine_value(
         &machine_state.frame_iteration,
         &frame_key,
@@ -2979,15 +3397,39 @@ pub(crate) fn project_flow_frame_state_from_machine(
     .iter()
     .map(project_flow_node_id)
     .collect::<Vec<_>>();
-    let mut state = flow_frame::State {
+    let frame_node_status = required_machine_value(
+        &machine_state.frame_node_status,
+        &frame_key,
+        "frame_node_status",
+    )?;
+    let frame_ready_queue = required_machine_value(
+        &machine_state.frame_ready_queue,
+        &frame_key,
+        "frame_ready_queue",
+    )?;
+    let frame_output_recorded = required_machine_value(
+        &machine_state.frame_output_recorded,
+        &frame_key,
+        "frame_output_recorded",
+    )?;
+    let frame_node_condition_results = required_machine_value(
+        &machine_state.frame_node_condition_results,
+        &frame_key,
+        "frame_node_condition_results",
+    )?;
+    let frame_last_admitted_node = required_machine_value(
+        &machine_state.frame_last_admitted_node,
+        &frame_key,
+        "frame_last_admitted_node",
+    )?;
+    let state = flow_frame::State {
         phase,
         frame_id: frame_id.clone(),
         frame_scope,
         loop_instance_id,
         iteration,
-        last_admitted_node: machine_state
-            .frame_last_admitted_node
-            .get(&frame_key)
+        last_admitted_node: frame_last_admitted_node
+            .as_ref()
             .map(project_flow_node_id)
             .unwrap_or_else(|| FlowNodeId::from(String::new())),
         tracked_nodes,
@@ -3029,68 +3471,94 @@ pub(crate) fn project_flow_frame_state_from_machine(
             |branch| branch.as_ref().map(project_branch_id),
         ),
         branch_winners,
-        node_status: project_node_map(
-            machine_state
-                .frame_node_status
-                .get(&frame_key)
-                .cloned()
-                .unwrap_or_default(),
-            project_node_run_status,
-        ),
-        ready_queue: machine_state
-            .frame_ready_queue
-            .get(&frame_key)
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(project_flow_node_id)
-            .collect(),
-        output_recorded: project_node_map(
-            machine_state
-                .frame_output_recorded
-                .get(&frame_key)
-                .cloned()
-                .unwrap_or_default(),
-            |v| v,
-        ),
-        node_condition_results: project_node_map(
-            machine_state
-                .frame_node_condition_results
-                .get(&frame_key)
-                .cloned()
-                .unwrap_or_default(),
-            |v| v,
-        ),
+        node_status: project_node_map(frame_node_status.clone(), project_node_run_status),
+        ready_queue: frame_ready_queue.iter().map(project_flow_node_id).collect(),
+        output_recorded: project_node_map(frame_output_recorded.clone(), |v| v),
+        node_condition_results: project_node_map(frame_node_condition_results.clone(), |v| v),
     };
-    for node_id in state.tracked_nodes.clone() {
-        let node_key = mob_dsl::FrameNodeKey::from(format!("{frame_id}\u{0}{}", node_id.as_str()));
-        if let Some(recorded) = machine_state
-            .frame_output_recorded_flat
-            .get(&node_key)
-            .copied()
-        {
-            state.output_recorded.insert(node_id, recorded);
-        }
-    }
-    for node_id in state.tracked_nodes.clone() {
-        state
-            .node_status
-            .entry(node_id.clone())
-            .or_insert(flow_frame::NodeRunStatus::Pending);
-        state
-            .output_recorded
-            .entry(node_id.clone())
-            .or_insert(false);
-        state.node_condition_results.entry(node_id).or_insert(None);
-    }
-    for node_id in state.ready_queue.clone() {
-        if state.node_status.get(&node_id) == Some(&flow_frame::NodeRunStatus::Pending) {
-            state
-                .node_status
-                .insert(node_id, flow_frame::NodeRunStatus::Ready);
-        }
-    }
+    validate_flow_frame_projection_facts(&state)?;
     Ok(state)
+}
+
+fn validate_flow_frame_projection_facts(state: &flow_frame::State) -> Result<(), MobError> {
+    for node_id in &state.tracked_nodes {
+        if !state.node_status.contains_key(node_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine frame '{}' missing generated node status for tracked node '{}'",
+                state.frame_id, node_id
+            )));
+        }
+    }
+    for node_id in state.node_status.keys() {
+        if !state.tracked_nodes.contains(node_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine frame '{}' projected status for untracked node '{}'",
+                state.frame_id, node_id
+            )));
+        }
+    }
+    let ready_members = state
+        .ready_queue
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<FlowNodeId>>();
+    for node_id in &state.ready_queue {
+        match state.node_status.get(node_id) {
+            Some(flow_frame::NodeRunStatus::Ready) => {}
+            Some(other) => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine frame '{}' ready queue contains node '{}' with status {:?}",
+                    state.frame_id, node_id, other
+                )));
+            }
+            None => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine frame '{}' ready queue contains node '{}' without generated status",
+                    state.frame_id, node_id
+                )));
+            }
+        }
+    }
+    for (node_id, status) in &state.node_status {
+        if *status == flow_frame::NodeRunStatus::Ready && !ready_members.contains(node_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine frame '{}' generated ready node '{}' missing from ready queue",
+                state.frame_id, node_id
+            )));
+        }
+    }
+    validate_node_projection_keys(state, state.output_recorded.keys(), "frame_output_recorded")?;
+    validate_node_projection_keys(
+        state,
+        state.node_condition_results.keys(),
+        "frame_node_condition_results",
+    )?;
+    Ok(())
+}
+
+fn validate_node_projection_keys<'a>(
+    state: &flow_frame::State,
+    keys: impl Iterator<Item = &'a FlowNodeId>,
+    field: &'static str,
+) -> Result<(), MobError> {
+    let keys = keys.cloned().collect::<BTreeSet<_>>();
+    for node_id in &state.tracked_nodes {
+        if !keys.contains(node_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine frame '{}' projection field {field} missing tracked node '{}'",
+                state.frame_id, node_id
+            )));
+        }
+    }
+    for node_id in &keys {
+        if !state.tracked_nodes.contains(node_id) {
+            return Err(MobError::Internal(format!(
+                "MobMachine frame '{}' projection field {field} contains untracked node '{}'",
+                state.frame_id, node_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn project_flow_frame_authority_state_from_machine(
@@ -3098,13 +3566,22 @@ pub(crate) fn project_flow_frame_authority_state_from_machine(
     frame_id: &FrameId,
 ) -> Result<flow_frame::State, MobError> {
     let state = project_flow_frame_state_from_machine(machine_state, frame_id, BTreeSet::new())?;
-    let branch_winners = state
+    let branch_winners = completed_branch_winners(&state);
+    project_flow_frame_state_from_machine(machine_state, frame_id, branch_winners)
+}
+
+fn completed_branch_winners(state: &flow_frame::State) -> BTreeSet<BranchId> {
+    state
         .node_status
         .iter()
         .filter(|(_, status)| **status == flow_frame::NodeRunStatus::Completed)
         .filter_map(|(node_id, _)| state.node_branches.get(node_id).and_then(Clone::clone))
-        .collect();
-    project_flow_frame_state_from_machine(machine_state, frame_id, branch_winners)
+        .collect()
+}
+
+fn refresh_completed_branch_winners(mut state: flow_frame::State) -> flow_frame::State {
+    state.branch_winners = completed_branch_winners(&state);
+    state
 }
 
 fn project_flow_frame_admit_from_machine(
@@ -3116,33 +3593,20 @@ fn project_flow_frame_admit_from_machine(
         &state.frame_id,
         state.branch_winners.clone(),
     )?;
-    let admitted_node = if !next_state.last_admitted_node.as_str().is_empty() {
-        next_state.last_admitted_node.clone()
+    let admitted_node = if next_state.last_admitted_node.as_str().is_empty() {
+        return Err(MobError::Internal(format!(
+            "MobMachine frame '{}' missing generated admitted-node witness",
+            state.frame_id
+        )));
     } else {
-        state
-            .node_status
-            .iter()
-            .find_map(|(node_id, previous)| {
-                let next = next_state.node_status.get(node_id)?;
-                (*previous == flow_frame::NodeRunStatus::Ready
-                    && *next == flow_frame::NodeRunStatus::Running)
-                    .then(|| node_id.clone())
-            })
-            .or_else(|| {
-                next_state.node_status.iter().find_map(|(node_id, next)| {
-                    (*next == flow_frame::NodeRunStatus::Running
-                        && state.node_status.get(node_id)
-                            != Some(&flow_frame::NodeRunStatus::Running))
-                    .then(|| node_id.clone())
-                })
-            })
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "MobMachine frame '{}' did not project an admitted running node",
-                    state.frame_id
-                ))
-            })?
+        next_state.last_admitted_node.clone()
     };
+    if next_state.node_status.get(&admitted_node) != Some(&flow_frame::NodeRunStatus::Running) {
+        return Err(MobError::Internal(format!(
+            "MobMachine frame '{}' admitted node '{}' was not projected as Running",
+            state.frame_id, admitted_node
+        )));
+    }
     let effect = match next_state.node_kind.get(&admitted_node).copied() {
         Some(flow_frame::FlowNodeKind::Step) => {
             flow_frame::Effect::AdmitStepWork(flow_frame::effects::AdmitStepWork {
@@ -3177,11 +3641,11 @@ fn project_flow_frame_node_from_machine(
     expected_status: flow_frame::NodeRunStatus,
     transition_id: flow_frame::TransitionId,
 ) -> Result<flow_frame::Outcome, MobError> {
-    let next_state = project_flow_frame_state_from_machine(
+    let next_state = refresh_completed_branch_winners(project_flow_frame_state_from_machine(
         machine_state,
         &state.frame_id,
         state.branch_winners.clone(),
-    )?;
+    )?);
     let projected = next_state
         .node_status
         .get(node_id)
@@ -3215,11 +3679,11 @@ fn project_flow_frame_node_output_from_machine(
     machine_state: &mob_dsl::MobMachineState,
     node_id: &FlowNodeId,
 ) -> Result<flow_frame::Outcome, MobError> {
-    let next_state = project_flow_frame_state_from_machine(
+    let next_state = refresh_completed_branch_winners(project_flow_frame_state_from_machine(
         machine_state,
         &state.frame_id,
         state.branch_winners.clone(),
-    )?;
+    )?);
     if next_state.output_recorded.get(node_id) != Some(&true) {
         return Err(MobError::Internal(format!(
             "MobMachine frame '{}' did not project output recorded for node '{}'",
@@ -3439,11 +3903,6 @@ fn project_step_id(step_id: &mob_dsl::StepId) -> StepId {
     StepId::from(step_id.as_str())
 }
 
-fn project_run_step_key_for_run(key: &mob_dsl::RunStepKey, run_id: &RunId) -> Option<StepId> {
-    let (projected_run_id, step_id) = key.0.split_once('\0')?;
-    (projected_run_id == run_id.to_string()).then(|| StepId::from(step_id))
-}
-
 fn saturating_u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -3500,6 +3959,168 @@ fn project_step_run_status(status: mob_dsl::StepRunStatus) -> flow_run::StepRunS
         mob_dsl::StepRunStatus::Skipped => flow_run::StepRunStatus::Skipped,
         mob_dsl::StepRunStatus::Canceled => flow_run::StepRunStatus::Canceled,
     }
+}
+
+fn mob_run_status_to_machine(status: &MobRunStatus) -> mob_dsl::FlowRunStatus {
+    match status {
+        MobRunStatus::Pending => mob_dsl::FlowRunStatus::Pending,
+        MobRunStatus::Running => mob_dsl::FlowRunStatus::Running,
+        MobRunStatus::Completed => mob_dsl::FlowRunStatus::Completed,
+        MobRunStatus::Failed => mob_dsl::FlowRunStatus::Failed,
+        MobRunStatus::Canceled => mob_dsl::FlowRunStatus::Canceled,
+    }
+}
+
+fn step_run_status_to_machine(status: &StepRunStatus) -> mob_dsl::StepRunStatus {
+    match status {
+        StepRunStatus::Dispatched => mob_dsl::StepRunStatus::Dispatched,
+        StepRunStatus::Completed => mob_dsl::StepRunStatus::Completed,
+        StepRunStatus::Failed => mob_dsl::StepRunStatus::Failed,
+        StepRunStatus::Skipped => mob_dsl::StepRunStatus::Skipped,
+        StepRunStatus::Canceled => mob_dsl::StepRunStatus::Canceled,
+    }
+}
+
+fn classify_mob_machine_stateless(
+    input: mob_dsl::MobMachineInput,
+    label: &'static str,
+) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+    let mut authority = mob_dsl::MobMachineAuthority::new();
+    let input_debug = format!("{input:?}");
+    mob_dsl::MobMachineMutator::apply(&mut authority, input)
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine stateless classifier ({label}) rejected {input_debug}: {error}"
+            ))
+        })
+        .map(|transition| transition.into_effects())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobFlowRunPublicResultClass {
+    Success,
+    Error,
+}
+
+impl From<mob_dsl::FlowRunPublicResultClassKind> for MobFlowRunPublicResultClass {
+    fn from(value: mob_dsl::FlowRunPublicResultClassKind) -> Self {
+        match value {
+            mob_dsl::FlowRunPublicResultClassKind::Success => Self::Success,
+            mob_dsl::FlowRunPublicResultClassKind::Failure => Self::Error,
+        }
+    }
+}
+
+pub fn mob_machine_run_status_is_terminal(
+    run_id: &RunId,
+    status: &MobRunStatus,
+) -> Result<bool, MobError> {
+    let run_key = mob_dsl::RunId::from(run_id.to_string());
+    let effects = classify_mob_machine_stateless(
+        mob_dsl::MobMachineInput::ClassifyFlowRunTerminality {
+            run_id: run_key.clone(),
+            status: mob_run_status_to_machine(status),
+        },
+        "ClassifyFlowRunTerminality",
+    )?;
+    let mut terminal = None;
+    for effect in effects {
+        match effect {
+            mob_dsl::MobMachineEffect::FlowRunTerminal { run_id } if run_id == run_key => {
+                terminal = Some(true);
+            }
+            mob_dsl::MobMachineEffect::FlowRunNonTerminal { run_id } if run_id == run_key => {
+                terminal = Some(false);
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine run terminality classifier emitted unexpected effect: {other:?}"
+                )));
+            }
+        }
+    }
+    terminal.ok_or_else(|| {
+        MobError::Internal(format!(
+            "MobMachine run terminality classifier emitted no effect for run '{run_id}'"
+        ))
+    })
+}
+
+pub fn mob_machine_step_status_is_terminal(
+    run_id: &RunId,
+    step_id: &StepId,
+    status: &StepRunStatus,
+) -> Result<bool, MobError> {
+    let run_key = mob_dsl::RunId::from(run_id.to_string());
+    let step_key = mob_dsl::StepId::from(step_id.as_str());
+    let effects = classify_mob_machine_stateless(
+        mob_dsl::MobMachineInput::ClassifyFlowStepTerminality {
+            run_id: run_key.clone(),
+            step_id: step_key.clone(),
+            status: step_run_status_to_machine(status),
+        },
+        "ClassifyFlowStepTerminality",
+    )?;
+    let mut terminal = None;
+    for effect in effects {
+        match effect {
+            mob_dsl::MobMachineEffect::FlowStepTerminal { run_id, step_id }
+                if run_id == run_key && step_id == step_key =>
+            {
+                terminal = Some(true);
+            }
+            mob_dsl::MobMachineEffect::FlowStepNonTerminal { run_id, step_id }
+                if run_id == run_key && step_id == step_key =>
+            {
+                terminal = Some(false);
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine step terminality classifier emitted unexpected effect: {other:?}"
+                )));
+            }
+        }
+    }
+    terminal.ok_or_else(|| {
+        MobError::Internal(format!(
+            "MobMachine step terminality classifier emitted no effect for run '{run_id}' step '{step_id}'"
+        ))
+    })
+}
+
+pub fn mob_machine_run_public_result_class(
+    run_id: &RunId,
+    status: &MobRunStatus,
+) -> Result<MobFlowRunPublicResultClass, MobError> {
+    let run_key = mob_dsl::RunId::from(run_id.to_string());
+    let effects = classify_mob_machine_stateless(
+        mob_dsl::MobMachineInput::ClassifyFlowRunPublicResult {
+            run_id: run_key.clone(),
+            status: mob_run_status_to_machine(status),
+        },
+        "ClassifyFlowRunPublicResult",
+    )?;
+    let mut result = None;
+    for effect in effects {
+        match effect {
+            mob_dsl::MobMachineEffect::FlowRunPublicResultClassified {
+                run_id,
+                result: classified,
+            } if run_id == run_key => {
+                result = Some(MobFlowRunPublicResultClass::from(classified));
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine flow public-result classifier emitted unexpected effect: {other:?}"
+                )));
+            }
+        }
+    }
+    result.ok_or_else(|| {
+        MobError::Internal(format!(
+            "MobMachine flow public-result classifier emitted no effect for run '{run_id}'"
+        ))
+    })
 }
 
 fn project_flow_node_kind(kind: mob_dsl::FlowNodeKind) -> flow_frame::FlowNodeKind {
@@ -3628,6 +4249,56 @@ pub struct MobRun {
 }
 
 impl MobRun {
+    pub fn public_flow_status_run_value(run: Option<&Self>) -> Result<serde_json::Value, MobError> {
+        match run {
+            Some(run) => run.public_status_value(),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// Public flow-status projection. Store-local timestamps are deliberately
+    /// omitted because MobMachine does not own them as semantic flow facts.
+    pub fn public_status_value(&self) -> Result<serde_json::Value, MobError> {
+        let mut value = serde_json::to_value(self).map_err(|error| {
+            MobError::Internal(format!(
+                "public flow status projection failed to encode run '{}': {error}",
+                self.run_id
+            ))
+        })?;
+        let Some(object) = value.as_object_mut() else {
+            return Err(MobError::Internal(format!(
+                "public flow status projection for run '{}' did not encode as an object",
+                self.run_id
+            )));
+        };
+
+        object.remove("created_at");
+        object.remove("completed_at");
+
+        for field in ["step_ledger", "failure_ledger"] {
+            let Some(entries) = object.get_mut(field) else {
+                continue;
+            };
+            let Some(entries) = entries.as_array_mut() else {
+                return Err(MobError::Internal(format!(
+                    "public flow status projection for run '{}' encoded {field} as non-array",
+                    self.run_id
+                )));
+            };
+            for entry in entries {
+                let Some(entry) = entry.as_object_mut() else {
+                    return Err(MobError::Internal(format!(
+                        "public flow status projection for run '{}' encoded {field} entry as non-object",
+                        self.run_id
+                    )));
+                };
+                entry.remove("timestamp");
+            }
+        }
+
+        Ok(value)
+    }
+
     /// Read-only access to the run's current status.
     pub fn status(&self) -> &MobRunStatus {
         &self.status
@@ -3796,7 +4467,7 @@ impl MobRun {
             frames: BTreeMap::new(),
             loops: BTreeMap::new(),
             loop_iteration_ledger: Vec::new(),
-            schema_version: 6,
+            schema_version: mob_run_schema_version(),
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
             flow_authority_inputs: Vec::new(),
@@ -3811,6 +4482,12 @@ impl MobRun {
             .into_iter()
             .map(FlowAuthorityInputRecord::from_machine_input)
             .collect::<Result<Vec<_>, _>>()?;
+        if records.is_empty() {
+            return Err(MobError::Internal(format!(
+                "run '{}' store mutation missing MobMachine authority input",
+                self.run_id
+            )));
+        }
         self.flow_authority_inputs.extend(records);
         Ok(())
     }
@@ -3821,6 +4498,12 @@ impl MobRun {
         context: &str,
     ) -> Result<(), MobError> {
         for record in inputs {
+            let input_variant = generated_flow_authority_record_variant(record)?;
+            if !canonical_flow_authority_input_variant_manifest().contains(&input_variant) {
+                return Err(MobError::Internal(format!(
+                    "persisted MobMachine input variant {input_variant:?} is not in the generated flow authority manifest"
+                )));
+            }
             let input = record.to_machine_input();
             let input_debug = format!("{input:?}");
             let transition = mob_dsl::MobMachineMutator::apply(authority, input).map_err(
@@ -3830,20 +4513,27 @@ impl MobRun {
                     ))
                 },
             )?;
-            if transition.from_phase != transition.to_phase {
-                authority.state.lifecycle_phase = transition.to_phase;
-            }
+            let _ = transition;
         }
         Ok(())
     }
 
-    pub(crate) fn validate_flow_authority_projection(&self) -> Result<(), MobError> {
+    fn validate_flow_authority_projection_core(&self) -> Result<(), MobError> {
+        let expected_schema_version = mob_run_schema_version();
+        if self.schema_version != expected_schema_version {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': schema_version {} != {}",
+                self.run_id, self.schema_version, expected_schema_version
+            )));
+        }
         if self.flow_authority_inputs.is_empty() {
-            return Ok(());
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': missing MobMachine authority inputs",
+                self.run_id
+            )));
         }
 
         let mut authority = mob_dsl::MobMachineAuthority::new();
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         Self::replay_flow_authority_inputs_into(
             &mut authority,
             &self.flow_authority_inputs,
@@ -3851,7 +4541,7 @@ impl MobRun {
         )?;
 
         let projected_flow_state =
-            project_flow_run_state_from_machine(&authority.state, &self.run_id)?;
+            project_flow_run_state_from_machine(authority.state(), &self.run_id)?;
         if projected_flow_state != self.flow_state {
             return Err(MobError::Internal(format!(
                 "flow authority log projection mismatch for run '{}': flow_state diverged",
@@ -3869,7 +4559,7 @@ impl MobRun {
 
         let run_key = mob_dsl::RunId::from(self.run_id.to_string());
         let projected_frame_ids = authority
-            .state
+            .state()
             .frame_run
             .iter()
             .filter(|(_, frame_run_id)| *frame_run_id == &run_key)
@@ -3885,7 +4575,7 @@ impl MobRun {
 
         for (frame_id, snapshot) in &self.frames {
             let projected =
-                project_flow_frame_authority_state_from_machine(&authority.state, frame_id)?;
+                project_flow_frame_authority_state_from_machine(authority.state(), frame_id)?;
             if projected != snapshot.kernel_state {
                 return Err(MobError::Internal(format!(
                     "flow authority log projection mismatch for run '{}': frame '{}' diverged",
@@ -3895,15 +4585,15 @@ impl MobRun {
         }
 
         let projected_loop_ids = authority
-            .state
+            .state()
             .loop_phase
             .keys()
             .filter(|loop_instance_id| {
                 authority
-                    .state
+                    .state()
                     .loop_parent_frame
                     .get(*loop_instance_id)
-                    .and_then(|frame_id| authority.state.frame_run.get(frame_id))
+                    .and_then(|frame_id| authority.state().frame_run.get(frame_id))
                     == Some(&run_key)
             })
             .map(project_loop_instance_id)
@@ -3918,7 +4608,7 @@ impl MobRun {
 
         for (loop_instance_id, snapshot) in &self.loops {
             let projected =
-                project_loop_iteration_state_from_machine(&authority.state, loop_instance_id)?;
+                project_loop_iteration_state_from_machine(authority.state(), loop_instance_id)?;
             if projected != snapshot.kernel_state {
                 return Err(MobError::Internal(format!(
                     "flow authority log projection mismatch for run '{}': loop '{}' diverged",
@@ -3930,15 +4620,207 @@ impl MobRun {
         Ok(())
     }
 
+    pub(crate) fn validate_flow_authority_projection(&self) -> Result<(), MobError> {
+        self.validate_flow_authority_projection_core()?;
+        self.validate_provenance_ledgers()
+    }
+
+    fn validate_provenance_ledgers(&self) -> Result<(), MobError> {
+        let reducer_authorities = self
+            .flow_authority_inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| {
+                matches!(
+                    record,
+                    FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand { .. }
+                )
+            })
+            .map(|(index, record)| {
+                (
+                    index,
+                    MobRunProvenanceAuthority {
+                        input: record.to_machine_input(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut used_step_authorities = BTreeSet::new();
+        for entry in &self.step_ledger {
+            let Some((authority_index, _)) =
+                reducer_authorities
+                    .iter()
+                    .find(|(authority_index, authority)| {
+                        !used_step_authorities.contains(authority_index)
+                            && authority.validate_step_entry(self, entry).is_ok()
+                    })
+            else {
+                return Err(MobError::Internal(format!(
+                    "run '{}' step ledger entry for step '{}' status {:?} is not authorized by the MobMachine authority log",
+                    self.run_id, entry.step_id, entry.status
+                )));
+            };
+            used_step_authorities.insert(*authority_index);
+        }
+
+        let mut used_failure_authorities = BTreeSet::new();
+        for entry in &self.failure_ledger {
+            let Some((authority_index, _)) =
+                reducer_authorities
+                    .iter()
+                    .find(|(authority_index, authority)| {
+                        !used_failure_authorities.contains(authority_index)
+                            && authority.validate_failure_entry(self, entry).is_ok()
+                    })
+            else {
+                return Err(MobError::Internal(format!(
+                    "run '{}' failure ledger entry for step '{}' is not authorized by the MobMachine authority log",
+                    self.run_id, entry.step_id
+                )));
+            };
+            used_failure_authorities.insert(*authority_index);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn flow_state_for_config(config: &FlowRunConfig) -> Result<flow_run::State, MobError> {
         let run_id = RunId::new();
         let seed_input = Self::create_run_seed_input(&run_id, config)?;
         let mut authority = mob_dsl::MobMachineAuthority::new();
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
-        Self::flow_state_for_config_with_authority(&run_id, config, &authority.state)
+        Self::flow_state_for_config_with_authority(&run_id, config, authority.state())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authority_backed_for_steps<I>(
+        run_id: RunId,
+        mob_id: MobId,
+        flow_id: FlowId,
+        step_ids: I,
+        status: MobRunStatus,
+        activation_params: serde_json::Value,
+    ) -> Result<Self, MobError>
+    where
+        I: IntoIterator<Item = StepId>,
+    {
+        let mut steps = IndexMap::new();
+        for step_id in step_ids {
+            steps.insert(
+                step_id,
+                crate::definition::FlowStepSpec {
+                    role: ProfileName::from("worker"),
+                    message: meerkat_core::types::ContentInput::from("placeholder"),
+                    depends_on: Vec::new(),
+                    dispatch_mode: crate::definition::DispatchMode::FanOut,
+                    collection_policy: crate::definition::CollectionPolicy::All,
+                    condition: None,
+                    timeout_ms: None,
+                    expected_schema_ref: None,
+                    branch: None,
+                    depends_on_mode: crate::definition::DependencyMode::All,
+                    allowed_tools: None,
+                    blocked_tools: None,
+                    output_format: crate::definition::StepOutputFormat::Json,
+                },
+            );
+        }
+        let config = FlowRunConfig {
+            flow_id: flow_id.clone(),
+            flow_spec: FlowSpec {
+                description: None,
+                steps,
+                root: None,
+            },
+            topology: None,
+            supervisor: None,
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let seed_input = Self::create_run_seed_input(&run_id, &config)?;
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        mob_dsl::MobMachineMutator::apply(&mut authority, seed_input.clone())
+            .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
+        let flow_state =
+            Self::flow_state_for_config_with_authority(&run_id, &config, authority.state())?;
+        let mut run =
+            Self::pending_with_run_id(run_id, mob_id, flow_id, flow_state, activation_params);
+        run.append_flow_authority_inputs(vec![seed_input])?;
+
+        if status != MobRunStatus::Pending {
+            let start_input = run.apply_flow_run_command_for_test(
+                &mut authority,
+                MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
+            )?;
+            run.status = MobRunStatus::Running;
+            run.append_flow_authority_inputs(vec![start_input])?;
+        }
+
+        let terminal_command = match status {
+            MobRunStatus::Pending | MobRunStatus::Running => None,
+            MobRunStatus::Completed => Some(MobMachineFlowRunCommand::TerminalizeCompleted(
+                flow_run::inputs::TerminalizeCompleted {},
+            )),
+            MobRunStatus::Failed => Some(MobMachineFlowRunCommand::TerminalizeFailed(
+                flow_run::inputs::TerminalizeFailed {},
+            )),
+            MobRunStatus::Canceled => Some(MobMachineFlowRunCommand::TerminalizeCanceled(
+                flow_run::inputs::TerminalizeCanceled {},
+            )),
+        };
+        if let Some(command) = terminal_command {
+            let terminal_input = run.apply_flow_run_command_for_test(&mut authority, command)?;
+            run.status = status;
+            run.completed_at = Some(Utc::now());
+            run.append_flow_authority_inputs(vec![terminal_input])?;
+        }
+
+        run.validate_flow_authority_projection()?;
+        Ok(run)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flow_run_command_projection_for_test(
+        &self,
+        command: MobMachineFlowRunCommand,
+    ) -> Result<(flow_run::State, mob_dsl::MobMachineInput), MobError> {
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        Self::replay_flow_authority_inputs_into(
+            &mut authority,
+            &self.flow_authority_inputs,
+            "test_project_flow_run_command",
+        )?;
+        let mut run = self.clone();
+        let input = run.apply_flow_run_command_for_test(&mut authority, command)?;
+        Ok((run.flow_state, input))
+    }
+
+    #[cfg(test)]
+    fn apply_flow_run_command_for_test(
+        &mut self,
+        authority: &mut mob_dsl::MobMachineAuthority,
+        command: MobMachineFlowRunCommand,
+    ) -> Result<mob_dsl::MobMachineInput, MobError> {
+        let input = command.authority_input(&self.run_id);
+        let transition =
+            mob_dsl::MobMachineMutator::apply(authority, input.clone()).map_err(|error| {
+                MobError::Internal(format!("test flow run authority input rejected: {error}"))
+            })?;
+        let authority_token =
+            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&input)?;
+        let outcome = apply_mob_machine_flow_run_command(
+            &self.flow_state,
+            authority.state(),
+            &self.run_id,
+            command,
+            authority_token,
+            transition.effects(),
+        )?;
+        self.flow_state = outcome.next_state;
+        Ok(input)
     }
 
     pub(crate) fn flow_state_for_config_with_authority(
@@ -3955,18 +4837,52 @@ impl MobRun {
         config: &FlowRunConfig,
     ) -> Result<mob_dsl::MobMachineInput, MobError> {
         let ordered_steps = topological_steps(&config.flow_spec)?;
+        let step_ids = config
+            .flow_spec
+            .steps
+            .keys()
+            .map(|step_id| mob_dsl::StepId::from(step_id.as_str()))
+            .collect::<BTreeSet<_>>();
+        let step_status = step_ids
+            .iter()
+            .cloned()
+            .map(|step_id| (step_id, None))
+            .collect();
+        let output_recorded = step_ids
+            .iter()
+            .cloned()
+            .map(|step_id| (step_id, false))
+            .collect();
+        let step_condition_results = step_ids
+            .iter()
+            .cloned()
+            .map(|step_id| (step_id, None))
+            .collect();
+        let step_target_counts = step_ids
+            .iter()
+            .cloned()
+            .map(|step_id| (step_id, 0))
+            .collect();
+        let step_target_success_counts = step_ids
+            .iter()
+            .cloned()
+            .map(|step_id| (step_id, 0))
+            .collect();
+        let step_target_terminal_failure_counts = step_ids
+            .iter()
+            .cloned()
+            .map(|step_id| (step_id, 0))
+            .collect();
         Ok(mob_dsl::MobMachineInput::CreateRunSeed {
             run_id: mob_dsl::RunId::from(run_id.to_string()),
-            step_ids: config
-                .flow_spec
-                .steps
-                .keys()
-                .map(|step_id| mob_dsl::StepId::from(step_id.as_str()))
-                .collect(),
+            step_ids,
             ordered_steps: ordered_steps
                 .iter()
                 .map(|step_id| mob_dsl::StepId::from(step_id.as_str()))
                 .collect(),
+            step_status,
+            output_recorded,
+            step_condition_results,
             step_has_conditions: config
                 .flow_spec
                 .steps
@@ -4039,10 +4955,13 @@ impl MobRun {
                     (mob_dsl::StepId::from(step_id.as_str()), threshold)
                 })
                 .collect(),
+            step_target_counts,
+            step_target_success_counts,
+            step_target_terminal_failure_counts,
             escalation_threshold: config
                 .supervisor
                 .as_ref()
-                .map_or(0, |supervisor| supervisor.escalation_threshold),
+                .map_or(0, |supervisor| u64::from(supervisor.escalation_threshold)),
             max_step_retries: config
                 .limits
                 .as_ref()
@@ -4074,12 +4993,18 @@ impl MobRun {
             run_id,
             step_ids,
             ordered_steps,
+            step_status,
+            output_recorded,
+            step_condition_results,
             step_has_conditions,
             step_dependencies,
             step_dependency_modes,
             step_branches,
             step_collection_policies,
             step_quorum_thresholds,
+            step_target_counts,
+            step_target_success_counts,
+            step_target_terminal_failure_counts,
             escalation_threshold,
             max_step_retries,
             max_active_nodes,
@@ -4093,12 +5018,18 @@ impl MobRun {
             run_id,
             step_ids,
             ordered_steps,
+            step_status,
+            output_recorded,
+            step_condition_results,
             step_has_conditions,
             step_dependencies,
             step_dependency_modes,
             step_branches,
             step_collection_policies,
             step_quorum_thresholds,
+            step_target_counts,
+            step_target_success_counts,
+            step_target_terminal_failure_counts,
             escalation_threshold,
             max_step_retries,
             max_active_nodes,
@@ -4116,7 +5047,7 @@ impl MobRun {
         spec: &FrameSpec,
         ordered: &[FlowNodeId],
     ) -> Result<mob_dsl::MobMachineInput, MobError> {
-        let tracked_nodes = ordered
+        let tracked_nodes: BTreeSet<mob_dsl::FlowNodeId> = ordered
             .iter()
             .map(|node_id| mob_dsl::FlowNodeId::from(node_id.as_str()))
             .collect();
@@ -4175,6 +5106,16 @@ impl MobRun {
             }
         }
         let (node_status, ready_queue) = initial_frame_node_projection(ordered, &node_dependencies);
+        let output_recorded = tracked_nodes
+            .iter()
+            .cloned()
+            .map(|node_id| (node_id, false))
+            .collect();
+        let node_condition_results = tracked_nodes
+            .iter()
+            .cloned()
+            .map(|node_id| (node_id, None))
+            .collect();
 
         Ok(mob_dsl::MobMachineInput::CreateFrameSeed {
             run_id: mob_dsl::RunId::from(run_id.to_string()),
@@ -4192,6 +5133,9 @@ impl MobRun {
             node_loop_ids,
             node_status,
             ready_queue,
+            output_recorded,
+            node_condition_results,
+            last_admitted_node: None,
         })
     }
 
@@ -4295,10 +5239,9 @@ impl MobRun {
         let run_id = RunId::new();
         let seed_input = Self::create_run_seed_input(&run_id, &config)?;
         let mut authority = mob_dsl::MobMachineAuthority::new();
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
-        Self::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+        Self::flow_state_for_config_with_authority(&run_id, &config, authority.state())
     }
 }
 
@@ -4444,12 +5387,6 @@ pub enum MobRunStatus {
     Canceled,
 }
 
-impl MobRunStatus {
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Canceled)
-    }
-}
-
 /// Per-target step execution ledger entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepLedgerEntry {
@@ -4484,12 +5421,6 @@ impl StepRunStatus {
             ))),
         }
     }
-
-    /// A step is terminal when it can no longer receive work dispatch or
-    /// completion events. Only `Dispatched` is non-terminal.
-    pub fn is_terminal(&self) -> bool {
-        !matches!(self, Self::Dispatched)
-    }
 }
 
 /// Flow-level failure log entry.
@@ -4502,6 +5433,180 @@ pub struct FailureLedgerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<meerkat_core::event::TurnErrorMetadata>,
     pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MobRunProvenanceAuthority {
+    input: mob_dsl::MobMachineInput,
+}
+
+impl MobRunProvenanceAuthority {
+    pub fn from_flow_authority_input(input: mob_dsl::MobMachineInput) -> Result<Self, MobError> {
+        let record = FlowAuthorityInputRecord::from_machine_input(input.clone())?;
+        match record {
+            FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand { .. } => Ok(Self { input }),
+            _ => Err(MobError::Internal(format!(
+                "MobRun provenance authority requires a flow-run reducer authority input, got {input:?}"
+            ))),
+        }
+    }
+
+    fn record(&self) -> Result<FlowAuthorityInputRecord, MobError> {
+        FlowAuthorityInputRecord::from_machine_input(self.input.clone())
+    }
+
+    fn validate_present(&self, run: &MobRun) -> Result<FlowAuthorityInputRecord, MobError> {
+        let record = self.record()?;
+        if run
+            .flow_authority_inputs
+            .iter()
+            .any(|existing| existing == &record)
+        {
+            Ok(record)
+        } else {
+            Err(MobError::Internal(format!(
+                "run '{}' provenance authority input is not present in the MobMachine authority log",
+                run.run_id
+            )))
+        }
+    }
+
+    pub(crate) fn validate_step_entry(
+        &self,
+        run: &MobRun,
+        entry: &StepLedgerEntry,
+    ) -> Result<(), MobError> {
+        run.validate_flow_authority_projection_core()?;
+        if entry.agent_identity.as_str() != FLOW_RUN_PROVENANCE_AGENT_ID {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority only permits system provenance '{}', entry has '{}'",
+                run.run_id, FLOW_RUN_PROVENANCE_AGENT_ID, entry.agent_identity
+            )));
+        }
+        let record = self.validate_present(run)?;
+        let FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
+            command, step_id, ..
+        } = record
+        else {
+            unreachable!("validate_present returned a flow-run reducer authority record")
+        };
+        let step_id = step_id
+            .map(|step_id| project_step_id(&step_id))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "run '{}' step ledger authority {:?} did not name a step",
+                    run.run_id, command
+                ))
+            })?;
+        if step_id != entry.step_id {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority step '{}' does not match entry step '{}'",
+                run.run_id, step_id, entry.step_id
+            )));
+        }
+
+        let expected = match command {
+            FlowRunReducerCommandRecord::DispatchStep => Some(StepRunStatus::Dispatched),
+            FlowRunReducerCommandRecord::CompleteStep => Some(StepRunStatus::Completed),
+            FlowRunReducerCommandRecord::FailStep => Some(StepRunStatus::Failed),
+            FlowRunReducerCommandRecord::SkipStep => Some(StepRunStatus::Skipped),
+            FlowRunReducerCommandRecord::CancelStep => Some(StepRunStatus::Canceled),
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus => {
+                run.step_status_snapshot()?.get(&step_id).cloned()
+            }
+            _ => None,
+        }
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "run '{}' authority command {:?} cannot authorize a step ledger entry",
+                run.run_id, command
+            ))
+        })?;
+
+        if expected != entry.status {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority projected {:?} for step '{}', entry has {:?}",
+                run.run_id, expected, entry.step_id, entry.status
+            )));
+        }
+        let expected_output = match command {
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus
+                if expected == StepRunStatus::Completed =>
+            {
+                projected_step_output(run, &entry.step_id)
+            }
+            _ => None,
+        };
+        if entry.output.as_ref() != expected_output {
+            return Err(MobError::Internal(format!(
+                "run '{}' step ledger authority projected output {:?} for step '{}', entry has {:?}",
+                run.run_id, expected_output, entry.step_id, entry.output
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_failure_entry(
+        &self,
+        run: &MobRun,
+        entry: &FailureLedgerEntry,
+    ) -> Result<(), MobError> {
+        if entry.error_report.is_some() || entry.error.is_some() {
+            return Err(MobError::Internal(format!(
+                "run '{}' failure ledger terminal error metadata requires generated mob authority",
+                run.run_id
+            )));
+        }
+        run.validate_flow_authority_projection_core()?;
+        let record = self.validate_present(run)?;
+        let FlowAuthorityInputRecord::AuthorizeFlowRunReducerCommand {
+            command, step_id, ..
+        } = record
+        else {
+            unreachable!("validate_present returned a flow-run reducer authority record")
+        };
+        let step_id = step_id
+            .map(|step_id| project_step_id(&step_id))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "run '{}' failure ledger authority {:?} did not name a step",
+                    run.run_id, command
+                ))
+            })?;
+        if step_id != entry.step_id {
+            return Err(MobError::Internal(format!(
+                "run '{}' failure ledger authority step '{}' does not match entry step '{}'",
+                run.run_id, step_id, entry.step_id
+            )));
+        }
+
+        let can_append_failure = match command {
+            FlowRunReducerCommandRecord::FailStep => true,
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus => {
+                run.step_status_snapshot()?.get(&step_id) == Some(&StepRunStatus::Failed)
+            }
+            _ => false,
+        };
+        if !can_append_failure {
+            return Err(MobError::Internal(format!(
+                "run '{}' authority command {:?} cannot authorize a failure ledger entry",
+                run.run_id, command
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn projected_step_output<'a>(run: &'a MobRun, step_id: &StepId) -> Option<&'a serde_json::Value> {
+    let mut output = run.root_step_outputs.get(step_id);
+    for iterations in run.loop_iteration_outputs.values() {
+        for iteration in iterations {
+            if let Some(value) = iteration.get(step_id) {
+                output = Some(value);
+            }
+        }
+    }
+    output
 }
 
 /// Immutable per-run flow snapshot.
@@ -4655,6 +5760,41 @@ mod tests {
     }
 
     #[test]
+    fn flow_authority_journal_records_require_generated_mob_input_witness() {
+        let def = sample_definition();
+        let config = FlowRunConfig::from_definition(FlowId::from("flow-a"), &def)
+            .expect("sample flow config");
+        let run_id = RunId::new();
+        let seed_input = MobRun::create_run_seed_input(&run_id, &config)
+            .expect("generated MobMachine seed input");
+        let record = FlowAuthorityInputRecord::from_machine_input(seed_input)
+            .expect("seed input should produce a journal record");
+
+        assert_eq!(
+            generated_flow_authority_record_variant(&record).expect("generated witness"),
+            MobMachineInputVariant::CreateRunSeed
+        );
+        assert!(
+            matches!(
+                generated_flow_authority_record(&record).expect("generated Mob input witness"),
+                generated_mob::Input::CreateRunSeed(_)
+            ),
+            "flow authority journal records must be accepted by generated Mob input structs"
+        );
+    }
+
+    #[test]
+    fn mob_run_schema_version_is_owned_by_mob_machine_state() {
+        let machine_version = mob_dsl::MobMachineAuthority::new()
+            .state()
+            .flow_authority_schema_version;
+        assert_eq!(
+            mob_run_schema_version(),
+            u32::try_from(machine_version).expect("test schema version fits u32")
+        );
+    }
+
+    #[test]
     fn flow_reducer_apply_rejects_wrong_authority_token_family() {
         let run_state = flow_run::initial_state();
         let machine_state = mob_dsl::MobMachineState::default();
@@ -4675,6 +5815,9 @@ mod tests {
             node_loop_ids: Default::default(),
             node_status: Default::default(),
             ready_queue: Default::default(),
+            output_recorded: Default::default(),
+            node_condition_results: Default::default(),
+            last_admitted_node: None,
         };
         let frame_token =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&frame_authority_input)
@@ -4685,6 +5828,7 @@ mod tests {
             &run_id,
             MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
             frame_token,
+            &[],
         )
         .expect_err("flow_run reducer must reject frame authority");
         assert!(
@@ -4703,7 +5847,6 @@ mod tests {
             run_id: mob_dsl::RunId::from(run_id.to_string()),
             command: mob_dsl::FlowRunReducerCommandKind::CompleteStep,
             step_id: Some(mob_dsl::StepId::from(step_id.as_str())),
-            run_step_key: None,
             step_status: None,
             target_count: None,
             frame_id: None,
@@ -4720,10 +5863,271 @@ mod tests {
             &run_id,
             MobMachineFlowRunCommand::CompleteStep(flow_run::inputs::CompleteStep { step_id }),
             run_token,
+            &[],
         )
         .expect_err("machine-owned reducer authority must still require accepted projection state");
         assert!(
-            err.to_string().contains("run_step_status_flat missing"),
+            err.to_string().contains("run_step_status"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn machine_state_with_flow_frame_projection(
+        node_status: mob_dsl::NodeRunStatus,
+        ready_queue: Vec<mob_dsl::FlowNodeId>,
+    ) -> (mob_dsl::MobMachineState, FrameId, mob_dsl::FrameId) {
+        let mut machine_state = mob_dsl::MobMachineState::default();
+        let frame_id = FrameId::from("frame");
+        let frame_key = mob_dsl::FrameId::from(frame_id.as_str());
+        let node_key = mob_dsl::FlowNodeId::from("node");
+        let mut tracked_nodes = BTreeSet::new();
+        tracked_nodes.insert(node_key.clone());
+        let ordered_nodes = vec![node_key.clone()];
+
+        machine_state
+            .frame_phase
+            .insert(frame_key.clone(), mob_dsl::FrameStatus::Running);
+        machine_state
+            .frame_scope
+            .insert(frame_key.clone(), mob_dsl::FrameScope::Root);
+        machine_state
+            .frame_parent_loop
+            .insert(frame_key.clone(), None);
+        machine_state.frame_iteration.insert(frame_key.clone(), 0);
+        machine_state
+            .frame_tracked_nodes
+            .insert(frame_key.clone(), tracked_nodes);
+        machine_state
+            .frame_ordered_nodes
+            .insert(frame_key.clone(), ordered_nodes);
+        machine_state.frame_node_kind.insert(
+            frame_key.clone(),
+            BTreeMap::from([(node_key.clone(), mob_dsl::FlowNodeKind::Step)]),
+        );
+        machine_state.frame_node_dependencies.insert(
+            frame_key.clone(),
+            BTreeMap::from([(node_key.clone(), Vec::new())]),
+        );
+        machine_state.frame_node_dependency_modes.insert(
+            frame_key.clone(),
+            BTreeMap::from([(node_key.clone(), mob_dsl::DependencyMode::All)]),
+        );
+        machine_state.frame_node_branches.insert(
+            frame_key.clone(),
+            BTreeMap::from([(node_key.clone(), None)]),
+        );
+        machine_state.frame_node_status.insert(
+            frame_key.clone(),
+            BTreeMap::from([(node_key.clone(), node_status)]),
+        );
+        machine_state
+            .frame_ready_queue
+            .insert(frame_key.clone(), ready_queue);
+        machine_state.frame_output_recorded.insert(
+            frame_key.clone(),
+            BTreeMap::from([(node_key.clone(), false)]),
+        );
+        machine_state
+            .frame_node_condition_results
+            .insert(frame_key.clone(), BTreeMap::from([(node_key, None)]));
+        machine_state
+            .frame_last_admitted_node
+            .insert(frame_key.clone(), None);
+
+        (machine_state, frame_id, frame_key)
+    }
+
+    #[test]
+    fn flow_frame_projection_fails_closed_without_generated_node_status() {
+        let ready_node = mob_dsl::FlowNodeId::from("node");
+        let (mut machine_state, frame_id, frame_key) = machine_state_with_flow_frame_projection(
+            mob_dsl::NodeRunStatus::Ready,
+            vec![ready_node],
+        );
+        machine_state.frame_node_status.remove(&frame_key);
+
+        let err = project_flow_frame_state_from_machine(&machine_state, &frame_id, BTreeSet::new())
+            .expect_err("projection must require generated frame_node_status");
+        assert!(
+            err.to_string().contains("frame_node_status"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_frame_projection_does_not_synthesize_ready_status_from_queue() {
+        let ready_node = mob_dsl::FlowNodeId::from("node");
+        let (machine_state, frame_id, _) = machine_state_with_flow_frame_projection(
+            mob_dsl::NodeRunStatus::Pending,
+            vec![ready_node],
+        );
+
+        let err = project_flow_frame_state_from_machine(&machine_state, &frame_id, BTreeSet::new())
+            .expect_err("projection must not promote pending nodes to ready");
+        assert!(
+            err.to_string().contains("ready queue contains node"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_frame_projection_fails_closed_for_body_without_parent_loop() {
+        let ready_node = mob_dsl::FlowNodeId::from("node");
+        let (mut machine_state, frame_id, frame_key) = machine_state_with_flow_frame_projection(
+            mob_dsl::NodeRunStatus::Ready,
+            vec![ready_node],
+        );
+        machine_state
+            .frame_scope
+            .insert(frame_key, mob_dsl::FrameScope::Body);
+
+        let err = project_flow_frame_state_from_machine(&machine_state, &frame_id, BTreeSet::new())
+            .expect_err("body frame projection must require generated parent loop identity");
+        assert!(
+            err.to_string().contains("missing generated parent loop"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_frame_admit_requires_generated_admitted_node_witness() {
+        let ready_node = mob_dsl::FlowNodeId::from("node");
+        let (machine_state, frame_id, _) = machine_state_with_flow_frame_projection(
+            mob_dsl::NodeRunStatus::Ready,
+            vec![ready_node],
+        );
+        let previous =
+            project_flow_frame_state_from_machine(&machine_state, &frame_id, BTreeSet::new())
+                .expect("fixture should project ready frame state");
+        let node = mob_dsl::FlowNodeId::from("node");
+        let (mut machine_state, _, frame_key) =
+            machine_state_with_flow_frame_projection(mob_dsl::NodeRunStatus::Running, Vec::new());
+        machine_state
+            .frame_last_admitted_node
+            .insert(frame_key, None);
+
+        let err = project_flow_frame_admit_from_machine(&previous, &machine_state)
+            .expect_err("admit projection must require generated admitted-node witness");
+        assert!(
+            err.to_string()
+                .contains("missing generated admitted-node witness"),
+            "unexpected error for node {node:?}: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_run_projection_fails_closed_without_generated_seed_defaults() {
+        let def = sample_definition();
+        let config = FlowRunConfig::from_definition(FlowId::from("flow-a"), &def).unwrap();
+        let run_id = RunId::new();
+        let input = MobRun::create_run_seed_input(&run_id, &config).unwrap();
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        mob_dsl::MobMachineMutator::apply(&mut authority, input)
+            .expect("CreateRunSeed fixture should be accepted");
+        let mut machine_state = authority.state().clone();
+        let run_key = mob_dsl::RunId::from(run_id.to_string());
+        machine_state.run_output_recorded.remove(&run_key);
+
+        let err = project_flow_run_state_from_machine(&machine_state, &run_id)
+            .expect_err("run projection must require generated output defaults");
+        assert!(
+            err.to_string().contains("run_output_recorded"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn create_run_seed_rejects_extra_default_map_keys() {
+        let def = sample_definition();
+        let config = FlowRunConfig::from_definition(FlowId::from("flow-a"), &def).unwrap();
+        let run_id = RunId::new();
+        let mut input = MobRun::create_run_seed_input(&run_id, &config).unwrap();
+        let mob_dsl::MobMachineInput::CreateRunSeed { step_status, .. } = &mut input else {
+            panic!("create_run_seed_input always returns CreateRunSeed");
+        };
+        step_status.insert(mob_dsl::StepId::from("untracked"), None);
+
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        let err = mob_dsl::MobMachineMutator::apply(&mut authority, input)
+            .expect_err("CreateRunSeed must reject untracked default-map keys");
+        assert!(
+            err.to_string().contains("guard rejected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn create_frame_seed_rejects_extra_default_map_keys() {
+        let def = sample_definition();
+        let config = FlowRunConfig::from_definition(FlowId::from("flow-a"), &def).unwrap();
+        let run_id = RunId::new();
+        let run_seed = MobRun::create_run_seed_input(&run_id, &config).unwrap();
+        let frame_id = FrameId::from("frame");
+        let frame_spec = FrameSpec {
+            nodes: IndexMap::new(),
+        };
+        let mut frame_seed = MobRun::create_frame_seed_input(
+            &run_id,
+            &frame_id,
+            None,
+            0,
+            mob_dsl::FrameScope::Root,
+            &frame_spec,
+            &[],
+        )
+        .unwrap();
+        let mob_dsl::MobMachineInput::CreateFrameSeed {
+            output_recorded, ..
+        } = &mut frame_seed
+        else {
+            panic!("create_frame_seed_input always returns CreateFrameSeed");
+        };
+        output_recorded.insert(mob_dsl::FlowNodeId::from("untracked"), false);
+
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        mob_dsl::MobMachineMutator::apply(&mut authority, run_seed)
+            .expect("run seed should be accepted");
+        let err = mob_dsl::MobMachineMutator::apply(&mut authority, frame_seed)
+            .expect_err("CreateFrameSeed must reject untracked default-map keys");
+        assert!(
+            err.to_string().contains("guard rejected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn schema6_flow_authority_records_decode_but_fail_version_gate() {
+        let run = MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            [StepId::from("s1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run fixture");
+        let mut encoded = serde_json::to_value(&run).expect("serialize run");
+        encoded["schema_version"] = serde_json::json!(6);
+        if let Some(payload) = encoded["flow_authority_inputs"]
+            .get_mut(0)
+            .and_then(|record| record.get_mut("payload"))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            payload.remove("step_status");
+            payload.remove("output_recorded");
+            payload.remove("step_condition_results");
+            payload.remove("step_target_counts");
+            payload.remove("step_target_success_counts");
+            payload.remove("step_target_terminal_failure_counts");
+        }
+
+        let decoded: MobRun =
+            serde_json::from_value(encoded).expect("schema-6 authority records should decode");
+        let err = decoded
+            .validate_flow_authority_projection()
+            .expect_err("schema-6 authority log must fail the version gate");
+        assert!(
+            err.to_string().contains("schema_version 6 != 7"),
             "unexpected error: {err}"
         );
     }
@@ -4794,50 +6198,61 @@ mod tests {
             }),
         );
 
-        MobDefinition {
-            id: MobId::from("mob"),
-            orchestrator: Some(OrchestratorConfig {
-                profile: ProfileName::from("lead"),
-            }),
-            profiles,
-            wiring: WiringRules::default(),
-            skills: BTreeMap::new(),
-            backend: BackendConfig::default(),
-            flows,
-            topology: Some(TopologySpec {
-                mode: crate::definition::PolicyMode::Advisory,
-                rules: vec![crate::definition::TopologyRule {
-                    from_role: ProfileName::from("lead"),
-                    to_role: ProfileName::from("worker"),
-                    allowed: true,
-                }],
-            }),
-            supervisor: Some(SupervisorSpec {
-                role: ProfileName::from("lead"),
-                escalation_threshold: 3,
-            }),
-            limits: Some(LimitsSpec {
-                max_flow_duration_ms: Some(60_000),
-                max_step_retries: Some(1),
-                max_orphaned_turns: Some(8),
-                cancel_grace_timeout_ms: None,
-                ..Default::default()
-            }),
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit("mob");
+        definition.orchestrator = Some(OrchestratorConfig {
+            profile: ProfileName::from("lead"),
+        });
+        definition.profiles = profiles;
+        definition.flows = flows;
+        definition.topology = Some(TopologySpec {
+            mode: crate::definition::PolicyMode::Advisory,
+            rules: vec![crate::definition::TopologyRule {
+                from_role: ProfileName::from("lead"),
+                to_role: ProfileName::from("worker"),
+                allowed: true,
+            }],
+        });
+        definition.supervisor = Some(SupervisorSpec {
+            role: ProfileName::from("lead"),
+            escalation_threshold: 3,
+        });
+        definition.limits = Some(LimitsSpec {
+            max_flow_duration_ms: Some(60_000),
+            max_step_retries: Some(1),
+            max_orphaned_turns: Some(8),
+            cancel_grace_timeout_ms: None,
+            ..Default::default()
+        });
+        definition
     }
 
     #[test]
     fn test_run_status_terminal() {
-        assert!(MobRunStatus::Completed.is_terminal());
-        assert!(MobRunStatus::Failed.is_terminal());
-        assert!(MobRunStatus::Canceled.is_terminal());
-        assert!(!MobRunStatus::Pending.is_terminal());
-        assert!(!MobRunStatus::Running.is_terminal());
+        let run_id = RunId::new();
+        assert!(mob_machine_run_status_is_terminal(&run_id, &MobRunStatus::Completed).unwrap());
+        assert!(mob_machine_run_status_is_terminal(&run_id, &MobRunStatus::Failed).unwrap());
+        assert!(mob_machine_run_status_is_terminal(&run_id, &MobRunStatus::Canceled).unwrap());
+        assert!(!mob_machine_run_status_is_terminal(&run_id, &MobRunStatus::Pending).unwrap());
+        assert!(!mob_machine_run_status_is_terminal(&run_id, &MobRunStatus::Running).unwrap());
+    }
+
+    #[test]
+    fn test_run_public_result_class() {
+        let run_id = RunId::new();
+        assert_eq!(
+            mob_machine_run_public_result_class(&run_id, &MobRunStatus::Completed).unwrap(),
+            MobFlowRunPublicResultClass::Success
+        );
+        assert_eq!(
+            mob_machine_run_public_result_class(&run_id, &MobRunStatus::Failed).unwrap(),
+            MobFlowRunPublicResultClass::Error
+        );
+        assert_eq!(
+            mob_machine_run_public_result_class(&run_id, &MobRunStatus::Canceled).unwrap(),
+            MobFlowRunPublicResultClass::Error
+        );
+        assert!(mob_machine_run_public_result_class(&run_id, &MobRunStatus::Pending).is_err());
+        assert!(mob_machine_run_public_result_class(&run_id, &MobRunStatus::Running).is_err());
     }
 
     #[test]
@@ -5100,6 +6515,75 @@ mod tests {
     }
 
     #[test]
+    fn public_flow_status_projection_omits_store_local_timestamps() {
+        let now = Utc::now();
+        let run = MobRun {
+            run_id: RunId::new(),
+            mob_id: MobId::from("mob"),
+            flow_id: FlowId::from("flow-a"),
+            status: MobRunStatus::Completed,
+            flow_state: MobRun::flow_state_for_steps([StepId::from("step-1")]).unwrap(),
+            activation_params: serde_json::json!({"k":"v"}),
+            created_at: now,
+            completed_at: Some(now),
+            step_ledger: vec![StepLedgerEntry {
+                step_id: StepId::from("step-1"),
+                agent_identity: AgentIdentity::from(FLOW_RUN_PROVENANCE_AGENT_ID),
+                status: StepRunStatus::Completed,
+                output: Some(serde_json::json!({"ok":true})),
+                timestamp: now,
+            }],
+            failure_ledger: vec![FailureLedgerEntry {
+                step_id: StepId::from("step-1"),
+                reason: "boom".to_string(),
+                error_report: None,
+                error: None,
+                timestamp: now,
+            }],
+            frames: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: mob_run_schema_version(),
+            root_step_outputs: IndexMap::new(),
+            loop_iteration_outputs: BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
+        };
+
+        let value = run.public_status_value().expect("public projection");
+        let object = value.as_object().expect("run projection is object");
+        assert!(!object.contains_key("created_at"));
+        assert!(!object.contains_key("completed_at"));
+        assert_eq!(object.get("status"), Some(&serde_json::json!("completed")));
+        assert!(object.contains_key("flow_state"));
+
+        let step_entry = object["step_ledger"]
+            .as_array()
+            .expect("step_ledger array")
+            .first()
+            .expect("step ledger entry")
+            .as_object()
+            .expect("step ledger entry object");
+        assert!(!step_entry.contains_key("timestamp"));
+        assert_eq!(
+            step_entry.get("status"),
+            Some(&serde_json::json!("completed"))
+        );
+
+        let failure_entry = object["failure_ledger"]
+            .as_array()
+            .expect("failure_ledger array")
+            .first()
+            .expect("failure ledger entry")
+            .as_object()
+            .expect("failure ledger entry object");
+        assert!(!failure_entry.contains_key("timestamp"));
+        assert_eq!(
+            failure_entry.get("reason"),
+            Some(&serde_json::json!("boom"))
+        );
+    }
+
+    #[test]
     fn test_flow_context_roundtrip_json() {
         let mut outputs = IndexMap::new();
         outputs.insert(StepId::from("step-1"), serde_json::json!({"a":1}));
@@ -5151,10 +6635,26 @@ mod tests {
 
     #[test]
     fn step_run_status_terminal_classification() {
-        assert!(StepRunStatus::Completed.is_terminal());
-        assert!(StepRunStatus::Failed.is_terminal());
-        assert!(StepRunStatus::Skipped.is_terminal());
-        assert!(StepRunStatus::Canceled.is_terminal());
-        assert!(!StepRunStatus::Dispatched.is_terminal());
+        let run_id = RunId::new();
+        let step_id = StepId::from("step");
+        assert!(
+            mob_machine_step_status_is_terminal(&run_id, &step_id, &StepRunStatus::Completed)
+                .unwrap()
+        );
+        assert!(
+            mob_machine_step_status_is_terminal(&run_id, &step_id, &StepRunStatus::Failed).unwrap()
+        );
+        assert!(
+            mob_machine_step_status_is_terminal(&run_id, &step_id, &StepRunStatus::Skipped)
+                .unwrap()
+        );
+        assert!(
+            mob_machine_step_status_is_terminal(&run_id, &step_id, &StepRunStatus::Canceled)
+                .unwrap()
+        );
+        assert!(
+            !mob_machine_step_status_is_terminal(&run_id, &step_id, &StepRunStatus::Dispatched)
+                .unwrap()
+        );
     }
 }

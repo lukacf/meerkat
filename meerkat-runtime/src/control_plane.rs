@@ -16,6 +16,17 @@ pub(crate) async fn terminalize_async_stop(
     driver: &SharedDriver,
     completions: Option<&SharedCompletionRegistry>,
 ) -> Result<(), RuntimeDriverError> {
+    let runtime_terminated_completion = if completions.is_some() {
+        Some(
+            crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
+                driver,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     {
         let mut driver = driver.lock().await;
         if !matches!(driver.runtime_state(), crate::RuntimeState::Destroyed) {
@@ -23,9 +34,9 @@ pub(crate) async fn terminalize_async_stop(
         }
     }
 
-    if let Some(completions) = completions {
+    if let (Some(completions), Some(result_class)) = (completions, runtime_terminated_completion) {
         let mut reg = completions.lock().await;
-        reg.resolve_all_terminated("runtime stopped");
+        reg.resolve_all_runtime_terminated("runtime stopped", result_class);
     }
 
     Ok(())

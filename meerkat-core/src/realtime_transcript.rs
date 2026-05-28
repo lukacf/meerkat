@@ -1,8 +1,8 @@
 //! Typed realtime transcript append seam.
 //!
 //! Provider adapters translate provider-native realtime events into these
-//! identity-bearing events. The session layer owns idempotency, causal ordering,
-//! and the decision to materialize canonical transcript messages.
+//! identity-bearing events. Generated session realtime transcript authority owns
+//! idempotency, causal ordering, and canonical transcript materialization.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +25,8 @@ pub enum RealtimeTranscriptRole {
 /// T9/T10: distinguishes display text (authored output the model writes,
 /// e.g. OpenAI realtime `response.output_text.delta`) from spoken transcript
 /// (text derived from audio output, e.g. `response.output_audio_transcript.*`).
-/// The materializer at [`crate::session::Session::append_realtime_transcript_event`]
-/// dispatches on this to flush either [`crate::types::AssistantBlock::Text`]
+/// The generated realtime transcript authority dispatches on this to flush
+/// either [`crate::types::AssistantBlock::Text`]
 /// (for `Display`) or [`crate::types::AssistantBlock::Transcript`] with
 /// `source: TranscriptSource::Spoken` (for `Spoken`).
 ///
@@ -92,8 +92,8 @@ pub enum RealtimeTranscriptEvent {
     /// output item — text derived from audio output (e.g. OpenAI realtime
     /// `response.output_audio_transcript.delta`).
     ///
-    /// Identity shape mirrors [`Self::AssistantTextDelta`] so the session's
-    /// idempotent ordering / staging logic owns dedup uniformly across
+    /// Identity shape mirrors [`Self::AssistantTextDelta`] so generated
+    /// idempotent ordering / staging authority owns dedup uniformly across
     /// lanes. Materializes as [`crate::types::AssistantBlock::Transcript`]
     /// with `source: TranscriptSource::Spoken` (T9/T10).
     AssistantTranscriptDelta {

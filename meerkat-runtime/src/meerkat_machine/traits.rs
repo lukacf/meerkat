@@ -13,16 +13,23 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
         match self
             .execute_meerkat_machine_command(
                 None,
-                MeerkatMachineCommand::Ingest { runtime_id, input },
+                MeerkatMachineCommand::AcceptWithCompletion {
+                    session_id: session_id.clone(),
+                    input,
+                    register_completion: false,
+                },
             )
             .await
             .map_err(MeerkatMachine::driver_error_from_command_error)?
         {
-            MeerkatMachineCommandResult::AcceptOutcome(outcome) => Ok(outcome),
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle: _,
+                admission_signal: _,
+            } => Ok(outcome),
             other => Err(RuntimeDriverError::Internal(format!(
                 "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::accept_input: {other:?}"
             ))),
@@ -295,6 +302,31 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn deny_image_operation_plan(
+        &self,
+        session_id: &SessionId,
+        operation_id: meerkat_core::image_generation::ImageOperationId,
+        reason: meerkat_core::image_generation::ImageOperationDenialReason,
+    ) -> Result<meerkat_core::image_generation::ImageOperationPhase, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::DenyImageOperationPlan {
+                    session_id: session_id.clone(),
+                    operation_id,
+                    reason,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ImageOperationPhase(phase) => Ok(phase),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::deny_image_operation_plan: {other:?}"
+            ))),
+        }
+    }
+
     async fn activate_image_operation_override(
         &self,
         session_id: &SessionId,
@@ -339,6 +371,34 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             MeerkatMachineCommandResult::ImageOperationPhase(phase) => Ok(phase),
             other => Err(RuntimeDriverError::Internal(format!(
                 "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::complete_image_operation: {other:?}"
+            ))),
+        }
+    }
+
+    async fn classify_image_operation_terminal(
+        &self,
+        session_id: &SessionId,
+        operation_id: meerkat_core::image_generation::ImageOperationId,
+        observation: meerkat_core::image_generation::ImageProviderTerminalObservation,
+        provider_text: meerkat_core::image_generation::ProviderTextDisposition,
+    ) -> Result<meerkat_core::image_generation::ImageOperationTerminalClass, RuntimeDriverError>
+    {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::ClassifyImageOperationTerminal {
+                    session_id: session_id.clone(),
+                    operation_id,
+                    observation,
+                    provider_text,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ImageOperationTerminalClass(terminal) => Ok(terminal),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::classify_image_operation_terminal: {other:?}"
             ))),
         }
     }

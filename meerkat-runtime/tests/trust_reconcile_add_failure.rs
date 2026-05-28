@@ -7,7 +7,7 @@
 //! reconciler lives in `meerkat-runtime`, and `meerkat-comms` cannot
 //! dev-dep on it without introducing a circular crate dependency.
 //!
-//! Invariant pinned (§6 #3): when the trust store's `add_trusted_peer`
+//! Invariant pinned (§6 #3): when the generated trust mutation seam
 //! returns an error, the reconciler must
 //!
 //!   (a) surface the failure as
@@ -26,16 +26,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::comms::{SendError, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsTrustMutation, CommsTrustMutationResult, GeneratedCommsTrustAuthoritySourceKind,
+    SendError, TrustedPeerDescriptor,
+};
 use meerkat_core::{
     PeerIngressAuthorityPhase, PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot,
 };
 use meerkat_runtime::comms_trust_reconcile::{CommsTrustReconcileError, CommsTrustReconciler};
 use meerkat_runtime::meerkat_machine::dsl::{
-    PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey,
+    MeerkatMachineAuthority, MeerkatMachineInput, MeerkatMachineMutator, MeerkatMachineSignal,
+    PeerAddress, PeerEndpoint, PeerId, PeerName, PeerSigningKey, SessionId,
 };
+use meerkat_runtime::protocol_comms_trust_reconcile::CommsTrustReconcileObligation;
 
-const UUID_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+const UUID_A: &str = "f805a14c-4089-5328-b4cb-39ede8b4464d";
+const LOCAL_UUID: &str = "00000000-0000-4000-8000-000000000000";
 
 fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     PeerEndpoint {
@@ -46,7 +52,59 @@ fn endpoint(name: &str, peer_id_uuid: &str) -> PeerEndpoint {
     }
 }
 
-/// `CommsRuntime` mock whose next `add_trusted_peer` call returns
+fn local_peer_id() -> meerkat_core::comms::PeerId {
+    meerkat_core::comms::PeerId::parse(LOCAL_UUID).expect("valid local test peer id")
+}
+
+fn obligation(
+    epoch: u64,
+    direct_peer_endpoints: BTreeSet<PeerEndpoint>,
+) -> CommsTrustReconcileObligation {
+    let mut authority = MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(MeerkatMachineSignal::Initialize)
+        .expect("Initialize signal");
+    MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::RegisterSession {
+            session_id: SessionId::from("trust-reconcile-add-failure-test"),
+        },
+    )
+    .expect("RegisterSession input");
+    MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::PublishLocalEndpoint {
+            endpoint: endpoint("local", LOCAL_UUID),
+        },
+    )
+    .expect("PublishLocalEndpoint input");
+    let projection_epoch = epoch.max(1);
+    let mut transition = None;
+    for overlay_epoch in 1..=projection_epoch {
+        transition = Some(
+            MeerkatMachineMutator::apply(
+                &mut authority,
+                MeerkatMachineInput::ApplyMobPeerOverlay {
+                    epoch: overlay_epoch,
+                    endpoints: direct_peer_endpoints.clone(),
+                },
+            )
+            .expect("ApplyMobPeerOverlay input"),
+        );
+    }
+    let transition = transition.expect("projection epoch loop produces transition");
+    meerkat_runtime::protocol_comms_trust_reconcile::extract_obligations_with_freshness(
+        &transition,
+        meerkat_runtime::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+            Arc::new(std::sync::Mutex::new(authority)),
+        ),
+    )
+    .into_iter()
+    .next()
+    .expect("generated reconcile obligation")
+}
+
+/// `CommsRuntime` mock whose next generated trust add mutation returns
 /// `SendError::Unsupported`. Once fired, the flag resets so a
 /// subsequent retry succeeds — this lets us assert the retry path
 /// sees the peer as still absent from the applied view.
@@ -72,15 +130,32 @@ impl CommsRuntime for AddFailingCommsRuntime {
         Arc::new(tokio::sync::Notify::new())
     }
 
-    async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        if self.fail_next_add.swap(false, Ordering::SeqCst) {
-            return Err(SendError::Unsupported("synthetic add failure".into()));
+    async fn apply_trust_mutation(
+        &self,
+        mutation: CommsTrustMutation,
+    ) -> Result<CommsTrustMutationResult, SendError> {
+        match mutation {
+            CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                authority
+                    .validate_public_add(Some(local_peer_id()), &peer)
+                    .map_err(SendError::Validation)?;
+                if self.fail_next_add.swap(false, Ordering::SeqCst) {
+                    return Err(SendError::Unsupported("synthetic add failure".into()));
+                }
+                let mut successful_adds = self
+                    .successful_adds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let created = !successful_adds
+                    .iter()
+                    .any(|existing| existing.peer_id == peer.peer_id);
+                successful_adds.push(peer);
+                Ok(CommsTrustMutationResult::Added { created })
+            }
+            _ => Err(SendError::Unsupported(
+                "test runtime only supports generated public trust adds".into(),
+            )),
         }
-        self.successful_adds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(peer);
-        Ok(())
     }
 
     async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
@@ -91,16 +166,30 @@ impl CommsRuntime for AddFailingCommsRuntime {
         &self,
     ) -> Result<PeerIngressRuntimeSnapshot, CommsCapabilityError> {
         Ok(PeerIngressRuntimeSnapshot {
-            self_peer_id: meerkat_core::comms::PeerId::parse(
-                "00000000-0000-4000-8000-000000000000",
-            )
-            .expect("valid test peer id"),
+            self_peer_id: local_peer_id(),
             auth_required: true,
             authority_phase: PeerIngressAuthorityPhase::Received,
             trusted_peers: self.successful_add_calls(),
             submission_queue_len: 0,
             queue: PeerIngressQueueSnapshot::default(),
         })
+    }
+
+    async fn public_trusted_peer_projection_snapshot(
+        &self,
+    ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+        Ok(self.successful_add_calls())
+    }
+
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+        if source_kind == GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection {
+            Ok(self.successful_add_calls())
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -124,7 +213,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
 
     // First reconcile: add fails.
     let err = reconciler
-        .reconcile(1, BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(1, BTreeSet::from([endpoint("A", UUID_A)])))
         .await
         .expect_err("add_trust failure must surface");
     match err {
@@ -148,7 +237,7 @@ async fn add_failure_surfaces_typed_error_and_preserves_canonical_store() {
     // flag is cleared; the retry succeeds because the reconciler
     // re-reads the canonical store and still sees the peer absent.
     let retry = reconciler
-        .reconcile(1, BTreeSet::from([endpoint("A", UUID_A)]))
+        .reconcile(&obligation(1, BTreeSet::from([endpoint("A", UUID_A)])))
         .await
         .expect("retry succeeds with flag cleared");
     assert_eq!(retry.applied_epoch, 1);

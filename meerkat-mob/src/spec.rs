@@ -510,23 +510,9 @@ mod tests {
             ProfileBinding::Inline(profile()),
         );
 
-        MobDefinition {
-            id: MobId::from("mob"),
-            orchestrator: None,
-            profiles,
-            wiring: WiringRules::default(),
-            skills: BTreeMap::new(),
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit("mob");
+        definition.profiles = profiles;
+        definition
     }
 
     fn step(role: &str, message: &str) -> FlowStepSpec {

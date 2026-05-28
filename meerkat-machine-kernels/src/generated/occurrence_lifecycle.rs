@@ -5,7 +5,8 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
@@ -40,9 +41,11 @@ impl std::fmt::Display for ClaimToken {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -52,20 +55,308 @@ impl std::fmt::Display for ClaimToken {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct DeliveryReceipt(pub String);
-impl From<String> for DeliveryReceipt {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum DeliveryCompletionFailureReason {
+    #[default]
+    #[serde(rename = "CompletionFutureFailed")]
+    CompletionFutureFailed,
+    #[serde(rename = "RuntimeCompletionChannelClosed")]
+    RuntimeCompletionChannelClosed,
+    #[serde(rename = "RuntimeCompletionAuthorityUnavailable")]
+    RuntimeCompletionAuthorityUnavailable,
+    #[serde(rename = "RuntimeCompletionHandleMissing")]
+    RuntimeCompletionHandleMissing,
+}
+impl DeliveryCompletionFailureReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CompletionFutureFailed => "CompletionFutureFailed",
+            Self::RuntimeCompletionChannelClosed => "RuntimeCompletionChannelClosed",
+            Self::RuntimeCompletionAuthorityUnavailable => "RuntimeCompletionAuthorityUnavailable",
+            Self::RuntimeCompletionHandleMissing => "RuntimeCompletionHandleMissing",
+        }
     }
 }
-impl From<&str> for DeliveryReceipt {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for DeliveryCompletionFailureReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CompletionFutureFailed" => Ok(Self::CompletionFutureFailed),
+            "RuntimeCompletionChannelClosed" => Ok(Self::RuntimeCompletionChannelClosed),
+            "RuntimeCompletionAuthorityUnavailable" => {
+                Ok(Self::RuntimeCompletionAuthorityUnavailable)
+            }
+            "RuntimeCompletionHandleMissing" => Ok(Self::RuntimeCompletionHandleMissing),
+            other => Err(format!(
+                "invalid DeliveryCompletionFailureReason value `{other}`"
+            )),
+        }
     }
 }
-impl std::fmt::Display for DeliveryReceipt {
+impl std::convert::TryFrom<String> for DeliveryCompletionFailureReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryCompletionFailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DeliveryFailureReason {
+    #[default]
+    #[serde(rename = "TargetMaterializationFailed")]
+    TargetMaterializationFailed,
+    #[serde(rename = "TargetMissing")]
+    TargetMissing,
+    #[serde(rename = "TargetBusy")]
+    TargetBusy,
+    #[serde(rename = "RuntimeRejected")]
+    RuntimeRejected,
+    #[serde(rename = "MobRejected")]
+    MobRejected,
+    #[serde(rename = "TransportError")]
+    TransportError,
+    #[serde(rename = "InternalError")]
+    InternalError,
+}
+impl DeliveryFailureReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TargetMaterializationFailed => "TargetMaterializationFailed",
+            Self::TargetMissing => "TargetMissing",
+            Self::TargetBusy => "TargetBusy",
+            Self::RuntimeRejected => "RuntimeRejected",
+            Self::MobRejected => "MobRejected",
+            Self::TransportError => "TransportError",
+            Self::InternalError => "InternalError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryFailureReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TargetMaterializationFailed" => Ok(Self::TargetMaterializationFailed),
+            "TargetMissing" => Ok(Self::TargetMissing),
+            "TargetBusy" => Ok(Self::TargetBusy),
+            "RuntimeRejected" => Ok(Self::RuntimeRejected),
+            "MobRejected" => Ok(Self::MobRejected),
+            "TransportError" => Ok(Self::TransportError),
+            "InternalError" => Ok(Self::InternalError),
+            other => Err(format!("invalid DeliveryFailureReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryFailureReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DeliveryReceiptStage {
+    #[default]
+    #[serde(rename = "Planned")]
+    Planned,
+    #[serde(rename = "Claimed")]
+    Claimed,
+    #[serde(rename = "DispatchStarted")]
+    DispatchStarted,
+    #[serde(rename = "DispatchAccepted")]
+    DispatchAccepted,
+    #[serde(rename = "AwaitingCompletion")]
+    AwaitingCompletion,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Skipped")]
+    Skipped,
+    #[serde(rename = "Misfired")]
+    Misfired,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "DeliveryFailed")]
+    DeliveryFailed,
+    #[serde(rename = "LeaseExpired")]
+    LeaseExpired,
+}
+impl DeliveryReceiptStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planned => "Planned",
+            Self::Claimed => "Claimed",
+            Self::DispatchStarted => "DispatchStarted",
+            Self::DispatchAccepted => "DispatchAccepted",
+            Self::AwaitingCompletion => "AwaitingCompletion",
+            Self::Completed => "Completed",
+            Self::Skipped => "Skipped",
+            Self::Misfired => "Misfired",
+            Self::Superseded => "Superseded",
+            Self::DeliveryFailed => "DeliveryFailed",
+            Self::LeaseExpired => "LeaseExpired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryReceiptStage {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Planned" => Ok(Self::Planned),
+            "Claimed" => Ok(Self::Claimed),
+            "DispatchStarted" => Ok(Self::DispatchStarted),
+            "DispatchAccepted" => Ok(Self::DispatchAccepted),
+            "AwaitingCompletion" => Ok(Self::AwaitingCompletion),
+            "Completed" => Ok(Self::Completed),
+            "Skipped" => Ok(Self::Skipped),
+            "Misfired" => Ok(Self::Misfired),
+            "Superseded" => Ok(Self::Superseded),
+            "DeliveryFailed" => Ok(Self::DeliveryFailed),
+            "LeaseExpired" => Ok(Self::LeaseExpired),
+            other => Err(format!("invalid DeliveryReceiptStage value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryReceiptStage {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryReceiptStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MisfirePolicy {
+    #[default]
+    #[serde(rename = "Skip")]
+    Skip,
+    #[serde(rename = "CatchUpWithin")]
+    CatchUpWithin,
+}
+impl MisfirePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Skip => "Skip",
+            Self::CatchUpWithin => "CatchUpWithin",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MisfirePolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Skip" => Ok(Self::Skip),
+            "CatchUpWithin" => Ok(Self::CatchUpWithin),
+            other => Err(format!("invalid MisfirePolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MisfirePolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MisfirePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MissingTargetPolicy {
+    #[default]
+    #[serde(rename = "MarkMisfired")]
+    MarkMisfired,
+    #[serde(rename = "Skip")]
+    Skip,
+}
+impl MissingTargetPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MarkMisfired => "MarkMisfired",
+            Self::Skip => "Skip",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MissingTargetPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MarkMisfired" => Ok(Self::MarkMisfired),
+            "Skip" => Ok(Self::Skip),
+            other => Err(format!("invalid MissingTargetPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MissingTargetPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MissingTargetPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -184,6 +475,118 @@ impl std::fmt::Display for OccurrenceId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum OccurrenceLifecycleInputVariant {
+    #[default]
+    #[serde(rename = "PlanOccurrence")]
+    PlanOccurrence,
+    #[serde(rename = "SyncTargetSnapshot")]
+    SyncTargetSnapshot,
+    #[serde(rename = "RecordReceipt")]
+    RecordReceipt,
+    #[serde(rename = "ClassifyDue")]
+    ClassifyDue,
+    #[serde(rename = "Claim")]
+    Claim,
+    #[serde(rename = "DispatchStarted")]
+    DispatchStarted,
+    #[serde(rename = "AwaitCompletion")]
+    AwaitCompletion,
+    #[serde(rename = "Complete")]
+    Complete,
+    #[serde(rename = "ResolveRuntimeCompletion")]
+    ResolveRuntimeCompletion,
+    #[serde(rename = "ResolveDeliveryCompletionFailure")]
+    ResolveDeliveryCompletionFailure,
+    #[serde(rename = "ResolveDeliveryFailure")]
+    ResolveDeliveryFailure,
+    #[serde(rename = "ResolveTargetProbe")]
+    ResolveTargetProbe,
+    #[serde(rename = "ResolveDueMisfire")]
+    ResolveDueMisfire,
+    #[serde(rename = "Supersede")]
+    Supersede,
+    #[serde(rename = "LeaseExpired")]
+    LeaseExpired,
+    #[serde(rename = "ReleaseLeaseForPausedSchedule")]
+    ReleaseLeaseForPausedSchedule,
+    #[serde(rename = "ClassifyTransitionFailure")]
+    ClassifyTransitionFailure,
+}
+impl OccurrenceLifecycleInputVariant {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanOccurrence => "PlanOccurrence",
+            Self::SyncTargetSnapshot => "SyncTargetSnapshot",
+            Self::RecordReceipt => "RecordReceipt",
+            Self::ClassifyDue => "ClassifyDue",
+            Self::Claim => "Claim",
+            Self::DispatchStarted => "DispatchStarted",
+            Self::AwaitCompletion => "AwaitCompletion",
+            Self::Complete => "Complete",
+            Self::ResolveRuntimeCompletion => "ResolveRuntimeCompletion",
+            Self::ResolveDeliveryCompletionFailure => "ResolveDeliveryCompletionFailure",
+            Self::ResolveDeliveryFailure => "ResolveDeliveryFailure",
+            Self::ResolveTargetProbe => "ResolveTargetProbe",
+            Self::ResolveDueMisfire => "ResolveDueMisfire",
+            Self::Supersede => "Supersede",
+            Self::LeaseExpired => "LeaseExpired",
+            Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
+            Self::ClassifyTransitionFailure => "ClassifyTransitionFailure",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PlanOccurrence" => Ok(Self::PlanOccurrence),
+            "SyncTargetSnapshot" => Ok(Self::SyncTargetSnapshot),
+            "RecordReceipt" => Ok(Self::RecordReceipt),
+            "ClassifyDue" => Ok(Self::ClassifyDue),
+            "Claim" => Ok(Self::Claim),
+            "DispatchStarted" => Ok(Self::DispatchStarted),
+            "AwaitCompletion" => Ok(Self::AwaitCompletion),
+            "Complete" => Ok(Self::Complete),
+            "ResolveRuntimeCompletion" => Ok(Self::ResolveRuntimeCompletion),
+            "ResolveDeliveryCompletionFailure" => Ok(Self::ResolveDeliveryCompletionFailure),
+            "ResolveDeliveryFailure" => Ok(Self::ResolveDeliveryFailure),
+            "ResolveTargetProbe" => Ok(Self::ResolveTargetProbe),
+            "ResolveDueMisfire" => Ok(Self::ResolveDueMisfire),
+            "Supersede" => Ok(Self::Supersede),
+            "LeaseExpired" => Ok(Self::LeaseExpired),
+            "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
+            "ClassifyTransitionFailure" => Ok(Self::ClassifyTransitionFailure),
+            other => Err(format!(
+                "invalid OccurrenceLifecycleInputVariant value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceLifecycleInputVariant {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceLifecycleInputVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum OccurrenceLifecycleState {
     #[default]
     #[serde(rename = "Pending")]
@@ -248,6 +651,314 @@ impl std::fmt::Display for OccurrenceLifecycleState {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OccurrenceTargetProbeOutcome {
+    #[default]
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Busy")]
+    Busy,
+    #[serde(rename = "Missing")]
+    Missing,
+}
+impl OccurrenceTargetProbeOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::Busy => "Busy",
+            Self::Missing => "Missing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceTargetProbeOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ready" => Ok(Self::Ready),
+            "Busy" => Ok(Self::Busy),
+            "Missing" => Ok(Self::Missing),
+            other => Err(format!(
+                "invalid OccurrenceTargetProbeOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceTargetProbeOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceTargetProbeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OccurrenceTransitionFailureClassKind {
+    #[default]
+    #[serde(rename = "PlanRejected")]
+    PlanRejected,
+    #[serde(rename = "TargetSyncRejected")]
+    TargetSyncRejected,
+    #[serde(rename = "ReceiptRecordRejected")]
+    ReceiptRecordRejected,
+    #[serde(rename = "DueClassificationRejected")]
+    DueClassificationRejected,
+    #[serde(rename = "ClaimRejected")]
+    ClaimRejected,
+    #[serde(rename = "NotPendingForClaim")]
+    NotPendingForClaim,
+    #[serde(rename = "NotClaimed")]
+    NotClaimed,
+    #[serde(rename = "NotDispatching")]
+    NotDispatching,
+    #[serde(rename = "NotLeaseHolding")]
+    NotLeaseHolding,
+    #[serde(rename = "NotLiveForTerminal")]
+    NotLiveForTerminal,
+}
+impl OccurrenceTransitionFailureClassKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanRejected => "PlanRejected",
+            Self::TargetSyncRejected => "TargetSyncRejected",
+            Self::ReceiptRecordRejected => "ReceiptRecordRejected",
+            Self::DueClassificationRejected => "DueClassificationRejected",
+            Self::ClaimRejected => "ClaimRejected",
+            Self::NotPendingForClaim => "NotPendingForClaim",
+            Self::NotClaimed => "NotClaimed",
+            Self::NotDispatching => "NotDispatching",
+            Self::NotLeaseHolding => "NotLeaseHolding",
+            Self::NotLiveForTerminal => "NotLiveForTerminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureClassKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PlanRejected" => Ok(Self::PlanRejected),
+            "TargetSyncRejected" => Ok(Self::TargetSyncRejected),
+            "ReceiptRecordRejected" => Ok(Self::ReceiptRecordRejected),
+            "DueClassificationRejected" => Ok(Self::DueClassificationRejected),
+            "ClaimRejected" => Ok(Self::ClaimRejected),
+            "NotPendingForClaim" => Ok(Self::NotPendingForClaim),
+            "NotClaimed" => Ok(Self::NotClaimed),
+            "NotDispatching" => Ok(Self::NotDispatching),
+            "NotLeaseHolding" => Ok(Self::NotLeaseHolding),
+            "NotLiveForTerminal" => Ok(Self::NotLiveForTerminal),
+            other => Err(format!(
+                "invalid OccurrenceTransitionFailureClassKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceTransitionFailureClassKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceTransitionFailureClassKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OccurrenceTransitionFailureRefusalKind {
+    #[default]
+    #[serde(rename = "NoMatchingTransition")]
+    NoMatchingTransition,
+    #[serde(rename = "GuardRejected")]
+    GuardRejected,
+}
+impl OccurrenceTransitionFailureRefusalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoMatchingTransition => "NoMatchingTransition",
+            Self::GuardRejected => "GuardRejected",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureRefusalKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoMatchingTransition" => Ok(Self::NoMatchingTransition),
+            "GuardRejected" => Ok(Self::GuardRejected),
+            other => Err(format!(
+                "invalid OccurrenceTransitionFailureRefusalKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceTransitionFailureRefusalKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OccurrenceTransitionFailureRefusalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OverlapPolicy {
+    #[default]
+    #[serde(rename = "AllowConcurrent")]
+    AllowConcurrent,
+    #[serde(rename = "SkipIfRunning")]
+    SkipIfRunning,
+}
+impl OverlapPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllowConcurrent => "AllowConcurrent",
+            Self::SkipIfRunning => "SkipIfRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OverlapPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AllowConcurrent" => Ok(Self::AllowConcurrent),
+            "SkipIfRunning" => Ok(Self::SkipIfRunning),
+            other => Err(format!("invalid OverlapPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OverlapPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OverlapPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeCompletionOutcome {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+    #[serde(rename = "FinalizationFailed")]
+    FinalizationFailed,
+    #[serde(rename = "RuntimeTerminated")]
+    RuntimeTerminated,
+}
+impl RuntimeCompletionOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::CallbackPending => "CallbackPending",
+            Self::Cancelled => "Cancelled",
+            Self::Abandoned => "Abandoned",
+            Self::FinalizationFailed => "FinalizationFailed",
+            Self::RuntimeTerminated => "RuntimeTerminated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeCompletionOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Abandoned" => Ok(Self::Abandoned),
+            "FinalizationFailed" => Ok(Self::FinalizationFailed),
+            "RuntimeTerminated" => Ok(Self::RuntimeTerminated),
+            other => Err(format!("invalid RuntimeCompletionOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeCompletionOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeCompletionOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -272,6 +983,34 @@ impl From<&str> for ScheduleId {
     }
 }
 impl std::fmt::Display for ScheduleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct SessionId(pub String);
+impl From<String> for SessionId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for SessionId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -302,14 +1041,34 @@ pub struct State {
     pub schedule_id: ScheduleId,
     pub schedule_revision: u64,
     pub occurrence_ordinal: u64,
+    pub trigger_key: String,
     pub target_binding_key: String,
+    pub misfire_policy: MisfirePolicy,
+    pub misfire_policy_key: String,
+    pub overlap_policy: OverlapPolicy,
+    pub overlap_policy_key: String,
+    pub missing_target_policy: MissingTargetPolicy,
+    pub missing_target_policy_key: String,
     pub due_at_utc_ms: u64,
+    pub misfire_deadline_utc_ms: u64,
     pub claimed_by: Option<String>,
     pub lease_expires_at_utc_ms: Option<u64>,
     pub claimed_at_utc_ms: Option<u64>,
     pub claim_token: Option<ClaimToken>,
     pub delivery_correlation_id: Option<String>,
-    pub last_receipt: Option<DeliveryReceipt>,
+    pub target_materialized_session_id: Option<SessionId>,
+    pub receipt_recorded_at_utc_ms: Option<u64>,
+    pub last_receipt_recorded_at_utc_ms: Option<u64>,
+    pub last_receipt_attempt: Option<u64>,
+    pub last_receipt_stage: Option<DeliveryReceiptStage>,
+    pub last_receipt_failure_class: Option<OccurrenceFailureClass>,
+    pub last_receipt_detail: Option<String>,
+    pub last_receipt_correlation_id: Option<String>,
+    pub last_receipt_materialized_session_id: Option<SessionId>,
+    pub runtime_outcome_key: Option<String>,
+    pub receipt_stage: Option<DeliveryReceiptStage>,
+    pub receipt_failure_class: Option<OccurrenceFailureClass>,
+    pub receipt_detail: Option<String>,
     pub failure_class: Option<OccurrenceFailureClass>,
     pub failure_detail: Option<String>,
     pub dispatched_at_utc_ms: Option<u64>,
@@ -326,6 +1085,40 @@ impl Default for State {
 pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PlanOccurrence {
+        pub occurrence_id: OccurrenceId,
+        pub schedule_id: ScheduleId,
+        pub schedule_revision: u64,
+        pub occurrence_ordinal: u64,
+        pub trigger_key: String,
+        pub target_binding_key: String,
+        pub misfire_policy: MisfirePolicy,
+        pub misfire_policy_key: String,
+        pub overlap_policy: OverlapPolicy,
+        pub overlap_policy_key: String,
+        pub missing_target_policy: MissingTargetPolicy,
+        pub missing_target_policy_key: String,
+        pub target_materialized_session_id: Option<SessionId>,
+        pub due_at_utc_ms: u64,
+        pub misfire_deadline_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SyncTargetSnapshot {
+        pub target_binding_key: String,
+        pub target_materialized_session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordReceipt {
+        pub correlation_id: Option<String>,
+        pub detail: Option<String>,
+        pub materialized_session_id: Option<SessionId>,
+        pub runtime_outcome_key: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyDue {
+        pub now_utc_ms: u64,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
         pub owner_id: String,
@@ -344,19 +1137,35 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Complete {
-        pub receipt: DeliveryReceipt,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Skip {
+    pub struct ResolveRuntimeCompletion {
+        pub outcome: RuntimeCompletionOutcome,
         pub detail: Option<String>,
-        pub failure_class: Option<OccurrenceFailureClass>,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Misfire {
+    pub struct ResolveDeliveryCompletionFailure {
+        pub reason: DeliveryCompletionFailureReason,
         pub detail: Option<String>,
-        pub failure_class: Option<OccurrenceFailureClass>,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveDeliveryFailure {
+        pub reason: DeliveryFailureReason,
+        pub detail: Option<String>,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveTargetProbe {
+        pub outcome: OccurrenceTargetProbeOutcome,
+        pub detail: Option<String>,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveDueMisfire {
+        pub detail: Option<String>,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -365,56 +1174,84 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DeliveryFailed {
-        pub receipt: Option<DeliveryReceipt>,
-        pub failure_class: OccurrenceFailureClass,
-        pub detail: Option<String>,
+    pub struct LeaseExpired {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct LeaseExpired {
+    pub struct ReleaseLeaseForPausedSchedule {
         pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTransitionFailure {
+        pub refusal_kind: OccurrenceTransitionFailureRefusalKind,
+        pub trigger: OccurrenceLifecycleInputVariant,
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
+    PlanOccurrence(inputs::PlanOccurrence),
+    SyncTargetSnapshot(inputs::SyncTargetSnapshot),
+    RecordReceipt(inputs::RecordReceipt),
+    ClassifyDue(inputs::ClassifyDue),
     Claim(inputs::Claim),
     DispatchStarted(inputs::DispatchStarted),
     AwaitCompletion(inputs::AwaitCompletion),
     Complete(inputs::Complete),
-    Skip(inputs::Skip),
-    Misfire(inputs::Misfire),
+    ResolveRuntimeCompletion(inputs::ResolveRuntimeCompletion),
+    ResolveDeliveryCompletionFailure(inputs::ResolveDeliveryCompletionFailure),
+    ResolveDeliveryFailure(inputs::ResolveDeliveryFailure),
+    ResolveTargetProbe(inputs::ResolveTargetProbe),
+    ResolveDueMisfire(inputs::ResolveDueMisfire),
     Supersede(inputs::Supersede),
-    DeliveryFailed(inputs::DeliveryFailed),
     LeaseExpired(inputs::LeaseExpired),
+    ReleaseLeaseForPausedSchedule(inputs::ReleaseLeaseForPausedSchedule),
+    ClassifyTransitionFailure(inputs::ClassifyTransitionFailure),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
+            Self::PlanOccurrence(_) => InputKind::PlanOccurrence,
+            Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
+            Self::RecordReceipt(_) => InputKind::RecordReceipt,
+            Self::ClassifyDue(_) => InputKind::ClassifyDue,
             Self::Claim(_) => InputKind::Claim,
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
             Self::Complete(_) => InputKind::Complete,
-            Self::Skip(_) => InputKind::Skip,
-            Self::Misfire(_) => InputKind::Misfire,
+            Self::ResolveRuntimeCompletion(_) => InputKind::ResolveRuntimeCompletion,
+            Self::ResolveDeliveryCompletionFailure(_) => {
+                InputKind::ResolveDeliveryCompletionFailure
+            }
+            Self::ResolveDeliveryFailure(_) => InputKind::ResolveDeliveryFailure,
+            Self::ResolveTargetProbe(_) => InputKind::ResolveTargetProbe,
+            Self::ResolveDueMisfire(_) => InputKind::ResolveDueMisfire,
             Self::Supersede(_) => InputKind::Supersede,
-            Self::DeliveryFailed(_) => InputKind::DeliveryFailed,
             Self::LeaseExpired(_) => InputKind::LeaseExpired,
+            Self::ReleaseLeaseForPausedSchedule(_) => InputKind::ReleaseLeaseForPausedSchedule,
+            Self::ClassifyTransitionFailure(_) => InputKind::ClassifyTransitionFailure,
         }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
+    PlanOccurrence,
+    SyncTargetSnapshot,
+    RecordReceipt,
+    ClassifyDue,
     Claim,
     DispatchStarted,
     AwaitCompletion,
     Complete,
-    Skip,
-    Misfire,
+    ResolveRuntimeCompletion,
+    ResolveDeliveryCompletionFailure,
+    ResolveDeliveryFailure,
+    ResolveTargetProbe,
+    ResolveDueMisfire,
     Supersede,
-    DeliveryFailed,
     LeaseExpired,
+    ReleaseLeaseForPausedSchedule,
+    ClassifyTransitionFailure,
 }
 
 pub mod effects {
@@ -440,9 +1277,24 @@ pub mod effects {
         pub superseding_revision: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueNoAction {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueClaimEligible {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueMisfireRequired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueLeaseExpired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeliveryFailed {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TransitionFailureClassified {
+        pub phase: OccurrenceLifecycleState,
+        pub refusal_kind: OccurrenceTransitionFailureRefusalKind,
+        pub trigger: OccurrenceLifecycleInputVariant,
+        pub public_class: OccurrenceTransitionFailureClassKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -455,8 +1307,13 @@ pub enum Effect {
     Misfired(effects::Misfired),
     Superseded(effects::Superseded),
     OccurrencesSuperseded(effects::OccurrencesSuperseded),
+    DueNoAction(effects::DueNoAction),
+    DueClaimEligible(effects::DueClaimEligible),
+    DueMisfireRequired(effects::DueMisfireRequired),
+    DueLeaseExpired(effects::DueLeaseExpired),
     DeliveryFailed(effects::DeliveryFailed),
     LeaseExpired(effects::LeaseExpired),
+    TransitionFailureClassified(effects::TransitionFailureClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -468,24 +1325,155 @@ pub enum EffectKind {
     Misfired,
     Superseded,
     OccurrencesSuperseded,
+    DueNoAction,
+    DueClaimEligible,
+    DueMisfireRequired,
+    DueLeaseExpired,
     DeliveryFailed,
     LeaseExpired,
+    TransitionFailureClassified,
 }
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    ClassifyTransitionFailurePlanRejectedPending,
+    ClassifyTransitionFailurePlanRejectedClaimed,
+    ClassifyTransitionFailurePlanRejectedDispatching,
+    ClassifyTransitionFailurePlanRejectedAwaitingCompletion,
+    ClassifyTransitionFailurePlanRejectedCompleted,
+    ClassifyTransitionFailurePlanRejectedSkipped,
+    ClassifyTransitionFailurePlanRejectedMisfired,
+    ClassifyTransitionFailurePlanRejectedSuperseded,
+    ClassifyTransitionFailurePlanRejectedDeliveryFailed,
+    ClassifyTransitionFailureTargetSyncRejectedPending,
+    ClassifyTransitionFailureTargetSyncRejectedClaimed,
+    ClassifyTransitionFailureTargetSyncRejectedDispatching,
+    ClassifyTransitionFailureTargetSyncRejectedAwaitingCompletion,
+    ClassifyTransitionFailureTargetSyncRejectedCompleted,
+    ClassifyTransitionFailureTargetSyncRejectedSkipped,
+    ClassifyTransitionFailureTargetSyncRejectedMisfired,
+    ClassifyTransitionFailureTargetSyncRejectedSuperseded,
+    ClassifyTransitionFailureTargetSyncRejectedDeliveryFailed,
+    ClassifyTransitionFailureReceiptRecordRejectedPending,
+    ClassifyTransitionFailureReceiptRecordRejectedClaimed,
+    ClassifyTransitionFailureReceiptRecordRejectedDispatching,
+    ClassifyTransitionFailureReceiptRecordRejectedAwaitingCompletion,
+    ClassifyTransitionFailureReceiptRecordRejectedCompleted,
+    ClassifyTransitionFailureReceiptRecordRejectedSkipped,
+    ClassifyTransitionFailureReceiptRecordRejectedMisfired,
+    ClassifyTransitionFailureReceiptRecordRejectedSuperseded,
+    ClassifyTransitionFailureReceiptRecordRejectedDeliveryFailed,
+    ClassifyTransitionFailureDueClassificationRejectedPending,
+    ClassifyTransitionFailureDueClassificationRejectedClaimed,
+    ClassifyTransitionFailureDueClassificationRejectedDispatching,
+    ClassifyTransitionFailureDueClassificationRejectedAwaitingCompletion,
+    ClassifyTransitionFailureDueClassificationRejectedCompleted,
+    ClassifyTransitionFailureDueClassificationRejectedSkipped,
+    ClassifyTransitionFailureDueClassificationRejectedMisfired,
+    ClassifyTransitionFailureDueClassificationRejectedSuperseded,
+    ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed,
+    ClassifyTransitionFailureClaimRejectedPendingPending,
+    ClassifyTransitionFailureNotPendingForClaimClaimed,
+    ClassifyTransitionFailureNotPendingForClaimDispatching,
+    ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion,
+    ClassifyTransitionFailureNotPendingForClaimCompleted,
+    ClassifyTransitionFailureNotPendingForClaimSkipped,
+    ClassifyTransitionFailureNotPendingForClaimMisfired,
+    ClassifyTransitionFailureNotPendingForClaimSuperseded,
+    ClassifyTransitionFailureNotPendingForClaimDeliveryFailed,
+    ClassifyTransitionFailureNotClaimedPending,
+    ClassifyTransitionFailureNotClaimedClaimed,
+    ClassifyTransitionFailureNotClaimedDispatching,
+    ClassifyTransitionFailureNotClaimedAwaitingCompletion,
+    ClassifyTransitionFailureNotClaimedCompleted,
+    ClassifyTransitionFailureNotClaimedSkipped,
+    ClassifyTransitionFailureNotClaimedMisfired,
+    ClassifyTransitionFailureNotClaimedSuperseded,
+    ClassifyTransitionFailureNotClaimedDeliveryFailed,
+    ClassifyTransitionFailureNotDispatchingPending,
+    ClassifyTransitionFailureNotDispatchingClaimed,
+    ClassifyTransitionFailureNotDispatchingDispatching,
+    ClassifyTransitionFailureNotDispatchingAwaitingCompletion,
+    ClassifyTransitionFailureNotDispatchingCompleted,
+    ClassifyTransitionFailureNotDispatchingSkipped,
+    ClassifyTransitionFailureNotDispatchingMisfired,
+    ClassifyTransitionFailureNotDispatchingSuperseded,
+    ClassifyTransitionFailureNotDispatchingDeliveryFailed,
+    ClassifyTransitionFailureNotLeaseHoldingPending,
+    ClassifyTransitionFailureNotLeaseHoldingClaimed,
+    ClassifyTransitionFailureNotLeaseHoldingDispatching,
+    ClassifyTransitionFailureNotLeaseHoldingAwaitingCompletion,
+    ClassifyTransitionFailureNotLeaseHoldingCompleted,
+    ClassifyTransitionFailureNotLeaseHoldingSkipped,
+    ClassifyTransitionFailureNotLeaseHoldingMisfired,
+    ClassifyTransitionFailureNotLeaseHoldingSuperseded,
+    ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed,
+    ClassifyTransitionFailureNotLiveForTerminalPending,
+    ClassifyTransitionFailureNotLiveForTerminalClaimed,
+    ClassifyTransitionFailureNotLiveForTerminalDispatching,
+    ClassifyTransitionFailureNotLiveForTerminalAwaitingCompletion,
+    ClassifyTransitionFailureNotLiveForTerminalCompleted,
+    ClassifyTransitionFailureNotLiveForTerminalSkipped,
+    ClassifyTransitionFailureNotLiveForTerminalMisfired,
+    ClassifyTransitionFailureNotLiveForTerminalSuperseded,
+    ClassifyTransitionFailureNotLiveForTerminalDeliveryFailed,
+    PlanOccurrenceFromPending,
+    ClassifyDuePendingFuture,
+    ClassifyDuePendingMisfire,
+    ClassifyDuePendingClaimEligible,
+    ClassifyDueClaimedLeaseExpired,
+    ClassifyDueDispatchingLeaseExpired,
+    ClassifyDueAwaitingCompletionLeaseExpired,
+    ClassifyDueClaimedLeaseCurrent,
+    ClassifyDueDispatchingLeaseCurrent,
+    ClassifyDueAwaitingCompletionLeaseCurrent,
+    ClassifyDueCompletedNoAction,
+    ClassifyDueSkippedNoAction,
+    ClassifyDueMisfiredNoAction,
+    ClassifyDueSupersededNoAction,
+    ClassifyDueDeliveryFailedNoAction,
+    SyncTargetSnapshotPending,
+    SyncTargetSnapshotClaimed,
+    RecordReceiptPending,
+    RecordReceiptClaimed,
+    RecordReceiptDispatching,
+    RecordReceiptAwaitingCompletion,
+    RecordReceiptCompleted,
+    RecordReceiptSkipped,
+    RecordReceiptMisfired,
+    RecordReceiptSuperseded,
+    RecordReceiptDeliveryFailed,
     ClaimPending,
     DispatchStartedFromClaimed,
     AwaitCompletionFromDispatching,
     CompleteFromDispatchingOrAwaiting,
-    SkipFromPendingOrLive,
-    MisfireFromPendingOrLive,
+    RuntimeCompletionCompleted,
+    RuntimeCompletionRuntimeRejected,
+    RuntimeCompletionTransportError,
+    RuntimeCompletionInternalError,
+    DeliveryCompletionFailureTransportError,
+    DeliveryCompletionFailureInternalError,
+    DeliveryFailureTargetMaterializationFailed,
+    DeliveryFailureTargetMissing,
+    DeliveryFailureTargetBusy,
+    DeliveryFailureRuntimeRejected,
+    DeliveryFailureMobRejected,
+    DeliveryFailureTransportError,
+    DeliveryFailureInternalError,
+    TargetProbeReadyClaimed,
+    TargetProbeBusyAllowedByPolicy,
+    TargetProbeBusySkipByPolicy,
+    TargetProbeMissingSkipByPolicy,
+    TargetProbeMissingMisfireByPolicy,
+    DueMisfirePending,
     SupersedePendingOrLive,
-    DeliveryFailedFromClaimedOrLive,
     LeaseExpiredFromClaimed,
     LeaseExpiredFromDispatching,
     LeaseExpiredFromAwaitingCompletion,
+    ReleaseLeaseForPausedScheduleFromClaimed,
+    ReleaseLeaseForPausedScheduleFromDispatching,
+    ReleaseLeaseForPausedScheduleFromAwaitingCompletion,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -562,14 +1550,34 @@ pub fn initial_state() -> State {
         schedule_id: ScheduleId("schedule-0".to_string()),
         schedule_revision: 1,
         occurrence_ordinal: 0,
+        trigger_key: "trigger-0".to_string(),
         target_binding_key: "target-0".to_string(),
+        misfire_policy: MisfirePolicy::Skip,
+        misfire_policy_key: "misfire:skip".to_string(),
+        overlap_policy: OverlapPolicy::SkipIfRunning,
+        overlap_policy_key: "overlap:skip_if_running".to_string(),
+        missing_target_policy: MissingTargetPolicy::MarkMisfired,
+        missing_target_policy_key: "missing_target:mark_misfired".to_string(),
         due_at_utc_ms: 1,
+        misfire_deadline_utc_ms: 1,
         claimed_by: None,
         lease_expires_at_utc_ms: None,
         claimed_at_utc_ms: None,
         claim_token: None,
         delivery_correlation_id: None,
-        last_receipt: None,
+        target_materialized_session_id: None,
+        receipt_recorded_at_utc_ms: None,
+        last_receipt_recorded_at_utc_ms: None,
+        last_receipt_attempt: None,
+        last_receipt_stage: None,
+        last_receipt_failure_class: None,
+        last_receipt_detail: None,
+        last_receipt_correlation_id: None,
+        last_receipt_materialized_session_id: None,
+        runtime_outcome_key: None,
+        receipt_stage: None,
+        receipt_failure_class: None,
+        receipt_detail: None,
         failure_class: None,
         failure_detail: None,
         dispatched_at_utc_ms: None,

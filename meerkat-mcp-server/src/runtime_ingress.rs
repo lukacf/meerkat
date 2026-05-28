@@ -25,7 +25,7 @@ use meerkat_core::types::{HandlingMode, SessionId};
 use meerkat_core::{ConfigRuntime, EventEnvelope, PendingSystemContextAppend};
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
-use meerkat_runtime::completion::{CompletionHandle, CompletionOutcome};
+use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::{AcceptOutcome, Input, MeerkatMachine};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
@@ -172,58 +172,36 @@ fn wrap_mcp_runtime_pre_admission_cleanup(
     accepted_input_id: meerkat_core::lifecycle::InputId,
     handle: CompletionHandle,
 ) -> CompletionHandle {
-    handle.with_outcome_cleanup(move |outcome| async move {
-        context
-            .cleanup_runtime_after_completion_outcome(&session_id, &outcome)
-            .await;
-        context
-            .discard_runtime_pre_admission(&session_id, &requested_input_id)
-            .await;
-        context
-            .discard_runtime_pre_admission(&session_id, &accepted_input_id)
-            .await;
-        outcome
+    handle.with_completion_cleanup(move |completion| async move {
+        let runtime_registration_lock = context.runtime_registration_lock(&session_id);
+        let _runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        let release_pre_admission = match completion {
+            Ok(cleanup_observation) => {
+                context
+                    .cleanup_runtime_after_completion_outcome(&session_id, cleanup_observation)
+                    .await
+                    == Some(true)
+            }
+            Err(error) => {
+                context
+                    .runtime_wait_failure_releases_pre_admission(&session_id, &error)
+                    .await
+            }
+        };
+        if release_pre_admission {
+            context
+                .discard_runtime_pre_admission(&session_id, &requested_input_id)
+                .await;
+            context
+                .discard_runtime_pre_admission(&session_id, &accepted_input_id)
+                .await;
+        }
     })
-}
-
-fn completion_outcome_requires_mcp_runtime_cleanup(outcome: &CompletionOutcome) -> bool {
-    match outcome {
-        CompletionOutcome::Abandoned(reason)
-        | CompletionOutcome::AbandonedWithError { reason, .. }
-        | CompletionOutcome::RuntimeTerminated(reason) => {
-            reason.contains("runtime boundary commit failed")
-                || reason.contains("runtime loop commit failed")
-        }
-        CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
-            error.detail.as_deref().is_some_and(|reason| {
-                reason.contains("runtime boundary commit failed")
-                    || reason.contains("runtime loop commit failed")
-            })
-        }
-        CompletionOutcome::Completed(_)
-        | CompletionOutcome::CompletedWithoutResult
-        | CompletionOutcome::Cancelled
-        | CompletionOutcome::CallbackPending { .. } => false,
-    }
-}
-
-fn completion_outcome_is_mcp_apply_failure(outcome: &CompletionOutcome) -> bool {
-    match outcome {
-        CompletionOutcome::Abandoned(reason)
-        | CompletionOutcome::AbandonedWithError { reason, .. }
-        | CompletionOutcome::RuntimeTerminated(reason) => reason.starts_with("apply failed:"),
-        CompletionOutcome::CompletedWithFinalizationFailure { .. } => false,
-        CompletionOutcome::Completed(_)
-        | CompletionOutcome::CompletedWithoutResult
-        | CompletionOutcome::Cancelled
-        | CompletionOutcome::CallbackPending { .. } => false,
-    }
 }
 
 pub(crate) struct McpRuntimeIngressResources {
     pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub runtime_adapter: Arc<MeerkatMachine>,
-    pub workgraph_service: meerkat::WorkGraphService,
     pub config_runtime: Arc<ConfigRuntime>,
     pub realm_id: meerkat_core::connection::RealmId,
     pub instance_id: Option<String>,
@@ -238,7 +216,6 @@ pub(crate) struct McpRuntimeIngressResources {
 pub(crate) struct McpRuntimeIngressContext {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
-    workgraph_service: meerkat::WorkGraphService,
     config_runtime: Arc<ConfigRuntime>,
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
@@ -254,7 +231,6 @@ impl McpRuntimeIngressContext {
         Self {
             service: resources.service,
             runtime_adapter: resources.runtime_adapter,
-            workgraph_service: resources.workgraph_service,
             config_runtime: resources.config_runtime,
             realm_id: resources.realm_id,
             instance_id: resources.instance_id,
@@ -266,10 +242,13 @@ impl McpRuntimeIngressContext {
         }
     }
 
-    async fn runtime_session_state(&self, session_id: &SessionId) -> Arc<McpRuntimeSessionState> {
+    async fn runtime_session_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
             if self.runtime_adapter.session_has_executor(session_id).await {
-                return existing;
+                return Ok(existing);
             }
             existing.clear_queued_turns().await;
             let executor = Box::new(McpSessionRuntimeExecutor::new(
@@ -279,8 +258,9 @@ impl McpRuntimeIngressContext {
             ));
             self.runtime_adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
-            return existing;
+                .await
+                .map_err(runtime_driver_error_to_session_error)?;
+            return Ok(existing);
         }
 
         let state = Arc::new(McpRuntimeSessionState::default());
@@ -291,18 +271,19 @@ impl McpRuntimeIngressContext {
         ));
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
         self.runtime_sessions
             .write()
             .await
             .insert(session_id.clone(), state.clone());
-        state
+        Ok(state)
     }
 
     pub(crate) async fn ensure_session(
         &self,
         session_id: &SessionId,
-    ) -> Arc<McpRuntimeSessionState> {
+    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
         self.runtime_session_state(session_id).await
     }
 
@@ -324,28 +305,32 @@ impl McpRuntimeIngressContext {
         session_id: &SessionId,
         callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
         replace_runtime_attachment: bool,
-    ) -> Arc<McpRuntimeSessionState> {
+    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
         if replace_runtime_attachment {
             self.runtime_adapter.unregister_session(session_id).await;
         }
-        let state = self.runtime_session_state(session_id).await;
+        let state = self.runtime_session_state(session_id).await?;
         state.set_callback_tools(callback_tools).await;
-        state
+        Ok(state)
     }
 
-    pub(crate) async fn clear_session(&self, session_id: &SessionId) {
+    async fn clear_runtime_session_state(&self, session_id: &SessionId) {
         #[cfg(feature = "comms")]
         self.runtime_adapter.abort_comms_drain(session_id).await;
         self.runtime_adapter.unregister_session(session_id).await;
         if let Some(state) = self.runtime_sessions.write().await.remove(session_id) {
             state.clear_queued_turns().await;
         }
-        self.discard_all_runtime_pre_admissions_for_session(session_id)
-            .await;
         self.mcp_adapters
             .lock()
             .await
             .remove(&session_id.to_string());
+    }
+
+    pub(crate) async fn clear_session(&self, session_id: &SessionId) {
+        self.clear_runtime_session_state(session_id).await;
+        self.discard_all_runtime_pre_admissions_for_session(session_id)
+            .await;
     }
 
     async fn session_archived_by_authority(
@@ -372,32 +357,87 @@ impl McpRuntimeIngressContext {
     async fn cleanup_runtime_after_completion_outcome(
         &self,
         session_id: &SessionId,
-        outcome: &CompletionOutcome,
-    ) {
+        cleanup_observation: meerkat_runtime::completion::CompletionCleanupObservation,
+    ) -> Option<bool> {
         let archived_now = match self.authoritative_session_archived(session_id).await {
             Ok(archived_now) => archived_now,
-            Err(_) => {
-                let _ = self.service.discard_live_session(session_id).await;
-                self.clear_session(session_id).await;
-                return;
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    error = %error,
+                    "MCP runtime completion cleanup skipped because archive authority was unavailable"
+                );
+                return None;
             }
         };
-        if archived_now {
-            let _ = self.service.discard_live_session(session_id).await;
-            self.clear_session(session_id).await;
-            return;
-        }
-
-        let live_present = self
-            .service
-            .has_live_session(session_id)
+        let live_session = if archived_now {
+            meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::NotObserved
+        } else {
+            match self.service.has_live_session(session_id).await {
+                Ok(true) => {
+                    meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Present
+                }
+                Ok(false) => {
+                    meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Absent
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %error,
+                        "MCP runtime completion cleanup skipped because live-session authority was unavailable"
+                    );
+                    return None;
+                }
+            }
+        };
+        let cleanup_authority = match self
+            .runtime_adapter
+            .resolve_runtime_completion_cleanup(
+                session_id,
+                cleanup_observation,
+                archived_now,
+                live_session,
+            )
             .await
-            .unwrap_or(false);
-        if completion_outcome_requires_mcp_runtime_cleanup(outcome)
-            || (!live_present && completion_outcome_is_mcp_apply_failure(outcome))
         {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    error = %error,
+                    "MCP runtime completion cleanup skipped because generated cleanup authority was unavailable"
+                );
+                return None;
+            }
+        };
+        let release_pre_admission = cleanup_authority.releases_pre_admission();
+        if cleanup_authority.requires_runtime_cleanup() {
             let _ = self.service.discard_live_session(session_id).await;
-            self.clear_session(session_id).await;
+            self.clear_runtime_session_state(session_id).await;
+        }
+        Some(release_pre_admission)
+    }
+
+    async fn runtime_wait_failure_releases_pre_admission(
+        &self,
+        session_id: &SessionId,
+        error: &meerkat_runtime::completion::CompletionWaitError,
+    ) -> bool {
+        match self
+            .runtime_adapter
+            .resolve_runtime_completion_wait_failure(session_id, error)
+            .await
+        {
+            Ok(authority) => authority.releases_pre_admission(),
+            Err(authority_error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    authority_error = ?authority_error,
+                    "MCP runtime pre-admission retained because generated wait-failure authority was unavailable"
+                );
+                false
+            }
         }
     }
 
@@ -579,7 +619,25 @@ impl McpRuntimeIngressContext {
 
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let runtime_state_existed = self.runtime_sessions.read().await.contains_key(session_id);
-        let state = self.runtime_session_state(session_id).await;
+        let state = match self.runtime_session_state(session_id).await {
+            Ok(state) => state,
+            Err(error) => {
+                self.discard_runtime_pre_admission(session_id, &requested_input_id)
+                    .await;
+                if let Some(registration) = pre_admission_registration.take() {
+                    registration.disarm();
+                }
+                self.clear_session_if_new_locked(
+                    session_id,
+                    runtime_was_registered,
+                    runtime_state_existed,
+                )
+                .await;
+                return Err(meerkat_runtime::RuntimeDriverError::Internal(
+                    error.to_string(),
+                ));
+            }
+        };
         let mut context_input_id = requested_input_id.clone();
         let queued_context = state
             .enqueue_turn_context(requested_input_id.clone(), event_tx)
@@ -798,6 +856,7 @@ impl McpRuntimeIngressContext {
             .session_archived_by_authority(session_id, &session)
             .await?
         {
+            self.clear_session(session_id).await;
             return Err(SessionError::NotFound {
                 id: session_id.clone(),
             });
@@ -856,6 +915,7 @@ impl McpRuntimeIngressContext {
             .session_archived_by_authority(session_id, &session)
             .await?
         {
+            self.clear_session(session_id).await;
             return Err(SessionError::NotFound {
                 id: session_id.clone(),
             });
@@ -903,6 +963,12 @@ fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> S
         SurfaceRuntimeMaterializeError::Session(error) => error,
         other => SessionError::Agent(AgentError::InternalError(other.to_string())),
     }
+}
+
+fn runtime_driver_error_to_session_error(
+    error: meerkat_runtime::RuntimeDriverError,
+) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(error.to_string()))
 }
 
 fn surface_recovery_session_error(
@@ -1117,22 +1183,6 @@ async fn apply_runtime_turn(
     run_id: meerkat_core::lifecycle::RunId,
     primitive: &RunPrimitive,
 ) -> Result<CoreApplyOutput, SessionError> {
-    if let Some(projection) = primitive.turn_metadata().and_then(|metadata| {
-        meerkat::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
-    }) {
-        meerkat::validate_workgraph_attention_projection_current(
-            &context.workgraph_service,
-            &projection,
-        )
-        .await
-        .map_err(|error| SessionError::FailedWithData {
-            message: error.to_string(),
-            data: serde_json::json!({
-                "code": "STALE_WORKGRAPH_ATTENTION_PROJECTION"
-            }),
-        })?;
-    }
-
     if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
         return Err(SessionError::Agent(AgentError::InternalError(
             reason.to_string(),
@@ -1444,6 +1494,38 @@ mod tests {
     use meerkat_runtime::SessionServiceRuntimeExt as _;
     use meerkat_store::{JsonlStore, MemoryBlobStore};
 
+    async fn pending_completion_handle(
+        adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
+        session_id: &SessionId,
+    ) -> meerkat_runtime::CompletionHandle {
+        adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("test machine should prepare runtime bindings");
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "pending completion fixture",
+            None,
+        ));
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(session_id, input)
+            .await
+            .expect("test machine should accept pending completion input");
+        handle.expect("pending completion input should return a completion handle")
+    }
+
+    async fn runtime_terminated_completion_handle(
+        adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
+        session_id: &SessionId,
+        reason: &str,
+    ) -> meerkat_runtime::CompletionHandle {
+        let handle = pending_completion_handle(adapter, session_id).await;
+        adapter
+            .stop_runtime_executor(session_id, reason)
+            .await
+            .expect("test machine should resolve pending completion as runtime terminated");
+        handle
+    }
+
     async fn build_test_context(temp: &tempfile::TempDir) -> McpRuntimeIngressContext {
         build_test_context_with_capacity(temp, 4).await
     }
@@ -1455,8 +1537,13 @@ mod tests {
         let session_store = Arc::new(JsonlStore::new(temp.path().join("sessions")));
         session_store.init().await.expect("init jsonl store");
         let session_store: Arc<dyn meerkat::SessionStore> = session_store;
-        let persistence =
-            PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            session_store,
+            Some(runtime_store),
+            Arc::new(MemoryBlobStore::new()),
+        );
 
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -1468,9 +1555,6 @@ mod tests {
         McpRuntimeIngressContext::new(McpRuntimeIngressResources {
             service: Arc::new(service),
             runtime_adapter,
-            workgraph_service: meerkat::WorkGraphService::new(Arc::new(
-                meerkat::MemoryWorkGraphStore::new(),
-            )),
             config_runtime: Arc::new(ConfigRuntime::new(
                 config_store,
                 temp.path().join("config-state.json"),
@@ -1483,6 +1567,21 @@ mod tests {
             runtime_pre_admissions: Arc::new(Mutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
         })
+    }
+
+    async fn archive_with_test_machine_authority(
+        context: &McpRuntimeIngressContext,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        context
+            .service
+            .archive_with_machine_protocol(
+                session_id,
+                meerkat::MachineSessionArchiveProtocol::from_machine(
+                    context.runtime_adapter.as_ref(),
+                ),
+            )
+            .await
     }
 
     #[test]
@@ -1532,6 +1631,37 @@ mod tests {
             build: Some(meerkat_core::service::SessionBuildOptions::default()),
             labels: None,
         }
+    }
+
+    async fn create_session_with_test_machine(
+        context: &McpRuntimeIngressContext,
+        prompt: &str,
+        initial_turn: meerkat_core::service::InitialTurnPolicy,
+    ) -> Result<RunResult, SessionError> {
+        context
+            .materialize_with_state(
+                Session::new(),
+                create_request(prompt, initial_turn),
+                false,
+                Arc::new(McpRuntimeSessionState::default()),
+                None,
+            )
+            .await
+    }
+
+    async fn create_deferred_session_with_generated_authority(
+        context: &McpRuntimeIngressContext,
+        prompt: &str,
+    ) -> SessionId {
+        context
+            .service
+            .create_session(create_request(
+                prompt,
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("deferred session create should seed generated authority")
+            .session_id
     }
 
     fn context_append() -> ConversationContextAppend {
@@ -1601,9 +1731,7 @@ mod tests {
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        context
-            .service
-            .archive(&session_id)
+        archive_with_test_machine_authority(&context, &session_id)
             .await
             .expect("archive should succeed");
         let state = Arc::new(McpRuntimeSessionState::default());
@@ -1662,7 +1790,10 @@ mod tests {
             "test must remove runtime registration before context-only recovery"
         );
 
-        let state = context.ensure_session(&session_id).await;
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("MCP runtime executor should attach");
         let input_id = InputId::new();
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunCheckpoint,
@@ -1696,23 +1827,22 @@ mod tests {
             "context-only recovery should install MCP runtime session state"
         );
 
-        let exported = context
-            .service
-            .export_live_session(&session_id)
-            .await
-            .expect("export recovered live session");
-        let system_context = exported
-            .messages()
-            .iter()
-            .find_map(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or("");
+        let session_snapshot: Session = serde_json::from_slice(
+            output
+                .session_snapshot
+                .as_deref()
+                .expect("context-only apply should return a machine commit snapshot"),
+        )
+        .expect("machine commit snapshot should deserialize");
+        let system_context = session_snapshot
+            .system_context_state()
+            .expect("context-only recovery should persist system-context state");
         assert!(
-            system_context.contains("mcp-context-recovery")
-                && system_context.contains("mcp recovered context"),
-            "context-only recovery should persist MCP runtime context append: {system_context}"
+            system_context.applied().iter().any(|append| {
+                append.source.as_deref() == Some("mcp-context-recovery")
+                    && append.text.contains("mcp recovered context")
+            }),
+            "context-only recovery should persist MCP runtime context append: {system_context:?}"
         );
     }
 
@@ -1738,12 +1868,13 @@ mod tests {
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        context.ensure_session(&session_id).await;
+        context
+            .ensure_session(&session_id)
+            .await
+            .expect("MCP runtime executor should attach");
         assert!(context.runtime_adapter.contains_session(&session_id).await);
 
-        context
-            .service
-            .archive(&session_id)
+        archive_with_test_machine_authority(&context, &session_id)
             .await
             .expect("archive should succeed");
         let rejected = context
@@ -1777,24 +1908,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_runtime_pre_admission_completion_cleanup_clears_boundary_failed_runtime() {
+    async fn mcp_runtime_pre_admission_completion_cleanup_clears_terminated_runtime() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context_with_capacity(&temp, 1).await;
-        let created = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
-        let session_id = created.session_id;
-        context.ensure_session(&session_id).await;
+        let context = build_test_context_with_capacity(&temp, 2).await;
+        let session_id =
+            create_deferred_session_with_generated_authority(&context, "runtime cleanup target")
+                .await;
+        let completion_handle = runtime_terminated_completion_handle(
+            context.runtime_adapter.as_ref(),
+            &session_id,
+            "runtime stopped during cleanup",
+        )
+        .await;
+        context.runtime_sessions.write().await.insert(
+            session_id.clone(),
+            Arc::new(McpRuntimeSessionState::default()),
+        );
         context.mcp_adapters.lock().await.insert(
             session_id.to_string(),
             Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new())),
         );
-        assert!(context.runtime_adapter.contains_session(&session_id).await);
         assert!(
             context
                 .runtime_sessions
@@ -1814,9 +1947,9 @@ mod tests {
         let accepted_input_id = InputId::new();
         let admission = context
             .service
-            .reserve_runtime_turn_admission(&session_id)
+            .reserve_create_session_admission()
             .await
-            .expect("reserve runtime turn admission");
+            .expect("reserve active admission");
         context
             .insert_runtime_pre_admission(session_id.clone(), requested_input_id.clone(), admission)
             .await
@@ -1827,25 +1960,19 @@ mod tests {
             session_id.clone(),
             requested_input_id,
             accepted_input_id,
-            CompletionHandle::already_resolved(CompletionOutcome::Abandoned(
-                "runtime boundary commit failed: injected failure".to_string(),
-            )),
+            completion_handle,
         );
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
             .await
             .expect("cleanup handle should finish");
 
         assert!(
-            !context.runtime_adapter.contains_session(&session_id).await,
-            "boundary failure cleanup must unregister the runtime"
-        );
-        assert!(
             !context
                 .runtime_sessions
                 .read()
                 .await
                 .contains_key(&session_id),
-            "boundary failure cleanup must remove MCP runtime session state"
+            "runtime termination cleanup must remove MCP runtime session state"
         );
         assert!(
             !context
@@ -1853,7 +1980,7 @@ mod tests {
                 .lock()
                 .await
                 .contains_key(&session_id.to_string()),
-            "boundary failure cleanup must remove MCP adapter bindings"
+            "runtime termination cleanup must remove MCP adapter bindings"
         );
         assert!(
             context
@@ -1862,7 +1989,7 @@ mod tests {
                 .await
                 .get(&session_id)
                 .is_none(),
-            "boundary failure cleanup must release MCP runtime pre-admission"
+            "runtime termination cleanup must release MCP runtime pre-admission"
         );
 
         context
@@ -1876,19 +2003,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_runtime_completion_cleanup_preserves_unrelated_pre_admission() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 3).await;
+        let session_id = create_deferred_session_with_generated_authority(
+            &context,
+            "runtime unrelated cleanup target",
+        )
+        .await;
+        let completion_handle = runtime_terminated_completion_handle(
+            context.runtime_adapter.as_ref(),
+            &session_id,
+            "runtime stopped with unrelated admission",
+        )
+        .await;
+
+        let requested_input_id = InputId::new();
+        let accepted_input_id = InputId::new();
+        let unrelated_input_id = InputId::new();
+        let requested_admission = context
+            .service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve requested active admission");
+        let unrelated_admission = context
+            .service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve unrelated active admission");
+        context
+            .insert_runtime_pre_admission(
+                session_id.clone(),
+                requested_input_id.clone(),
+                requested_admission,
+            )
+            .await
+            .expect("insert requested pre-admission");
+        context
+            .insert_runtime_pre_admission(
+                session_id.clone(),
+                unrelated_input_id.clone(),
+                unrelated_admission,
+            )
+            .await
+            .expect("insert unrelated pre-admission");
+
+        let handle = wrap_mcp_runtime_pre_admission_cleanup(
+            context.clone(),
+            session_id.clone(),
+            requested_input_id.clone(),
+            accepted_input_id,
+            completion_handle,
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
+            .await
+            .expect("cleanup handle should finish");
+
+        let pre_admissions = context.runtime_pre_admissions.lock().await;
+        let entries = pre_admissions
+            .get(&session_id)
+            .expect("unrelated pre-admission must remain after completion cleanup");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.input_id != requested_input_id),
+            "generated cleanup release must remove only the completed input pre-admission"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.input_id == unrelated_input_id),
+            "runtime cleanup must not release unrelated MCP pre-admission"
+        );
+        drop(pre_admissions);
+
+        context
+            .discard_runtime_pre_admission(&session_id, &unrelated_input_id)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn mcp_runtime_completion_cleanup_retains_pre_admission_on_authority_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 1).await;
+        let source_session_id = SessionId::new();
+        let target_session_id = SessionId::new();
+        let completion_handle = runtime_terminated_completion_handle(
+            context.runtime_adapter.as_ref(),
+            &source_session_id,
+            "runtime stopped during mismatched cleanup",
+        )
+        .await;
+
+        let requested_input_id = InputId::new();
+        let accepted_input_id = InputId::new();
+        let admission = context
+            .service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve active admission");
+        context
+            .insert_runtime_pre_admission(
+                target_session_id.clone(),
+                requested_input_id.clone(),
+                admission,
+            )
+            .await
+            .expect("insert pending pre-admission");
+
+        let handle = wrap_mcp_runtime_pre_admission_cleanup(
+            context.clone(),
+            target_session_id.clone(),
+            requested_input_id.clone(),
+            accepted_input_id,
+            completion_handle,
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
+            .await
+            .expect("cleanup handle should finish");
+
+        assert!(
+            context
+                .runtime_pre_admissions
+                .lock()
+                .await
+                .get(&target_session_id)
+                .is_some_and(|entries| entries
+                    .iter()
+                    .any(|entry| entry.input_id == requested_input_id)),
+            "MCP runtime pre-admission must be retained when generated cleanup authority rejects the observation"
+        );
+
+        context
+            .discard_runtime_pre_admission(&target_session_id, &requested_input_id)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn mcp_runtime_wait_failure_authority_controls_pre_admission_release() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let session_id = SessionId::new();
+        context
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare generated runtime authority");
+
+        assert!(
+            context
+                .runtime_wait_failure_releases_pre_admission(
+                    &session_id,
+                    &meerkat_runtime::completion::CompletionWaitError::ChannelClosed,
+                )
+                .await,
+            "generated MCP waiter-failure authority should release pre-admission for channel-close failures"
+        );
+
+        let missing_session_id = SessionId::new();
+        assert!(
+            !context
+                .runtime_wait_failure_releases_pre_admission(
+                    &missing_session_id,
+                    &meerkat_runtime::completion::CompletionWaitError::ChannelClosed,
+                )
+                .await,
+            "MCP waiter-failure cleanup must fail closed when generated session authority is absent"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_runtime_accept_capacity_full_rejects_before_input_accept() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
+        let target = create_session_with_test_machine(
+            &context,
+            "completed target",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        )
+        .await
+        .expect("completed target create should succeed");
         let target_session_id = target.session_id;
-        context.ensure_session(&target_session_id).await;
+        context
+            .ensure_session(&target_session_id)
+            .await
+            .expect("MCP runtime executor should attach");
 
         let _blocker = context
             .service
@@ -1929,16 +2228,18 @@ mod tests {
     async fn mcp_runtime_accept_waits_for_registration_lock_before_pre_admission() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
+        let target = create_session_with_test_machine(
+            &context,
+            "completed target",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        )
+        .await
+        .expect("completed target create should succeed");
         let target_session_id = target.session_id;
-        context.ensure_session(&target_session_id).await;
+        context
+            .ensure_session(&target_session_id)
+            .await
+            .expect("MCP runtime executor should attach");
 
         let registration_lock = context.runtime_registration_lock(&target_session_id);
         let registration_guard = registration_lock.mutex().lock().await;
@@ -1983,14 +2284,13 @@ mod tests {
     async fn mcp_new_runtime_cleanup_preserves_pending_pre_admission() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
+        let target = create_session_with_test_machine(
+            &context,
+            "completed target",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        )
+        .await
+        .expect("completed target create should succeed");
         let target_session_id = target.session_id;
         context
             .runtime_adapter
@@ -2045,14 +2345,13 @@ mod tests {
     async fn mcp_runtime_accept_terminal_no_handle_clears_new_runtime_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
+        let target = create_session_with_test_machine(
+            &context,
+            "completed target",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        )
+        .await
+        .expect("completed target create should succeed");
         let target_session_id = target.session_id;
         context
             .service
@@ -2063,6 +2362,7 @@ mod tests {
             .runtime_adapter
             .unregister_session(&target_session_id)
             .await;
+        context.clear_session(&target_session_id).await;
         assert!(
             !context
                 .runtime_sessions
@@ -2141,16 +2441,18 @@ mod tests {
     async fn mcp_runtime_accept_recovers_persisted_live_missing_session() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
+        let target = create_session_with_test_machine(
+            &context,
+            "completed target",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        )
+        .await
+        .expect("completed target create should succeed");
         let target_session_id = target.session_id;
-        let state = context.ensure_session(&target_session_id).await;
+        let state = context
+            .ensure_session(&target_session_id)
+            .await
+            .expect("MCP runtime executor should attach");
         context
             .runtime_adapter
             .ensure_session_with_executor(
@@ -2161,7 +2463,8 @@ mod tests {
                     state.clone(),
                 )),
             )
-            .await;
+            .await
+            .expect("runtime executor registration should succeed");
         context
             .service
             .discard_live_session(&target_session_id)
@@ -2219,16 +2522,18 @@ mod tests {
     async fn mcp_runtime_recovery_no_pending_releases_capacity() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = context
-            .service
-            .create_session(create_request(
-                "completed target",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("completed target create should succeed");
+        let target = create_session_with_test_machine(
+            &context,
+            "completed target",
+            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        )
+        .await
+        .expect("completed target create should succeed");
         let session_id = target.session_id;
-        let state = context.ensure_session(&session_id).await;
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("MCP runtime executor should attach");
         context
             .service
             .discard_live_session(&session_id)
@@ -2302,12 +2607,13 @@ mod tests {
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        let state = context.ensure_session(&session_id).await;
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("MCP runtime executor should attach");
         assert!(context.runtime_adapter.contains_session(&session_id).await);
 
-        context
-            .service
-            .archive(&session_id)
+        archive_with_test_machine_authority(&context, &session_id)
             .await
             .expect("archive should succeed");
         let primitive = RunPrimitive::ImmediateAppend(

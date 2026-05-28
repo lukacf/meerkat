@@ -216,6 +216,42 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/terminal_surface_mapping.rs",
     ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/comms_trust_authority_sources.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/auth_lease_transition_authority_sources.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/protocol_tool_visibility_owner.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_persistence_version_authority.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/pending_continuation_admission.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/approval_lifecycle.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_deferred_turn_authority.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_durable_config_authority.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_realtime_transcript_authority.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-core/src/generated/session_system_context_authority.rs",
+    ));
+    set.insert(PathBuf::from(
+        "meerkat-mob/src/generated/mob_coordination_lifecycle_authority.rs",
+    ));
 
     set.insert(PathBuf::from(
         "meerkat-machine-kernels/src/generated/mod.rs",

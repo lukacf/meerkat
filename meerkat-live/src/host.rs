@@ -24,9 +24,10 @@
 //!   [`LiveAdapterCommand::SubmitToolResult`] / `SubmitToolError`.
 //! - `SignalInterrupt`   → calls the sink's `signal_turn_interrupt` (the same
 //!   path the user-facing interrupt RPC uses).
-//! - `UpdateStatus`      → updates host-tracked status; pump task observed it.
-//! - `TerminalError`     → terminalizes the channel (status `Closed`) and
-//!   surfaces the error to the sink for session-level signalling.
+//! - `UpdateStatus`      → reports status already committed through generated
+//!   MeerkatMachine status authority.
+//! - `TerminalError`     → surfaces the error to the sink only after
+//!   generated close authority has committed channel terminality.
 //! - `Noop`              → no-op (e.g. bare audio chunks in the projection).
 //!
 //! `LiveProjectionSink` is the runtime-side abstraction over `SessionService`.
@@ -36,12 +37,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indexmap::IndexMap;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::RealtimeTranscriptEvent;
-use meerkat_core::SessionLlmIdentity;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
@@ -84,6 +85,303 @@ impl LiveChannelId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Typed evidence that a live refresh command was accepted onto the adapter
+/// command queue.
+///
+/// This is host-minted observation evidence, not the public refresh result.
+/// External crates can read it and submit it to MeerkatMachine, but cannot
+/// forge it because the constructor is private to `meerkat-live`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveRefreshQueueAcceptance {
+    channel_id: String,
+    acceptance_sequence: u64,
+}
+
+impl LiveRefreshQueueAcceptance {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn acceptance_sequence(&self) -> u64 {
+        self.acceptance_sequence
+    }
+
+    fn from_host_queue_acceptance(
+        channel_id: impl Into<String>,
+        acceptance_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || acceptance_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            acceptance_sequence,
+        })
+    }
+}
+
+/// Closed classifier for live adapter commands whose queue acceptance backs a
+/// public RPC result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LiveCommandAcceptanceKind {
+    SendInput,
+    CommitInput,
+    Interrupt,
+    TruncateAssistantOutput,
+}
+
+/// Typed evidence that a live adapter command was accepted onto the adapter
+/// command queue.
+///
+/// This is host-minted observation evidence, not the public RPC result.
+/// External crates can read it and submit it to MeerkatMachine, but cannot
+/// forge it because the constructor is private to `meerkat-live`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCommandQueueAcceptance {
+    channel_id: String,
+    kind: LiveCommandAcceptanceKind,
+    acceptance_sequence: u64,
+}
+
+impl LiveCommandQueueAcceptance {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> LiveCommandAcceptanceKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn acceptance_sequence(&self) -> u64 {
+        self.acceptance_sequence
+    }
+
+    fn from_host_queue_acceptance(
+        channel_id: impl Into<String>,
+        kind: LiveCommandAcceptanceKind,
+        acceptance_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || acceptance_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            kind,
+            acceptance_sequence,
+        })
+    }
+}
+
+/// Typed evidence that a live channel close handoff was accepted by the host.
+///
+/// This is host-minted observation evidence, not the public close result.
+/// External crates can read it and submit it to MeerkatMachine, but cannot
+/// forge it because the constructor is private to `meerkat-live`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveChannelCloseObservation {
+    channel_id: String,
+    close_sequence: u64,
+}
+
+impl LiveChannelCloseObservation {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn close_sequence(&self) -> u64 {
+        self.close_sequence
+    }
+
+    fn from_host_close_observation(
+        channel_id: impl Into<String>,
+        close_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || close_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            close_sequence,
+        })
+    }
+}
+
+/// Non-forgeable generated-authority handoff for committing host close cleanup.
+#[derive(Debug, Clone)]
+pub struct LiveChannelCloseCommitAuthority {
+    channel_id: String,
+    close_sequence: u64,
+    consumed: Arc<AtomicBool>,
+}
+
+impl LiveChannelCloseCommitAuthority {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn close_sequence(&self) -> u64 {
+        self.close_sequence
+    }
+
+    fn consume_once(&self) -> Result<(), LiveAdapterHostError> {
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| LiveAdapterHostError::CloseAuthorityAlreadyConsumed)
+    }
+
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
+    fn from_generated_parts(channel_id: String, close_sequence: u64) -> Self {
+        Self {
+            channel_id,
+            close_sequence,
+            consumed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_generated_test_machine(
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        close_sequence: u64,
+    ) -> Self {
+        let mut authority =
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(
+                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal::Initialize,
+            )
+            .expect("initialize generated MeerkatMachine authority");
+        let channel_id_string = channel_id.as_str().to_owned();
+        meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput::ResolveLiveOpenAdmission {
+                session_id: session_id.to_string(),
+                channel_id: channel_id_string.clone(),
+                llm_identity: generated_test_llm_identity(),
+            },
+        )
+        .expect("generated MeerkatMachine live-open admission");
+        let transition = meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput::RecordLiveCloseClosed {
+                session_id: session_id.to_string(),
+                channel_id: channel_id_string.clone(),
+                close_observation_sequence: close_sequence,
+            },
+        )
+        .expect("generated MeerkatMachine live-close result");
+        assert!(
+            transition.effects().iter().any(|effect| matches!(
+                effect,
+                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineEffect::LiveCloseResultResolved {
+                    channel_id: effect_channel_id,
+                    closed: true,
+                    close_observation_sequence,
+                    ..
+                } if *effect_channel_id == channel_id_string && *close_observation_sequence == close_sequence
+            )),
+            "generated live-close result effect"
+        );
+        Self::from_generated_parts(channel_id_string, close_sequence)
+    }
+}
+
+/// Host-minted observation of the adapter transport status.
+///
+/// The host owns transport mechanics and observed adapter health; generated
+/// MeerkatMachine authority owns the public `live/status` result projected to
+/// SDK/RPC callers. `observation_sequence` is a provenance nonce for
+/// correlating a shell observation with the generated effect that accepted it;
+/// skipped or rejected nonce values are not semantic status truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveChannelStatusObservation {
+    channel_id: String,
+    status: LiveAdapterStatus,
+    observation_sequence: u64,
+}
+
+impl LiveChannelStatusObservation {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &LiveAdapterStatus {
+        &self.status
+    }
+
+    #[must_use]
+    pub fn observation_sequence(&self) -> u64 {
+        self.observation_sequence
+    }
+
+    fn from_host_status_observation(
+        channel_id: impl Into<String>,
+        status: LiveAdapterStatus,
+        observation_sequence: u64,
+    ) -> Option<Self> {
+        let channel_id = channel_id.into();
+        if channel_id.is_empty() || observation_sequence == 0 {
+            return None;
+        }
+        Some(Self {
+            channel_id,
+            status,
+            observation_sequence,
+        })
+    }
+}
+
+/// Non-forgeable generated-authority handoff for committing host status cache.
+#[derive(Debug, Clone)]
+pub struct LiveChannelStatusCommitAuthority {
+    channel_id: String,
+    status_observation_sequence: u64,
+    consumed: Arc<AtomicBool>,
+}
+
+impl LiveChannelStatusCommitAuthority {
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn status_observation_sequence(&self) -> u64 {
+        self.status_observation_sequence
+    }
+
+    fn consume_once(&self) -> Result<(), LiveAdapterHostError> {
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| LiveAdapterHostError::StatusAuthorityAlreadyConsumed)
+    }
+
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
+    fn from_generated_parts(channel_id: String, status_observation_sequence: u64) -> Self {
+        Self {
+            channel_id,
+            status_observation_sequence,
+            consumed: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -543,42 +841,39 @@ impl LiveProjectionSink for NoOpProjectionSink {
 /// instead of `ChannelNotFound` (G42).
 const CLOSED_CHANNEL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Per-channel state tracked by the host.
+/// Per-channel transport state tracked by the host.
 struct ChannelState {
     session_id: SessionId,
-    /// Source-of-truth status. Driven by adapter observations after attach,
-    /// not by the host asserting `Ready` at attach time (F32, F33).
+    /// Generated-committed transport status cache. The host can reserve typed
+    /// status observations, but this cache changes only after generated
+    /// MeerkatMachine status authority returns a commit handoff.
     status: LiveAdapterStatus,
+    /// Host observation nonce. This can advance while collecting evidence, but
+    /// generated MeerkatMachine authority owns the accepted status sequence in
+    /// `live_channel_status_observation_sequence_by_channel`.
+    status_observation_sequence: u64,
     snapshot_version: u64,
+    refresh_acceptance_sequence: u64,
+    command_acceptance_sequence: u64,
+    close_observation_sequence: u64,
     adapter: Option<Arc<dyn LiveAdapter>>,
-    /// When `Some`, the channel was closed and is retained until this instant
-    /// (G42). Reads are still serviced; commands are rejected.
+    /// Transport-retention deadline for a channel the generated owner has
+    /// already closed/terminalized. This is a resource-cache timer: public
+    /// lifecycle/admission surfaces must route through generated authority
+    /// before they interpret the channel as open, closed, or reusable.
+    /// Reads are still serviced during the grace window; adapter handoffs are
+    /// rejected because the transport handle has been released.
     retire_at: Option<std::time::Instant>,
-    /// R11: LLM identity the channel was opened with.
-    ///
-    /// Recorded by the surface (`live/open` handler) immediately after
-    /// `attach_adapter` so `propagate_config_to_live_channels` can detect a
-    /// model/provider swap on `config/patch`. The OpenAI realtime adapter
-    /// rejects model/provider drift via its R1 guard (the realtime
-    /// `session.update` event cannot change model). Without a recorded
-    /// identity here the runtime would unconditionally enqueue Refresh and
-    /// the channel would land in `ConfigRejected` error state instead of
-    /// closing cleanly so the SDK can reopen.
-    ///
-    /// `None` for channels opened before identity recording was wired
-    /// (degraded test configs, factory-less paths). On `None` the runtime
-    /// falls back to legacy Refresh routing.
-    bound_llm_identity: Option<SessionLlmIdentity>,
     /// CC1 (R11 wire-signal): one-shot synthetic observation to deliver to
     /// the next [`LiveAdapterHost::next_observation_raw`] caller before any
     /// adapter poll happens.
     ///
     /// Populated by [`LiveAdapterHost::signal_terminal_error`] so a typed
     /// terminal error (e.g. `ConfigRejected { reason: "model_swap: ..." }`)
-    /// flows through the same WS pump path as a provider-emitted Error
-    /// observation. Without this, runtime-side terminations only show up as
-    /// a TCP close from `close_channel`, which clients cannot distinguish
-    /// from a network drop.
+    /// flows through the same generated close-authority path as a
+    /// provider-emitted Error observation. Without this, runtime-side
+    /// terminations can tear down transport resources without recording the
+    /// machine-owned close fact first.
     ///
     /// Single-slot by design: there's exactly one terminal moment per
     /// channel; subsequent `signal_terminal_error` calls overwrite (the
@@ -586,6 +881,264 @@ struct ChannelState {
     /// `next_observation_raw` — must come before `adapter_for` so the
     /// synthetic obs survives a concurrent `close_channel`.
     pending_synthetic_obs: Option<LiveAdapterObservation>,
+}
+
+/// Non-forgeable generated-authority handoff for materializing a live channel.
+///
+/// `LiveAdapterHost` owns transport resources only. Callers that expose
+/// public lifecycle/admission behavior must first route `live/open` through
+/// generated machine authority and pass the resulting admitted handoff here.
+#[derive(Debug, Clone)]
+pub struct LiveChannelOpenAuthority {
+    session_id: SessionId,
+    channel_id: LiveChannelId,
+    sequence: u64,
+    consumed: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+fn generated_test_llm_identity()
+-> meerkat_machine_schema::catalog::dsl::meerkat_machine::SessionLlmIdentity {
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::SessionLlmIdentity {
+        model: "gpt-realtime-2".to_string(),
+        provider: meerkat_machine_schema::catalog::dsl::meerkat_machine::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params_repr: None,
+        auth_binding: None,
+    }
+}
+
+#[cfg(test)]
+fn generated_test_live_channel_status(
+    status: &LiveAdapterStatus,
+) -> (
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::LiveChannelPublicStatus,
+    Option<meerkat_machine_schema::catalog::dsl::meerkat_machine::LiveChannelDegradationReason>,
+    Option<String>,
+) {
+    use meerkat_core::live_adapter::LiveDegradationReason;
+    use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+        LiveChannelDegradationReason as DslReason, LiveChannelPublicStatus as DslStatus,
+    };
+
+    match status {
+        LiveAdapterStatus::Idle => (DslStatus::Idle, None, None),
+        LiveAdapterStatus::Opening => (DslStatus::Opening, None, None),
+        LiveAdapterStatus::Ready => (DslStatus::Ready, None, None),
+        LiveAdapterStatus::Closing => (DslStatus::Closing, None, None),
+        LiveAdapterStatus::Closed => (DslStatus::Closed, None, None),
+        LiveAdapterStatus::Degraded { reason } => match reason {
+            LiveDegradationReason::RateLimited => {
+                (DslStatus::Degraded, Some(DslReason::RateLimited), None)
+            }
+            LiveDegradationReason::ProviderThrottled => (
+                DslStatus::Degraded,
+                Some(DslReason::ProviderThrottled),
+                None,
+            ),
+            LiveDegradationReason::NetworkUnstable => {
+                (DslStatus::Degraded, Some(DslReason::NetworkUnstable), None)
+            }
+            LiveDegradationReason::Other { detail } => (
+                DslStatus::Degraded,
+                Some(DslReason::Other),
+                Some(detail.clone().into_owned()),
+            ),
+            other => (
+                DslStatus::Degraded,
+                Some(DslReason::Unknown),
+                Some(format!("{other:?}")),
+            ),
+        },
+        other => (
+            DslStatus::Degraded,
+            Some(DslReason::Unknown),
+            Some(format!("{other:?}")),
+        ),
+    }
+}
+
+impl LiveChannelOpenAuthority {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    fn consume_once(&self) -> Result<(), LiveAdapterHostError> {
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| LiveAdapterHostError::OpenAuthorityAlreadyConsumed)
+    }
+
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
+    fn from_generated_parts(
+        session_id: SessionId,
+        channel_id: LiveChannelId,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            session_id,
+            channel_id,
+            sequence,
+            consumed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_generated_test_machine(session_id: SessionId, channel_id: LiveChannelId) -> Self {
+        let mut authority =
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(
+                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal::Initialize,
+            )
+            .expect("initialize generated MeerkatMachine authority");
+        let channel_id_string = channel_id.as_str().to_owned();
+        let transition = meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput::ResolveLiveOpenAdmission {
+                session_id: session_id.to_string(),
+                channel_id: channel_id_string.clone(),
+                llm_identity: generated_test_llm_identity(),
+            },
+        )
+        .expect("generated MeerkatMachine live-open admission");
+        let sequence = transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineEffect::LiveOpenAdmissionResolved {
+                    channel_id: effect_channel_id,
+                    admitted: true,
+                    sequence,
+                    ..
+                } if *effect_channel_id == channel_id_string => Some(*sequence),
+                _ => None,
+            })
+            .expect("generated live-open admission effect");
+        Self::from_generated_parts(session_id, channel_id, sequence)
+    }
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_open_admission_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_live_open_admission_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_close_result_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_live_close_result_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_channel_status_result_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_live_channel_status_result_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_live_runtime_generated_live_channel_open_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_live_channel_open_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    session_id: SessionId,
+    channel_id: LiveChannelId,
+    sequence: u64,
+) -> Result<LiveChannelOpenAuthority, String> {
+    #[allow(unsafe_code)]
+    let valid =
+        unsafe { runtime_live_open_admission_generated_authority_bridge_token_is_valid(token) };
+    if !valid {
+        return Err(
+            "live channel open authority requires the generated runtime admission bridge token"
+                .into(),
+        );
+    }
+    Ok(LiveChannelOpenAuthority::from_generated_parts(
+        session_id, channel_id, sequence,
+    ))
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_live_runtime_generated_live_channel_close_commit_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_live_channel_close_commit_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    channel_id: String,
+    close_sequence: u64,
+) -> Result<LiveChannelCloseCommitAuthority, String> {
+    #[allow(unsafe_code)]
+    let valid =
+        unsafe { runtime_live_close_result_generated_authority_bridge_token_is_valid(token) };
+    if !valid {
+        return Err(
+            "live channel close commit authority requires the generated runtime close bridge token"
+                .into(),
+        );
+    }
+    Ok(LiveChannelCloseCommitAuthority::from_generated_parts(
+        channel_id,
+        close_sequence,
+    ))
+}
+
+#[cfg(meerkat_internal_generated_authority_bridge)]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_live_runtime_generated_live_channel_status_commit_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_live_channel_status_commit_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    channel_id: String,
+    status_observation_sequence: u64,
+) -> Result<LiveChannelStatusCommitAuthority, String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe {
+        runtime_live_channel_status_result_generated_authority_bridge_token_is_valid(token)
+    };
+    if !valid {
+        return Err(
+            "live channel status commit authority requires the generated runtime status bridge token"
+                .into(),
+        );
+    }
+    Ok(LiveChannelStatusCommitAuthority::from_generated_parts(
+        channel_id,
+        status_observation_sequence,
+    ))
 }
 
 /// Errors from the live adapter host.
@@ -600,8 +1153,22 @@ pub enum LiveAdapterHostError {
     ChannelNotReady(LiveChannelId, LiveAdapterStatus),
     #[error("session {0} already has an active channel")]
     SessionAlreadyBound(SessionId),
+    #[error("live channel open lacks generated admission authority")]
+    OpenNotAuthorized,
+    #[error("live channel open authority was already consumed")]
+    OpenAuthorityAlreadyConsumed,
+    #[error("live channel close lacks generated commit authority")]
+    CloseNotAuthorized,
+    #[error("live channel close authority was already consumed")]
+    CloseAuthorityAlreadyConsumed,
+    #[error("live channel status lacks generated commit authority")]
+    StatusNotAuthorized,
+    #[error("live channel status authority was already consumed")]
+    StatusAuthorityAlreadyConsumed,
     #[error("no adapter attached to channel {0}")]
     NoAdapter(LiveChannelId),
+    #[error("unsupported host command: {0}")]
+    UnsupportedCommand(&'static str),
     /// E29: typed adapter error preserved structurally (not flattened to String).
     #[error(transparent)]
     AdapterError(#[from] LiveAdapterError),
@@ -882,16 +1449,41 @@ impl LiveAdapterHost {
             .and_then(|slot| slot.as_ref().map(Arc::clone))
     }
 
-    pub async fn open_channel(
+    pub async fn open_channel_with_authority(
+        &self,
+        authority: &LiveChannelOpenAuthority,
+    ) -> Result<LiveChannelId, LiveAdapterHostError> {
+        authority.consume_once()?;
+        self.open_channel_after_generated_authority(
+            authority.session_id().clone(),
+            authority.channel_id().clone(),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_channel_with_generated_test_machine_authority(
         &self,
         session_id: SessionId,
+    ) -> Result<LiveChannelId, LiveAdapterHostError> {
+        let channel_id = LiveChannelId::random_uuid();
+        let authority =
+            LiveChannelOpenAuthority::from_generated_test_machine(session_id, channel_id);
+        self.open_channel_with_authority(&authority).await
+    }
+
+    async fn open_channel_after_generated_authority(
+        &self,
+        session_id: SessionId,
+        channel_id: LiveChannelId,
     ) -> Result<LiveChannelId, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
         Self::reap_retired_locked(&mut inner);
 
-        // N80: O(1) reverse-map lookup instead of linear scan over the
-        // channels map. Only counts channels not in their post-close grace
-        // window — a closed channel must not block the next open.
+        // Resource-cache consistency check after generated admission. Public
+        // duplicate-session admission is owned by MeerkatMachine; this guard
+        // only fails closed if the host still has a live transport binding
+        // that contradicts the generated handoff.
         if let Some(existing) = inner.by_session.get(&session_id).cloned()
             && let Some(channel) = inner.channels.get(&existing)
             && channel.retire_at.is_none()
@@ -899,20 +1491,18 @@ impl LiveAdapterHost {
             return Err(LiveAdapterHostError::SessionAlreadyBound(session_id));
         }
 
-        // G41: v4 UUID — globally-unique across `rkat-rpc` restarts and
-        // co-tenant host instances. Replaced the prior `live_{N}` shape
-        // (process-monotonic `AtomicU64`).
-        let channel_id = LiveChannelId::random_uuid();
-
         inner.channels.insert(
             channel_id.clone(),
             ChannelState {
                 session_id: session_id.clone(),
                 status: LiveAdapterStatus::Opening,
+                status_observation_sequence: 0,
                 snapshot_version: 0,
+                refresh_acceptance_sequence: 0,
+                command_acceptance_sequence: 0,
+                close_observation_sequence: 0,
                 adapter: None,
                 retire_at: None,
-                bound_llm_identity: None,
                 pending_synthetic_obs: None,
             },
         );
@@ -945,47 +1535,42 @@ impl LiveAdapterHost {
         Ok(())
     }
 
-    /// R11: record the LLM identity the channel was opened with.
-    ///
-    /// Called by `live/open` after `attach_adapter` succeeds so
-    /// `propagate_config_to_live_channels` can detect a model / provider
-    /// swap on a later `config/patch` and route to a clean close (so the
-    /// SDK can reopen against the new identity) instead of issuing a
-    /// `Refresh` the OpenAI realtime adapter is forced to reject.
-    ///
-    /// Idempotent — calling twice replaces the recorded identity. A future
-    /// hot-swap path that mutates identity in place without closing would
-    /// rewrite via this same setter.
-    pub async fn set_channel_llm_identity(
+    fn command_acceptance_kind(
+        command: &LiveAdapterCommand,
+    ) -> Result<LiveCommandAcceptanceKind, LiveAdapterHostError> {
+        match command {
+            LiveAdapterCommand::SendInput { .. } => Ok(LiveCommandAcceptanceKind::SendInput),
+            LiveAdapterCommand::CommitInput { .. } => Ok(LiveCommandAcceptanceKind::CommitInput),
+            LiveAdapterCommand::Interrupt => Ok(LiveCommandAcceptanceKind::Interrupt),
+            LiveAdapterCommand::TruncateAssistantOutput { .. } => {
+                Ok(LiveCommandAcceptanceKind::TruncateAssistantOutput)
+            }
+            LiveAdapterCommand::Refresh { .. } => Err(LiveAdapterHostError::UnsupportedCommand(
+                "refresh commands must use LiveAdapterHost::enqueue_refresh",
+            )),
+            _ => Err(LiveAdapterHostError::UnsupportedCommand(
+                "live command has no public queue-acceptance authority",
+            )),
+        }
+    }
+
+    async fn record_command_queue_acceptance(
         &self,
         channel_id: &LiveChannelId,
-        identity: SessionLlmIdentity,
-    ) -> Result<(), LiveAdapterHostError> {
+        kind: LiveCommandAcceptanceKind,
+    ) -> Result<LiveCommandQueueAcceptance, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
         let channel = inner
             .channels
             .get_mut(channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        channel.bound_llm_identity = Some(identity);
-        Ok(())
-    }
-
-    /// R11: read the LLM identity the channel was opened with.
-    ///
-    /// Returns `Ok(None)` when the channel was opened by a path that did
-    /// not record identity (degraded factory-less config in tests, or a
-    /// pre-R11 caller). The runtime treats `None` as "do not assume a
-    /// swap" and falls through to the legacy Refresh path.
-    pub async fn channel_llm_identity(
-        &self,
-        channel_id: &LiveChannelId,
-    ) -> Result<Option<SessionLlmIdentity>, LiveAdapterHostError> {
-        let inner = self.inner.lock().await;
-        inner
-            .channels
-            .get(channel_id)
-            .map(|ch| ch.bound_llm_identity.clone())
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+        channel.command_acceptance_sequence = channel.command_acceptance_sequence.saturating_add(1);
+        LiveCommandQueueAcceptance::from_host_queue_acceptance(
+            channel_id.as_str().to_owned(),
+            kind,
+            channel.command_acceptance_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
     /// Send a command to the adapter on a channel.
@@ -994,6 +1579,11 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         command: LiveAdapterCommand,
     ) -> Result<(), LiveAdapterHostError> {
+        if matches!(&command, LiveAdapterCommand::Refresh { .. }) {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "refresh commands must use LiveAdapterHost::enqueue_refresh",
+            ));
+        }
         let adapter = self
             .adapter_for(channel_id, /* require_ready = */ false)
             .await?;
@@ -1001,11 +1591,62 @@ impl LiveAdapterHost {
         Ok(())
     }
 
+    /// Send a command to the adapter and return typed queue-acceptance
+    /// evidence for public-result authority.
+    pub async fn send_command_observed(
+        &self,
+        channel_id: &LiveChannelId,
+        command: LiveAdapterCommand,
+    ) -> Result<LiveCommandQueueAcceptance, LiveAdapterHostError> {
+        if matches!(&command, LiveAdapterCommand::Refresh { .. }) {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "refresh commands must use LiveAdapterHost::enqueue_refresh",
+            ));
+        }
+        let acceptance_kind = Self::command_acceptance_kind(&command)?;
+        let adapter = self
+            .adapter_for(channel_id, /* require_ready = */ false)
+            .await?;
+        adapter.send_command(command).await?;
+        self.record_command_queue_acceptance(channel_id, acceptance_kind)
+            .await
+    }
+
+    /// Enqueue a refresh command and return typed queue-acceptance evidence.
+    ///
+    /// The acceptance receipt is minted only after the adapter command queue
+    /// accepts the refresh. MeerkatMachine consumes the receipt to decide the
+    /// public `live/refresh` result; the host does not construct that result.
+    pub async fn enqueue_refresh(
+        &self,
+        channel_id: &LiveChannelId,
+        snapshot: meerkat_core::live_adapter::LiveProjectionSnapshot,
+    ) -> Result<LiveRefreshQueueAcceptance, LiveAdapterHostError> {
+        let adapter = self
+            .adapter_for(channel_id, /* require_ready = */ false)
+            .await?;
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await?;
+
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.refresh_acceptance_sequence = channel.refresh_acceptance_sequence.saturating_add(1);
+        LiveRefreshQueueAcceptance::from_host_queue_acceptance(
+            channel_id.as_str().to_owned(),
+            channel.refresh_acceptance_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
     /// Send an input chunk to the adapter on a channel.
     ///
-    /// F31: rejects when the host-tracked status does not `accepts_commands()`
-    /// (i.e. channel is not in `Ready`). Returns `ChannelNotReady` so callers
-    /// can map to a typed wire error.
+    /// F31: adapter-mechanical guard using the observed transport status.
+    /// Public result/status authority still lives in MeerkatMachine; this
+    /// check prevents writes to a transport that is not ready to accept bytes.
     pub async fn send_input(
         &self,
         channel_id: &LiveChannelId,
@@ -1018,6 +1659,25 @@ impl LiveAdapterHost {
             .send_command(LiveAdapterCommand::SendInput { chunk })
             .await?;
         Ok(())
+    }
+
+    /// Send an input chunk and return typed queue-acceptance evidence for
+    /// public-result authority. Public transports that do not return a
+    /// per-frame success result use [`Self::send_input`] instead so they do
+    /// not mint authority evidence that cannot be consumed by MeerkatMachine.
+    pub async fn send_input_observed(
+        &self,
+        channel_id: &LiveChannelId,
+        chunk: LiveInputChunk,
+    ) -> Result<LiveCommandQueueAcceptance, LiveAdapterHostError> {
+        let adapter = self
+            .adapter_for(channel_id, /* require_ready = */ true)
+            .await?;
+        adapter
+            .send_command(LiveAdapterCommand::SendInput { chunk })
+            .await?;
+        self.record_command_queue_acceptance(channel_id, LiveCommandAcceptanceKind::SendInput)
+            .await
     }
 
     /// Submit a tool result back to the adapter on a channel.
@@ -1050,15 +1710,27 @@ impl LiveAdapterHost {
     /// Poll the next observation from the adapter on a channel and project it.
     ///
     /// Convenience wrapper around `next_observation_raw` + `apply_observation`.
-    /// Surfaces that need to react to the typed [`ObservationOutcome`] (e.g.
-    /// to drop a WS connection on `Terminal`) should call the two halves
-    /// directly.
+    /// This wrapper fails closed on non-terminal status observations because
+    /// the host has no generated status feedback handle here. Surfaces that
+    /// need status, terminality, or typed [`ObservationOutcome`] values must
+    /// call `next_observation_raw`, route status/close evidence through
+    /// generated authority, then call `apply_observation`.
     pub async fn next_observation(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
         let obs = self.next_observation_raw(channel_id).await?;
         if let Some(ref obs) = obs {
+            if let ObservationRouting::UpdateStatus(status) = Self::classify_observation(obs)
+                && !status.is_terminal()
+            {
+                return Err(LiveAdapterHostError::StatusNotAuthorized);
+            }
+            if Self::observation_requires_generated_close(obs)
+                && !self.generated_close_has_committed(channel_id).await?
+            {
+                return Err(LiveAdapterHostError::CloseNotAuthorized);
+            }
             // Best-effort projection. Errors are surfaced by `apply_observation`
             // for callers that want to react; here we discard so the read API
             // stays compatible with existing handlers.
@@ -1069,9 +1741,9 @@ impl LiveAdapterHost {
 
     /// Read the next adapter observation without applying it to canonical state.
     ///
-    /// F34: when the adapter pump errors with a transport/closed/provider
-    /// error, the host marks the channel terminal so subsequent
-    /// `channel_status` reads do not return a stale `Ready`.
+    /// Adapter read failures are surfaced as typed terminal observations.
+    /// The host does not commit close/retire state here; transports must route
+    /// terminal observations through generated close feedback before cleanup.
     pub async fn next_observation_raw(
         &self,
         channel_id: &LiveChannelId,
@@ -1112,36 +1784,10 @@ impl LiveAdapterHost {
                 Ok(None)
             }
             Err(err) => {
-                // R5-8: on adapter pump / transport failure, fully
-                // retire the channel — set `status = Closed`, schedule
-                // `retire_at`, drop the adapter Arc, and reuse the
-                // R5-3 synthetic-error seam to surface a typed `Error`
-                // observation to the consumer instead of a generic
-                // disconnect. Without this the channel stays half-bound
-                // (status=Closed, retire_at=None, adapter still held)
-                // and `open_channel` rejects future bindings for the
-                // same session id with `SessionAlreadyBound` — the
-                // broken-session symptom.
                 let synthetic = LiveAdapterObservation::Error {
                     code: LiveAdapterErrorCode::ProviderError,
                     message: format!("adapter read failure: {err}"),
                 };
-                {
-                    let mut inner = self.inner.lock().await;
-                    if let Some(channel) = inner.channels.get_mut(channel_id) {
-                        channel.status = LiveAdapterStatus::Closed;
-                        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-                        // Drop the adapter Arc so transport resources
-                        // are released even though we keep the channel
-                        // entry around for `live/status` reads until
-                        // the TTL elapses (G42).
-                        channel.adapter = None;
-                    }
-                }
-                // Surface the synthetic Error first; the WS pump will
-                // forward it to the client and close with a typed
-                // `terminal:provider_error` reason via
-                // `apply_observation`'s `Terminal` arm.
                 Ok(Some(synthetic))
             }
         }
@@ -1151,21 +1797,23 @@ impl LiveAdapterHost {
     ///
     /// This is the heart of the projection contract (A1–A6, A10, A14):
     /// classify → dispatch → return a typed [`ObservationOutcome`] describing
-    /// what was applied. Status updates are always written to host-tracked
-    /// channel state. Transcript / tool / interrupt routing requires the
-    /// host to be configured with the relevant injected seams.
+    /// what was applied. Non-terminal status updates must be committed through
+    /// generated status authority before this method is called; terminal
+    /// status/error observations require the generated close authority path to
+    /// commit first. Transcript / tool / interrupt routing requires the host
+    /// to be configured with the relevant injected seams.
     pub async fn apply_observation(
         &self,
         channel_id: &LiveChannelId,
         observation: &LiveAdapterObservation,
     ) -> Result<ObservationOutcome, LiveAdapterHostError> {
-        let routing = Self::classify_observation(observation);
-
-        // Always reflect status updates first so other readers see fresh
-        // status even if the projection sink is not wired yet.
-        if let ObservationRouting::UpdateStatus(ref status) = routing {
-            self.apply_status_update(channel_id, status.clone()).await?;
+        if Self::observation_requires_generated_close(observation)
+            && !self.generated_close_has_committed(channel_id).await?
+        {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
         }
+
+        let routing = Self::classify_observation(observation);
 
         let session_id = self.channel_session(channel_id).await?;
 
@@ -1368,16 +2016,6 @@ impl LiveAdapterHost {
                 ObservationRouting::TerminalError,
                 LiveAdapterObservation::Error { code, message },
             ) => {
-                // A10: terminalize host channel state alongside the
-                // session-level signal so subsequent `live/status` reflects
-                // truth and the channel is reapable.
-                {
-                    let mut inner = self.inner.lock().await;
-                    if let Some(channel) = inner.channels.get_mut(channel_id) {
-                        channel.status = LiveAdapterStatus::Closed;
-                        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-                    }
-                }
                 self.projection_sink
                     .signal_terminal_error(&session_id, code.clone(), message)
                     .await?;
@@ -1542,28 +2180,41 @@ impl LiveAdapterHost {
     /// The synthetic observation is queued on a per-channel one-shot slot
     /// that [`Self::next_observation_raw`] inspects before polling the
     /// adapter. The next read by the WS pump returns the synthetic Error,
-    /// which the pump forwards to the client and routes through
-    /// [`Self::apply_observation`] — yielding
-    /// [`ObservationOutcome::Terminal`] and a typed `terminal:<slug>` close
-    /// frame (slug derived from the serde tag, e.g. `config_rejected`).
+    /// which the pump routes through generated close authority before
+    /// [`Self::apply_observation`] can yield [`ObservationOutcome::Terminal`].
     ///
     /// Use this when the runtime decides a channel must die for a typed
     /// reason that the provider adapter never produced (e.g. model swap on
     /// `config/patch`, where the OpenAI realtime adapter cannot rebind the
-    /// model in-place). Without this seam clients only see a TCP close
-    /// indistinguishable from a network drop.
+    /// model in-place). Without this seam the host can lose the typed terminal
+    /// cause before generated close authority records terminality.
     ///
     /// `message` defaults from the typed code: `ConfigRejected { reason }`
     /// uses `reason` directly, other variants fall back to the serde tag.
-    /// The pending obs is enqueued FIRST, then `close_channel` is called —
-    /// this is safe because `next_observation_raw` checks the pending slot
-    /// before honoring `retire_at`, so the WS pump still sees the typed
-    /// signal even after the adapter has been released.
-    pub async fn signal_terminal_error(
+    /// The pending obs is enqueued FIRST, then a close observation is reserved
+    /// for generated close authority. Callers commit host close cleanup only
+    /// after that authority accepts the observation.
+    #[cfg(test)]
+    pub(crate) async fn signal_terminal_error(
         &self,
         channel_id: &LiveChannelId,
         code: LiveAdapterErrorCode,
     ) -> Result<(), LiveAdapterHostError> {
+        let observation = self
+            .signal_terminal_error_observed(channel_id, code)
+            .await?;
+        let authority = self
+            .close_commit_authority_from_generated_test_machine(&observation)
+            .await?;
+        self.commit_channel_close_observation(&observation, &authority)
+            .await
+    }
+
+    pub async fn signal_terminal_error_observed(
+        &self,
+        channel_id: &LiveChannelId,
+        code: LiveAdapterErrorCode,
+    ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
         let message = match &code {
             // R5-2: `reason` is a typed `LiveConfigRejectionReason`; render
             // via `Display` (which preserves the human-readable swap/text
@@ -1590,8 +2241,8 @@ impl LiveAdapterHost {
         //    synthetic onto the live observation stream — this is what
         //    actually unsticks an awaiting WS pump on a real adapter.
         //
-        // Order matters: stage FIRST, inject SECOND, close THIRD. If
-        // injection fails (adapter already torn down), the fallback in
+        // Order matters: stage FIRST, inject SECOND, reserve close evidence
+        // THIRD. If injection fails (adapter already torn down), the fallback in
         // `next_observation_raw`'s pending check still surfaces the
         // typed event.
         let adapter = {
@@ -1609,27 +2260,51 @@ impl LiveAdapterHost {
             // covers that case.
             let _ = adapter.inject_observation(synthetic).await;
         }
-        // Close the adapter so any in-flight provider activity is
-        // released. The synthetic observation has already been pushed
-        // onto the control channel (or staged in pending_synthetic_obs)
-        // so it surfaces ahead of the close-driven end-of-stream.
-        self.close_channel(channel_id).await
+        self.reserve_channel_close_observation(channel_id).await
     }
 
-    pub async fn close_channel(
+    pub async fn reserve_channel_close_observation(
         &self,
         channel_id: &LiveChannelId,
+    ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
+        let mut inner = self.inner.lock().await;
+        Self::reap_retired_locked(&mut inner);
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.close_observation_sequence = channel.close_observation_sequence.saturating_add(1);
+        LiveChannelCloseObservation::from_host_close_observation(
+            channel_id.as_str().to_owned(),
+            channel.close_observation_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    pub async fn commit_channel_close_observation(
+        &self,
+        observation: &LiveChannelCloseObservation,
+        authority: &LiveChannelCloseCommitAuthority,
     ) -> Result<(), LiveAdapterHostError> {
+        authority.consume_once()?;
+        if authority.channel_id() != observation.channel_id()
+            || authority.close_sequence() != observation.close_sequence()
+        {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
         // G42: keep the channel reachable for `live/status` until the TTL
         // elapses. We unbind the adapter (releasing transport resources) and
         // mark the channel as `Closed`, but leave the entry in `channels`
-        // so post-close reads can report the terminal status.
+        // so post-close reads can report the terminal status. This commit is
+        // called only after generated close authority accepts the typed close
+        // observation.
+        let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
         let adapter = {
             let mut inner = self.inner.lock().await;
             Self::reap_retired_locked(&mut inner);
             let channel = inner
                 .channels
-                .get_mut(channel_id)
+                .get_mut(&channel_id)
                 .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
             let adapter = channel.adapter.take();
             channel.status = LiveAdapterStatus::Closed;
@@ -1642,7 +2317,127 @@ impl LiveAdapterHost {
         Ok(())
     }
 
-    pub async fn channel_status(
+    #[cfg(test)]
+    pub(crate) async fn close_commit_authority_from_generated_test_machine(
+        &self,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<LiveChannelCloseCommitAuthority, LiveAdapterHostError> {
+        let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
+        let session_id = self.channel_session(&channel_id).await?;
+        Ok(
+            LiveChannelCloseCommitAuthority::from_generated_test_machine(
+                &session_id,
+                &channel_id,
+                observation.close_sequence(),
+            ),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn close_channel_observed_with_generated_test_machine_authority(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
+        let observation = self.reserve_channel_close_observation(channel_id).await?;
+        let authority = self
+            .close_commit_authority_from_generated_test_machine(&observation)
+            .await?;
+        self.commit_channel_close_observation(&observation, &authority)
+            .await?;
+        Ok(observation)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn close_channel_with_generated_test_machine_authority(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveAdapterHostError> {
+        self.close_channel_observed_with_generated_test_machine_authority(channel_id)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn status_commit_authority_from_generated_test_machine(
+        &self,
+        observation: &LiveChannelStatusObservation,
+    ) -> Result<LiveChannelStatusCommitAuthority, LiveAdapterHostError> {
+        let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
+        let session_id = self.channel_session(&channel_id).await?;
+        let channel_id_string = channel_id.as_str().to_owned();
+        let (status, degradation_reason, degradation_detail) =
+            generated_test_live_channel_status(observation.status());
+        let mut authority =
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(
+                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal::Initialize,
+            )
+            .expect("initialize generated MeerkatMachine authority");
+        meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput::ResolveLiveOpenAdmission {
+                session_id: session_id.to_string(),
+                channel_id: channel_id_string.clone(),
+                llm_identity: generated_test_llm_identity(),
+            },
+        )
+        .expect("generated MeerkatMachine live-open admission");
+        let transition = meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
+            &mut authority,
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput::RecordLiveChannelStatus {
+                channel_id: channel_id_string.clone(),
+                status,
+                status_observation_sequence: observation.observation_sequence(),
+                degradation_reason,
+                degradation_detail: degradation_detail.clone(),
+            },
+        )
+        .expect("generated MeerkatMachine live-status result");
+        assert!(
+            transition.effects().iter().any(|effect| matches!(
+                effect,
+                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineEffect::LiveChannelStatusResolved {
+                    channel_id: effect_channel_id,
+                    status: effect_status,
+                    status_observation_sequence,
+                    ..
+                } if *effect_channel_id == channel_id_string
+                    && *effect_status == status
+                    && *status_observation_sequence == observation.observation_sequence()
+            )),
+            "generated live-status result effect"
+        );
+        Ok(LiveChannelStatusCommitAuthority::from_generated_parts(
+            channel_id_string,
+            observation.observation_sequence(),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn commit_status_with_generated_test_machine_authority(
+        &self,
+        channel_id: &LiveChannelId,
+        status: LiveAdapterStatus,
+    ) -> Result<LiveChannelStatusObservation, LiveAdapterHostError> {
+        let observation = self
+            .reserve_channel_status_observation(channel_id, status)
+            .await?;
+        let authority = self
+            .status_commit_authority_from_generated_test_machine(&observation)
+            .await?;
+        self.commit_channel_status_observation(&observation, &authority)
+            .await?;
+        Ok(observation)
+    }
+
+    /// Return the host's generated-committed adapter-status cache.
+    ///
+    /// Crate-internal transport cleanup and unit tests may inspect this cache
+    /// directly. Public surfaces must use [`Self::channel_status_observation`]
+    /// and submit the observation to generated MeerkatMachine authority before
+    /// projecting a result to callers.
+    pub(crate) async fn channel_status(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<LiveAdapterStatus, LiveAdapterHostError> {
@@ -1653,6 +2448,92 @@ impl LiveAdapterHost {
             .get(channel_id)
             .map(|ch| ch.status.clone())
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    pub async fn channel_status_observation(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<LiveChannelStatusObservation, LiveAdapterHostError> {
+        // This sequence is host-minted observation evidence only. Gaps from
+        // failed or abandoned generated submissions are non-semantic; the
+        // generated machine owns the accepted sequence it stores in
+        // `live_channel_status_observation_sequence_by_channel`.
+        let mut inner = self.inner.lock().await;
+        Self::reap_retired_locked(&mut inner);
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.status_observation_sequence = channel.status_observation_sequence.saturating_add(1);
+        LiveChannelStatusObservation::from_host_status_observation(
+            channel_id.as_str().to_owned(),
+            channel.status.clone(),
+            channel.status_observation_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    pub async fn reserve_channel_status_observation(
+        &self,
+        channel_id: &LiveChannelId,
+        status: LiveAdapterStatus,
+    ) -> Result<LiveChannelStatusObservation, LiveAdapterHostError> {
+        if status.is_terminal() {
+            return Err(LiveAdapterHostError::StatusNotAuthorized);
+        }
+        let mut inner = self.inner.lock().await;
+        Self::reap_retired_locked(&mut inner);
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        if channel.retire_at.is_some() {
+            return Err(LiveAdapterHostError::ChannelNotReady(
+                channel_id.clone(),
+                channel.status.clone(),
+            ));
+        }
+        // This sequence is host-minted observation evidence only. It does not
+        // become status truth unless generated MeerkatMachine authority accepts
+        // it and returns a commit handoff.
+        channel.status_observation_sequence = channel.status_observation_sequence.saturating_add(1);
+        LiveChannelStatusObservation::from_host_status_observation(
+            channel_id.as_str().to_owned(),
+            status,
+            channel.status_observation_sequence,
+        )
+        .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    pub async fn commit_channel_status_observation(
+        &self,
+        observation: &LiveChannelStatusObservation,
+        authority: &LiveChannelStatusCommitAuthority,
+    ) -> Result<(), LiveAdapterHostError> {
+        authority.consume_once()?;
+        if authority.channel_id() != observation.channel_id()
+            || authority.status_observation_sequence() != observation.observation_sequence()
+        {
+            return Err(LiveAdapterHostError::StatusNotAuthorized);
+        }
+        if observation.status().is_terminal() {
+            return Err(LiveAdapterHostError::StatusNotAuthorized);
+        }
+        let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
+        let mut inner = self.inner.lock().await;
+        Self::reap_retired_locked(&mut inner);
+        let channel = inner
+            .channels
+            .get_mut(&channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        if channel.retire_at.is_some() {
+            return Err(LiveAdapterHostError::ChannelNotReady(
+                channel_id,
+                channel.status.clone(),
+            ));
+        }
+        channel.status = observation.status().clone();
+        Ok(())
     }
 
     pub async fn channel_session(
@@ -1724,18 +2605,27 @@ impl LiveAdapterHost {
         }
     }
 
-    pub async fn apply_status_update(
+    fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
+        match observation {
+            LiveAdapterObservation::Error { .. } => true,
+            LiveAdapterObservation::StatusChanged { status } => status.is_terminal(),
+            _ => false,
+        }
+    }
+
+    /// Read-only transport projection of generated close cleanup.
+    ///
+    /// `Closed` can be written only by [`Self::commit_channel_close_observation`],
+    /// which consumes a generated close commit handoff. Transports use this to
+    /// avoid requesting a second close decision when a runtime path has already
+    /// committed terminality before the staged terminal observation is drained.
+    pub(crate) async fn generated_close_has_committed(
         &self,
         channel_id: &LiveChannelId,
-        status: LiveAdapterStatus,
-    ) -> Result<(), LiveAdapterHostError> {
-        let mut inner = self.inner.lock().await;
-        let channel = inner
-            .channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        channel.status = status;
-        Ok(())
+    ) -> Result<bool, LiveAdapterHostError> {
+        self.channel_status(channel_id)
+            .await
+            .map(|status| status.is_terminal())
     }
 
     pub async fn next_snapshot_version(
@@ -1754,14 +2644,13 @@ impl LiveAdapterHost {
     pub async fn active_channels(&self) -> Vec<LiveChannelId> {
         let mut inner = self.inner.lock().await;
         Self::reap_retired_locked(&mut inner);
-        // G7 (P2): exclude channels in their post-close TTL retention
-        // window. Retained-closed entries remain in `channels` so the
-        // reap path (G1) and post-close status reads (G42) keep working,
-        // but they no longer accept input — callers like
-        // `propagate_config_to_live_channels` and UI listings must not
-        // see them as active. `retire_at == Some(_)` is the canonical
-        // discriminator (already gated on in `open_channel` rebind and
-        // `attach_adapter`).
+        // Transport-resource view: exclude channels in their post-close TTL
+        // retention window. Retained-closed entries remain in `channels` so
+        // the reap path (G1) and post-close status reads (G42) keep working,
+        // but they no longer have an adapter handoff target. Public
+        // lifecycle/admission callers must still require generated live-open
+        // authority; this list is only the host's currently handoff-capable
+        // transport cache.
         inner
             .channels
             .iter()
@@ -1878,7 +2767,10 @@ mod tests {
         let recording = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&recording) as _);
         let session = test_session_id();
-        let ch = host.open_channel(session.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::UserTranscriptFinal {
             provider_item_id: Some("item-1".into()),
             previous_item_id: None,
@@ -1900,7 +2792,10 @@ mod tests {
         // at the call site rather than hidden in `Option<_>`.
         let noop_host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let session2 = test_session_id();
-        let ch2 = noop_host.open_channel(session2).await.unwrap();
+        let ch2 = noop_host
+            .open_channel_with_generated_test_machine_authority(session2)
+            .await
+            .unwrap();
         let outcome2 = noop_host.apply_observation(&ch2, &obs).await.unwrap();
         assert!(matches!(outcome2, ObservationOutcome::TranscriptAppended));
     }
@@ -1912,8 +2807,14 @@ mod tests {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let s1 = test_session_id();
         let s2 = test_session_id();
-        let ch1 = host.open_channel(s1).await.unwrap();
-        let ch2 = host.open_channel(s2).await.unwrap();
+        let ch1 = host
+            .open_channel_with_generated_test_machine_authority(s1)
+            .await
+            .unwrap();
+        let ch2 = host
+            .open_channel_with_generated_test_machine_authority(s2)
+            .await
+            .unwrap();
         assert_ne!(ch1, ch2);
     }
 
@@ -1923,8 +2824,14 @@ mod tests {
         // and collided across `rkat-rpc` restarts and across co-tenant host
         // instances. Channel ids must now be v4 UUIDs.
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch1 = host.open_channel(test_session_id()).await.unwrap();
-        let ch2 = host.open_channel(test_session_id()).await.unwrap();
+        let ch1 = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        let ch2 = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
 
         for ch in [&ch1, &ch2] {
             let s = ch.as_str();
@@ -1948,37 +2855,102 @@ mod tests {
     #[tokio::test]
     async fn open_channel_starts_in_opening_status() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Opening);
+    }
+
+    #[tokio::test]
+    async fn channel_status_observation_advances_per_channel() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+
+        let first = host.channel_status_observation(&ch).await.unwrap();
+        let second = host.channel_status_observation(&ch).await.unwrap();
+
+        assert_eq!(first.channel_id(), ch.as_str());
+        assert_eq!(first.status(), &LiveAdapterStatus::Opening);
+        assert_eq!(first.observation_sequence(), 1);
+        assert_eq!(second.observation_sequence(), 2);
     }
 
     #[tokio::test]
     async fn duplicate_session_binding_rejected() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let session_id = test_session_id();
-        let _ch = host.open_channel(session_id.clone()).await.unwrap();
-        let err = host.open_channel(session_id.clone()).await.unwrap_err();
+        let _ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        let err = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap_err();
         assert!(matches!(err, LiveAdapterHostError::SessionAlreadyBound(id) if id == session_id));
     }
 
     #[tokio::test]
     async fn close_channel_marks_closed_and_retains_for_status_reads() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
-        host.close_channel(&ch).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
         // G42: post-close status is `Closed`, not `ChannelNotFound`.
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Closed);
     }
 
     #[tokio::test]
+    async fn close_channel_observation_advances_per_channel() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+
+        let first = host
+            .close_channel_observed_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
+        let second = host
+            .close_channel_observed_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
+
+        assert_eq!(first.channel_id(), ch.as_str());
+        assert_eq!(first.close_sequence(), 1);
+        assert_eq!(second.close_sequence(), 2);
+        assert_eq!(
+            host.channel_status(&ch).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
+    }
+
+    #[tokio::test]
     async fn close_channel_allows_rebinding_same_session() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
-        host.close_channel(&ch).await.unwrap();
-        let ch2 = host.open_channel(session_id).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
+        let ch2 = host
+            .open_channel_with_generated_test_machine_authority(session_id)
+            .await
+            .unwrap();
         assert_ne!(ch, ch2);
     }
 
@@ -1992,9 +2964,17 @@ mod tests {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let session_id = test_session_id();
 
-        let ch_a = host.open_channel(session_id.clone()).await.unwrap();
-        host.close_channel(&ch_a).await.unwrap();
-        let ch_b = host.open_channel(session_id.clone()).await.unwrap();
+        let ch_a = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&ch_a)
+            .await
+            .unwrap();
+        let ch_b = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         assert_ne!(ch_a, ch_b);
 
         // Force-expire A's retire window so the reaper drops A on the next
@@ -2031,7 +3011,10 @@ mod tests {
         // A subsequent open for the same session must be rejected (B is
         // still bound) — the pre-fix bug allowed it to succeed and create
         // a duplicate active channel.
-        let err = host.open_channel(session_id.clone()).await.unwrap_err();
+        let err = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, LiveAdapterHostError::SessionAlreadyBound(id) if id == session_id),
             "after reap, third open for session must still see B as bound"
@@ -2053,8 +3036,14 @@ mod tests {
         let s1 = test_session_id();
         let s2 = test_session_id();
 
-        let live = host.open_channel(s1).await.unwrap();
-        let closing = host.open_channel(s2).await.unwrap();
+        let live = host
+            .open_channel_with_generated_test_machine_authority(s1)
+            .await
+            .unwrap();
+        let closing = host
+            .open_channel_with_generated_test_machine_authority(s2)
+            .await
+            .unwrap();
 
         // Both freshly opened — both should be active.
         let active_pre = host.active_channels().await;
@@ -2065,7 +3054,9 @@ mod tests {
         // Close one. It enters the TTL retention window
         // (`retire_at = Some(now + CLOSED_CHANNEL_TTL)`); the reaper
         // does NOT drop it yet.
-        host.close_channel(&closing).await.unwrap();
+        host.close_channel_with_generated_test_machine_authority(&closing)
+            .await
+            .unwrap();
 
         // G7: the retained-closed channel must NOT appear in
         // `active_channels()`, even though it's still in the underlying
@@ -2107,7 +3098,10 @@ mod tests {
     async fn channel_session_returns_bound_session() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         assert_eq!(host.channel_session(&ch).await.unwrap(), session_id);
     }
 
@@ -2115,12 +3109,15 @@ mod tests {
     /// observation and close the underlying adapter. The pending obs must
     /// be readable through `next_observation_raw` even after the channel
     /// has transitioned to `Closed` (the slot lives on `ChannelState`, not
-    /// on the adapter), so the WS pump can forward it to the client and
-    /// derive a typed `terminal:config_rejected` close-frame reason.
+    /// on the adapter), so transports can observe it after generated close
+    /// authority accepts the channel close.
     #[tokio::test]
     async fn signal_terminal_error_enqueues_synthetic_error_obs_and_closes_channel() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
             .await
             .unwrap();
@@ -2168,13 +3165,15 @@ mod tests {
 
     /// CC1: applying the synthetic `Error` observation through
     /// `apply_observation` must produce `ObservationOutcome::Terminal` with
-    /// the same `ConfigRejected` code, so the WS pump's `terminal:<slug>`
-    /// close-frame derivation in `transport.rs` picks up the typed reason
-    /// (slug `config_rejected`).
+    /// the same `ConfigRejected` code after generated close authority has
+    /// accepted the channel close.
     #[tokio::test]
     async fn synthetic_terminal_error_routes_through_apply_observation_to_terminal_outcome() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
             .await
             .unwrap();
@@ -2218,7 +3217,10 @@ mod tests {
     #[tokio::test]
     async fn signal_terminal_error_delivers_synthetic_error_before_close_signal() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
             .await
             .unwrap();
@@ -2415,10 +3417,13 @@ mod tests {
     // -- Status tracking --
 
     #[tokio::test]
-    async fn apply_status_update_changes_channel_status() {
+    async fn commit_status_with_generated_authority_changes_channel_status() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
         assert_eq!(
@@ -2427,12 +3432,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn terminal_status_update_requires_generated_close_authority() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        let err = host
+            .commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Closed)
+            .await
+            .expect_err("terminal status update must not bypass generated close authority");
+        assert!(matches!(err, LiveAdapterHostError::StatusNotAuthorized));
+
+        let obs = LiveAdapterObservation::StatusChanged {
+            status: LiveAdapterStatus::Closed,
+        };
+        let err = host
+            .apply_observation(&ch, &obs)
+            .await
+            .expect_err("closed observation must not bypass generated close authority");
+        assert!(matches!(err, LiveAdapterHostError::CloseNotAuthorized));
+
+        host.close_channel_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
+        let outcome = host.apply_observation(&ch, &obs).await.unwrap();
+        assert_eq!(
+            outcome,
+            ObservationOutcome::StatusUpdated(LiveAdapterStatus::Closed)
+        );
+    }
+
     // -- Snapshot versioning --
 
     #[tokio::test]
     async fn snapshot_version_increments_monotonically() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let v1 = host.next_snapshot_version(&ch).await.unwrap();
         let v2 = host.next_snapshot_version(&ch).await.unwrap();
         assert_eq!(v1, 1);
@@ -2444,8 +3484,14 @@ mod tests {
     #[tokio::test]
     async fn active_channels_lists_open_channels() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch1 = host.open_channel(test_session_id()).await.unwrap();
-        let ch2 = host.open_channel(test_session_id()).await.unwrap();
+        let ch1 = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        let ch2 = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let active = host.active_channels().await;
         assert_eq!(active.len(), 2);
         assert!(active.contains(&ch1));
@@ -2457,7 +3503,10 @@ mod tests {
     #[tokio::test]
     async fn send_input_without_adapter_returns_error() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let err = host
             .send_input(&ch, LiveInputChunk::Text { text: "hi".into() })
             .await
@@ -2468,11 +3517,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_command_rejects_refresh_without_typed_acceptance_path() {
+        let session_id = test_session_id();
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        let snapshot = meerkat_core::live_adapter::LiveProjectionSnapshot {
+            session_id,
+            snapshot_version: 1,
+            seed_messages: vec![],
+            visible_tools: vec![],
+            system_prompt: None,
+            model_id: "model-a".into(),
+            provider_id: "provider-a".into(),
+            audio_config: None,
+            runtime_system_context: vec![],
+        };
+
+        let err = host
+            .send_command(&ch, LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LiveAdapterHostError::UnsupportedCommand(_)));
+    }
+
+    #[tokio::test]
     async fn attach_adapter_does_not_assert_ready() {
         // F32: attach leaves status Opening; only `Ready` observation
         // promotes the channel.
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         assert_eq!(
             host.channel_status(&ch).await.unwrap(),
             LiveAdapterStatus::Opening
@@ -2492,7 +3572,10 @@ mod tests {
     #[tokio::test]
     async fn send_input_rejected_when_not_ready() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
             .await
             .unwrap();
@@ -2512,11 +3595,14 @@ mod tests {
     #[tokio::test]
     async fn send_input_accepts_when_ready() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
         host.send_input(&ch, LiveInputChunk::Text { text: "hi".into() })
@@ -2527,19 +3613,19 @@ mod tests {
     // -- E29: typed adapter error --
 
     #[tokio::test]
-    async fn adapter_pump_error_terminalizes_channel_status() {
-        // R5-8 (was F34): when the pump errors, the host fully retires
-        // the channel — sets status=Closed, schedules retire_at, drops
-        // the adapter Arc — and surfaces a synthetic typed
-        // `LiveAdapterObservation::Error` to the consumer instead of an
-        // `AdapterError` propagation. This lets the WS pump close with
-        // a typed reason and reuses R5-3's synthetic-error seam.
+    async fn adapter_pump_error_routes_close_through_generated_authority() {
+        // Adapter pump failures surface a synthetic terminal observation.
+        // The host does not retire the channel until the transport routes
+        // that terminal observation through generated close authority.
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(ErroringAdapter))
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
         let obs = host
@@ -2547,9 +3633,9 @@ mod tests {
             .await
             .unwrap()
             .expect("synthetic Error obs surfaces on adapter Err");
-        match obs {
+        match &obs {
             LiveAdapterObservation::Error { code, message } => {
-                assert_eq!(code, LiveAdapterErrorCode::ProviderError);
+                assert_eq!(*code, LiveAdapterErrorCode::ProviderError);
                 assert!(
                     message.contains("adapter read failure"),
                     "synthetic message must explain origin; got `{message}`"
@@ -2557,9 +3643,41 @@ mod tests {
             }
             other => unreachable!("expected synthetic Error, got {other:?}"),
         }
-        // Channel status now reflects the terminal pump failure AND
-        // retire_at is set so a future open_channel for the same
-        // session can succeed once the TTL elapses.
+        let err = host
+            .apply_observation(&ch, &obs)
+            .await
+            .expect_err("terminal observation must wait for generated close authority");
+        assert!(matches!(err, LiveAdapterHostError::CloseNotAuthorized));
+
+        // Terminal observation routing waits for generated close authority.
+        let status = host.channel_status(&ch).await.unwrap();
+        assert_eq!(status, LiveAdapterStatus::Ready);
+        {
+            let inner = host.inner.lock().await;
+            let channel = inner
+                .channels
+                .get(&ch)
+                .expect("channel remains present before close authority");
+            assert!(
+                channel.retire_at.is_none(),
+                "adapter Err must not set retire_at before generated close authority"
+            );
+            assert!(
+                channel.adapter.is_some(),
+                "adapter Err must not drop the adapter before generated close authority"
+            );
+        }
+
+        host.close_channel_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
+        let outcome = host.apply_observation(&ch, &obs).await.unwrap();
+        assert_eq!(
+            outcome,
+            ObservationOutcome::Terminal {
+                code: LiveAdapterErrorCode::ProviderError
+            }
+        );
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Closed);
         {
@@ -2570,11 +3688,11 @@ mod tests {
                 .expect("channel preserved for live/status until TTL elapses");
             assert!(
                 channel.retire_at.is_some(),
-                "R5-8: adapter Err must set retire_at"
+                "generated close authority must set retire_at"
             );
             assert!(
                 channel.adapter.is_none(),
-                "R5-8: adapter Err must drop the adapter Arc"
+                "generated close authority must drop the adapter Arc"
             );
         }
     }
@@ -2588,11 +3706,14 @@ mod tests {
     #[tokio::test]
     async fn command_rejected_routes_non_terminally_and_preserves_channel() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -2647,11 +3768,14 @@ mod tests {
     async fn adapter_err_releases_session_for_rebind() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let session_id = test_session_id();
-        let ch1 = host.open_channel(session_id.clone()).await.unwrap();
+        let ch1 = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         host.attach_adapter(&ch1, Arc::new(ErroringAdapter))
             .await
             .unwrap();
-        host.apply_status_update(&ch1, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch1, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -2669,7 +3793,7 @@ mod tests {
         }
 
         let ch2 = host
-            .open_channel(session_id.clone())
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
             .await
             .expect("rebind for same session must succeed once previous channel is retired");
         assert_ne!(ch1, ch2);
@@ -2682,7 +3806,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::UserTranscriptFinal {
             provider_item_id: Some("item_1".into()),
             previous_item_id: None,
@@ -2705,7 +3832,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::UserTranscriptFinal {
             provider_item_id: Some("item_1".into()),
             previous_item_id: Some("item_0".into()),
@@ -2729,7 +3859,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::AssistantTextDelta {
             provider_item_id: None,
             previous_item_id: None,
@@ -2755,7 +3888,10 @@ mod tests {
         // including `response_id` and `delta_id` — must reach the sink.
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::AssistantTextDelta {
             provider_item_id: Some("item_42".into()),
             previous_item_id: Some("item_41".into()),
@@ -2779,7 +3915,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id: "resp_1".into(),
             previous_item_id: None,
@@ -2805,7 +3944,10 @@ mod tests {
         // applicable to a final.
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id: "item_final".into(),
             previous_item_id: Some("item_prev".into()),
@@ -2829,7 +3971,10 @@ mod tests {
     async fn turn_completed_observation_signals_sink() {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::TurnCompleted {
             response_id: None,
             stop_reason: StopReason::EndTurn,
@@ -2851,7 +3996,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::AssistantTranscriptDelta {
             provider_item_id: Some("item_t".into()),
             previous_item_id: None,
@@ -2889,7 +4037,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
 
         let event = RealtimeTranscriptEvent::ItemObserved {
             item_id: "item_realtime_1".into(),
@@ -2946,7 +4097,10 @@ mod tests {
         let sink: Arc<dyn LiveProjectionSink> = Arc::new(NoOpProjectionSink);
         let host = LiveAdapterHost::new(Arc::clone(&sink));
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
 
         let event = RealtimeTranscriptEvent::ItemObserved {
             item_id: "item_noop".into(),
@@ -2982,7 +4136,10 @@ mod tests {
         // shape: stop_reason + usage, not item identity.)
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let event = RealtimeTranscriptEvent::AssistantTurnCompleted {
             response_id: "resp_complete".into(),
             stop_reason: StopReason::EndTurn,
@@ -3007,11 +4164,14 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
             .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
@@ -3045,7 +4205,10 @@ mod tests {
     async fn tool_call_skipped_when_no_dispatcher_wired() {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
             provider_call_id: "call_99".into(),
             tool_name: "calculator".into(),
@@ -3078,16 +4241,19 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter::default());
         // No dispatcher installed.
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
         // Status must accept commands so the adapter command path is exercised
         // (otherwise `send_command` rejects with ChannelNotReady — but the
         // helper used for SubmitToolError uses `require_ready=false` since the
-        // command is allowed when not Ready; verifying via apply_status_update
-        // anyway to mirror the production attach sequence).
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        // command is allowed when not Ready; verifying via the generated status
+        // commit helper anyway to mirror the production attach sequence).
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -3141,11 +4307,14 @@ mod tests {
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -3195,11 +4364,14 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
             .with_tool_dispatcher(Arc::clone(&first) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -3222,11 +4394,14 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
             .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
@@ -3322,11 +4497,14 @@ mod tests {
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
             .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
             .with_tool_timeout(timeout);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -3400,11 +4578,14 @@ mod tests {
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
             .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
             .with_tool_timeout(timeout);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
 
@@ -3444,11 +4625,14 @@ mod tests {
         let adapter = Arc::new(RecordingAdapter::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _)
             .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
-        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
         host.attach_adapter(&ch, Arc::clone(&adapter) as _)
             .await
             .unwrap();
-        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
             .await
             .unwrap();
         let obs = LiveAdapterObservation::ToolCallRequested {
@@ -3470,7 +4654,10 @@ mod tests {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let outcome = host
             .apply_observation(
                 &ch,
@@ -3493,15 +4680,35 @@ mod tests {
     // -- A10: terminal error projection --
 
     #[tokio::test]
-    async fn terminal_error_observation_marks_channel_closed_and_signals_sink() {
+    async fn terminal_error_observation_signals_sink_without_closing_host_directly() {
         let sink = Arc::new(RecordingProjectionSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
         let session_id = test_session_id();
-        let ch = host.open_channel(session_id.clone()).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
         let obs = LiveAdapterObservation::Error {
             code: LiveAdapterErrorCode::ConnectionLost,
             message: "ws closed unexpectedly".into(),
         };
+        let err = host
+            .apply_observation(&ch, &obs)
+            .await
+            .expect_err("terminal error must wait for generated close authority");
+        assert!(matches!(err, LiveAdapterHostError::CloseNotAuthorized));
+        assert_eq!(
+            host.channel_status(&ch).await.unwrap(),
+            LiveAdapterStatus::Opening
+        );
+        assert_eq!(sink.terminal_errors.lock().unwrap().len(), 0);
+
+        let close = host
+            .close_channel_observed_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
+        assert_eq!(close.channel_id(), ch.as_str());
+
         let outcome = host.apply_observation(&ch, &obs).await.unwrap();
         match outcome {
             ObservationOutcome::Terminal {
@@ -3509,7 +4716,6 @@ mod tests {
             } => {}
             other => panic!("expected Terminal/ConnectionLost, got {other:?}"),
         }
-        // Channel reflects terminal status.
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Closed);
         // Sink was signalled.
@@ -3531,10 +4737,58 @@ mod tests {
         // block re-binding the same session.
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
         let s = test_session_id();
-        let ch = host.open_channel(s.clone()).await.unwrap();
-        host.close_channel(&ch).await.unwrap();
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(s.clone())
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&ch)
+            .await
+            .unwrap();
         // Closed channel still in retention map; rebind must succeed.
-        host.open_channel(s).await.unwrap();
+        host.open_channel_with_generated_test_machine_authority(s)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_send_input_does_not_mint_command_acceptance_evidence() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
+            .await
+            .unwrap();
+        host.commit_status_with_generated_test_machine_authority(&ch, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+
+        host.send_input(
+            &ch,
+            LiveInputChunk::Text {
+                text: "hello".into(),
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let inner = host.inner.lock().await;
+            let channel = inner.channels.get(&ch).unwrap();
+            assert_eq!(channel.command_acceptance_sequence, 0);
+        }
+
+        let acceptance = host
+            .send_input_observed(
+                &ch,
+                LiveInputChunk::Text {
+                    text: "hello".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(acceptance.kind(), LiveCommandAcceptanceKind::SendInput);
+        assert_eq!(acceptance.acceptance_sequence(), 1);
     }
 
     // ---------------------------------------------------------------------

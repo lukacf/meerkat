@@ -31,7 +31,8 @@
 
 use meerkat_mob::machines::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation, MobId, MobMachineAuthority,
-    MobMachineEffect, MobMachineInput, MobMachineMutator, SessionId,
+    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, SessionId,
+    SpawnPolicyRuntimeMode,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -46,6 +47,32 @@ fn session_id(label: &str) -> SessionId {
     SessionId(label.to_string())
 }
 
+fn profile_material_digest(identity_name: &str, generation: u64) -> String {
+    format!("test-profile-digest:{identity_name}:{generation}")
+}
+
+fn authorize_spawn_profile(
+    authority: &mut MobMachineAuthority,
+    identity_name: &str,
+    generation: u64,
+) {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::AuthorizeSpawnProfile {
+            agent_identity: identity(identity_name),
+            profile_name: "test".to_string(),
+            model: "test-model".to_string(),
+            profile_material_digest: profile_material_digest(identity_name, generation),
+            tool_config_digest: "test-tool-config-digest".to_string(),
+            skills_digest: "test-skills-digest".to_string(),
+            provider_params_digest: None,
+            output_schema_digest: None,
+            external_addressable: false,
+        },
+    )
+    .expect("spawn profile material must be authorized before Spawn");
+}
+
 fn spawn_input(
     identity_name: &str,
     generation: u64,
@@ -57,8 +84,10 @@ fn spawn_input(
         agent_runtime_id: runtime_id(identity_name, generation),
         fence_token: FenceToken(generation),
         generation: Generation(generation),
+        profile_material_digest: profile_material_digest(identity_name, generation),
         external_addressable: false,
-        bridge_session_id: session_id(bridge_sid),
+        runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+        bridge_session_id: Some(session_id(bridge_sid)),
         replacing,
     }
 }
@@ -68,13 +97,39 @@ fn retire_input(
     generation: u64,
     releasing: Option<SessionId>,
 ) -> MobMachineInput {
-    let session_id_for_route = releasing.clone().unwrap_or_else(SessionId::default);
     MobMachineInput::Retire {
         mob_id: MobId("test-mob".to_string()),
         agent_runtime_id: runtime_id(identity_name, generation),
         agent_identity: identity(identity_name),
+        generation: Generation(generation),
+        session_id: releasing.clone(),
         releasing,
-        session_id: session_id_for_route,
+    }
+}
+
+fn recover_roster_member_signal(identity_name: &str, generation: u64) -> MobMachineSignal {
+    MobMachineSignal::RecoverRosterMember {
+        agent_identity: identity(identity_name),
+        agent_runtime_id: runtime_id(identity_name, generation),
+        fence_token: FenceToken(generation),
+        generation: Generation(generation),
+        profile_name: "worker".to_string(),
+        runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+        external_addressable: false,
+    }
+}
+
+fn recover_member_session_binding_signal(
+    identity_name: &str,
+    generation: u64,
+    bridge_sid: &str,
+    replacing: Option<SessionId>,
+) -> MobMachineSignal {
+    MobMachineSignal::RecoverMemberSessionBinding {
+        agent_identity: identity(identity_name),
+        agent_runtime_id: runtime_id(identity_name, generation),
+        bridge_session_id: session_id(bridge_sid),
+        replacing,
     }
 }
 
@@ -83,7 +138,7 @@ fn retire_input(
 fn find_binding_changed(
     transition: &meerkat_mob::machines::mob_machine::MobMachineTransition,
 ) -> Option<(u64, AgentIdentity, Option<SessionId>, Option<SessionId>)> {
-    transition.effects.iter().find_map(|e| match e {
+    transition.effects().iter().find_map(|e| match e {
         MobMachineEffect::MemberSessionBindingChanged {
             epoch,
             agent_identity,
@@ -100,15 +155,103 @@ fn find_binding_changed(
 }
 
 #[test]
+fn recovery_member_session_binding_is_generated_authority_owned() {
+    let mut authority = MobMachineAuthority::new();
+
+    let rejected = authority.apply_signal(recover_member_session_binding_signal(
+        "alpha",
+        1,
+        "bridge-a-gen1",
+        None,
+    ));
+    assert!(
+        rejected.is_err(),
+        "recovery binding must fail until the member identity/runtime has been recovered",
+    );
+
+    authority
+        .apply_signal(recover_roster_member_signal("alpha", 1))
+        .expect("roster member recovery must be accepted");
+    let transition = authority
+        .apply_signal(recover_member_session_binding_signal(
+            "alpha",
+            1,
+            "bridge-a-gen1",
+            None,
+        ))
+        .expect("fresh recovered binding must be accepted");
+    assert_eq!(
+        find_binding_changed(&transition),
+        Some((
+            authority.state().topology_epoch,
+            identity("alpha"),
+            None,
+            Some(session_id("bridge-a-gen1")),
+        )),
+    );
+
+    let idempotent = authority
+        .apply_signal(recover_member_session_binding_signal(
+            "alpha",
+            1,
+            "bridge-a-gen1",
+            Some(session_id("bridge-a-gen1")),
+        ))
+        .expect("same recovered binding must be idempotent");
+    assert!(
+        find_binding_changed(&idempotent).is_none(),
+        "idempotent recovered binding must not emit a topology change",
+    );
+
+    let rotated = authority
+        .apply_signal(recover_member_session_binding_signal(
+            "alpha",
+            1,
+            "bridge-a-gen2",
+            Some(session_id("bridge-a-gen1")),
+        ))
+        .expect("recovered replacement must be accepted when replacing matches machine state");
+    assert_eq!(
+        find_binding_changed(&rotated),
+        Some((
+            authority.state().topology_epoch,
+            identity("alpha"),
+            Some(session_id("bridge-a-gen1")),
+            Some(session_id("bridge-a-gen2")),
+        )),
+    );
+
+    let wrong_replacing = authority.apply_signal(recover_member_session_binding_signal(
+        "alpha",
+        1,
+        "bridge-a-gen3",
+        Some(session_id("bridge-a-gen1")),
+    ));
+    assert!(
+        wrong_replacing.is_err(),
+        "recovered replacement must be rejected when replacing does not match machine state",
+    );
+    assert_eq!(
+        authority
+            .state()
+            .member_session_bindings
+            .get(&identity("alpha")),
+        Some(&session_id("bridge-a-gen2")),
+        "rejected recovery replacement must not mutate the binding map",
+    );
+}
+
+#[test]
 fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     let transition = MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
     )
     .expect("fresh spawn must be accepted");
 
-    let bindings = &authority.state.member_session_bindings;
+    let bindings = &authority.state().member_session_bindings;
     assert_eq!(
         bindings.get(&identity("alpha")),
         Some(&session_id("bridge-a-gen1")),
@@ -119,7 +262,7 @@ fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
     assert_eq!(
         changed,
         Some((
-            authority.state.topology_epoch,
+            authority.state().topology_epoch,
             identity("alpha"),
             None,
             Some(session_id("bridge-a-gen1")),
@@ -132,6 +275,7 @@ fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
 fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
     let mut authority = MobMachineAuthority::new();
     // Initial spawn — binds alpha to bridge-a-gen1.
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -151,10 +295,11 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
     // respawn flow will produce once the realtime observer lands (the
     // observer deduplicates the rotation window).
     let prior = authority
-        .state
+        .state()
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
+    authorize_spawn_profile(&mut authority, "alpha", 2);
     let transition = MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 2, "bridge-a-gen2", prior),
@@ -163,7 +308,7 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
 
     assert_eq!(
         authority
-            .state
+            .state()
             .member_session_bindings
             .get(&identity("alpha")),
         Some(&session_id("bridge-a-gen2")),
@@ -174,7 +319,7 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
     assert_eq!(
         changed,
         Some((
-            authority.state.topology_epoch,
+            authority.state().topology_epoch,
             identity("alpha"),
             Some(session_id("bridge-a-gen1")),
             Some(session_id("bridge-a-gen2")),
@@ -186,6 +331,7 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
 #[test]
 fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -193,7 +339,7 @@ fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     .expect("spawn must be accepted");
 
     let releasing = authority
-        .state
+        .state()
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
@@ -202,7 +348,7 @@ fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
 
     assert!(
         !authority
-            .state
+            .state()
             .member_session_bindings
             .contains_key(&identity("alpha")),
         "retire clears the identity from the binding map",
@@ -212,7 +358,7 @@ fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     assert_eq!(
         changed,
         Some((
-            authority.state.topology_epoch,
+            authority.state().topology_epoch,
             identity("alpha"),
             Some(session_id("bridge-a-gen1")),
             None,
@@ -229,6 +375,7 @@ fn spawn_with_wrong_replacing_witness_is_rejected() {
     // SpawnRunningReplacing requires the state's binding map to contain
     // the identity. Neither guard matches, so the transition is
     // rejected.
+    authorize_spawn_profile(&mut authority, "ghost", 1);
     let result = MobMachineMutator::apply(
         &mut authority,
         spawn_input("ghost", 1, "bridge-g-gen1", Some(session_id("fabricated"))),
@@ -239,7 +386,7 @@ fn spawn_with_wrong_replacing_witness_is_rejected() {
     );
     assert!(
         !authority
-            .state
+            .state()
             .member_session_bindings
             .contains_key(&identity("ghost")),
         "rejected Spawn must not mutate the binding map",
@@ -256,18 +403,34 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
     // atomic rotation (Some -> Some) `MemberSessionBindingChanged`.
     // No binding-change effect is emitted; the binding stays put.
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
     )
     .expect("spawn must be accepted");
 
-    let transition = MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, None))
-        .expect("Retire with releasing=None + binding present must route to PreservingBinding");
+    let session_id_for_route = authority
+        .state()
+        .member_session_bindings
+        .get(&identity("alpha"))
+        .cloned();
+    let transition = MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::Retire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_runtime_id: runtime_id("alpha", 1),
+            agent_identity: identity("alpha"),
+            generation: Generation(1),
+            releasing: None,
+            session_id: session_id_for_route,
+        },
+    )
+    .expect("Retire with releasing=None + binding present must route to PreservingBinding");
 
     assert_eq!(
         authority
-            .state
+            .state()
             .member_session_bindings
             .get(&identity("alpha")),
         Some(&session_id("bridge-a-gen1")),
@@ -282,6 +445,7 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
 #[test]
 fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -299,7 +463,7 @@ fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     );
     assert_eq!(
         authority
-            .state
+            .state()
             .member_session_bindings
             .get(&identity("alpha")),
         Some(&session_id("bridge-a-gen1")),
@@ -316,6 +480,7 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
     // identity for the mob even after retirement). So the subset
     // relation holds through the whole lifecycle.
     let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, "alpha", 1);
     MobMachineMutator::apply(
         &mut authority,
         spawn_input("alpha", 1, "bridge-a-gen1", None),
@@ -330,16 +495,16 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
             );
         }
     };
-    check_invariant(&authority.state);
+    check_invariant(authority.state());
 
     let releasing = authority
-        .state
+        .state()
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
     MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, releasing))
         .expect("retire must be accepted");
-    check_invariant(&authority.state);
+    check_invariant(authority.state());
 }
 
 // ==========================================================================
@@ -367,24 +532,25 @@ fn unwire_input(a: &str, b: &str) -> MobMachineInput {
 #[test]
 fn wire_members_inserts_edge_bumps_epoch_and_emits_wiring_graph_changed() {
     let mut authority = MobMachineAuthority::new();
-    assert_eq!(authority.state.topology_epoch, 0);
+    assert_eq!(authority.state().topology_epoch, 0);
 
     let transition = MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"))
         .expect("wire_members accepted");
 
     assert!(
         authority
-            .state
+            .state()
             .wiring_edges
             .contains(&WiringEdge::new(identity("alpha"), identity("beta"))),
         "wiring_edges must contain the new edge after WireMembers",
     );
     assert_eq!(
-        authority.state.topology_epoch, 1,
+        authority.state().topology_epoch,
+        1,
         "topology_epoch must increment by exactly 1 per wire mutation",
     );
 
-    let epoch_from_effect = transition.effects.iter().find_map(|e| match e {
+    let epoch_from_effect = transition.effects().iter().find_map(|e| match e {
         MobMachineEffect::WiringGraphChanged { epoch } => Some(*epoch),
         _ => None,
     });
@@ -396,20 +562,33 @@ fn wire_members_inserts_edge_bumps_epoch_and_emits_wiring_graph_changed() {
 }
 
 #[test]
-fn wire_members_rejects_duplicate_edge_without_bumping_epoch() {
+fn wire_members_idempotently_accepts_duplicate_edge_without_bumping_epoch() {
     let mut authority = MobMachineAuthority::new();
     MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"))
         .expect("first wire accepted");
-    assert_eq!(authority.state.topology_epoch, 1);
+    assert_eq!(authority.state().topology_epoch, 1);
 
-    let result = MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"));
+    let transition = MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"))
+        .expect("re-wiring a present edge is an idempotent no-op");
     assert!(
-        result.is_err(),
-        "re-wiring a present edge must be rejected by the guard",
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::WiringTrustRepairRequested { edge }
+                if edge == &WiringEdge::new(identity("alpha"), identity("beta"))
+        )),
+        "idempotent wire must emit generated repair authority for trust reconciliation",
+    );
+    assert!(
+        !transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, MobMachineEffect::WiringGraphChanged { .. })),
+        "idempotent wire must not emit a topology mutation effect",
     );
     assert_eq!(
-        authority.state.topology_epoch, 1,
-        "topology_epoch must not advance on a rejected transition",
+        authority.state().topology_epoch,
+        1,
+        "topology_epoch must not advance on an idempotent transition",
     );
 }
 
@@ -418,21 +597,21 @@ fn unwire_members_removes_edge_bumps_epoch_and_emits_wiring_graph_changed() {
     let mut authority = MobMachineAuthority::new();
     MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta"))
         .expect("initial wire accepted");
-    assert_eq!(authority.state.topology_epoch, 1);
+    assert_eq!(authority.state().topology_epoch, 1);
 
     let transition = MobMachineMutator::apply(&mut authority, unwire_input("alpha", "beta"))
         .expect("unwire_members accepted");
 
     assert!(
         !authority
-            .state
+            .state()
             .wiring_edges
             .contains(&WiringEdge::new(identity("alpha"), identity("beta"))),
         "wiring_edges must not contain the edge after UnwireMembers",
     );
-    assert_eq!(authority.state.topology_epoch, 2);
+    assert_eq!(authority.state().topology_epoch, 2);
 
-    let epoch_from_effect = transition.effects.iter().find_map(|e| match e {
+    let epoch_from_effect = transition.effects().iter().find_map(|e| match e {
         MobMachineEffect::WiringGraphChanged { epoch } => Some(*epoch),
         _ => None,
     });
@@ -440,25 +619,23 @@ fn unwire_members_removes_edge_bumps_epoch_and_emits_wiring_graph_changed() {
 }
 
 #[test]
-fn unwire_members_rejects_absent_edge_without_bumping_epoch() {
+fn unwire_members_idempotently_accepts_absent_edge_without_bumping_epoch() {
     let mut authority = MobMachineAuthority::new();
-    let result = MobMachineMutator::apply(&mut authority, unwire_input("alpha", "beta"));
-    assert!(
-        result.is_err(),
-        "unwiring an absent edge must be rejected by the guard",
-    );
-    assert_eq!(authority.state.topology_epoch, 0);
+    let transition = MobMachineMutator::apply(&mut authority, unwire_input("alpha", "beta"))
+        .expect("unwiring an absent edge is an idempotent no-op");
+    assert!(transition.effects().is_empty());
+    assert_eq!(authority.state().topology_epoch, 0);
 }
 
 #[test]
 fn topology_epoch_increments_monotonically_across_wire_mutations() {
     let mut authority = MobMachineAuthority::new();
-    let starting_epoch = authority.state.topology_epoch;
+    let starting_epoch = authority.state().topology_epoch;
 
     MobMachineMutator::apply(&mut authority, wire_input("alpha", "beta")).expect("wire accepted");
-    assert_eq!(authority.state.topology_epoch, starting_epoch + 1);
+    assert_eq!(authority.state().topology_epoch, starting_epoch + 1);
 
     MobMachineMutator::apply(&mut authority, unwire_input("alpha", "beta"))
         .expect("unwire accepted");
-    assert_eq!(authority.state.topology_epoch, starting_epoch + 2);
+    assert_eq!(authority.state().topology_epoch, starting_epoch + 2);
 }

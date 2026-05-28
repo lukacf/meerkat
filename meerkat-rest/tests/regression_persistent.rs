@@ -128,7 +128,7 @@ fn build_state(
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
-        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+        auth_lease: runtime_adapter.generated_auth_lease_handle(),
         provider_registry,
     }
 }

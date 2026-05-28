@@ -1376,6 +1376,7 @@ receiving side."""
 class BridgePeerWiringPayload:
     """Peer wiring command payload."""
     epoch: int
+    mob_peer_overlay: dict[str, Any]
     peer_spec: BridgePeerSpec
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
@@ -1461,10 +1462,8 @@ class PeerDirectoryEntry:
     meta: dict[str, Any]
     name: PeerName
     peer_id: PeerId
-    reachability: PeerReachability
     sendable_kinds: list[PeerSendability]
     source: PeerDirectorySource
-    last_unreachable_reason: Optional[PeerReachabilityReason] = None
 
 
 @dataclass
@@ -1852,18 +1851,16 @@ realtime adapter today)."""
 
 # Status of a `live/refresh` request relative to the adapter pump.
 #
-# R4-5 (P3): the refresh path is asynchronous — `LiveAdapterHost::send_command`
-# returns when the command has been queued on the adapter's mpsc channel,
-# not when the adapter pump has applied the resulting `session.update`. The
+# R4-5 (P3): the refresh path is asynchronous — host queue acceptance happens
+# before the adapter pump has applied the resulting `session.update`. The
 # realtime stream is the source of truth for the actual refresh outcome
 # (failures surface as `LiveAdapterObservation::Error`).
 #
-# Today every refresh path is `Queued`. The enum is `#[non_exhaustive]` so
-# a future revision can add `AppliedSync` (e.g. when a oneshot ack from the
-# adapter pump back through the command channel lands, or when a refresh
-# is detected as a no-op against the currently-applied snapshot) without
-# breaking the wire shape. SDK consumers route on the string value and
-# treat unknown values as "outcome unknown — observe the realtime stream".
+# Today generated runtime authority emits only `Queued`. The enum is
+# `#[non_exhaustive]` so a future generated contract can add a typed status
+# without changing the object shape. SDK consumers must route on the string
+# value and fail closed for values outside the generated contract they were
+# built with.
 #
 # Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
 # place this typed status alongside the back-compat `refresh_enqueued`
@@ -1885,6 +1882,23 @@ See [`LiveRefreshStatus`] for the variant set and the contract on
 asynchronous adapter-pump application."""
     refresh_enqueued: bool
     status: Literal['queued']
+
+
+# Typed public result class for `live/close`.
+#
+# Today generated runtime authority emits only `Closed`. The enum is
+# `#[non_exhaustive]` so future generated contracts can add explicit result
+# classes without changing the object shape.
+LiveCloseStatus = Literal['closed']
+
+@dataclass
+class LiveCloseResult:
+    """Response payload for `live/close`.
+
+The boolean `closed` field is preserved for back-compat alongside the typed
+`status` discriminator. New code should route on `status`."""
+    closed: bool
+    status: Literal['closed']
 
 
 # A typed, identity-bearing realtime transcript event consumed by the session.
@@ -3356,6 +3370,7 @@ class BridgeCommandDestroyMember(TypedDict, total=False):
 class BridgeCommandWireMember(TypedDict, total=False):
     command: Required[Literal['wire_member']]
     epoch: Required[int]
+    mob_peer_overlay: Required[Any]
     peer_spec: Required[BridgePeerSpec]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
@@ -3363,6 +3378,7 @@ class BridgeCommandWireMember(TypedDict, total=False):
 class BridgeCommandUnwireMember(TypedDict, total=False):
     command: Required[Literal['unwire_member']]
     epoch: Required[int]
+    mob_peer_overlay: Required[Any]
     peer_spec: Required[BridgePeerSpec]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
@@ -3631,9 +3647,3 @@ PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknow
 
 # Comms/session-stream RPC contract for PeerSendability.
 PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
-
-# Comms/session-stream RPC contract for PeerReachability.
-PeerReachability = Literal['unknown', 'reachable', 'unreachable']
-
-# Comms/session-stream RPC contract for PeerReachabilityReason.
-PeerReachabilityReason = Literal['offline_or_no_ack', 'transport_error'] | Literal['admission_dropped']

@@ -230,7 +230,17 @@ pub(super) fn compose_external_tools_for_profile(
                 .keys()
                 .map(|profile| profile.as_str().to_string())
                 .collect::<Vec<_>>();
-            authority_context = authority_context.grant_spawn_profiles_in_mob(mob_id, profiles);
+            authority_context =
+                meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
+                    &authority_context,
+                    mob_id,
+                    profiles,
+                )
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "generated mob operator authority rejected default spawn profiles: {error}"
+                    ))
+                })?;
         }
         dispatchers.push(Arc::new(MobOperatorToolDispatcher::new(
             mob_handle,
@@ -333,7 +343,6 @@ struct MobOperatorToolDispatcher {
     authority_context: MobToolAuthorityContext,
     tools: Arc<[Arc<ToolDef>]>,
     owner_bridge_session_id: Option<SessionId>,
-    ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
 impl MobOperatorToolDispatcher {
@@ -342,6 +351,7 @@ impl MobOperatorToolDispatcher {
         enable_mob: bool,
         authority_context: MobToolAuthorityContext,
     ) -> Self {
+        let enable_mob = enable_mob && authority_context.is_generated_authority_context();
         let mut defs: Vec<Arc<ToolDef>> = Vec::new();
         if enable_mob {
             defs.push(tool_def(
@@ -523,7 +533,6 @@ impl MobOperatorToolDispatcher {
             authority_context,
             tools: defs.into(),
             owner_bridge_session_id: None,
-            ops_registry: None,
         }
     }
 
@@ -850,17 +859,13 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 if let Some(auto_wire) = args.auto_wire_parent {
                     spec = spec.with_auto_wire_parent(auto_wire);
                 }
-                let (result, async_ops) = match (&self.owner_bridge_session_id, &self.ops_registry)
-                {
-                    (Some(owner_bridge_session_id), Some(ops_registry)) => {
+                let (result, async_ops) =
+                    if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
                         let receipt = self
                             .handle
-                            .spawn_spec_receipt_with_owner_context(
+                            .spawn_spec_receipt_with_generated_owner_context(
                                 spec,
-                                super::handle::CanonicalOpsOwnerContext {
-                                    owner_bridge_session_id: owner_bridge_session_id.clone(),
-                                    ops_registry: Arc::clone(ops_registry),
-                                },
+                                owner_bridge_session_id,
                             )
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
@@ -869,8 +874,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
                         (result, vec![AsyncOpRef::detached(receipt.operation_id)])
-                    }
-                    _ => {
+                    } else {
                         let spawn_result = self
                             .handle
                             .spawn_spec(spec)
@@ -879,8 +883,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         let result =
                             Self::spawn_result_payload(&self.handle.definition().id, &spawn_result);
                         (result, Vec::new())
-                    }
-                };
+                    };
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, result, async_ops)
             }
@@ -926,19 +929,16 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let (results, async_ops) = match (&self.owner_bridge_session_id, &self.ops_registry)
-                {
-                    (Some(owner_bridge_session_id), Some(ops_registry)) => {
+                let (results, async_ops) =
+                    if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
                         let receipts = self
                             .handle
-                            .spawn_many_receipts_with_owner_context(
+                            .spawn_many_receipts_with_generated_owner_context(
                                 specs,
-                                super::handle::CanonicalOpsOwnerContext {
-                                    owner_bridge_session_id: owner_bridge_session_id.clone(),
-                                    ops_registry: Arc::clone(ops_registry),
-                                },
+                                owner_bridge_session_id,
                             )
-                            .await;
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
                         let async_ops = receipts
                             .iter()
                             .filter_map(|result| result.as_ref().ok())
@@ -957,7 +957,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 Err(error) => {
                                     results.push(json!(
                                         meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                            error.spawn_many_failure_cause(),
+                                            error.cause(),
                                             error.to_string()
                                         )
                                     ));
@@ -965,12 +965,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             }
                         }
                         (results, async_ops)
-                    }
-                    _ => {
+                    } else {
                         let results = self
                             .handle
                             .spawn_many(specs)
                             .await
+                            .map_err(|error| Self::map_mob_error(call, error))?
                             .into_iter()
                             .map(|result| match result {
                                 Ok(spawn_result) => {
@@ -985,15 +985,14 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                                 }
                                 Err(error) => {
                                     json!(meerkat_contracts::MobSpawnManyResultEntry::failed(
-                                        error.spawn_many_failure_cause(),
+                                        error.cause(),
                                         error.to_string()
                                     ))
                                 }
                             })
                             .collect::<Vec<_>>();
                         (results, Vec::new())
-                    }
-                };
+                    };
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
@@ -1123,7 +1122,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
-        registry: Arc<dyn OpsLifecycleRegistry>,
+        _registry: Arc<dyn OpsLifecycleRegistry>,
         owner_bridge_session_id: SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
@@ -1135,7 +1134,6 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             authority_context: this.authority_context,
             tools: this.tools,
             owner_bridge_session_id: Some(owner_bridge_session_id),
-            ops_registry: Some(registry),
         })))
     }
 }

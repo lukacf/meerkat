@@ -6,6 +6,10 @@ use crate::event::AgentEvent;
 use crate::hooks::{HookInvocation, HookPoint};
 use crate::lifecycle::run_primitive::{ConversationAppend, ConversationAppendRole, CoreRenderable};
 use crate::ops::{ToolDispatchOutcome, ToolDispatchTimeoutPolicy};
+use crate::pending_continuation_admission::{
+    ObservedSessionTailKind, PendingContinuationDisposition, PendingContinuationPublicTerminal,
+    observe_session_tail, resolve_pending_continuation,
+};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
 use crate::session::{PendingSystemContextAppend, Session};
@@ -41,6 +45,28 @@ fn user_message_from_operator_renderable(
         | CoreRenderable::Reference { .. } => Err(AgentError::ConfigError(
             "role=user transcript append only accepts operator text or content blocks".to_string(),
         )),
+    }
+}
+
+fn prompt_from_admitted_pending_tail(
+    messages: &[Message],
+    admitted_tail: ObservedSessionTailKind,
+) -> Result<ContentInput, AgentError> {
+    match (admitted_tail, messages.last()) {
+        (ObservedSessionTailKind::User, Some(Message::User(user)))
+            if user.has_non_text_content() =>
+        {
+            Ok(ContentInput::Blocks(user.content.clone()))
+        }
+        (ObservedSessionTailKind::User, Some(Message::User(user))) => {
+            Ok(ContentInput::Text(user.text_content()))
+        }
+        (ObservedSessionTailKind::ToolResults, Some(Message::ToolResults { .. })) => {
+            Ok(ContentInput::Text(String::new()))
+        }
+        _ => Err(AgentError::InternalError(format!(
+            "generated pending-continuation authority admitted tail {admitted_tail:?}, but transcript tail no longer matches"
+        ))),
     }
 }
 
@@ -202,7 +228,7 @@ where
         let handle = self.tool_scope.handle();
         let revision = handle.stage_external_filter(filter)?;
         let _ = handle.staged_revision();
-        if let Ok(visibility_state) = self.tool_scope.visibility_state() {
+        if let Ok(visibility_state) = self.tool_scope.authorized_visibility_state() {
             if let Err(err) = self.session.set_tool_visibility_state(visibility_state) {
                 tracing::warn!(
                     error = %err,
@@ -235,7 +261,7 @@ where
             self.turn_tool_dispatch_metadata = dispatch_context;
         } else {
             self.turn_tool_dispatch_metadata.clear();
-            handle.clear_turn_overlay();
+            handle.clear_turn_overlay()?;
         }
         Ok(())
     }
@@ -269,33 +295,37 @@ where
     /// that append assistant transcript blocks are applied after tool results so
     /// provider tool-call adjacency remains intact.
     ///
-    /// The session's `build_state` is the source of truth. The shared
-    /// `mob_authority_handle` (if present) is updated as a derived projection
-    /// after the canonical write succeeds.
+    /// Mob authority effects must carry the generated authority seal. The
+    /// session `build_state` is a durable projection; the shared
+    /// `mob_authority_handle` (if present) is updated from the validated
+    /// in-memory effect after the projection write succeeds.
     pub(crate) fn apply_session_effects(
         &mut self,
         effects: &[crate::ops::SessionEffect],
     ) -> Result<(), crate::error::AgentError> {
         use crate::error::AgentError;
 
-        let mut build_state = self.session.build_state().unwrap_or_default();
+        let mut build_state = self.session.build_state().ok_or_else(|| {
+            AgentError::InternalError(format!(
+                "session {} is missing session build state",
+                self.session.id()
+            ))
+        })?;
         let mut build_state_changed = false;
         let mut visibility_changed = false;
+        let mut latest_mob_authority_context = None;
 
         for effect in effects {
             match effect {
-                crate::ops::SessionEffect::GrantManageMob { mob_id } => {
-                    let authority =
-                        build_state
-                            .mob_tool_authority_context
-                            .as_mut()
-                            .ok_or_else(|| {
-                                AgentError::InternalError(
-                                "mob authority effect applied without canonical authority context"
-                                    .into(),
-                            )
-                            })?;
-                    authority.grant_manage_mob_in_place(mob_id.clone());
+                crate::ops::SessionEffect::ReplaceMobToolAuthorityContext { authority_context } => {
+                    if !authority_context.is_generated_authority_context() {
+                        return Err(AgentError::InternalError(
+                            "refusing to apply mob authority context not minted by generated authority"
+                                .to_string(),
+                        ));
+                    }
+                    build_state.mob_tool_authority_context = Some(authority_context.clone());
+                    latest_mob_authority_context = Some(authority_context.clone());
                     build_state_changed = true;
                 }
                 crate::ops::SessionEffect::RequestDeferredTools { authorities } => {
@@ -334,19 +364,16 @@ where
         }
 
         // Update the shared effective-authority handle so mob tools in
-        // subsequent batches see the widened scope. The handle is a derived
-        // projection of the canonical session build_state — it is never
-        // treated as an independent truth source.
-        if build_state_changed && let Some(ref handle) = self.mob_authority_handle {
-            let updated = self
-                .session
-                .build_state()
-                .and_then(|bs| bs.mob_tool_authority_context);
-            if let Some(authority) = updated {
-                *handle
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = authority;
-            }
+        // subsequent batches see the widened scope. Serialization drops the
+        // generated authority seal, so the handle is updated only from the
+        // already-validated in-memory effect.
+        if build_state_changed
+            && let Some(ref handle) = self.mob_authority_handle
+            && let Some(authority) = latest_mob_authority_context
+        {
+            *handle
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = authority;
         }
 
         Ok(())
@@ -434,13 +461,16 @@ where
     pub(crate) fn publish_committed_visible_set(&mut self) -> Result<(), AgentError> {
         // Session metadata is a durable projection/export of the canonical
         // visibility owner state so checkpoint/recovery stays aligned.
-        let visibility_state = self.tool_scope.visibility_state().map_err(|err| {
-            AgentError::InternalError(format!(
-                "failed to snapshot canonical tool visibility state: {err}"
-            ))
-        })?;
+        let authorized_visibility_state =
+            self.tool_scope
+                .authorized_visibility_state()
+                .map_err(|err| {
+                    AgentError::InternalError(format!(
+                        "failed to authorize canonical tool visibility state: {err}"
+                    ))
+                })?;
         self.session
-            .set_tool_visibility_state(visibility_state)
+            .set_tool_visibility_state(authorized_visibility_state)
             .map_err(|err| {
                 AgentError::InternalError(format!(
                     "failed to persist canonical tool visibility state: {err}"
@@ -621,26 +651,20 @@ where
     }
 
     /// Get shared runtime system-context control state.
-    pub fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<crate::session::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    pub fn system_context_state(&self) -> crate::session::SystemContextStateHandle {
+        crate::session::SystemContextStateHandle::from_shared_authority_state(Arc::clone(
+            &self.system_context_state,
+        ))
     }
 
     /// Clone the current session with the latest shared system-context state merged into metadata.
     pub fn session_with_system_context_state(&self) -> Session {
         let mut session = self.session.clone();
-        let state = match self.system_context_state.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while cloning session");
-                poisoned.into_inner().clone()
-            }
-        };
+        let state = self.system_context_state().snapshot();
         if let Err(err) = session.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to serialize system-context state into session");
         }
-        if let Ok(visibility_state) = self.tool_scope.visibility_state()
+        if let Ok(visibility_state) = self.tool_scope.authorized_visibility_state()
             && let Err(err) = session.set_tool_visibility_state(visibility_state)
         {
             tracing::warn!(error = %err, "failed to serialize tool visibility state into session");
@@ -651,13 +675,7 @@ where
     /// Synchronize the shared system-context state into the in-memory session metadata.
     #[doc(hidden)]
     pub fn sync_system_context_state_to_session(&mut self) {
-        let state = match self.system_context_state.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while syncing session");
-                poisoned.into_inner().clone()
-            }
-        };
+        let state = self.system_context_state().snapshot();
         if let Err(err) = self.session.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to serialize system-context state into session");
         }
@@ -678,10 +696,10 @@ where
                     poisoned.into_inner()
                 }
             };
-            if state.pending.is_empty() {
+            if state.pending().is_empty() {
                 return Vec::new();
             }
-            let pending = state.pending.clone();
+            let pending = state.pending().to_vec();
             state.mark_pending_applied();
             pending
         };
@@ -922,8 +940,8 @@ where
     /// tool results). Unlike `run()`, this method does NOT add a new user message;
     /// it runs directly from the session's current state.
     ///
-    /// Returns an error if the session doesn't end at a resumable continuation
-    /// boundary (`User` or `ToolResults`).
+    /// Returns `NoPendingBoundary` when generated pending-continuation
+    /// authority does not admit the current transcript tail.
     pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
         self.run_pending_inner(None).await
     }
@@ -1118,20 +1136,41 @@ where
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
-        let pending_prompt = self.session.messages().last().and_then(|m| match m {
-            Message::User(u) if u.has_non_text_content() => {
-                Some(ContentInput::Blocks(u.content.clone()))
+        let session_tail = observe_session_tail(self.session.messages());
+        let pending_resolution =
+            resolve_pending_continuation(session_tail, 0).map_err(|error| {
+                AgentError::InternalError(format!(
+                    "generated pending-continuation authority rejected run_pending: {error}"
+                ))
+            })?;
+        let prompt = match pending_resolution.disposition {
+            PendingContinuationDisposition::RunPending => {
+                if let Some(terminal) = pending_resolution.public_terminal {
+                    self.clear_runtime_execution_kind();
+                    return Err(AgentError::InternalError(format!(
+                        "generated pending-continuation authority emitted terminal {terminal:?} for runnable continuation"
+                    )));
+                }
+                match prompt_from_admitted_pending_tail(self.session.messages(), session_tail) {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        self.clear_runtime_execution_kind();
+                        return Err(error);
+                    }
+                }
             }
-            Message::User(u) => Some(ContentInput::Text(u.text_content())),
-            Message::ToolResults { .. } => Some(ContentInput::Text(String::new())),
-            _ => None,
-        });
-
-        let Some(prompt) = pending_prompt else {
-            self.clear_runtime_execution_kind();
-            return Err(AgentError::ConfigError(
-                "run_pending requires a pending user or tool-results continuation boundary in the session".to_string(),
-            ));
+            PendingContinuationDisposition::NoPendingBoundary => {
+                self.clear_runtime_execution_kind();
+                return if pending_resolution.public_terminal
+                    == Some(PendingContinuationPublicTerminal::NoPendingBoundary)
+                {
+                    Err(AgentError::NoPendingBoundary)
+                } else {
+                    Err(AgentError::InternalError(
+                        "generated pending-continuation authority omitted NoPendingBoundary terminal witness".to_string(),
+                    ))
+                };
+            }
         };
 
         self.require_runtime_execution_kind()?;

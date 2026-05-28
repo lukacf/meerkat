@@ -41,7 +41,6 @@ fn materialized_preload_skills(
 struct McpScheduleContext {
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
-    workgraph_service: meerkat::WorkGraphService,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
@@ -57,7 +56,6 @@ impl McpScheduleContext {
         Self {
             service: Arc::clone(&state.service),
             runtime_adapter: Arc::clone(&state.runtime_adapter),
-            workgraph_service: state.workgraph_service.clone(),
             config_runtime: Arc::clone(&state.config_runtime),
             realm_id: state.realm_id.clone(),
             instance_id: state.instance_id.clone(),
@@ -74,7 +72,6 @@ impl McpScheduleContext {
             runtime_ingress::McpRuntimeIngressResources {
                 service: Arc::clone(&self.service),
                 runtime_adapter: Arc::clone(&self.runtime_adapter),
-                workgraph_service: self.workgraph_service.clone(),
                 config_runtime: Arc::clone(&self.config_runtime),
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
@@ -91,21 +88,14 @@ impl McpScheduleContext {
         &self,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        // `service.read()` is the single authoritative liveness+presence
-        // check post-wave-c. Archived and genuinely-missing sessions
-        // both fail to read — both map to "session not found" here,
-        // which matches the scheduler contract.
-        if self.service.read(session_id).await.is_err() {
-            return Err(ScheduleDomainError::InvalidSchedule(format!(
-                "session not found: {session_id}"
-            )));
-        }
+        self.ensure_session_target_exists(session_id).await?;
 
         let ingress = self.ingress_context();
         let callback_tools = ingress.current_callback_tools(session_id).await;
         ingress
             .configure_session(session_id, callback_tools, false)
-            .await;
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         Ok(())
     }
 
@@ -117,18 +107,37 @@ impl McpScheduleContext {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        // `service.read()` is the single authoritative liveness+presence
-        // check post-wave-c. Archived sessions and genuinely-missing
-        // sessions both fail to read; the scheduler treats both as
-        // `Missing`.
+        // `service.read()` is the authoritative liveness+presence check.
+        // Only a typed NotFound can become scheduler Missing; other read
+        // failures are authority failures and must not become lifecycle facts.
         match self.service.read(session_id).await {
             Ok(view) if view.state.is_active => Ok(TargetProbeOutcome::Busy {
                 detail: Some(format!("session still running: {session_id}")),
             }),
             Ok(_) => Ok(TargetProbeOutcome::Ready),
-            Err(_) => Ok(TargetProbeOutcome::Missing {
-                detail: Some(format!("session not found: {session_id}")),
-            }),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                Ok(TargetProbeOutcome::Missing {
+                    detail: Some(format!("session not found: {session_id}")),
+                })
+            }
+            Err(error) => Err(ScheduleDomainError::Internal(format!(
+                "failed to read session target {session_id}: {error}"
+            ))),
+        }
+    }
+
+    async fn ensure_session_target_exists(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
+        match self.service.read(session_id).await {
+            Ok(_) => Ok(()),
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => Err(
+                ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}")),
+            ),
+            Err(error) => Err(ScheduleDomainError::Internal(format!(
+                "failed to read session target {session_id}: {error}"
+            ))),
         }
     }
 
@@ -255,21 +264,62 @@ impl McpScheduleContext {
             .service
             .create_session_with_reserved_admission(request, create_admission)
             .await;
-        let session_exists = self.service.read(&session_id).await.is_ok();
-        if session_exists {
-            self.mcp_adapters
-                .lock()
-                .await
-                .insert(session_id.to_string(), Arc::clone(&mcp_adapter));
-            self.ingress_context()
-                .configure_session(&session_id, None, false)
-                .await;
-            update_peer_ingress_context(self, &session_id).await;
-        }
-
         match result {
-            Ok(_) => Ok(session_id),
+            Ok(_) => {
+                match self.service.read(&session_id).await {
+                    Ok(_) => {}
+                    Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                        self.ingress_context().clear_session(&session_id).await;
+                        return Err(ScheduleDomainError::Internal(format!(
+                            "schedule create reported success but session {session_id} is unavailable"
+                        )));
+                    }
+                    Err(error) => {
+                        self.ingress_context().clear_session(&session_id).await;
+                        return Err(ScheduleDomainError::Internal(format!(
+                            "schedule create reported success but session {session_id} authority is unreadable: {error}"
+                        )));
+                    }
+                }
+                self.mcp_adapters
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), Arc::clone(&mcp_adapter));
+                self.ingress_context()
+                    .configure_session(&session_id, None, false)
+                    .await
+                    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+                if let Err(error) = update_peer_ingress_context(self, &session_id).await {
+                    if let Err(archive_error) = self
+                        .service
+                        .archive_with_machine_protocol(
+                            &session_id,
+                            meerkat::MachineSessionArchiveProtocol::from_machine(
+                                self.runtime_adapter.as_ref(),
+                            ),
+                        )
+                        .await
+                    {
+                        return Err(ScheduleDomainError::Internal(format!(
+                            "schedule create peer ingress update failed ({error}); machine archive cleanup failed: {archive_error}"
+                        )));
+                    }
+                    self.ingress_context().clear_session(&session_id).await;
+                    return Err(error);
+                }
+                Ok(session_id)
+            }
             Err(error) => {
+                let session_exists = match self.service.read(&session_id).await {
+                    Ok(_) => true,
+                    Err(meerkat_core::service::SessionError::NotFound { .. }) => false,
+                    Err(read_error) => {
+                        self.ingress_context().clear_session(&session_id).await;
+                        return Err(ScheduleDomainError::Internal(format!(
+                            "schedule create failed ({error}); session {session_id} authority is unreadable: {read_error}"
+                        )));
+                    }
+                };
                 if session_exists
                     && let Err(archive_error) = self
                         .service
@@ -485,22 +535,37 @@ async fn deliver_scheduled_event(
     ))
 }
 
-async fn update_peer_ingress_context(_context: &McpScheduleContext, _session_id: &SessionId) {
+async fn update_peer_ingress_context(
+    _context: &McpScheduleContext,
+    _session_id: &SessionId,
+) -> Result<(), ScheduleDomainError> {
     #[cfg(feature = "comms")]
     {
-        // Post-wave-c the raw `load_persisted` escape hatch is gone.
-        // `SessionInfo` (returned by `service.read()`) does not surface
-        // `keep_alive`, so we default to `false` — matches the
-        // pre-retype `.unwrap_or(false)` fallback. Sessions that need
-        // comms-driven keep-alive configure it through the canonical
-        // `SessionBuildOptions.keep_alive` on create.
-        let keep_alive = false;
+        let session = _context
+            .service
+            .load_authoritative_session(_session_id)
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                ScheduleDomainError::InvalidSchedule(format!("session not found: {_session_id}"))
+            })?;
+        let keep_alive = session
+            .session_metadata()
+            .ok_or_else(|| {
+                ScheduleDomainError::Internal(format!(
+                    "session {_session_id} is missing session metadata"
+                ))
+            })?
+            .keep_alive;
         let comms_rt = _context.service.comms_runtime(_session_id).await;
         _context
             .runtime_adapter
             .update_peer_ingress_context(_session_id, keep_alive, comms_rt)
             .await;
     }
+    #[cfg(not(feature = "comms"))]
+    let _ = (_context, _session_id);
+    Ok(())
 }
 
 #[cfg(test)]

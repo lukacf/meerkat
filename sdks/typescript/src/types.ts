@@ -695,6 +695,12 @@ export interface BridgePeerSpec {
   readonly pubkey?: readonly number[];
 }
 
+export interface BridgeMobPeerOverlayHandoff {
+  readonly recipient_peer_id: string;
+  readonly topology_epoch: number;
+  readonly peer_specs: readonly BridgePeerSpec[];
+}
+
 interface BridgeCommandBase {
   readonly epoch: number;
   readonly protocol_version: BridgeProtocolVersion;
@@ -746,11 +752,13 @@ export interface BridgeCommandDestroyMember extends BridgeCommandBase {
 
 export interface BridgeCommandWireMember extends BridgeCommandBase {
   readonly command: "wire_member";
+  readonly mob_peer_overlay: BridgeMobPeerOverlayHandoff;
   readonly peer_spec: BridgePeerSpec;
 }
 
 export interface BridgeCommandUnwireMember extends BridgeCommandBase {
   readonly command: "unwire_member";
+  readonly mob_peer_overlay: BridgeMobPeerOverlayHandoff;
   readonly peer_spec: BridgePeerSpec;
 }
 

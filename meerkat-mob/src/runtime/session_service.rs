@@ -633,9 +633,10 @@ where
         let Some(session) = self.load_authoritative_session(session_id).await? else {
             return Ok(None);
         };
-        if self
-            .session_archived_by_authority(session_id, &session)
-            .await?
+        if self.runtime_store().is_some()
+            && self
+                .session_archived_by_authority(session_id, &session)
+                .await?
         {
             return Ok(None);
         }

@@ -24,6 +24,8 @@ const CONTROL_SOURCE_ID: &str = "control_plane";
 #[derive(Default)]
 pub struct CatalogControlVisibilityProvider {
     scope: RwLock<Option<ToolScope>>,
+    #[cfg(test)]
+    visibility_state_override: RwLock<Option<SessionToolVisibilityState>>,
 }
 
 impl CatalogControlVisibilityProvider {
@@ -39,7 +41,25 @@ impl CatalogControlVisibilityProvider {
         *guard = Some(scope);
     }
 
+    #[cfg(test)]
+    fn set_visibility_state_for_test(&self, visibility_state: SessionToolVisibilityState) {
+        let mut guard = self
+            .visibility_state_override
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(visibility_state);
+    }
+
     fn visibility_state(&self) -> SessionToolVisibilityState {
+        #[cfg(test)]
+        if let Some(visibility_state) = self
+            .visibility_state_override
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return visibility_state;
+        }
         self.scope
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -533,7 +553,7 @@ mod tests {
     use meerkat_core::types::ToolProvenance;
     use serde_json::json;
     use serde_json::value::RawValue;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, HashSet};
 
     struct ExactCatalogDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -571,60 +591,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct LegacyVisibilityOwner {
-        state: SessionToolVisibilityState,
-    }
-
-    impl meerkat_core::ToolVisibilityOwner for LegacyVisibilityOwner {
-        fn visibility_state(
-            &self,
-        ) -> Result<SessionToolVisibilityState, meerkat_core::ToolScopeApplyError> {
-            Ok(self.state.clone())
-        }
-
-        fn replace_visibility_state(
-            &self,
-            _visibility_state: SessionToolVisibilityState,
-        ) -> Result<(), meerkat_core::ToolScopeApplyError> {
-            Ok(())
-        }
-
-        fn stage_persistent_filter(
-            &self,
-            _filter: ToolFilter,
-            _witnesses: BTreeMap<String, ToolVisibilityWitness>,
-        ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
-            Err(meerkat_core::ToolScopeStageError::Owner {
-                message: "legacy visibility fixture is read-only".to_string(),
-            })
-        }
-
-        fn stage_requested_deferred_names(
-            &self,
-            _names: BTreeSet<String>,
-        ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
-            Err(meerkat_core::ToolScopeStageError::Owner {
-                message: "legacy visibility fixture is read-only".to_string(),
-            })
-        }
-
-        fn request_deferred_tools(
-            &self,
-            _authorities: Vec<DeferredToolLoadAuthority>,
-        ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
-            Err(meerkat_core::ToolScopeStageError::Owner {
-                message: "legacy visibility fixture is read-only".to_string(),
-            })
-        }
-
-        fn boundary_applied(
-            &self,
-        ) -> Result<SessionToolVisibilityState, meerkat_core::ToolScopeApplyError> {
-            Ok(self.state.clone())
-        }
-    }
-
     fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
             name: name.into(),
@@ -656,20 +622,26 @@ mod tests {
         }
     }
 
-    fn legacy_visibility_scope(
-        tools: Vec<Arc<ToolDef>>,
-        deferred_names: &[&str],
-        state: SessionToolVisibilityState,
+    fn generated_visibility_scope(
+        tools: Arc<[Arc<ToolDef>]>,
+        deferred_tool_names: HashSet<String>,
     ) -> ToolScope {
-        ToolScope::new_with_visibility_owner(
-            tools.into(),
-            std::collections::HashSet::new(),
-            deferred_names
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect(),
-            Arc::new(LegacyVisibilityOwner { state }),
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "test-model".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let owner = meerkat_runtime::standalone_tool_visibility_owner(
+            &meerkat_core::SessionId::new(),
+            &identity,
+            None,
+            &ToolFilter::All,
         )
+        .expect("generated standalone visibility owner should initialize");
+        ToolScope::new_with_visibility_owner(tools, HashSet::new(), deferred_tool_names, owner)
+            .expect("generated visibility test owner should accept catalog authority")
     }
 
     #[tokio::test]
@@ -691,9 +663,8 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new_with_projection_names(
+        let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
-            std::collections::HashSet::new(),
             ["deferred_mcp_tool".to_string()].into_iter().collect(),
         );
         visibility_provider.set_scope(scope);
@@ -816,9 +787,8 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new_with_projection_names(
+        let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
-            std::collections::HashSet::new(),
             ["deferred_mcp_tool".to_string()].into_iter().collect(),
         );
         scope
@@ -826,6 +796,7 @@ mod tests {
                 staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
                     .into_iter()
                     .collect(),
+                staged_revision: 1,
                 requested_witnesses: [(
                     "deferred_mcp_tool".to_string(),
                     ToolVisibilityWitness {
@@ -894,17 +865,12 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = legacy_visibility_scope(
-            vec![Arc::clone(&deferred)],
-            &["deferred_mcp_tool"],
-            SessionToolVisibilityState {
-                staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
-        );
-        visibility_provider.set_scope(scope);
+        visibility_provider.set_visibility_state_for_test(SessionToolVisibilityState {
+            staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
 
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
         let outcome = control
@@ -963,9 +929,8 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        visibility_provider.set_scope(ToolScope::new_with_projection_names(
+        visibility_provider.set_scope(generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            std::collections::HashSet::new(),
             ["deferred_mcp_tool".to_string()].into_iter().collect(),
         ));
 
@@ -1007,26 +972,21 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = legacy_visibility_scope(
-            vec![Arc::clone(&deferred)],
-            &["deferred_mcp_tool"],
-            SessionToolVisibilityState {
-                staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
-                    .into_iter()
-                    .collect(),
-                requested_witnesses: [(
-                    "deferred_mcp_tool".to_string(),
-                    ToolVisibilityWitness {
-                        stable_owner_key: Some("callback:test".to_string()),
-                        last_seen_provenance: None,
-                    },
-                )]
+        visibility_provider.set_visibility_state_for_test(SessionToolVisibilityState {
+            staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
                 .into_iter()
                 .collect(),
-                ..Default::default()
-            },
-        );
-        visibility_provider.set_scope(scope);
+            requested_witnesses: [(
+                "deferred_mcp_tool".to_string(),
+                ToolVisibilityWitness {
+                    stable_owner_key: Some("callback:test".to_string()),
+                    last_seen_provenance: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        });
 
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
         let outcome = control
@@ -1209,9 +1169,8 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new_with_projection_names(
+        let scope = generated_visibility_scope(
             vec![Arc::clone(&deferred)].into(),
-            std::collections::HashSet::new(),
             ["deferred_mcp_tool".to_string()].into_iter().collect(),
         );
         scope
@@ -1219,6 +1178,16 @@ mod tests {
                 staged_filter: ToolFilter::Deny(
                     ["deferred_mcp_tool".to_string()].into_iter().collect(),
                 ),
+                staged_revision: 1,
+                filter_witnesses: [(
+                    "deferred_mcp_tool".to_string(),
+                    ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:test".to_string()),
+                        last_seen_provenance: deferred.provenance.clone(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             })
             .unwrap();
@@ -1332,14 +1301,13 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new_with_projection_names(
+        let scope = generated_visibility_scope(
             vec![
                 Arc::clone(&loaded),
                 Arc::clone(&deferred),
                 Arc::clone(&blocked),
             ]
             .into(),
-            std::collections::HashSet::new(),
             [
                 "loaded_secret_lookup".to_string(),
                 "deferred_secret_lookup".to_string(),
@@ -1352,6 +1320,9 @@ mod tests {
         scope
             .set_visibility_state(SessionToolVisibilityState {
                 active_requested_deferred_names: ["loaded_secret_lookup".to_string()]
+                    .into_iter()
+                    .collect(),
+                staged_requested_deferred_names: ["loaded_secret_lookup".to_string()]
                     .into_iter()
                     .collect(),
                 requested_witnesses: [(
@@ -1369,6 +1340,15 @@ mod tests {
                 active_filter: ToolFilter::Deny(
                     ["blocked_secret_lookup".to_string()].into_iter().collect(),
                 ),
+                filter_witnesses: [(
+                    "blocked_secret_lookup".to_string(),
+                    ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:test".to_string()),
+                        last_seen_provenance: blocked.provenance.clone(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             })
             .unwrap();

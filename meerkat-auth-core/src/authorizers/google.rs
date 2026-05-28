@@ -26,9 +26,10 @@ use thiserror::Error;
 
 use super::{
     EnvLookup, LeaseFreshnessObserver, endpoint_failure_is_transient,
-    oauth_endpoint_failure_is_permanent,
+    oauth_endpoint_failure_observation,
 };
-use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+use meerkat_core::RefreshFailureObservation;
+use meerkat_core::handles::{GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -197,7 +198,7 @@ impl GoogleAuthAuthorizer {
 
     pub fn with_auth_lease_observer(
         mut self,
-        handle: Arc<dyn AuthLeaseHandle>,
+        handle: GeneratedAuthLeaseHandle,
         lease_key: LeaseKey,
     ) -> Self {
         self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));
@@ -268,7 +269,7 @@ impl GoogleAuthAuthorizer {
                     observer.refresh_failed(
                         &self.label,
                         lifecycle,
-                        google_refresh_failure_is_permanent(&err),
+                        google_refresh_failure_observation(&err),
                     )?;
                     return Err(err.into());
                 }
@@ -279,7 +280,7 @@ impl GoogleAuthAuthorizer {
                     observer.refresh_failed(
                         &self.label,
                         lifecycle,
-                        google_refresh_failure_is_permanent(&err),
+                        google_refresh_failure_observation(&err),
                     )?;
                     return Err(err.into());
                 }
@@ -454,23 +455,26 @@ impl GoogleAuthAuthorizer {
     }
 }
 
-fn google_refresh_failure_is_permanent(err: &GoogleAuthError) -> bool {
+fn google_refresh_failure_observation(err: &GoogleAuthError) -> RefreshFailureObservation {
     match err {
         GoogleAuthError::NoCredentialSource
         | GoogleAuthError::Json(_)
-        | GoogleAuthError::JwtSign(_) => true,
-        GoogleAuthError::Io(_) | GoogleAuthError::Network(_) => false,
-        GoogleAuthError::TokenEndpoint { status, body } => {
-            oauth_endpoint_failure_is_permanent(*status, body)
+        | GoogleAuthError::JwtSign(_) => RefreshFailureObservation::local_credential_unusable(),
+        GoogleAuthError::Io(_) | GoogleAuthError::Network(_) => {
+            RefreshFailureObservation::transient()
         }
-        GoogleAuthError::MetadataEndpoint { .. } => false,
+        GoogleAuthError::TokenEndpoint { status, body } => {
+            oauth_endpoint_failure_observation(*status, body)
+        }
+        GoogleAuthError::MetadataEndpoint { .. } => RefreshFailureObservation::transient(),
     }
 }
 
 fn default_chain_metadata_error_is_retryable(err: &GoogleAuthError) -> bool {
     match err {
         GoogleAuthError::MetadataEndpoint { status, body } => {
-            endpoint_failure_is_transient(*status, body)
+            let _ = body;
+            endpoint_failure_is_transient(*status)
         }
         _ => false,
     }

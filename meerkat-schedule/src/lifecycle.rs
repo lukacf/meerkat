@@ -6,11 +6,20 @@
 
 use crate::machines::occurrence_lifecycle as occ_dsl;
 use crate::machines::schedule_lifecycle as sched_dsl;
+use crate::store::PendingSupersession;
 use crate::types::{
-    CreateScheduleRequest, DeliveryReceipt, Occurrence, OccurrenceFailureClass, OccurrenceOrdinal,
-    OccurrencePhase, Schedule, SchedulePhase, ScheduleRevision, TriggerSpec, UpdateScheduleRequest,
+    CreateScheduleRequest, DeliveryCompletionFailureReason, DeliveryFailureReason, DeliveryReceipt,
+    DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrenceId, OccurrenceOrdinal,
+    OccurrencePhase, OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome,
+    RuntimeDeliveryOutcome, Schedule, ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding,
+    TriggerSpec, UpdateScheduleRequest, delivery_receipt_id_from_authority,
+    target_materialized_session_id, validate_occurrence_machine_projection,
+    validate_schedule_machine_projection,
 };
 use chrono::{DateTime, Utc};
+use meerkat_core::SessionId;
+use serde::Serialize;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -20,10 +29,16 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScheduleLifecycleInput {
     Create(CreateScheduleRequest),
-    Update(UpdateScheduleRequest),
+    Update {
+        request: UpdateScheduleRequest,
+        at_utc: DateTime<Utc>,
+    },
     RecordPlanningWindow {
         planning_cursor_utc: DateTime<Utc>,
         next_occurrence_ordinal: OccurrenceOrdinal,
+    },
+    SyncTargetSnapshot {
+        target: TargetBinding,
     },
     Pause {
         at_utc: DateTime<Utc>,
@@ -35,8 +50,7 @@ pub enum ScheduleLifecycleInput {
         at_utc: DateTime<Utc>,
     },
     ConfirmOccurrencesSuperseded {
-        occurrence_id: crate::types::OccurrenceId,
-        superseding_revision: ScheduleRevision,
+        ack: OccurrenceSupersessionAck,
     },
 }
 
@@ -48,6 +62,7 @@ pub enum ScheduleLifecycleEffect {
     },
     SupersedePendingOccurrences {
         superseding_revision: ScheduleRevision,
+        at_utc: DateTime<Utc>,
     },
     PlanningWindowRecorded {
         planning_cursor_utc: DateTime<Utc>,
@@ -55,17 +70,233 @@ pub enum ScheduleLifecycleEffect {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OccurrenceSupersessionAck {
+    schedule_id: ScheduleId,
+    occurrence_id: OccurrenceId,
+    superseding_revision: ScheduleRevision,
+}
+
+impl OccurrenceSupersessionAck {
+    pub fn schedule_id(&self) -> &ScheduleId {
+        &self.schedule_id
+    }
+
+    pub fn occurrence_id(&self) -> &OccurrenceId {
+        &self.occurrence_id
+    }
+
+    pub fn superseding_revision(&self) -> ScheduleRevision {
+        self.superseding_revision
+    }
+
+    fn from_occurrence_authority(
+        occurrence: &Occurrence,
+        effect: &OccurrenceLifecycleEffect,
+    ) -> Option<Self> {
+        let OccurrenceLifecycleEffect::OccurrencesSuperseded {
+            occurrence_id,
+            superseding_revision,
+        } = effect
+        else {
+            return None;
+        };
+        if occurrence.phase != OccurrencePhase::Superseded
+            || occurrence.superseded_by_revision != Some(*superseding_revision)
+            || occurrence.occurrence_id != *occurrence_id
+        {
+            return None;
+        }
+        Some(Self {
+            schedule_id: occurrence.schedule_id.clone(),
+            occurrence_id: occurrence_id.clone(),
+            superseding_revision: *superseding_revision,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScheduleLifecycleMutator {
     pub schedule: Schedule,
     pub effects: Vec<ScheduleLifecycleEffect>,
     pub revision_bumped: bool,
+    write_precondition: ScheduleWritePrecondition,
+    pending_supersession: Option<PendingSupersession>,
 }
 
 impl ScheduleLifecycleMutator {
     pub fn into_schedule(self) -> Schedule {
         self.schedule
     }
+
+    pub fn absorb_followup(
+        &mut self,
+        followup: ScheduleLifecycleMutator,
+    ) -> Result<(), ScheduleLifecycleError> {
+        let ScheduleLifecycleMutator {
+            schedule,
+            effects,
+            revision_bumped,
+            write_precondition,
+            pending_supersession,
+        } = followup;
+        write_precondition
+            .check_current(Some(&self.schedule))
+            .map_err(|reason| ScheduleLifecycleError::ProjectionMismatch { reason })?;
+        if pending_supersession.is_some() && self.pending_supersession.is_some() {
+            return Err(ScheduleLifecycleError::ProjectionMismatch {
+                reason: "multiple generated supersession handoffs for one schedule write".into(),
+            });
+        }
+        self.schedule = schedule;
+        self.effects.extend(effects);
+        self.revision_bumped |= revision_bumped;
+        if pending_supersession.is_some() {
+            self.pending_supersession = pending_supersession;
+        }
+        Ok(())
+    }
+
+    pub fn into_authorized_write(self) -> AuthorizedScheduleWrite {
+        AuthorizedScheduleWrite {
+            schedule: self.schedule,
+            precondition: self.write_precondition,
+            pending_supersession: self.pending_supersession,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizedScheduleWrite {
+    schedule: Schedule,
+    precondition: ScheduleWritePrecondition,
+    pending_supersession: Option<PendingSupersession>,
+}
+
+impl AuthorizedScheduleWrite {
+    pub fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+
+    pub fn schedule_id(&self) -> &ScheduleId {
+        &self.schedule.schedule_id
+    }
+
+    pub fn precondition(&self) -> &ScheduleWritePrecondition {
+        &self.precondition
+    }
+
+    pub fn has_pending_supersession(&self) -> bool {
+        self.pending_supersession.is_some()
+    }
+
+    pub fn into_schedule(self) -> Schedule {
+        self.schedule
+    }
+
+    pub fn into_parts(self) -> (Schedule, Option<PendingSupersession>) {
+        (self.schedule, self.pending_supersession)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduleWritePrecondition {
+    kind: ScheduleWritePreconditionKind,
+}
+
+#[derive(Debug, Clone)]
+enum ScheduleWritePreconditionKind {
+    Absent {
+        schedule_id: ScheduleId,
+    },
+    Matches {
+        schedule_id: ScheduleId,
+        fingerprint: Vec<u8>,
+    },
+}
+
+impl ScheduleWritePrecondition {
+    fn absent(schedule_id: ScheduleId) -> Self {
+        Self {
+            kind: ScheduleWritePreconditionKind::Absent { schedule_id },
+        }
+    }
+
+    fn matches(schedule: &Schedule) -> Result<Self, ScheduleLifecycleError> {
+        Ok(Self {
+            kind: ScheduleWritePreconditionKind::Matches {
+                schedule_id: schedule.schedule_id.clone(),
+                fingerprint: schedule_write_fingerprint(schedule)
+                    .map_err(|reason| ScheduleLifecycleError::ProjectionMismatch { reason })?,
+            },
+        })
+    }
+
+    pub fn schedule_id(&self) -> &ScheduleId {
+        match &self.kind {
+            ScheduleWritePreconditionKind::Absent { schedule_id }
+            | ScheduleWritePreconditionKind::Matches { schedule_id, .. } => schedule_id,
+        }
+    }
+
+    pub fn check_current(&self, current: Option<&Schedule>) -> Result<(), String> {
+        match &self.kind {
+            ScheduleWritePreconditionKind::Absent { schedule_id } => {
+                if current.is_some() {
+                    return Err(format!(
+                        "generated schedule write expected absent durable schedule {schedule_id}"
+                    ));
+                }
+                Ok(())
+            }
+            ScheduleWritePreconditionKind::Matches {
+                schedule_id,
+                fingerprint,
+            } => {
+                let current = current.ok_or_else(|| {
+                    format!("generated schedule write expected durable schedule {schedule_id}")
+                })?;
+                if &current.schedule_id != schedule_id {
+                    return Err(format!(
+                        "generated schedule write precondition id `{schedule_id}` did not match durable schedule `{}`",
+                        current.schedule_id
+                    ));
+                }
+                let current_fingerprint = schedule_write_fingerprint(current)?;
+                if current_fingerprint != *fingerprint {
+                    return Err(format!(
+                        "generated schedule write precondition for {schedule_id} did not match durable machine authority state"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn schedule_lifecycle_mutator(
+    schedule: Schedule,
+    effects: Vec<ScheduleLifecycleEffect>,
+    revision_bumped: bool,
+    write_precondition: ScheduleWritePrecondition,
+) -> ScheduleLifecycleMutator {
+    let pending_supersession = effects
+        .iter()
+        .find_map(PendingSupersession::from_schedule_effect);
+    ScheduleLifecycleMutator {
+        schedule,
+        effects,
+        revision_bumped,
+        write_precondition,
+        pending_supersession,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{fact} semantic key serialization failed: {detail}")]
+pub struct SemanticKeySerializationError {
+    fact: &'static str,
+    detail: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +307,35 @@ pub enum ScheduleLifecycleError {
     Deleted,
     #[error("schedule revision mismatch: expected {expected}, found {actual}")]
     RevisionMismatch { expected: u64, actual: u64 },
+    #[error(
+        "ScheduleLifecycleMachine target key `{machine_key}` did not match target snapshot key `{snapshot_key}`"
+    )]
+    TargetBindingKeyMismatch {
+        machine_key: String,
+        snapshot_key: String,
+    },
+    #[error("ScheduleLifecycleMachine emitted invalid schedule id `{id}`: {source}")]
+    InvalidScheduleId { id: String, source: uuid::Error },
+    #[error("ScheduleLifecycleMachine emitted invalid planning horizon days `{value}`")]
+    InvalidPlanningHorizonDays { value: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid planning horizon occurrences `{value}`")]
+    InvalidPlanningHorizonOccurrences { value: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid planning cursor timestamp millis `{millis}`")]
+    InvalidPlanningCursorUtcMillis { millis: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid supersession timestamp millis `{millis}`")]
+    InvalidSupersessionAtUtcMillis { millis: u64 },
+    #[error("ScheduleLifecycleMachine emitted invalid superseded occurrence id `{id}`: {source}")]
+    InvalidSupersededAckId { id: String, source: uuid::Error },
+    #[error("schedule timestamp `{field}` cannot be represented as unsigned millis: {millis}")]
+    InvalidTimestampMillis { field: &'static str, millis: i64 },
+    #[error(transparent)]
+    SemanticKeySerialization(#[from] SemanticKeySerializationError),
+    #[error("ScheduleLifecycleMachine rejected transition: {source}")]
+    TransitionRejected {
+        source: sched_dsl::ScheduleLifecycleMachineTransitionError,
+    },
+    #[error("schedule projection does not match generated machine_state: {reason}")]
+    ProjectionMismatch { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +344,28 @@ pub enum ScheduleLifecycleError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OccurrenceLifecycleInput {
+    PlanOccurrence {
+        occurrence_id: crate::types::OccurrenceId,
+        schedule_id: ScheduleId,
+        schedule_revision: ScheduleRevision,
+        occurrence_ordinal: OccurrenceOrdinal,
+        trigger_snapshot: TriggerSpec,
+        target_snapshot: TargetBinding,
+        misfire_policy: crate::types::MisfirePolicy,
+        overlap_policy: crate::types::OverlapPolicy,
+        missing_target_policy: crate::types::MissingTargetPolicy,
+        due_at_utc: DateTime<Utc>,
+    },
+    SyncTargetSnapshot {
+        target_snapshot: TargetBinding,
+    },
+    RecordReceipt {
+        receipt: DeliveryReceipt,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    },
+    ClassifyDue {
+        now_utc: DateTime<Utc>,
+    },
     Claim {
         owner_id: String,
         at_utc: DateTime<Utc>,
@@ -98,30 +380,40 @@ pub enum OccurrenceLifecycleInput {
         at_utc: DateTime<Utc>,
     },
     Complete {
-        receipt: DeliveryReceipt,
         at_utc: DateTime<Utc>,
     },
-    Skip {
+    ResolveRuntimeCompletion {
+        outcome: RuntimeCompletionOutcome,
         detail: Option<String>,
-        failure_class: Option<OccurrenceFailureClass>,
         at_utc: DateTime<Utc>,
     },
-    Misfire {
+    ResolveDeliveryCompletionFailure {
+        reason: DeliveryCompletionFailureReason,
         detail: Option<String>,
-        failure_class: Option<OccurrenceFailureClass>,
+        at_utc: DateTime<Utc>,
+    },
+    ResolveDeliveryFailure {
+        reason: DeliveryFailureReason,
+        detail: Option<String>,
+        at_utc: DateTime<Utc>,
+    },
+    ResolveTargetProbe {
+        outcome: OccurrenceTargetProbeOutcome,
+        detail: Option<String>,
+        at_utc: DateTime<Utc>,
+    },
+    ResolveDueMisfire {
+        detail: Option<String>,
         at_utc: DateTime<Utc>,
     },
     Supersede {
         superseded_by_revision: ScheduleRevision,
         at_utc: DateTime<Utc>,
     },
-    DeliveryFailed {
-        receipt: Option<DeliveryReceipt>,
-        failure_class: OccurrenceFailureClass,
-        detail: Option<String>,
+    LeaseExpired {
         at_utc: DateTime<Utc>,
     },
-    LeaseExpired {
+    ReleaseLeaseForPausedSchedule {
         at_utc: DateTime<Utc>,
     },
 }
@@ -139,7 +431,18 @@ pub enum OccurrenceLifecycleEffect {
         occurrence_id: crate::types::OccurrenceId,
         superseding_revision: ScheduleRevision,
     },
+    DueNoAction,
+    DueClaimEligible,
+    DueMisfireRequired,
+    DueLeaseExpired,
     DeliveryFailed,
+    LeaseExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceDueAction {
+    ClaimEligible,
+    MisfireRequired,
     LeaseExpired,
 }
 
@@ -147,11 +450,135 @@ pub enum OccurrenceLifecycleEffect {
 pub struct OccurrenceLifecycleMutator {
     pub occurrence: Occurrence,
     pub effects: Vec<OccurrenceLifecycleEffect>,
+    write_precondition: OccurrenceWritePrecondition,
+    supersession_acks: Vec<OccurrenceSupersessionAck>,
 }
 
 impl OccurrenceLifecycleMutator {
     pub fn into_occurrence(self) -> Occurrence {
         self.occurrence
+    }
+
+    pub fn into_parts(self) -> (Occurrence, Vec<OccurrenceLifecycleEffect>) {
+        (self.occurrence, self.effects)
+    }
+
+    pub fn into_parts_with_supersession_feedback(
+        self,
+    ) -> (
+        Occurrence,
+        Vec<OccurrenceLifecycleEffect>,
+        Vec<OccurrenceSupersessionAck>,
+    ) {
+        (self.occurrence, self.effects, self.supersession_acks)
+    }
+
+    pub fn into_authorized_write(self) -> AuthorizedOccurrenceWrite {
+        AuthorizedOccurrenceWrite {
+            occurrence: self.occurrence,
+            precondition: self.write_precondition,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizedOccurrenceWrite {
+    occurrence: Occurrence,
+    precondition: OccurrenceWritePrecondition,
+}
+
+impl AuthorizedOccurrenceWrite {
+    pub fn occurrence(&self) -> &Occurrence {
+        &self.occurrence
+    }
+
+    pub fn occurrence_id(&self) -> &crate::types::OccurrenceId {
+        &self.occurrence.occurrence_id
+    }
+
+    pub fn precondition(&self) -> &OccurrenceWritePrecondition {
+        &self.precondition
+    }
+
+    pub fn into_occurrence(self) -> Occurrence {
+        self.occurrence
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OccurrenceWritePrecondition {
+    kind: OccurrenceWritePreconditionKind,
+}
+
+#[derive(Debug, Clone)]
+enum OccurrenceWritePreconditionKind {
+    Absent {
+        occurrence_id: crate::types::OccurrenceId,
+    },
+    Matches {
+        occurrence_id: crate::types::OccurrenceId,
+        fingerprint: Vec<u8>,
+    },
+}
+
+impl OccurrenceWritePrecondition {
+    fn absent(occurrence_id: crate::types::OccurrenceId) -> Self {
+        Self {
+            kind: OccurrenceWritePreconditionKind::Absent { occurrence_id },
+        }
+    }
+
+    fn matches(occurrence: &Occurrence) -> Result<Self, OccurrenceLifecycleError> {
+        Ok(Self {
+            kind: OccurrenceWritePreconditionKind::Matches {
+                occurrence_id: occurrence.occurrence_id.clone(),
+                fingerprint: occurrence_write_fingerprint(occurrence)
+                    .map_err(|reason| OccurrenceLifecycleError::ProjectionMismatch { reason })?,
+            },
+        })
+    }
+
+    pub fn occurrence_id(&self) -> &crate::types::OccurrenceId {
+        match &self.kind {
+            OccurrenceWritePreconditionKind::Absent { occurrence_id }
+            | OccurrenceWritePreconditionKind::Matches { occurrence_id, .. } => occurrence_id,
+        }
+    }
+
+    pub fn check_current(&self, current: Option<&Occurrence>) -> Result<(), String> {
+        match &self.kind {
+            OccurrenceWritePreconditionKind::Absent { occurrence_id } => {
+                if current.is_some() {
+                    return Err(format!(
+                        "generated occurrence write expected absent durable occurrence {occurrence_id}"
+                    ));
+                }
+                Ok(())
+            }
+            OccurrenceWritePreconditionKind::Matches {
+                occurrence_id,
+                fingerprint,
+            } => {
+                let current = current.ok_or_else(|| {
+                    format!(
+                        "generated occurrence write expected durable occurrence {occurrence_id}"
+                    )
+                })?;
+                if &current.occurrence_id != occurrence_id {
+                    return Err(format!(
+                        "generated occurrence write precondition id `{occurrence_id}` did not match durable occurrence `{}`",
+                        current.occurrence_id
+                    ));
+                }
+                let current_fingerprint = occurrence_write_fingerprint(current)?;
+                if current_fingerprint != *fingerprint {
+                    return Err(format!(
+                        "generated occurrence write precondition for {occurrence_id} did not match durable machine authority state"
+                    ));
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -161,6 +588,8 @@ pub enum OccurrenceLifecycleError {
     AlreadyTerminal,
     #[error("occurrence must be pending before it can be claimed")]
     NotPendingForClaim,
+    #[error("generated occurrence authority rejected claim")]
+    ClaimRejected,
     #[error("occurrence must be claimed before dispatching")]
     NotClaimed,
     #[error("occurrence must be dispatching before awaiting completion")]
@@ -169,8 +598,110 @@ pub enum OccurrenceLifecycleError {
     NotLiveForTerminal,
     #[error("occurrence must hold an active lease before it can expire")]
     NotLeaseHolding,
+    #[error("generated occurrence authority rejected planned occurrence facts")]
+    PlanRejected,
+    #[error("generated occurrence authority rejected target snapshot sync")]
+    TargetSyncRejected,
+    #[error("generated occurrence authority rejected receipt/result projection")]
+    ReceiptRecordRejected,
+    #[error("generated occurrence authority rejected due classification")]
+    DueClassificationRejected,
+    #[error("generated occurrence authority rejected recovered machine state: {source}")]
+    AuthorityRecoveryRejected {
+        source: occ_dsl::OccurrenceLifecycleMachineTransitionError,
+    },
+    #[error("generated occurrence authority rejected transition failure classification: {source}")]
+    TransitionFailureClassificationRejected {
+        source: occ_dsl::OccurrenceLifecycleMachineTransitionError,
+    },
+    #[error("generated occurrence authority did not emit transition failure classification")]
+    TransitionFailureClassificationMissing,
+    #[error(
+        "generated occurrence authority emitted transition failure classification for `{actual:?}` while classifying `{expected:?}`"
+    )]
+    TransitionFailureClassificationMismatch {
+        phase: occ_dsl::OccurrenceLifecycleState,
+        expected_refusal_kind: occ_dsl::OccurrenceTransitionFailureRefusalKind,
+        actual_refusal_kind: occ_dsl::OccurrenceTransitionFailureRefusalKind,
+        expected: occ_dsl::OccurrenceLifecycleInputVariant,
+        actual: occ_dsl::OccurrenceLifecycleInputVariant,
+    },
+    #[error("generated occurrence authority emitted multiple transition failure classifications")]
+    TransitionFailureClassificationAmbiguous,
+    #[error(
+        "generated occurrence authority emitted transition failure classification during lifecycle mutation"
+    )]
+    UnexpectedTransitionFailureClassificationEffect,
     #[error("OccurrenceLifecycleMachine emitted invalid occurrence id `{id}`: {source}")]
     InvalidOccurrenceId { id: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid schedule id `{id}`: {source}")]
+    InvalidScheduleId { id: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid due timestamp millis `{millis}`")]
+    InvalidDueAtUtcMillis { millis: u64 },
+    #[error(
+        "OccurrenceLifecycleMachine emitted invalid misfire deadline timestamp millis `{millis}`"
+    )]
+    InvalidMisfireDeadlineUtcMillis { millis: u64 },
+    #[error("OccurrenceLifecycleMachine emitted invalid {field} timestamp millis `{millis}`")]
+    InvalidTimestampMillis { field: &'static str, millis: u64 },
+    #[error("OccurrenceLifecycleMachine emitted invalid claim token `{token}`: {source}")]
+    InvalidClaimToken { token: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid session id `{id}`: {source}")]
+    InvalidSessionId { id: String, source: uuid::Error },
+    #[error("OccurrenceLifecycleMachine emitted invalid attempt count `{value}`")]
+    InvalidAttemptCount { value: u64 },
+    #[error("occurrence timestamp `{field}` cannot be represented as unsigned millis: {millis}")]
+    InvalidInputTimestampMillis { field: &'static str, millis: i64 },
+    #[error(transparent)]
+    SemanticKeySerialization(#[from] SemanticKeySerializationError),
+    #[error(
+        "OccurrenceLifecycleMachine target key `{machine_key}` did not match target snapshot key `{snapshot_key}`"
+    )]
+    TargetBindingKeyMismatch {
+        machine_key: String,
+        snapshot_key: String,
+    },
+    #[error(
+        "OccurrenceLifecycleMachine runtime outcome key `{machine_key:?}` did not match runtime outcome key `{snapshot_key:?}`"
+    )]
+    RuntimeOutcomeKeyMismatch {
+        machine_key: Option<String>,
+        snapshot_key: Option<String>,
+    },
+    #[error("OccurrenceLifecycleMachine has no generated receipt authority for this projection")]
+    MissingReceiptAuthority,
+    #[error(
+        "OccurrenceLifecycleMachine receipt stage `{expected:?}` did not match supplied receipt stage `{actual:?}`"
+    )]
+    ReceiptStageMismatch {
+        expected: DeliveryReceiptStage,
+        actual: DeliveryReceiptStage,
+    },
+    #[error(
+        "OccurrenceLifecycleMachine receipt failure class `{expected:?}` did not match supplied receipt failure class `{actual:?}`"
+    )]
+    ReceiptFailureClassMismatch {
+        expected: Option<OccurrenceFailureClass>,
+        actual: Option<OccurrenceFailureClass>,
+    },
+    #[error(
+        "OccurrenceLifecycleMachine receipt detail `{expected:?}` did not match supplied receipt detail `{actual:?}`"
+    )]
+    ReceiptDetailMismatch {
+        expected: Option<String>,
+        actual: Option<String>,
+    },
+    #[error(
+        "OccurrenceLifecycleMachine canonical receipt `{expected:?}` did not match supplied receipt `{actual:?}`"
+    )]
+    ReceiptRecordMismatch {
+        expected: Box<DeliveryReceipt>,
+        actual: Box<DeliveryReceipt>,
+    },
+    #[error("OccurrenceLifecycleMachine emitted ambiguous due classification effects: {effects:?}")]
+    AmbiguousDueClassification { effects: Vec<&'static str> },
+    #[error("occurrence projection does not match generated machine_state: {reason}")]
+    ProjectionMismatch { reason: String },
 }
 
 // ===========================================================================
@@ -178,8 +709,46 @@ pub enum OccurrenceLifecycleError {
 // ===========================================================================
 
 impl Occurrence {
-    /// Apply a lifecycle input to this occurrence, projecting through the DSL
-    /// kernel and writing the resulting machine-owned state back into `self`.
+    pub fn planned_from_schedule(
+        schedule: &Schedule,
+        occurrence_ordinal: OccurrenceOrdinal,
+        due_at_utc: DateTime<Utc>,
+    ) -> Result<Self, OccurrenceLifecycleError> {
+        let target_snapshot = schedule.target.clone();
+        let input = OccurrenceLifecycleInput::PlanOccurrence {
+            occurrence_id: crate::types::OccurrenceId::new(),
+            schedule_id: schedule.schedule_id.clone(),
+            schedule_revision: schedule.revision,
+            occurrence_ordinal,
+            trigger_snapshot: schedule.trigger.clone(),
+            target_snapshot: target_snapshot.clone(),
+            misfire_policy: schedule.misfire_policy.clone(),
+            overlap_policy: schedule.overlap_policy.clone(),
+            missing_target_policy: schedule.missing_target_policy.clone(),
+            due_at_utc,
+        };
+        let dsl_input = convert_occurrence_input(&input)?;
+        let mut dsl_auth = occ_dsl::OccurrenceLifecycleMachineAuthority::new();
+        occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
+            .map_err(|e| map_occurrence_error(&mut dsl_auth, e))?;
+        occurrence_from_planned_state(dsl_auth.state(), schedule, target_snapshot, Utc::now())
+    }
+
+    pub fn planned_write_from_schedule(
+        schedule: &Schedule,
+        occurrence_ordinal: OccurrenceOrdinal,
+        due_at_utc: DateTime<Utc>,
+    ) -> Result<AuthorizedOccurrenceWrite, OccurrenceLifecycleError> {
+        let occurrence = Self::planned_from_schedule(schedule, occurrence_ordinal, due_at_utc)?;
+        Ok(AuthorizedOccurrenceWrite {
+            precondition: OccurrenceWritePrecondition::absent(occurrence.occurrence_id.clone()),
+            occurrence,
+        })
+    }
+
+    /// Apply a lifecycle input to this occurrence through its persisted
+    /// generated machine state, writing the resulting machine-owned state back
+    /// into `self`.
     ///
     /// Non-machine fields (trigger_snapshot, target_snapshot, policies,
     /// created_at_utc) are preserved verbatim; the DSL is sole authority over
@@ -188,167 +757,83 @@ impl Occurrence {
         mut self,
         input: OccurrenceLifecycleInput,
     ) -> Result<OccurrenceLifecycleMutator, OccurrenceLifecycleError> {
-        // 1. Project domain → DSL state
-        let dsl_state = project_occurrence(&self);
+        let write_precondition = OccurrenceWritePrecondition::matches(&self)?;
+        // 1. Recover generated DSL state after validating compatibility fields.
+        let dsl_state = occurrence_machine_state_for_authority(&self)?;
 
         // 2. Convert domain input → DSL input
-        let dsl_input = convert_occurrence_input(&input);
+        let dsl_input = convert_occurrence_input(&input)?;
 
         // 3. Run DSL dispatch
-        let mut dsl_auth = occ_dsl::OccurrenceLifecycleMachineAuthority::from_state(dsl_state);
+        let mut dsl_auth =
+            occ_dsl::OccurrenceLifecycleMachineAuthority::recover_from_state(dsl_state)
+                .map_err(|source| OccurrenceLifecycleError::AuthorityRecoveryRejected { source })?;
         let transition =
             occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
-                .map_err(|e| map_occurrence_error(e, &input))?;
+                .map_err(|e| map_occurrence_error(&mut dsl_auth, e))?;
 
         // 4. Write DSL state → occurrence
-        write_back_occurrence(&dsl_auth.state, &mut self, &input);
+        write_back_occurrence(dsl_auth.state(), &mut self, &input)?;
 
         // 5. Map effects
         let effects = transition
-            .effects
+            .effects()
             .iter()
             .map(map_occurrence_effect)
             .collect::<Result<Vec<_>, _>>()?;
+        let supersession_acks = effects
+            .iter()
+            .filter_map(|effect| {
+                OccurrenceSupersessionAck::from_occurrence_authority(&self, effect)
+            })
+            .collect();
 
         Ok(OccurrenceLifecycleMutator {
             occurrence: self,
             effects,
+            write_precondition,
+            supersession_acks,
         })
     }
-}
 
-/// Project a domain `Occurrence` into the DSL flat state struct.
-fn project_occurrence(occ: &Occurrence) -> occ_dsl::OccurrenceLifecycleMachineState {
-    occ_dsl::OccurrenceLifecycleMachineState {
-        lifecycle_phase: match occ.phase {
-            OccurrencePhase::Pending => occ_dsl::OccurrenceLifecycleState::Pending,
-            OccurrencePhase::Claimed => occ_dsl::OccurrenceLifecycleState::Claimed,
-            OccurrencePhase::Dispatching => occ_dsl::OccurrenceLifecycleState::Dispatching,
-            OccurrencePhase::AwaitingCompletion => {
-                occ_dsl::OccurrenceLifecycleState::AwaitingCompletion
-            }
-            OccurrencePhase::Completed => occ_dsl::OccurrenceLifecycleState::Completed,
-            OccurrencePhase::Skipped => occ_dsl::OccurrenceLifecycleState::Skipped,
-            OccurrencePhase::Misfired => occ_dsl::OccurrenceLifecycleState::Misfired,
-            OccurrencePhase::Superseded => occ_dsl::OccurrenceLifecycleState::Superseded,
-            OccurrencePhase::DeliveryFailed => occ_dsl::OccurrenceLifecycleState::DeliveryFailed,
-        },
-        occurrence_id: occ_dsl::OccurrenceId(occ.occurrence_id.0.to_string()),
-        schedule_id: occ_dsl::ScheduleId(occ.schedule_id.0.to_string()),
-        schedule_revision: occ.schedule_revision.0,
-        occurrence_ordinal: occ.occurrence_ordinal.0,
-        target_binding_key: occ.target_snapshot.stable_key(),
-        due_at_utc_ms: datetime_to_millis(occ.due_at_utc),
-        claimed_by: occ.claimed_by.clone(),
-        lease_expires_at_utc_ms: occ.lease_expires_at_utc.map(datetime_to_millis),
-        claimed_at_utc_ms: occ.claimed_at_utc.map(datetime_to_millis),
-        claim_token: occ.claim_token.map(|u| occ_dsl::ClaimToken(u.to_string())),
-        delivery_correlation_id: occ.delivery_correlation_id.clone(),
-        last_receipt: occ
-            .last_receipt
-            .as_ref()
-            .map(|r| occ_dsl::DeliveryReceipt(serde_json::to_string(r).unwrap_or_default())),
-        failure_class: occ.failure_class.map(to_dsl_failure_class),
-        failure_detail: occ.failure_detail.clone(),
-        dispatched_at_utc_ms: occ.dispatched_at_utc.map(datetime_to_millis),
-        completed_at_utc_ms: occ.completed_at_utc.map(datetime_to_millis),
-        attempt_count: u64::from(occ.attempt_count),
-        superseded_by_revision: occ.superseded_by_revision.map(|r| r.0),
+    pub fn classify_due_action(
+        &self,
+        now_utc: DateTime<Utc>,
+    ) -> Result<Option<OccurrenceDueAction>, OccurrenceLifecycleError> {
+        let mutator = self
+            .clone()
+            .apply(OccurrenceLifecycleInput::ClassifyDue { now_utc })?;
+        due_action_from_effects(&mutator.effects)
+    }
+
+    /// Build a public receipt from the generated receipt facts accepted by the
+    /// occurrence lifecycle machine.
+    pub fn delivery_receipt_from_authority(
+        &self,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    ) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+        delivery_receipt_from_authority(self, runtime_outcome)
     }
 }
 
-/// Convert domain input to DSL input.
-fn convert_occurrence_input(input: &OccurrenceLifecycleInput) -> occ_dsl::OccurrenceLifecycleInput {
-    match input {
-        OccurrenceLifecycleInput::Claim {
-            owner_id,
-            at_utc,
-            lease_expires_at_utc,
-            claim_token,
-        } => occ_dsl::OccurrenceLifecycleInput::Claim {
-            owner_id: owner_id.clone(),
-            at_utc_ms: datetime_to_millis(*at_utc),
-            lease_expires_at_utc_ms: datetime_to_millis(*lease_expires_at_utc),
-            claim_token: occ_dsl::ClaimToken(claim_token.to_string()),
-        },
-        OccurrenceLifecycleInput::DispatchStarted {
-            correlation_id,
-            at_utc,
-        } => occ_dsl::OccurrenceLifecycleInput::DispatchStarted {
-            correlation_id: correlation_id.clone(),
-            at_utc_ms: datetime_to_millis(*at_utc),
-        },
-        OccurrenceLifecycleInput::AwaitCompletion { at_utc } => {
-            occ_dsl::OccurrenceLifecycleInput::AwaitCompletion {
-                at_utc_ms: datetime_to_millis(*at_utc),
-            }
-        }
-        OccurrenceLifecycleInput::Complete { receipt, at_utc } => {
-            occ_dsl::OccurrenceLifecycleInput::Complete {
-                receipt: occ_dsl::DeliveryReceipt(
-                    serde_json::to_string(receipt).unwrap_or_default(),
-                ),
-                at_utc_ms: datetime_to_millis(*at_utc),
-            }
-        }
-        OccurrenceLifecycleInput::Skip {
-            detail,
-            failure_class,
-            at_utc,
-        } => occ_dsl::OccurrenceLifecycleInput::Skip {
-            detail: detail.clone(),
-            failure_class: failure_class.map(to_dsl_failure_class),
-            at_utc_ms: datetime_to_millis(*at_utc),
-        },
-        OccurrenceLifecycleInput::Misfire {
-            detail,
-            failure_class,
-            at_utc,
-        } => occ_dsl::OccurrenceLifecycleInput::Misfire {
-            detail: detail.clone(),
-            failure_class: failure_class.map(to_dsl_failure_class),
-            at_utc_ms: datetime_to_millis(*at_utc),
-        },
-        OccurrenceLifecycleInput::Supersede {
-            superseded_by_revision,
-            at_utc,
-        } => occ_dsl::OccurrenceLifecycleInput::Supersede {
-            superseded_by_revision: superseded_by_revision.0,
-            at_utc_ms: datetime_to_millis(*at_utc),
-        },
-        OccurrenceLifecycleInput::DeliveryFailed {
-            receipt,
-            failure_class,
-            detail,
-            at_utc,
-        } => occ_dsl::OccurrenceLifecycleInput::DeliveryFailed {
-            receipt: receipt
-                .as_ref()
-                .map(|r| occ_dsl::DeliveryReceipt(serde_json::to_string(r).unwrap_or_default())),
-            failure_class: to_dsl_failure_class(*failure_class),
-            detail: detail.clone(),
-            at_utc_ms: datetime_to_millis(*at_utc),
-        },
-        OccurrenceLifecycleInput::LeaseExpired { at_utc } => {
-            occ_dsl::OccurrenceLifecycleInput::LeaseExpired {
-                at_utc_ms: datetime_to_millis(*at_utc),
-            }
-        }
-    }
+/// Recover generated occurrence state after checking display projections.
+fn occurrence_machine_state_for_authority(
+    occ: &Occurrence,
+) -> Result<occ_dsl::OccurrenceLifecycleMachineState, OccurrenceLifecycleError> {
+    validate_occurrence_machine_projection(occ)
+        .map_err(|reason| OccurrenceLifecycleError::ProjectionMismatch { reason })?;
+    Ok(occ.machine_state.clone())
 }
 
-/// Write DSL state back into the domain occurrence.
-///
-/// The DSL state is the authority for machine-owned fields (phase, claimed_by,
-/// timestamps, etc). Non-machine fields (trigger_snapshot, target_snapshot,
-/// policies, created_at_utc) are left untouched since the DSL does not track them.
-fn write_back_occurrence(
-    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
-    occ: &mut Occurrence,
-    input: &OccurrenceLifecycleInput,
-) {
-    // Phase
-    occ.phase = match dsl.lifecycle_phase {
+#[cfg(test)]
+fn occurrence_machine_state_for_test(
+    occ: &Occurrence,
+) -> Result<occ_dsl::OccurrenceLifecycleMachineState, OccurrenceLifecycleError> {
+    occurrence_machine_state_for_authority(occ)
+}
+
+fn occurrence_phase_from_dsl(phase: occ_dsl::OccurrenceLifecycleState) -> OccurrencePhase {
+    match phase {
         occ_dsl::OccurrenceLifecycleState::Pending => OccurrencePhase::Pending,
         occ_dsl::OccurrenceLifecycleState::Claimed => OccurrencePhase::Claimed,
         occ_dsl::OccurrenceLifecycleState::Dispatching => OccurrencePhase::Dispatching,
@@ -360,87 +845,555 @@ fn write_back_occurrence(
         occ_dsl::OccurrenceLifecycleState::Misfired => OccurrencePhase::Misfired,
         occ_dsl::OccurrenceLifecycleState::Superseded => OccurrencePhase::Superseded,
         occ_dsl::OccurrenceLifecycleState::DeliveryFailed => OccurrencePhase::DeliveryFailed,
-    };
+    }
+}
+
+fn occurrence_from_planned_state(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    schedule: &Schedule,
+    target_snapshot: TargetBinding,
+    created_at_utc: DateTime<Utc>,
+) -> Result<Occurrence, OccurrenceLifecycleError> {
+    let snapshot_key = target_stable_key(&target_snapshot)?;
+    if dsl.target_binding_key != snapshot_key {
+        return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.target_binding_key.clone(),
+            snapshot_key,
+        });
+    }
+    let trigger_key = trigger_stable_key(&schedule.trigger)?;
+    if dsl.trigger_key != trigger_key {
+        return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.trigger_key.clone(),
+            snapshot_key: trigger_key,
+        });
+    }
+    verify_occurrence_policy_keys(
+        dsl,
+        &schedule.misfire_policy,
+        &schedule.overlap_policy,
+        &schedule.missing_target_policy,
+    )?;
+
+    Ok(Occurrence {
+        occurrence_id: occurrence_id_from_dsl(&dsl.occurrence_id)?,
+        schedule_id: occurrence_schedule_id_from_dsl(&dsl.schedule_id)?,
+        schedule_revision: ScheduleRevision(dsl.schedule_revision),
+        occurrence_ordinal: OccurrenceOrdinal(dsl.occurrence_ordinal),
+        phase: occurrence_phase_from_dsl(dsl.lifecycle_phase),
+        machine_state: dsl.clone(),
+        due_at_utc: millis_to_datetime(dsl.due_at_utc_ms).ok_or(
+            OccurrenceLifecycleError::InvalidDueAtUtcMillis {
+                millis: dsl.due_at_utc_ms,
+            },
+        )?,
+        trigger_snapshot: schedule.trigger.clone(),
+        target_snapshot,
+        misfire_policy: schedule.misfire_policy.clone(),
+        overlap_policy: schedule.overlap_policy.clone(),
+        missing_target_policy: schedule.missing_target_policy.clone(),
+        claimed_by: dsl.claimed_by.clone(),
+        lease_expires_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.lease_expires_at_utc_ms,
+            "lease_expires_at_utc",
+        )?,
+        claim_token: claim_token_from_dsl(&dsl.claim_token)?,
+        delivery_correlation_id: dsl.delivery_correlation_id.clone(),
+        last_receipt: None,
+        failure_class: dsl.failure_class.map(from_dsl_failure_class),
+        runtime_outcome: None,
+        failure_detail: dsl.failure_detail.clone(),
+        attempt_count: attempt_count_from_dsl(dsl.attempt_count)?,
+        created_at_utc,
+        claimed_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.claimed_at_utc_ms,
+            "claimed_at_utc",
+        )?,
+        dispatched_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.dispatched_at_utc_ms,
+            "dispatched_at_utc",
+        )?,
+        completed_at_utc: occurrence_optional_datetime_from_dsl(
+            dsl.completed_at_utc_ms,
+            "completed_at_utc",
+        )?,
+        superseded_by_revision: dsl.superseded_by_revision.map(ScheduleRevision),
+    })
+}
+
+/// Convert domain input to DSL input.
+fn convert_occurrence_input(
+    input: &OccurrenceLifecycleInput,
+) -> Result<occ_dsl::OccurrenceLifecycleInput, OccurrenceLifecycleError> {
+    Ok(match input {
+        OccurrenceLifecycleInput::PlanOccurrence {
+            occurrence_id,
+            schedule_id,
+            schedule_revision,
+            occurrence_ordinal,
+            trigger_snapshot,
+            target_snapshot,
+            misfire_policy,
+            overlap_policy,
+            missing_target_policy,
+            due_at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::PlanOccurrence {
+            occurrence_id: occ_dsl::OccurrenceId(occurrence_id.0.to_string()),
+            schedule_id: occ_dsl::ScheduleId(schedule_id.0.to_string()),
+            schedule_revision: schedule_revision.0,
+            occurrence_ordinal: occurrence_ordinal.0,
+            trigger_key: trigger_stable_key(trigger_snapshot)?,
+            target_binding_key: target_stable_key(target_snapshot)?,
+            misfire_policy: to_occ_dsl_misfire_policy(misfire_policy),
+            misfire_policy_key: misfire_policy_authority_key(misfire_policy)?,
+            overlap_policy: to_occ_dsl_overlap_policy(overlap_policy),
+            overlap_policy_key: overlap_policy_authority_key(overlap_policy)?,
+            missing_target_policy: to_occ_dsl_missing_target_policy(missing_target_policy),
+            missing_target_policy_key: missing_target_policy_authority_key(missing_target_policy)?,
+            target_materialized_session_id: target_materialized_session_id(target_snapshot)
+                .map(|session_id| occ_dsl::SessionId(session_id.0.to_string())),
+            due_at_utc_ms: occurrence_datetime_to_millis(*due_at_utc, "due_at_utc")?,
+            misfire_deadline_utc_ms: occurrence_misfire_deadline_to_millis(
+                misfire_policy,
+                *due_at_utc,
+            )?,
+        },
+        OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
+            occ_dsl::OccurrenceLifecycleInput::SyncTargetSnapshot {
+                target_binding_key: target_stable_key(target_snapshot)?,
+                target_materialized_session_id: target_materialized_session_id(target_snapshot)
+                    .map(|session_id| occ_dsl::SessionId(session_id.0.to_string())),
+            }
+        }
+        OccurrenceLifecycleInput::RecordReceipt {
+            receipt,
+            runtime_outcome,
+            ..
+        } => occ_dsl::OccurrenceLifecycleInput::RecordReceipt {
+            correlation_id: receipt.correlation_id.clone(),
+            detail: receipt.detail.clone(),
+            materialized_session_id: receipt
+                .materialized_session_id
+                .as_ref()
+                .map(|session_id| occ_dsl::SessionId(session_id.0.to_string())),
+            runtime_outcome_key: runtime_outcome
+                .as_ref()
+                .map(runtime_outcome_authority_key)
+                .transpose()?,
+        },
+        OccurrenceLifecycleInput::ClassifyDue { now_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::ClassifyDue {
+                now_utc_ms: occurrence_datetime_to_millis(*now_utc, "now_utc")?,
+            }
+        }
+        OccurrenceLifecycleInput::Claim {
+            owner_id,
+            at_utc,
+            lease_expires_at_utc,
+            claim_token,
+        } => occ_dsl::OccurrenceLifecycleInput::Claim {
+            owner_id: owner_id.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            lease_expires_at_utc_ms: occurrence_datetime_to_millis(
+                *lease_expires_at_utc,
+                "lease_expires_at_utc",
+            )?,
+            claim_token: occ_dsl::ClaimToken(claim_token.to_string()),
+        },
+        OccurrenceLifecycleInput::DispatchStarted {
+            correlation_id,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::DispatchStarted {
+            correlation_id: correlation_id.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::AwaitCompletion { at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::AwaitCompletion {
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
+        OccurrenceLifecycleInput::Complete { at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::Complete {
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
+        OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+            outcome,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+            outcome: to_dsl_runtime_completion_outcome(*outcome),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+            reason,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+            reason: to_dsl_delivery_completion_failure_reason(*reason),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::ResolveDeliveryFailure {
+            reason,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveDeliveryFailure {
+            reason: to_dsl_delivery_failure_reason(*reason),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::ResolveTargetProbe {
+            outcome,
+            detail,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ResolveTargetProbe {
+            outcome: to_dsl_occurrence_target_probe_outcome(*outcome),
+            detail: detail.clone(),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::ResolveDueMisfire { detail, at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::ResolveDueMisfire {
+                detail: detail.clone(),
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
+        OccurrenceLifecycleInput::Supersede {
+            superseded_by_revision,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::Supersede {
+            superseded_by_revision: superseded_by_revision.0,
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
+        OccurrenceLifecycleInput::LeaseExpired { at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::LeaseExpired {
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
+        OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule {
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
+    })
+}
+
+/// Write DSL state back into the domain occurrence.
+///
+/// The DSL state is the authority for machine-owned fields (phase, target
+/// binding key, claimed_by, timestamps, etc). Non-machine fields
+/// (trigger_snapshot, policies, created_at_utc) are left untouched since the
+/// DSL does not track them.
+fn write_back_occurrence(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    occ: &mut Occurrence,
+    input: &OccurrenceLifecycleInput,
+) -> Result<(), OccurrenceLifecycleError> {
+    occ.occurrence_id = occurrence_id_from_dsl(&dsl.occurrence_id)?;
+    occ.schedule_id = occurrence_schedule_id_from_dsl(&dsl.schedule_id)?;
+    occ.schedule_revision = ScheduleRevision(dsl.schedule_revision);
+    occ.occurrence_ordinal = OccurrenceOrdinal(dsl.occurrence_ordinal);
+    occ.due_at_utc = millis_to_datetime(dsl.due_at_utc_ms).ok_or(
+        OccurrenceLifecycleError::InvalidDueAtUtcMillis {
+            millis: dsl.due_at_utc_ms,
+        },
+    )?;
+
+    // Phase
+    occ.phase = occurrence_phase_from_dsl(dsl.lifecycle_phase);
 
     // Scalar fields
     occ.claimed_by = dsl.claimed_by.clone();
     occ.delivery_correlation_id = dsl.delivery_correlation_id.clone();
     occ.failure_detail = dsl.failure_detail.clone();
-    occ.attempt_count = u32::try_from(dsl.attempt_count).unwrap_or(u32::MAX);
+    occ.attempt_count = attempt_count_from_dsl(dsl.attempt_count)?;
 
     // Timestamps (u64 millis → DateTime<Utc>)
-    occ.lease_expires_at_utc = dsl.lease_expires_at_utc_ms.and_then(millis_to_datetime);
-    occ.claimed_at_utc = dsl.claimed_at_utc_ms.and_then(millis_to_datetime);
-    occ.dispatched_at_utc = dsl.dispatched_at_utc_ms.and_then(millis_to_datetime);
-    occ.completed_at_utc = dsl.completed_at_utc_ms.and_then(millis_to_datetime);
+    occ.lease_expires_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.lease_expires_at_utc_ms, "lease_expires_at_utc")?;
+    occ.claimed_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.claimed_at_utc_ms, "claimed_at_utc")?;
+    occ.dispatched_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.dispatched_at_utc_ms, "dispatched_at_utc")?;
+    occ.completed_at_utc =
+        occurrence_optional_datetime_from_dsl(dsl.completed_at_utc_ms, "completed_at_utc")?;
 
     // Claim token (DSL String → Uuid)
-    occ.claim_token = dsl
-        .claim_token
-        .as_ref()
-        .and_then(|t| Uuid::parse_str(&t.0).ok());
+    occ.claim_token = claim_token_from_dsl(&dsl.claim_token)?;
 
     // Failure class (DSL enum → real enum)
     occ.failure_class = dsl.failure_class.map(from_dsl_failure_class);
 
     // Superseded revision (DSL u64 → ScheduleRevision)
     occ.superseded_by_revision = dsl.superseded_by_revision.map(ScheduleRevision);
+    occ.machine_state = dsl.clone();
 
-    // DeliveryReceipt: the DSL stores it as serialized JSON. We recover the
-    // real receipt from the original input when the DSL assigned it (Complete,
-    // DeliveryFailed). For other transitions the DSL either kept None or the
-    // existing value — we round-trip through serde only when the DSL has a value
-    // we didn't supply.
+    match input {
+        OccurrenceLifecycleInput::PlanOccurrence {
+            trigger_snapshot,
+            target_snapshot,
+            misfire_policy,
+            overlap_policy,
+            missing_target_policy,
+            ..
+        } => {
+            let snapshot_key = target_stable_key(target_snapshot)?;
+            if dsl.target_binding_key != snapshot_key {
+                return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+                    machine_key: dsl.target_binding_key.clone(),
+                    snapshot_key,
+                });
+            }
+            let target_materialized_session_id = target_materialized_session_id(target_snapshot)
+                .map(|session_id| occ_dsl::SessionId(session_id.0.to_string()));
+            if dsl.target_materialized_session_id != target_materialized_session_id {
+                return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+                    machine_key: format!("{:?}", dsl.target_materialized_session_id),
+                    snapshot_key: format!("{target_materialized_session_id:?}"),
+                });
+            }
+            occ.target_snapshot = target_snapshot.clone();
+            let trigger_key = trigger_stable_key(trigger_snapshot)?;
+            if dsl.trigger_key != trigger_key {
+                return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+                    machine_key: dsl.trigger_key.clone(),
+                    snapshot_key: trigger_key,
+                });
+            }
+            occ.trigger_snapshot = trigger_snapshot.clone();
+            verify_occurrence_policy_keys(
+                dsl,
+                misfire_policy,
+                overlap_policy,
+                missing_target_policy,
+            )?;
+            occ.misfire_policy = misfire_policy.clone();
+            occ.overlap_policy = overlap_policy.clone();
+            occ.missing_target_policy = missing_target_policy.clone();
+        }
+        OccurrenceLifecycleInput::SyncTargetSnapshot { target_snapshot } => {
+            let snapshot_key = target_stable_key(target_snapshot)?;
+            if dsl.target_binding_key != snapshot_key {
+                return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+                    machine_key: dsl.target_binding_key.clone(),
+                    snapshot_key,
+                });
+            }
+            let target_materialized_session_id = target_materialized_session_id(target_snapshot)
+                .map(|session_id| occ_dsl::SessionId(session_id.0.to_string()));
+            if dsl.target_materialized_session_id != target_materialized_session_id {
+                return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+                    machine_key: format!("{:?}", dsl.target_materialized_session_id),
+                    snapshot_key: format!("{target_materialized_session_id:?}"),
+                });
+            }
+            occ.target_snapshot = target_snapshot.clone();
+        }
+        _ => {}
+    }
+
+    if let OccurrenceLifecycleInput::RecordReceipt {
+        receipt,
+        runtime_outcome,
+    } = input
+    {
+        let receipt = validate_receipt_against_authority(dsl, receipt, runtime_outcome.clone())?;
+        occ.last_receipt = Some(receipt);
+        occ.runtime_outcome = runtime_outcome.clone();
+        occ.machine_state = dsl.clone();
+        return Ok(());
+    }
+
+    // Lifecycle transitions mint receipt authority for a later RecordReceipt
+    // handoff; they do not overwrite the last recorded receipt projection.
     occ.last_receipt = match input {
-        OccurrenceLifecycleInput::Complete { receipt, .. } => {
-            // DSL sets last_receipt = Some(receipt), recover from input
-            if dsl.last_receipt.is_some() {
-                Some(receipt.clone())
-            } else {
-                None
-            }
-        }
-        OccurrenceLifecycleInput::DeliveryFailed { receipt, .. } => {
-            // DSL sets last_receipt = receipt (Option), recover from input
-            if dsl.last_receipt.is_some() {
-                receipt.clone()
-            } else {
-                None
-            }
-        }
         OccurrenceLifecycleInput::Claim { .. } => {
-            // DSL clears last_receipt to None
+            // Generated claim authority starts a fresh attempt.
+            occ.runtime_outcome = None;
+            None
+        }
+        OccurrenceLifecycleInput::PlanOccurrence { .. } => {
+            occ.runtime_outcome = None;
             None
         }
         _ => {
-            // Other transitions don't touch last_receipt in the DSL,
-            // so preserve the original domain value.
+            // Other transitions don't project a receipt blob. They may mint
+            // receipt class authority for a later RecordReceipt handoff.
             occ.last_receipt.take()
         }
     };
+    Ok(())
 }
 
 /// Map DSL error to the appropriate domain error variant.
 fn map_occurrence_error(
-    _error: occ_dsl::OccurrenceLifecycleMachineTransitionError,
-    input: &OccurrenceLifecycleInput,
+    authority: &mut occ_dsl::OccurrenceLifecycleMachineAuthority,
+    error: occ_dsl::OccurrenceLifecycleMachineTransitionError,
 ) -> OccurrenceLifecycleError {
-    // The DSL returns NoMatchingTransition { phase, trigger }. We reconstruct
-    // the specific error variant based on which input was attempted.
-    match input {
-        OccurrenceLifecycleInput::Claim { .. } => OccurrenceLifecycleError::NotPendingForClaim,
-        OccurrenceLifecycleInput::DispatchStarted { .. } => OccurrenceLifecycleError::NotClaimed,
-        OccurrenceLifecycleInput::AwaitCompletion { .. } => {
+    match classify_occurrence_transition_failure(authority, &error) {
+        Ok(public_class) => occurrence_error_from_transition_failure_class(public_class),
+        Err(error) => error,
+    }
+}
+
+fn classify_occurrence_transition_failure(
+    authority: &mut occ_dsl::OccurrenceLifecycleMachineAuthority,
+    error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
+) -> Result<occ_dsl::OccurrenceTransitionFailureClassKind, OccurrenceLifecycleError> {
+    let (refusal_kind, trigger) = occurrence_transition_refusal_evidence(error)
+        .map_err(|source| OccurrenceLifecycleError::AuthorityRecoveryRejected { source })?;
+    let phase = authority.state().lifecycle_phase;
+    let transition = occ_dsl::OccurrenceLifecycleMachineMutator::apply(
+        authority,
+        occ_dsl::OccurrenceLifecycleInput::ClassifyTransitionFailure {
+            refusal_kind,
+            trigger,
+        },
+    )
+    .map_err(
+        |source| OccurrenceLifecycleError::TransitionFailureClassificationRejected { source },
+    )?;
+
+    let mut classified = None;
+    for effect in transition.effects() {
+        if let occ_dsl::OccurrenceLifecycleEffect::TransitionFailureClassified {
+            phase: emitted_phase,
+            refusal_kind: emitted_refusal_kind,
+            trigger: emitted_trigger,
+            public_class,
+        } = effect
+        {
+            if *emitted_phase != phase
+                || *emitted_refusal_kind != refusal_kind
+                || *emitted_trigger != trigger
+            {
+                return Err(
+                    OccurrenceLifecycleError::TransitionFailureClassificationMismatch {
+                        phase: *emitted_phase,
+                        expected_refusal_kind: refusal_kind,
+                        actual_refusal_kind: *emitted_refusal_kind,
+                        expected: trigger,
+                        actual: *emitted_trigger,
+                    },
+                );
+            }
+            if classified.replace(*public_class).is_some() {
+                return Err(OccurrenceLifecycleError::TransitionFailureClassificationAmbiguous);
+            }
+        }
+    }
+
+    classified.ok_or(OccurrenceLifecycleError::TransitionFailureClassificationMissing)
+}
+
+fn occurrence_transition_refusal_evidence(
+    error: &occ_dsl::OccurrenceLifecycleMachineTransitionError,
+) -> Result<
+    (
+        occ_dsl::OccurrenceTransitionFailureRefusalKind,
+        occ_dsl::OccurrenceLifecycleInputVariant,
+    ),
+    occ_dsl::OccurrenceLifecycleMachineTransitionError,
+> {
+    match error {
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::NoMatchingTransition {
+            trigger: occ_dsl::OccurrenceLifecycleMachineTransitionTrigger::Input(trigger),
+            ..
+        } => Ok((
+            occ_dsl::OccurrenceTransitionFailureRefusalKind::NoMatchingTransition,
+            *trigger,
+        )),
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::GuardRejected {
+            trigger: occ_dsl::OccurrenceLifecycleMachineTransitionTrigger::Input(trigger),
+            ..
+        } => Ok((
+            occ_dsl::OccurrenceTransitionFailureRefusalKind::GuardRejected,
+            *trigger,
+        )),
+        occ_dsl::OccurrenceLifecycleMachineTransitionError::RecoveredStateInvariantRejected {
+            ..
+        } => Err(error.clone()),
+    }
+}
+
+fn occurrence_error_from_transition_failure_class(
+    public_class: occ_dsl::OccurrenceTransitionFailureClassKind,
+) -> OccurrenceLifecycleError {
+    match public_class {
+        occ_dsl::OccurrenceTransitionFailureClassKind::PlanRejected => {
+            OccurrenceLifecycleError::PlanRejected
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::TargetSyncRejected => {
+            OccurrenceLifecycleError::TargetSyncRejected
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::ReceiptRecordRejected => {
+            OccurrenceLifecycleError::ReceiptRecordRejected
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::DueClassificationRejected => {
+            OccurrenceLifecycleError::DueClassificationRejected
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected => {
+            OccurrenceLifecycleError::ClaimRejected
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::NotPendingForClaim => {
+            OccurrenceLifecycleError::NotPendingForClaim
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::NotClaimed => {
+            OccurrenceLifecycleError::NotClaimed
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::NotDispatching => {
             OccurrenceLifecycleError::NotDispatching
         }
-        OccurrenceLifecycleInput::LeaseExpired { .. } => OccurrenceLifecycleError::NotLeaseHolding,
-        OccurrenceLifecycleInput::Complete { .. }
-        | OccurrenceLifecycleInput::Skip { .. }
-        | OccurrenceLifecycleInput::Misfire { .. }
-        | OccurrenceLifecycleInput::Supersede { .. }
-        | OccurrenceLifecycleInput::DeliveryFailed { .. } => {
+        occ_dsl::OccurrenceTransitionFailureClassKind::NotLeaseHolding => {
+            OccurrenceLifecycleError::NotLeaseHolding
+        }
+        occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal => {
             OccurrenceLifecycleError::NotLiveForTerminal
         }
+    }
+}
+
+fn to_dsl_delivery_completion_failure_reason(
+    reason: DeliveryCompletionFailureReason,
+) -> occ_dsl::DeliveryCompletionFailureReason {
+    match reason {
+        DeliveryCompletionFailureReason::CompletionFutureFailed => {
+            occ_dsl::DeliveryCompletionFailureReason::CompletionFutureFailed
+        }
+        DeliveryCompletionFailureReason::RuntimeCompletionChannelClosed => {
+            occ_dsl::DeliveryCompletionFailureReason::RuntimeCompletionChannelClosed
+        }
+        DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable => {
+            occ_dsl::DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
+        }
+        DeliveryCompletionFailureReason::RuntimeCompletionHandleMissing => {
+            occ_dsl::DeliveryCompletionFailureReason::RuntimeCompletionHandleMissing
+        }
+    }
+}
+
+fn to_dsl_delivery_failure_reason(reason: DeliveryFailureReason) -> occ_dsl::DeliveryFailureReason {
+    match reason {
+        DeliveryFailureReason::TargetMaterializationFailed => {
+            occ_dsl::DeliveryFailureReason::TargetMaterializationFailed
+        }
+        DeliveryFailureReason::TargetMissing => occ_dsl::DeliveryFailureReason::TargetMissing,
+        DeliveryFailureReason::TargetBusy => occ_dsl::DeliveryFailureReason::TargetBusy,
+        DeliveryFailureReason::RuntimeRejected => occ_dsl::DeliveryFailureReason::RuntimeRejected,
+        DeliveryFailureReason::MobRejected => occ_dsl::DeliveryFailureReason::MobRejected,
+        DeliveryFailureReason::TransportError => occ_dsl::DeliveryFailureReason::TransportError,
+        DeliveryFailureReason::InternalError => occ_dsl::DeliveryFailureReason::InternalError,
+    }
+}
+
+fn to_dsl_occurrence_target_probe_outcome(
+    outcome: OccurrenceTargetProbeOutcome,
+) -> occ_dsl::OccurrenceTargetProbeOutcome {
+    match outcome {
+        OccurrenceTargetProbeOutcome::Ready => occ_dsl::OccurrenceTargetProbeOutcome::Ready,
+        OccurrenceTargetProbeOutcome::Busy => occ_dsl::OccurrenceTargetProbeOutcome::Busy,
+        OccurrenceTargetProbeOutcome::Missing => occ_dsl::OccurrenceTargetProbeOutcome::Missing,
     }
 }
 
@@ -467,11 +1420,55 @@ fn map_occurrence_effect(
             occurrence_id: occurrence_id_from_dsl(occurrence_id)?,
             superseding_revision: ScheduleRevision(*superseding_revision),
         },
+        occ_dsl::OccurrenceLifecycleEffect::DueNoAction => OccurrenceLifecycleEffect::DueNoAction,
+        occ_dsl::OccurrenceLifecycleEffect::DueClaimEligible => {
+            OccurrenceLifecycleEffect::DueClaimEligible
+        }
+        occ_dsl::OccurrenceLifecycleEffect::DueMisfireRequired => {
+            OccurrenceLifecycleEffect::DueMisfireRequired
+        }
+        occ_dsl::OccurrenceLifecycleEffect::DueLeaseExpired => {
+            OccurrenceLifecycleEffect::DueLeaseExpired
+        }
         occ_dsl::OccurrenceLifecycleEffect::DeliveryFailed => {
             OccurrenceLifecycleEffect::DeliveryFailed
         }
         occ_dsl::OccurrenceLifecycleEffect::LeaseExpired => OccurrenceLifecycleEffect::LeaseExpired,
+        occ_dsl::OccurrenceLifecycleEffect::TransitionFailureClassified { .. } => {
+            return Err(OccurrenceLifecycleError::UnexpectedTransitionFailureClassificationEffect);
+        }
     })
+}
+
+fn due_action_from_effects(
+    effects: &[OccurrenceLifecycleEffect],
+) -> Result<Option<OccurrenceDueAction>, OccurrenceLifecycleError> {
+    let mut classifications = effects.iter().filter_map(|effect| match effect {
+        OccurrenceLifecycleEffect::DueNoAction => Some(("DueNoAction", None)),
+        OccurrenceLifecycleEffect::DueClaimEligible => {
+            Some(("DueClaimEligible", Some(OccurrenceDueAction::ClaimEligible)))
+        }
+        OccurrenceLifecycleEffect::DueMisfireRequired => Some((
+            "DueMisfireRequired",
+            Some(OccurrenceDueAction::MisfireRequired),
+        )),
+        OccurrenceLifecycleEffect::DueLeaseExpired => {
+            Some(("DueLeaseExpired", Some(OccurrenceDueAction::LeaseExpired)))
+        }
+        _ => None,
+    });
+
+    let Some((first_name, first_action)) = classifications.next() else {
+        return Err(OccurrenceLifecycleError::AmbiguousDueClassification {
+            effects: Vec::new(),
+        });
+    };
+    if let Some((second_name, _)) = classifications.next() {
+        return Err(OccurrenceLifecycleError::AmbiguousDueClassification {
+            effects: vec![first_name, second_name],
+        });
+    }
+    Ok(first_action)
 }
 
 // ===========================================================================
@@ -480,48 +1477,30 @@ fn map_occurrence_effect(
 
 impl Schedule {
     /// Apply a lifecycle input. `Create` constructs a fresh schedule (self is
-    /// ignored); all other inputs require an existing schedule. The DSL is sole
-    /// authority over `phase`, `revision`, `planning_cursor_utc`, and
-    /// `next_occurrence_ordinal`; `config.updated_at_utc` / `config.deleted_at_utc`
-    /// are touched here since the DSL does not track them.
+    /// ignored); all other inputs recover generated machine state from the
+    /// schedule's persisted authority snapshot after validating compatibility
+    /// projections.
     pub fn apply(
         schedule: Option<Schedule>,
         input: ScheduleLifecycleInput,
     ) -> Result<ScheduleLifecycleMutator, ScheduleLifecycleError> {
         match input {
             // Create is special: constructs a fresh schedule, no prior state to project
-            ScheduleLifecycleInput::Create(request) => {
-                let mut schedule = Schedule::new(request);
-                let dsl_input = sched_dsl::ScheduleLifecycleInput::Create {
-                    trigger_key: trigger_stable_key(&schedule.trigger),
-                    target_binding_key: schedule.target.stable_key(),
-                    misfire_policy: to_dsl_misfire_policy(&schedule.misfire_policy),
-                    overlap_policy: to_dsl_overlap_policy(&schedule.overlap_policy),
-                    missing_target_policy: to_dsl_missing_target_policy(
-                        &schedule.missing_target_policy,
-                    ),
-                };
-                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                write_back_schedule(&dsl_state, &mut schedule);
-                let effects = map_schedule_effects(&transition, None);
-                Ok(ScheduleLifecycleMutator {
-                    schedule,
-                    effects,
-                    revision_bumped: false,
-                })
-            }
+            ScheduleLifecycleInput::Create(request) => create_schedule_via_dsl(request),
 
             // Update mixes config changes (name, labels, horizons) with
             // revision-affecting changes (trigger, target, policies). The DSL
             // handles only the machine-owned Revise transition.
-            ScheduleLifecycleInput::Update(request) => {
+            ScheduleLifecycleInput::Update { request, at_utc } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
-                let (revision_bumped, effects) = apply_update(&mut schedule, request)?;
-                Ok(ScheduleLifecycleMutator {
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
+                let (revision_bumped, effects) = apply_update(&mut schedule, request, at_utc)?;
+                Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,
                     revision_bumped,
-                })
+                    write_precondition,
+                ))
             }
 
             // Remaining inputs go through the DSL
@@ -530,94 +1509,208 @@ impl Schedule {
                 next_occurrence_ordinal,
             } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::RecordPlanningWindow {
-                    planning_cursor_utc_ms: datetime_to_millis(planning_cursor_utc),
+                    planning_cursor_utc_ms: schedule_datetime_to_millis(
+                        planning_cursor_utc,
+                        "planning_cursor_utc",
+                    )?,
                     next_occurrence_ordinal: next_occurrence_ordinal.0,
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                write_back_schedule(&dsl_state, &mut schedule);
-                let effects = map_schedule_effects(
-                    &transition,
-                    Some((planning_cursor_utc, next_occurrence_ordinal)),
-                );
-                Ok(ScheduleLifecycleMutator {
+                write_back_schedule(&dsl_state, &mut schedule)?;
+                let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,
-                    revision_bumped: false,
-                })
+                    false,
+                    write_precondition,
+                ))
+            }
+
+            ScheduleLifecycleInput::SyncTargetSnapshot { target } => {
+                let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
+                let target_binding_key = target_stable_key(&target)?;
+                let dsl_input = sched_dsl::ScheduleLifecycleInput::SyncTargetSnapshot {
+                    target_binding_key: target_binding_key.clone(),
+                };
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
+                if dsl_state.target_binding_key != target_binding_key {
+                    return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+                        machine_key: dsl_state.target_binding_key.clone(),
+                        snapshot_key: target_binding_key,
+                    });
+                }
+                write_back_schedule(&dsl_state, &mut schedule)?;
+                schedule.target = target;
+                schedule.touch();
+                let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
+                    schedule,
+                    effects,
+                    false,
+                    write_precondition,
+                ))
             }
 
             ScheduleLifecycleInput::Pause { at_utc } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::Pause {
-                    at_utc_ms: datetime_to_millis(at_utc),
+                    at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                write_back_schedule(&dsl_state, &mut schedule);
+                write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.config.updated_at_utc = at_utc;
-                let effects = map_schedule_effects(&transition, None);
-                Ok(ScheduleLifecycleMutator {
+                let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,
-                    revision_bumped: false,
-                })
+                    false,
+                    write_precondition,
+                ))
             }
 
             ScheduleLifecycleInput::Resume { at_utc } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::Resume {
-                    at_utc_ms: datetime_to_millis(at_utc),
+                    at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                write_back_schedule(&dsl_state, &mut schedule);
+                write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.config.updated_at_utc = at_utc;
-                let effects = map_schedule_effects(&transition, None);
-                Ok(ScheduleLifecycleMutator {
+                let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,
-                    revision_bumped: false,
-                })
+                    false,
+                    write_precondition,
+                ))
             }
 
             ScheduleLifecycleInput::Delete { at_utc } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::Delete {
-                    at_utc_ms: datetime_to_millis(at_utc),
+                    at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
                 };
                 let old_revision = schedule.revision;
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                write_back_schedule(&dsl_state, &mut schedule);
+                write_back_schedule(&dsl_state, &mut schedule)?;
                 schedule.config.deleted_at_utc = Some(at_utc);
                 schedule.config.updated_at_utc = at_utc;
                 let revision_bumped = schedule.revision != old_revision;
-                let effects = map_schedule_effects(&transition, None);
-                Ok(ScheduleLifecycleMutator {
+                let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,
                     revision_bumped,
-                })
+                    write_precondition,
+                ))
             }
 
-            ScheduleLifecycleInput::ConfirmOccurrencesSuperseded {
-                occurrence_id,
-                superseding_revision,
-            } => {
+            ScheduleLifecycleInput::ConfirmOccurrencesSuperseded { ack } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                let write_precondition = ScheduleWritePrecondition::matches(&schedule)?;
+                if ack.schedule_id != schedule.schedule_id {
+                    return Err(ScheduleLifecycleError::ProjectionMismatch {
+                        reason: format!(
+                            "occurrence supersession feedback for schedule `{}` cannot update schedule `{}`",
+                            ack.schedule_id, schedule.schedule_id
+                        ),
+                    });
+                }
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::ConfirmOccurrencesSuperseded {
-                    occurrence_id: sched_dsl::OccurrenceId(occurrence_id.0.to_string()),
-                    superseding_revision: superseding_revision.0,
+                    occurrence_id: sched_dsl::OccurrenceId(ack.occurrence_id.0.to_string()),
+                    superseding_revision: ack.superseding_revision.0,
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
-                write_back_schedule(&dsl_state, &mut schedule);
-                let effects = map_schedule_effects(&transition, None);
-                Ok(ScheduleLifecycleMutator {
+                write_back_schedule(&dsl_state, &mut schedule)?;
+                let effects = map_schedule_effects(&transition)?;
+                Ok(schedule_lifecycle_mutator(
                     schedule,
                     effects,
-                    revision_bumped: false,
-                })
+                    false,
+                    write_precondition,
+                ))
             }
         }
     }
+}
+
+fn create_schedule_via_dsl(
+    request: CreateScheduleRequest,
+) -> Result<ScheduleLifecycleMutator, ScheduleLifecycleError> {
+    let schedule_id = ScheduleId::new();
+    let trigger = request.trigger;
+    let target = request.target;
+    let misfire_policy = request.misfire_policy;
+    let overlap_policy = request.overlap_policy;
+    let missing_target_policy = request.missing_target_policy;
+    let planning_horizon_days = request.planning_horizon_days;
+    let planning_horizon_occurrences = request.planning_horizon_occurrences;
+
+    let dsl_input = sched_dsl::ScheduleLifecycleInput::Create {
+        schedule_id: sched_dsl::ScheduleId(schedule_id.0.to_string()),
+        trigger_key: trigger_stable_key(&trigger)?,
+        target_binding_key: target_stable_key(&target)?,
+        misfire_policy: to_dsl_misfire_policy(&misfire_policy),
+        misfire_policy_key: misfire_policy_authority_key(&misfire_policy)?,
+        overlap_policy: to_dsl_overlap_policy(&overlap_policy),
+        overlap_policy_key: overlap_policy_authority_key(&overlap_policy)?,
+        missing_target_policy: to_dsl_missing_target_policy(&missing_target_policy),
+        missing_target_policy_key: missing_target_policy_authority_key(&missing_target_policy)?,
+        planning_horizon_days: planning_horizon_days.map(u64::from),
+        planning_horizon_occurrences: planning_horizon_occurrences.map(u64::from),
+    };
+    let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::new();
+    let transition = sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
+        .map_err(|source| ScheduleLifecycleError::TransitionRejected { source })?;
+    let dsl_state = dsl_auth.state().clone();
+    verify_schedule_snapshot_keys(
+        &dsl_state,
+        &trigger,
+        &target,
+        &misfire_policy,
+        &overlap_policy,
+        &missing_target_policy,
+    )?;
+
+    let now = Utc::now();
+    let schedule = Schedule {
+        schedule_id: schedule_id_from_dsl(&dsl_state.schedule_id)?,
+        phase: schedule_phase_from_dsl(dsl_state.lifecycle_phase),
+        revision: ScheduleRevision(dsl_state.revision),
+        machine_state: dsl_state.clone(),
+        trigger,
+        target,
+        misfire_policy,
+        overlap_policy,
+        missing_target_policy,
+        next_occurrence_ordinal: OccurrenceOrdinal(dsl_state.next_occurrence_ordinal),
+        planning_cursor_utc: schedule_planning_cursor_from_dsl(dsl_state.planning_cursor_utc_ms)?,
+        superseded_ack_ids: schedule_superseded_ack_ids_from_dsl(&dsl_state.superseded_ack_ids)?,
+        config: crate::types::ScheduleConfig {
+            name: request.name,
+            description: request.description,
+            planning_horizon_days: planning_horizon_days_from_dsl(&dsl_state)?,
+            planning_horizon_occurrences: planning_horizon_occurrences_from_dsl(&dsl_state)?,
+            labels: request.labels,
+            created_at_utc: now,
+            updated_at_utc: now,
+            deleted_at_utc: None,
+        },
+    };
+    let effects = map_schedule_effects(&transition)?;
+    let write_precondition = ScheduleWritePrecondition::absent(schedule.schedule_id.clone());
+    Ok(schedule_lifecycle_mutator(
+        schedule,
+        effects,
+        false,
+        write_precondition,
+    ))
 }
 
 /// Apply config-level update changes. If any revision-affecting field changes,
@@ -625,13 +1718,10 @@ impl Schedule {
 fn apply_update(
     schedule: &mut Schedule,
     request: UpdateScheduleRequest,
+    at_utc: DateTime<Utc>,
 ) -> Result<(bool, Vec<ScheduleLifecycleEffect>), ScheduleLifecycleError> {
-    if schedule.phase == SchedulePhase::Deleted {
-        return Err(ScheduleLifecycleError::Deleted);
-    }
-
-    if let Some(expected_revision) = request.expected_revision
-        && expected_revision != schedule.revision
+    if let Some(expected_revision) = &request.expected_revision
+        && *expected_revision != schedule.revision
     {
         return Err(ScheduleLifecycleError::RevisionMismatch {
             expected: expected_revision.0,
@@ -639,72 +1729,213 @@ fn apply_update(
         });
     }
 
-    let mut revision_affecting_change = false;
+    let next_trigger = request
+        .trigger
+        .clone()
+        .unwrap_or_else(|| schedule.trigger.clone());
+    let next_target = request
+        .target
+        .clone()
+        .unwrap_or_else(|| schedule.target.clone());
+    let next_misfire_policy = request
+        .misfire_policy
+        .clone()
+        .unwrap_or_else(|| schedule.misfire_policy.clone());
+    let next_overlap_policy = request
+        .overlap_policy
+        .clone()
+        .unwrap_or_else(|| schedule.overlap_policy.clone());
+    let next_missing_target_policy = request
+        .missing_target_policy
+        .clone()
+        .unwrap_or_else(|| schedule.missing_target_policy.clone());
+    let next_planning_horizon_days = request
+        .planning_horizon_days
+        .unwrap_or(schedule.config.planning_horizon_days);
+    let next_planning_horizon_occurrences = request
+        .planning_horizon_occurrences
+        .unwrap_or(schedule.config.planning_horizon_occurrences);
 
-    // Config-only changes (not tracked by the DSL)
+    let revision_affecting_change = next_trigger != schedule.trigger
+        || next_target != schedule.target
+        || next_misfire_policy != schedule.misfire_policy
+        || next_overlap_policy != schedule.overlap_policy
+        || next_missing_target_policy != schedule.missing_target_policy;
+
+    let planning_config_changed = next_planning_horizon_days
+        != schedule.config.planning_horizon_days
+        || next_planning_horizon_occurrences != schedule.config.planning_horizon_occurrences;
+
+    if revision_affecting_change {
+        // Use the DSL Revise transition for the revision bump + planning cursor clear
+        let dsl_input = sched_dsl::ScheduleLifecycleInput::Revise {
+            trigger_key: trigger_stable_key(&next_trigger)?,
+            target_binding_key: target_stable_key(&next_target)?,
+            misfire_policy: to_dsl_misfire_policy(&next_misfire_policy),
+            misfire_policy_key: misfire_policy_authority_key(&next_misfire_policy)?,
+            overlap_policy: to_dsl_overlap_policy(&next_overlap_policy),
+            overlap_policy_key: overlap_policy_authority_key(&next_overlap_policy)?,
+            missing_target_policy: to_dsl_missing_target_policy(&next_missing_target_policy),
+            missing_target_policy_key: missing_target_policy_authority_key(
+                &next_missing_target_policy,
+            )?,
+            planning_horizon_days: u64::from(next_planning_horizon_days),
+            planning_horizon_occurrences: u64::from(next_planning_horizon_occurrences),
+            at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
+        };
+        let (transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
+        verify_schedule_snapshot_keys(
+            &dsl_state,
+            &next_trigger,
+            &next_target,
+            &next_misfire_policy,
+            &next_overlap_policy,
+            &next_missing_target_policy,
+        )?;
+        write_back_schedule(&dsl_state, schedule)?;
+        schedule.trigger = next_trigger;
+        schedule.target = next_target;
+        schedule.misfire_policy = next_misfire_policy;
+        schedule.overlap_policy = next_overlap_policy;
+        schedule.missing_target_policy = next_missing_target_policy;
+        schedule.touch();
+        apply_non_machine_schedule_config(schedule, request);
+        return Ok((true, map_schedule_effects(&transition)?));
+    }
+
+    let effects = if planning_config_changed {
+        let dsl_input = sched_dsl::ScheduleLifecycleInput::UpdatePlanningConfig {
+            planning_horizon_days: u64::from(next_planning_horizon_days),
+            planning_horizon_occurrences: u64::from(next_planning_horizon_occurrences),
+        };
+        let (transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
+        write_back_schedule(&dsl_state, schedule)?;
+        map_schedule_effects(&transition)?
+    } else {
+        Vec::new()
+    };
+    schedule.touch();
+    apply_non_machine_schedule_config(schedule, request);
+    Ok((false, effects))
+}
+
+fn apply_non_machine_schedule_config(schedule: &mut Schedule, request: UpdateScheduleRequest) {
     if let Some(name) = request.name {
         schedule.config.name = Some(name);
     }
     if let Some(description) = request.description {
         schedule.config.description = Some(description);
     }
-    if let Some(days) = request.planning_horizon_days {
-        schedule.config.planning_horizon_days = days;
-    }
-    if let Some(count) = request.planning_horizon_occurrences {
-        schedule.config.planning_horizon_occurrences = count;
-    }
     if let Some(labels) = request.labels {
         schedule.config.labels = labels;
     }
-
-    // Revision-affecting changes — detect diffs
-    if let Some(trigger) = request.trigger {
-        revision_affecting_change |= trigger != schedule.trigger;
-        schedule.trigger = trigger;
-    }
-    if let Some(target) = request.target {
-        revision_affecting_change |= target != schedule.target;
-        schedule.target = target;
-    }
-    if let Some(policy) = request.misfire_policy {
-        revision_affecting_change |= policy != schedule.misfire_policy;
-        schedule.misfire_policy = policy;
-    }
-    if let Some(policy) = request.overlap_policy {
-        revision_affecting_change |= policy != schedule.overlap_policy;
-        schedule.overlap_policy = policy;
-    }
-    if let Some(policy) = request.missing_target_policy {
-        revision_affecting_change |= policy != schedule.missing_target_policy;
-        schedule.missing_target_policy = policy;
-    }
-
-    if revision_affecting_change {
-        // Use the DSL Revise transition for the revision bump + planning cursor clear
-        let dsl_input = sched_dsl::ScheduleLifecycleInput::Revise {
-            trigger_key: trigger_stable_key(&schedule.trigger),
-            target_binding_key: schedule.target.stable_key(),
-            misfire_policy: to_dsl_misfire_policy(&schedule.misfire_policy),
-            overlap_policy: to_dsl_overlap_policy(&schedule.overlap_policy),
-            missing_target_policy: to_dsl_missing_target_policy(&schedule.missing_target_policy),
-        };
-        let (transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
-        write_back_schedule(&dsl_state, schedule);
-        schedule.touch();
-        return Ok((true, map_schedule_effects(&transition, None)));
-    }
-    schedule.touch();
-    Ok((
-        false,
-        vec![ScheduleLifecycleEffect::EmitScheduleNotice {
-            new_state: schedule.phase,
-            revision: schedule.revision,
-        }],
-    ))
 }
 
-/// Project schedule → DSL state, apply DSL input, return transition + new state.
+fn schedule_phase_from_dsl(phase: sched_dsl::ScheduleLifecycleState) -> SchedulePhase {
+    match phase {
+        sched_dsl::ScheduleLifecycleState::Active => SchedulePhase::Active,
+        sched_dsl::ScheduleLifecycleState::Paused => SchedulePhase::Paused,
+        sched_dsl::ScheduleLifecycleState::Deleted => SchedulePhase::Deleted,
+    }
+}
+
+fn planning_horizon_days_from_dsl(
+    dsl: &sched_dsl::ScheduleLifecycleMachineState,
+) -> Result<u32, ScheduleLifecycleError> {
+    u32::try_from(dsl.planning_horizon_days).map_err(|_| {
+        ScheduleLifecycleError::InvalidPlanningHorizonDays {
+            value: dsl.planning_horizon_days,
+        }
+    })
+}
+
+fn planning_horizon_occurrences_from_dsl(
+    dsl: &sched_dsl::ScheduleLifecycleMachineState,
+) -> Result<u32, ScheduleLifecycleError> {
+    u32::try_from(dsl.planning_horizon_occurrences).map_err(|_| {
+        ScheduleLifecycleError::InvalidPlanningHorizonOccurrences {
+            value: dsl.planning_horizon_occurrences,
+        }
+    })
+}
+
+fn verify_schedule_snapshot_keys(
+    dsl: &sched_dsl::ScheduleLifecycleMachineState,
+    trigger: &TriggerSpec,
+    target: &TargetBinding,
+    misfire_policy: &crate::types::MisfirePolicy,
+    overlap_policy: &crate::types::OverlapPolicy,
+    missing_target_policy: &crate::types::MissingTargetPolicy,
+) -> Result<(), ScheduleLifecycleError> {
+    let trigger_key = trigger_stable_key(trigger)?;
+    if dsl.trigger_key != trigger_key {
+        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.trigger_key.clone(),
+            snapshot_key: trigger_key,
+        });
+    }
+    let target_key = target_stable_key(target)?;
+    if dsl.target_binding_key != target_key {
+        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.target_binding_key.clone(),
+            snapshot_key: target_key,
+        });
+    }
+    let misfire_key = misfire_policy_authority_key(misfire_policy)?;
+    if dsl.misfire_policy_key != misfire_key {
+        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.misfire_policy_key.clone(),
+            snapshot_key: misfire_key,
+        });
+    }
+    let overlap_key = overlap_policy_authority_key(overlap_policy)?;
+    if dsl.overlap_policy_key != overlap_key {
+        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.overlap_policy_key.clone(),
+            snapshot_key: overlap_key,
+        });
+    }
+    let missing_target_key = missing_target_policy_authority_key(missing_target_policy)?;
+    if dsl.missing_target_policy_key != missing_target_key {
+        return Err(ScheduleLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.missing_target_policy_key.clone(),
+            snapshot_key: missing_target_key,
+        });
+    }
+    Ok(())
+}
+
+fn verify_occurrence_policy_keys(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    misfire_policy: &crate::types::MisfirePolicy,
+    overlap_policy: &crate::types::OverlapPolicy,
+    missing_target_policy: &crate::types::MissingTargetPolicy,
+) -> Result<(), OccurrenceLifecycleError> {
+    let misfire_key = misfire_policy_authority_key(misfire_policy)?;
+    if dsl.misfire_policy_key != misfire_key {
+        return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.misfire_policy_key.clone(),
+            snapshot_key: misfire_key,
+        });
+    }
+    let overlap_key = overlap_policy_authority_key(overlap_policy)?;
+    if dsl.overlap_policy_key != overlap_key {
+        return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.overlap_policy_key.clone(),
+            snapshot_key: overlap_key,
+        });
+    }
+    let missing_target_key = missing_target_policy_authority_key(missing_target_policy)?;
+    if dsl.missing_target_policy_key != missing_target_key {
+        return Err(OccurrenceLifecycleError::TargetBindingKeyMismatch {
+            machine_key: dsl.missing_target_policy_key.clone(),
+            snapshot_key: missing_target_key,
+        });
+    }
+    Ok(())
+}
+
+/// Recover generated schedule state, apply DSL input, return transition + new state.
 fn run_schedule_dsl(
     schedule: &Schedule,
     dsl_input: sched_dsl::ScheduleLifecycleInput,
@@ -715,124 +1946,373 @@ fn run_schedule_dsl(
     ),
     ScheduleLifecycleError,
 > {
-    let dsl_state = project_schedule(schedule);
-    let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::from_state(dsl_state);
+    let dsl_state = schedule_machine_state_for_authority(schedule)?;
+    let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::recover_from_state(dsl_state)
+        .map_err(|source| ScheduleLifecycleError::TransitionRejected { source })?;
     let transition = sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
-        .map_err(|_| ScheduleLifecycleError::Deleted)?;
-    Ok((transition, dsl_auth.state))
+        .map_err(|source| ScheduleLifecycleError::TransitionRejected { source })?;
+    Ok((transition, dsl_auth.state().clone()))
 }
 
-/// Project a domain `Schedule` into the DSL flat state struct.
-fn project_schedule(sched: &Schedule) -> sched_dsl::ScheduleLifecycleMachineState {
-    sched_dsl::ScheduleLifecycleMachineState {
-        lifecycle_phase: match sched.phase {
-            SchedulePhase::Active => sched_dsl::ScheduleLifecycleState::Active,
-            SchedulePhase::Paused => sched_dsl::ScheduleLifecycleState::Paused,
-            SchedulePhase::Deleted => sched_dsl::ScheduleLifecycleState::Deleted,
-        },
-        revision: sched.revision.0,
-        trigger_key: trigger_stable_key(&sched.trigger),
-        target_binding_key: sched.target.stable_key(),
-        misfire_policy: to_dsl_misfire_policy(&sched.misfire_policy),
-        overlap_policy: to_dsl_overlap_policy(&sched.overlap_policy),
-        missing_target_policy: to_dsl_missing_target_policy(&sched.missing_target_policy),
-        planning_cursor_utc_ms: sched.planning_cursor_utc.map(datetime_to_millis),
-        next_occurrence_ordinal: sched.next_occurrence_ordinal.0,
-        superseded_ack_ids: sched
-            .superseded_ack_ids
-            .iter()
-            .map(|id| sched_dsl::OccurrenceId(id.0.to_string()))
-            .collect(),
-    }
+/// Recover generated schedule state after checking display projections.
+fn schedule_machine_state_for_authority(
+    sched: &Schedule,
+) -> Result<sched_dsl::ScheduleLifecycleMachineState, ScheduleLifecycleError> {
+    validate_schedule_machine_projection(sched)
+        .map_err(|reason| ScheduleLifecycleError::ProjectionMismatch { reason })?;
+    Ok(sched.machine_state.clone())
+}
+
+#[cfg(test)]
+fn schedule_machine_state_for_test(
+    sched: &Schedule,
+) -> Result<sched_dsl::ScheduleLifecycleMachineState, ScheduleLifecycleError> {
+    schedule_machine_state_for_authority(sched)
 }
 
 /// Write DSL state back into the domain schedule (machine-owned fields only).
-fn write_back_schedule(dsl: &sched_dsl::ScheduleLifecycleMachineState, sched: &mut Schedule) {
+fn write_back_schedule(
+    dsl: &sched_dsl::ScheduleLifecycleMachineState,
+    sched: &mut Schedule,
+) -> Result<(), ScheduleLifecycleError> {
+    sched.schedule_id = schedule_id_from_dsl(&dsl.schedule_id)?;
     sched.phase = match dsl.lifecycle_phase {
         sched_dsl::ScheduleLifecycleState::Active => SchedulePhase::Active,
         sched_dsl::ScheduleLifecycleState::Paused => SchedulePhase::Paused,
         sched_dsl::ScheduleLifecycleState::Deleted => SchedulePhase::Deleted,
     };
     sched.revision = ScheduleRevision(dsl.revision);
-    sched.planning_cursor_utc = dsl.planning_cursor_utc_ms.and_then(millis_to_datetime);
+    sched.config.planning_horizon_days = planning_horizon_days_from_dsl(dsl)?;
+    sched.config.planning_horizon_occurrences = planning_horizon_occurrences_from_dsl(dsl)?;
+    sched.planning_cursor_utc = schedule_planning_cursor_from_dsl(dsl.planning_cursor_utc_ms)?;
     sched.next_occurrence_ordinal = OccurrenceOrdinal(dsl.next_occurrence_ordinal);
-    sched.superseded_ack_ids = dsl
-        .superseded_ack_ids
-        .iter()
-        .filter_map(|id| crate::types::OccurrenceId::parse(&id.0).ok())
-        .collect();
+    sched.superseded_ack_ids = schedule_superseded_ack_ids_from_dsl(&dsl.superseded_ack_ids)?;
+    sched.machine_state = dsl.clone();
+    Ok(())
 }
 
 /// Map DSL schedule effect → domain effect.
-///
-/// `planning_cursor_utc` and `next_occurrence_ordinal` are passed in from the
-/// original input since the DSL stores millis, and the PlanningWindowRecorded
-/// effect carries the original DateTime values.
 fn map_schedule_effect(
     effect: &sched_dsl::ScheduleLifecycleEffect,
-    planning_cursor_utc: DateTime<Utc>,
-    next_occurrence_ordinal: OccurrenceOrdinal,
-) -> ScheduleLifecycleEffect {
+) -> Result<ScheduleLifecycleEffect, ScheduleLifecycleError> {
     match effect {
         sched_dsl::ScheduleLifecycleEffect::EmitScheduleNotice {
             new_state,
             revision,
-        } => ScheduleLifecycleEffect::EmitScheduleNotice {
+        } => Ok(ScheduleLifecycleEffect::EmitScheduleNotice {
             new_state: match new_state {
                 sched_dsl::ScheduleLifecycleState::Active => SchedulePhase::Active,
                 sched_dsl::ScheduleLifecycleState::Paused => SchedulePhase::Paused,
                 sched_dsl::ScheduleLifecycleState::Deleted => SchedulePhase::Deleted,
             },
             revision: ScheduleRevision(*revision),
-        },
+        }),
         sched_dsl::ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision,
-        } => ScheduleLifecycleEffect::SupersedePendingOccurrences {
+            at_utc_ms,
+        } => Ok(ScheduleLifecycleEffect::SupersedePendingOccurrences {
             superseding_revision: ScheduleRevision(*superseding_revision),
-        },
-        sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded { .. } => {
-            ScheduleLifecycleEffect::PlanningWindowRecorded {
-                planning_cursor_utc,
-                next_occurrence_ordinal,
-            }
-        }
+            at_utc: millis_to_datetime(*at_utc_ms).ok_or(
+                ScheduleLifecycleError::InvalidSupersessionAtUtcMillis { millis: *at_utc_ms },
+            )?,
+        }),
+        sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
+            planning_cursor_utc_ms,
+            next_occurrence_ordinal,
+        } => Ok(ScheduleLifecycleEffect::PlanningWindowRecorded {
+            planning_cursor_utc: millis_to_datetime(*planning_cursor_utc_ms).ok_or(
+                ScheduleLifecycleError::InvalidPlanningCursorUtcMillis {
+                    millis: *planning_cursor_utc_ms,
+                },
+            )?,
+            next_occurrence_ordinal: OccurrenceOrdinal(*next_occurrence_ordinal),
+        }),
     }
 }
 
 fn map_schedule_effects(
     transition: &sched_dsl::ScheduleLifecycleMachineTransition,
-    planning_window: Option<(DateTime<Utc>, OccurrenceOrdinal)>,
-) -> Vec<ScheduleLifecycleEffect> {
-    let (planning_cursor_utc, next_occurrence_ordinal) =
-        planning_window.unwrap_or_else(|| (DateTime::default(), OccurrenceOrdinal::default()));
+) -> Result<Vec<ScheduleLifecycleEffect>, ScheduleLifecycleError> {
     transition
-        .effects
+        .effects()
         .iter()
-        .map(|effect| map_schedule_effect(effect, planning_cursor_utc, next_occurrence_ordinal))
+        .map(map_schedule_effect)
         .collect()
+}
+
+fn schedule_write_fingerprint(schedule: &Schedule) -> Result<Vec<u8>, String> {
+    validate_schedule_machine_projection(schedule)?;
+    serde_json::to_vec(schedule).map_err(|source| source.to_string())
+}
+
+fn occurrence_write_fingerprint(occurrence: &Occurrence) -> Result<Vec<u8>, String> {
+    validate_occurrence_machine_projection(occurrence)?;
+    serde_json::to_vec(occurrence).map_err(|source| source.to_string())
 }
 
 // ===========================================================================
 // Conversion helpers
 // ===========================================================================
 
-/// Produce a stable string key for a trigger spec. The DSL tracks this as an
-/// opaque string — equality is used only for revision-affecting change detection.
-fn trigger_stable_key(trigger: &TriggerSpec) -> String {
-    match trigger {
-        TriggerSpec::Once { due_at_utc } => format!("once:{due_at_utc}"),
-        TriggerSpec::Interval(spec) => {
-            format!(
-                "interval:{}:{}:{:?}",
-                spec.start_at_utc, spec.every_seconds, spec.end_at_utc
-            )
+fn semantic_json_key<T: Serialize>(
+    fact: &'static str,
+    prefix: &'static str,
+    value: &T,
+) -> Result<String, SemanticKeySerializationError> {
+    serde_json::to_string(value)
+        .map(|json| format!("{prefix}:{json}"))
+        .map_err(|source| SemanticKeySerializationError {
+            fact,
+            detail: source.to_string(),
+        })
+}
+
+/// Produce a complete semantic key for a trigger spec. The DSL stores the
+/// opaque key, and shell code may persist the full trigger only when the key
+/// accepted by generated authority matches this structured serialization.
+fn trigger_stable_key(trigger: &TriggerSpec) -> Result<String, SemanticKeySerializationError> {
+    semantic_json_key("trigger", "trigger", trigger)
+}
+
+fn target_stable_key(target: &TargetBinding) -> Result<String, SemanticKeySerializationError> {
+    target
+        .stable_key()
+        .map_err(|source| SemanticKeySerializationError {
+            fact: "target",
+            detail: source,
+        })
+}
+
+fn delivery_receipt_from_authority(
+    occurrence: &Occurrence,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+    let dsl = occurrence_machine_state_for_authority(occurrence)?;
+    receipt_from_pending_authority(&dsl, runtime_outcome)
+}
+
+fn receipt_from_pending_authority(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+    let stage = dsl
+        .receipt_stage
+        .map(from_dsl_receipt_stage)
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)?;
+    let recorded_at_utc_ms = dsl
+        .receipt_recorded_at_utc_ms
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)?;
+    let recorded_at_utc = millis_to_datetime(recorded_at_utc_ms).ok_or(
+        OccurrenceLifecycleError::InvalidTimestampMillis {
+            field: "receipt_recorded_at_utc",
+            millis: recorded_at_utc_ms,
+        },
+    )?;
+    let failure_class = dsl.receipt_failure_class.map(from_dsl_failure_class);
+    let detail = dsl.receipt_detail.clone();
+    let occurrence_id = occurrence_id_from_dsl(&dsl.occurrence_id)?;
+    let attempt = attempt_count_from_dsl(dsl.attempt_count)?;
+    let materialized_session_id =
+        optional_session_id_from_dsl(&dsl.target_materialized_session_id)?;
+    let runtime_outcome_key = runtime_outcome
+        .as_ref()
+        .map(runtime_outcome_authority_key)
+        .transpose()?;
+    let receipt_id = delivery_receipt_id_from_authority(
+        &occurrence_id,
+        attempt,
+        stage,
+        recorded_at_utc_ms,
+        dsl.delivery_correlation_id.as_deref(),
+        detail.as_deref(),
+        failure_class,
+        runtime_outcome_key.as_deref(),
+        materialized_session_id.as_ref(),
+    )
+    .map_err(|reason| OccurrenceLifecycleError::ProjectionMismatch { reason })?;
+    Ok(DeliveryReceipt {
+        receipt_id,
+        occurrence_id,
+        attempt,
+        stage,
+        recorded_at_utc,
+        correlation_id: dsl.delivery_correlation_id.clone(),
+        detail,
+        failure_class,
+        runtime_outcome,
+        materialized_session_id,
+    })
+}
+
+fn receipt_from_recorded_authority(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+    let stage = dsl
+        .last_receipt_stage
+        .map(from_dsl_receipt_stage)
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)?;
+    let recorded_at_utc_ms = dsl
+        .last_receipt_recorded_at_utc_ms
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)?;
+    let recorded_at_utc = millis_to_datetime(recorded_at_utc_ms).ok_or(
+        OccurrenceLifecycleError::InvalidTimestampMillis {
+            field: "last_receipt_recorded_at_utc",
+            millis: recorded_at_utc_ms,
+        },
+    )?;
+    let attempt = dsl
+        .last_receipt_attempt
+        .ok_or(OccurrenceLifecycleError::MissingReceiptAuthority)
+        .and_then(attempt_count_from_dsl)?;
+    let occurrence_id = occurrence_id_from_dsl(&dsl.occurrence_id)?;
+    let failure_class = dsl.last_receipt_failure_class.map(from_dsl_failure_class);
+    let detail = dsl.last_receipt_detail.clone();
+    let materialized_session_id =
+        optional_session_id_from_dsl(&dsl.last_receipt_materialized_session_id)?;
+    let runtime_outcome_key = runtime_outcome
+        .as_ref()
+        .map(runtime_outcome_authority_key)
+        .transpose()?;
+    if dsl.runtime_outcome_key != runtime_outcome_key {
+        return Err(OccurrenceLifecycleError::RuntimeOutcomeKeyMismatch {
+            machine_key: dsl.runtime_outcome_key.clone(),
+            snapshot_key: runtime_outcome_key,
+        });
+    }
+    let receipt_id = delivery_receipt_id_from_authority(
+        &occurrence_id,
+        attempt,
+        stage,
+        recorded_at_utc_ms,
+        dsl.last_receipt_correlation_id.as_deref(),
+        detail.as_deref(),
+        failure_class,
+        dsl.runtime_outcome_key.as_deref(),
+        materialized_session_id.as_ref(),
+    )
+    .map_err(|reason| OccurrenceLifecycleError::ProjectionMismatch { reason })?;
+    Ok(DeliveryReceipt {
+        receipt_id,
+        occurrence_id,
+        attempt,
+        stage,
+        recorded_at_utc,
+        correlation_id: dsl.last_receipt_correlation_id.clone(),
+        detail,
+        failure_class,
+        runtime_outcome,
+        materialized_session_id,
+    })
+}
+
+fn validate_receipt_against_authority(
+    dsl: &occ_dsl::OccurrenceLifecycleMachineState,
+    supplied: &DeliveryReceipt,
+    runtime_outcome: Option<RuntimeDeliveryOutcome>,
+) -> Result<DeliveryReceipt, OccurrenceLifecycleError> {
+    let expected = receipt_from_recorded_authority(dsl, runtime_outcome)?;
+    if supplied.stage != expected.stage {
+        return Err(OccurrenceLifecycleError::ReceiptStageMismatch {
+            expected: expected.stage,
+            actual: supplied.stage,
+        });
+    }
+    if supplied.failure_class != expected.failure_class {
+        return Err(OccurrenceLifecycleError::ReceiptFailureClassMismatch {
+            expected: expected.failure_class,
+            actual: supplied.failure_class,
+        });
+    }
+    if supplied.detail != expected.detail {
+        return Err(OccurrenceLifecycleError::ReceiptDetailMismatch {
+            expected: expected.detail,
+            actual: supplied.detail.clone(),
+        });
+    }
+    if supplied != &expected {
+        return Err(OccurrenceLifecycleError::ReceiptRecordMismatch {
+            expected: Box::new(expected),
+            actual: Box::new(supplied.clone()),
+        });
+    }
+    Ok(expected)
+}
+
+fn from_dsl_receipt_stage(stage: occ_dsl::DeliveryReceiptStage) -> DeliveryReceiptStage {
+    match stage {
+        occ_dsl::DeliveryReceiptStage::Planned => DeliveryReceiptStage::Planned,
+        occ_dsl::DeliveryReceiptStage::Claimed => DeliveryReceiptStage::Claimed,
+        occ_dsl::DeliveryReceiptStage::DispatchStarted => DeliveryReceiptStage::DispatchStarted,
+        occ_dsl::DeliveryReceiptStage::DispatchAccepted => DeliveryReceiptStage::DispatchAccepted,
+        occ_dsl::DeliveryReceiptStage::AwaitingCompletion => {
+            DeliveryReceiptStage::AwaitingCompletion
         }
-        TriggerSpec::Calendar(spec) => format!("calendar:{}", spec.timezone),
+        occ_dsl::DeliveryReceiptStage::Completed => DeliveryReceiptStage::Completed,
+        occ_dsl::DeliveryReceiptStage::Skipped => DeliveryReceiptStage::Skipped,
+        occ_dsl::DeliveryReceiptStage::Misfired => DeliveryReceiptStage::Misfired,
+        occ_dsl::DeliveryReceiptStage::Superseded => DeliveryReceiptStage::Superseded,
+        occ_dsl::DeliveryReceiptStage::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
+        occ_dsl::DeliveryReceiptStage::LeaseExpired => DeliveryReceiptStage::LeaseExpired,
     }
 }
 
-fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
-    u64::try_from(dt.timestamp_millis()).unwrap_or(0)
+fn runtime_outcome_authority_key(
+    outcome: &RuntimeDeliveryOutcome,
+) -> Result<String, SemanticKeySerializationError> {
+    semantic_json_key("runtime_outcome", "runtime_outcome", outcome)
+}
+
+fn misfire_policy_authority_key(
+    policy: &crate::types::MisfirePolicy,
+) -> Result<String, SemanticKeySerializationError> {
+    semantic_json_key("misfire_policy", "misfire_policy", policy)
+}
+
+fn overlap_policy_authority_key(
+    policy: &crate::types::OverlapPolicy,
+) -> Result<String, SemanticKeySerializationError> {
+    semantic_json_key("overlap_policy", "overlap_policy", policy)
+}
+
+fn missing_target_policy_authority_key(
+    policy: &crate::types::MissingTargetPolicy,
+) -> Result<String, SemanticKeySerializationError> {
+    semantic_json_key("missing_target_policy", "missing_target_policy", policy)
+}
+
+fn datetime_to_millis(dt: DateTime<Utc>) -> Result<u64, i64> {
+    let millis = dt.timestamp_millis();
+    u64::try_from(millis).map_err(|_| millis)
+}
+
+fn schedule_datetime_to_millis(
+    dt: DateTime<Utc>,
+    field: &'static str,
+) -> Result<u64, ScheduleLifecycleError> {
+    datetime_to_millis(dt)
+        .map_err(|millis| ScheduleLifecycleError::InvalidTimestampMillis { field, millis })
+}
+
+fn occurrence_datetime_to_millis(
+    dt: DateTime<Utc>,
+    field: &'static str,
+) -> Result<u64, OccurrenceLifecycleError> {
+    datetime_to_millis(dt)
+        .map_err(|millis| OccurrenceLifecycleError::InvalidInputTimestampMillis { field, millis })
+}
+
+fn occurrence_misfire_deadline_to_millis(
+    policy: &crate::types::MisfirePolicy,
+    due_at_utc: DateTime<Utc>,
+) -> Result<u64, OccurrenceLifecycleError> {
+    let deadline = policy.misfire_deadline_utc(due_at_utc).ok_or(
+        OccurrenceLifecycleError::InvalidInputTimestampMillis {
+            field: "misfire_deadline_utc",
+            millis: due_at_utc.timestamp_millis(),
+        },
+    )?;
+    occurrence_datetime_to_millis(deadline, "misfire_deadline_utc")
 }
 
 fn millis_to_datetime(ms: u64) -> Option<DateTime<Utc>> {
@@ -840,18 +2320,90 @@ fn millis_to_datetime(ms: u64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(ms_i64)
 }
 
-fn to_dsl_failure_class(fc: OccurrenceFailureClass) -> occ_dsl::FailureClass {
-    match fc {
-        OccurrenceFailureClass::TargetMaterializationFailed => {
-            occ_dsl::FailureClass::TargetMaterializationFailed
+fn schedule_planning_cursor_from_dsl(
+    ms: Option<u64>,
+) -> Result<Option<DateTime<Utc>>, ScheduleLifecycleError> {
+    ms.map(|millis| {
+        millis_to_datetime(millis)
+            .ok_or(ScheduleLifecycleError::InvalidPlanningCursorUtcMillis { millis })
+    })
+    .transpose()
+}
+
+fn schedule_superseded_ack_ids_from_dsl(
+    ids: &BTreeSet<sched_dsl::OccurrenceId>,
+) -> Result<BTreeSet<crate::types::OccurrenceId>, ScheduleLifecycleError> {
+    ids.iter()
+        .map(|id| {
+            crate::types::OccurrenceId::parse(&id.0).map_err(|source| {
+                ScheduleLifecycleError::InvalidSupersededAckId {
+                    id: id.0.clone(),
+                    source,
+                }
+            })
+        })
+        .collect()
+}
+
+fn occurrence_optional_datetime_from_dsl(
+    ms: Option<u64>,
+    field: &'static str,
+) -> Result<Option<DateTime<Utc>>, OccurrenceLifecycleError> {
+    ms.map(|millis| {
+        millis_to_datetime(millis)
+            .ok_or(OccurrenceLifecycleError::InvalidTimestampMillis { field, millis })
+    })
+    .transpose()
+}
+
+fn claim_token_from_dsl(
+    token: &Option<occ_dsl::ClaimToken>,
+) -> Result<Option<Uuid>, OccurrenceLifecycleError> {
+    token
+        .as_ref()
+        .map(|t| {
+            Uuid::parse_str(&t.0).map_err(|source| OccurrenceLifecycleError::InvalidClaimToken {
+                token: t.0.clone(),
+                source,
+            })
+        })
+        .transpose()
+}
+
+fn optional_session_id_from_dsl(
+    session_id: &Option<occ_dsl::SessionId>,
+) -> Result<Option<SessionId>, OccurrenceLifecycleError> {
+    session_id
+        .as_ref()
+        .map(|id| {
+            SessionId::parse(&id.0).map_err(|source| OccurrenceLifecycleError::InvalidSessionId {
+                id: id.0.clone(),
+                source,
+            })
+        })
+        .transpose()
+}
+
+fn attempt_count_from_dsl(value: u64) -> Result<u32, OccurrenceLifecycleError> {
+    u32::try_from(value).map_err(|_| OccurrenceLifecycleError::InvalidAttemptCount { value })
+}
+
+fn to_dsl_runtime_completion_outcome(
+    outcome: RuntimeCompletionOutcome,
+) -> occ_dsl::RuntimeCompletionOutcome {
+    match outcome {
+        RuntimeCompletionOutcome::Completed => occ_dsl::RuntimeCompletionOutcome::Completed,
+        RuntimeCompletionOutcome::CallbackPending => {
+            occ_dsl::RuntimeCompletionOutcome::CallbackPending
         }
-        OccurrenceFailureClass::TargetMissing => occ_dsl::FailureClass::TargetMissing,
-        OccurrenceFailureClass::TargetBusy => occ_dsl::FailureClass::TargetBusy,
-        OccurrenceFailureClass::RuntimeRejected => occ_dsl::FailureClass::RuntimeRejected,
-        OccurrenceFailureClass::MobRejected => occ_dsl::FailureClass::MobRejected,
-        OccurrenceFailureClass::LeaseLost => occ_dsl::FailureClass::LeaseLost,
-        OccurrenceFailureClass::TransportError => occ_dsl::FailureClass::TransportError,
-        OccurrenceFailureClass::InternalError => occ_dsl::FailureClass::InternalError,
+        RuntimeCompletionOutcome::Cancelled => occ_dsl::RuntimeCompletionOutcome::Cancelled,
+        RuntimeCompletionOutcome::Abandoned => occ_dsl::RuntimeCompletionOutcome::Abandoned,
+        RuntimeCompletionOutcome::FinalizationFailed => {
+            occ_dsl::RuntimeCompletionOutcome::FinalizationFailed
+        }
+        RuntimeCompletionOutcome::RuntimeTerminated => {
+            occ_dsl::RuntimeCompletionOutcome::RuntimeTerminated
+        }
     }
 }
 
@@ -881,6 +2433,22 @@ fn occurrence_id_from_dsl(
     })
 }
 
+fn occurrence_schedule_id_from_dsl(
+    id: &occ_dsl::ScheduleId,
+) -> Result<ScheduleId, OccurrenceLifecycleError> {
+    ScheduleId::parse(&id.0).map_err(|source| OccurrenceLifecycleError::InvalidScheduleId {
+        id: id.0.clone(),
+        source,
+    })
+}
+
+fn schedule_id_from_dsl(id: &sched_dsl::ScheduleId) -> Result<ScheduleId, ScheduleLifecycleError> {
+    ScheduleId::parse(&id.0).map_err(|source| ScheduleLifecycleError::InvalidScheduleId {
+        id: id.0.clone(),
+        source,
+    })
+}
+
 fn to_dsl_misfire_policy(policy: &crate::types::MisfirePolicy) -> sched_dsl::MisfirePolicy {
     match policy {
         crate::types::MisfirePolicy::Skip => sched_dsl::MisfirePolicy::Skip,
@@ -890,10 +2458,24 @@ fn to_dsl_misfire_policy(policy: &crate::types::MisfirePolicy) -> sched_dsl::Mis
     }
 }
 
+fn to_occ_dsl_misfire_policy(policy: &crate::types::MisfirePolicy) -> occ_dsl::MisfirePolicy {
+    match policy {
+        crate::types::MisfirePolicy::Skip => occ_dsl::MisfirePolicy::Skip,
+        crate::types::MisfirePolicy::CatchUpWithin { .. } => occ_dsl::MisfirePolicy::CatchUpWithin,
+    }
+}
+
 fn to_dsl_overlap_policy(policy: &crate::types::OverlapPolicy) -> sched_dsl::OverlapPolicy {
     match policy {
         crate::types::OverlapPolicy::AllowConcurrent => sched_dsl::OverlapPolicy::AllowConcurrent,
         crate::types::OverlapPolicy::SkipIfRunning => sched_dsl::OverlapPolicy::SkipIfRunning,
+    }
+}
+
+fn to_occ_dsl_overlap_policy(policy: &crate::types::OverlapPolicy) -> occ_dsl::OverlapPolicy {
+    match policy {
+        crate::types::OverlapPolicy::AllowConcurrent => occ_dsl::OverlapPolicy::AllowConcurrent,
+        crate::types::OverlapPolicy::SkipIfRunning => occ_dsl::OverlapPolicy::SkipIfRunning,
     }
 }
 
@@ -908,8 +2490,21 @@ fn to_dsl_missing_target_policy(
     }
 }
 
+fn to_occ_dsl_missing_target_policy(
+    policy: &crate::types::MissingTargetPolicy,
+) -> occ_dsl::MissingTargetPolicy {
+    match policy {
+        crate::types::MissingTargetPolicy::Skip => occ_dsl::MissingTargetPolicy::Skip,
+        crate::types::MissingTargetPolicy::MarkMisfired => {
+            occ_dsl::MissingTargetPolicy::MarkMisfired
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     use crate::types::{
@@ -926,6 +2521,7 @@ mod tests {
             crate::OccurrenceOrdinal(0),
             Utc::now(),
         )
+        .expect("sample occurrence planning should pass generated authority")
     }
 
     fn sample_schedule() -> Schedule {
@@ -952,6 +2548,209 @@ mod tests {
             planning_horizon_days: Some(1),
             planning_horizon_occurrences: Some(1),
         })
+        .expect("sample schedule creation should pass generated authority")
+    }
+
+    fn sample_claimed_occurrence() -> Occurrence {
+        sample_occurrence()
+            .apply(OccurrenceLifecycleInput::Claim {
+                owner_id: "owner".into(),
+                at_utc: Utc::now(),
+                lease_expires_at_utc: Utc::now() + Duration::seconds(30),
+                claim_token: Uuid::now_v7(),
+            })
+            .expect("claim should pass generated authority")
+            .into_occurrence()
+    }
+
+    fn sample_completed_occurrence() -> Occurrence {
+        sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch should pass generated authority")
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::Complete { at_utc: Utc::now() })
+            .expect("completion should pass generated authority")
+            .into_occurrence()
+    }
+
+    fn classify_rejected_occurrence_input(
+        occurrence: &Occurrence,
+        input: OccurrenceLifecycleInput,
+    ) -> occ_dsl::OccurrenceTransitionFailureClassKind {
+        let dsl_state = occurrence_machine_state_for_authority(occurrence)
+            .expect("test occurrence projection should match authority");
+        let mut authority =
+            occ_dsl::OccurrenceLifecycleMachineAuthority::recover_from_state(dsl_state)
+                .expect("test occurrence state should recover");
+        let dsl_input = convert_occurrence_input(&input).expect("test input should convert");
+        let error = occ_dsl::OccurrenceLifecycleMachineMutator::apply(&mut authority, dsl_input)
+            .expect_err("test input should be rejected by generated authority");
+        classify_occurrence_transition_failure(&mut authority, &error)
+            .expect("generated authority should classify its rejection")
+    }
+
+    #[test]
+    fn transition_failure_public_class_comes_from_occurrence_authority() {
+        let now = Utc::now();
+        let schedule = sample_schedule();
+        let pending = sample_occurrence();
+        let claimed = sample_claimed_occurrence();
+        let completed = sample_completed_occurrence();
+        let receipt = DeliveryReceipt::new(
+            pending.occurrence_id.clone(),
+            pending.attempt_count,
+            DeliveryReceiptStage::Claimed,
+        );
+        let future = Occurrence::planned_from_schedule(
+            &sample_schedule(),
+            crate::OccurrenceOrdinal(1),
+            now + Duration::minutes(5),
+        )
+        .expect("future occurrence planning should pass generated authority");
+
+        let cases = vec![
+            (
+                &claimed,
+                OccurrenceLifecycleInput::PlanOccurrence {
+                    occurrence_id: crate::types::OccurrenceId::new(),
+                    schedule_id: schedule.schedule_id.clone(),
+                    schedule_revision: schedule.revision,
+                    occurrence_ordinal: crate::OccurrenceOrdinal(0),
+                    trigger_snapshot: schedule.trigger.clone(),
+                    target_snapshot: schedule.target.clone(),
+                    misfire_policy: schedule.misfire_policy.clone(),
+                    overlap_policy: schedule.overlap_policy.clone(),
+                    missing_target_policy: schedule.missing_target_policy.clone(),
+                    due_at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::PlanRejected,
+            ),
+            (
+                &completed,
+                OccurrenceLifecycleInput::SyncTargetSnapshot {
+                    target_snapshot: schedule.target,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::TargetSyncRejected,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::RecordReceipt {
+                    receipt,
+                    runtime_outcome: None,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::ReceiptRecordRejected,
+            ),
+            (
+                &future,
+                OccurrenceLifecycleInput::Claim {
+                    owner_id: "owner".into(),
+                    at_utc: now,
+                    lease_expires_at_utc: now + Duration::seconds(30),
+                    claim_token: Uuid::now_v7(),
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected,
+            ),
+            (
+                &claimed,
+                OccurrenceLifecycleInput::Claim {
+                    owner_id: "owner".into(),
+                    at_utc: now,
+                    lease_expires_at_utc: now + Duration::seconds(30),
+                    claim_token: Uuid::now_v7(),
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotPendingForClaim,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::DispatchStarted {
+                    correlation_id: Some("corr-1".into()),
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotClaimed,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::AwaitCompletion { at_utc: now },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotDispatching,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::Complete { at_utc: now },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                    outcome: RuntimeCompletionOutcome::Completed,
+                    detail: None,
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+                    reason: DeliveryCompletionFailureReason::RuntimeCompletionHandleMissing,
+                    detail: None,
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                    reason: DeliveryFailureReason::TransportError,
+                    detail: None,
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &completed,
+                OccurrenceLifecycleInput::ResolveTargetProbe {
+                    outcome: OccurrenceTargetProbeOutcome::Busy,
+                    detail: None,
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &completed,
+                OccurrenceLifecycleInput::ResolveDueMisfire {
+                    detail: None,
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &completed,
+                OccurrenceLifecycleInput::Supersede {
+                    superseded_by_revision: ScheduleRevision(2),
+                    at_utc: now,
+                },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLiveForTerminal,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::LeaseExpired { at_utc: now },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLeaseHolding,
+            ),
+            (
+                &pending,
+                OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule { at_utc: now },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotLeaseHolding,
+            ),
+        ];
+
+        for (occurrence, input, expected) in cases {
+            assert_eq!(
+                classify_rejected_occurrence_input(occurrence, input),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -978,6 +2777,128 @@ mod tests {
     }
 
     #[test]
+    fn due_classification_comes_from_occurrence_authority() {
+        let now = Utc::now();
+        let claimable =
+            Occurrence::planned_from_schedule(&sample_schedule(), crate::OccurrenceOrdinal(0), now)
+                .expect("claimable occurrence planning should pass generated authority");
+        assert_eq!(
+            claimable
+                .classify_due_action(now)
+                .expect("due classification should pass"),
+            Some(OccurrenceDueAction::ClaimEligible)
+        );
+
+        let future = Occurrence::planned_from_schedule(
+            &sample_schedule(),
+            crate::OccurrenceOrdinal(1),
+            now + Duration::minutes(5),
+        )
+        .expect("future occurrence planning should pass generated authority");
+        assert_eq!(
+            future
+                .classify_due_action(now)
+                .expect("future classification should pass"),
+            None
+        );
+        assert!(matches!(
+            future.apply(OccurrenceLifecycleInput::Claim {
+                owner_id: "owner".into(),
+                at_utc: now,
+                lease_expires_at_utc: now + Duration::seconds(30),
+                claim_token: Uuid::now_v7(),
+            }),
+            Err(OccurrenceLifecycleError::ClaimRejected)
+        ));
+
+        let overdue = Occurrence::planned_from_schedule(
+            &sample_schedule(),
+            crate::OccurrenceOrdinal(2),
+            now - Duration::seconds(60),
+        )
+        .expect("overdue occurrence planning should pass generated authority");
+        assert_eq!(
+            overdue
+                .classify_due_action(now)
+                .expect("overdue classification should pass"),
+            Some(OccurrenceDueAction::MisfireRequired)
+        );
+    }
+
+    #[test]
+    fn record_receipt_rejects_stage_without_generated_authority() {
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch start should pass generated authority")
+            .into_occurrence();
+        let mut receipt = dispatching
+            .delivery_receipt_from_authority(None)
+            .expect("generated receipt authority should project dispatch receipt");
+        receipt.stage = DeliveryReceiptStage::Completed;
+
+        assert!(matches!(
+            dispatching.apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt,
+                runtime_outcome: None,
+            }),
+            Err(OccurrenceLifecycleError::ReceiptStageMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn record_receipt_rejects_provenance_without_generated_authority() {
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch start should pass generated authority")
+            .into_occurrence();
+        let mut receipt = dispatching
+            .delivery_receipt_from_authority(None)
+            .expect("generated receipt authority should project dispatch receipt");
+        receipt.receipt_id = Uuid::now_v7();
+
+        assert!(matches!(
+            dispatching.apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt,
+                runtime_outcome: None,
+            }),
+            Err(OccurrenceLifecycleError::ReceiptRecordMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn lease_expired_receipt_projection_comes_from_generated_authority() {
+        let expired = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc: Utc::now() })
+            .expect("lease expiry should pass generated authority")
+            .into_occurrence();
+        let receipt = expired
+            .delivery_receipt_from_authority(None)
+            .expect("generated receipt authority should project lease receipt");
+
+        assert_eq!(receipt.stage, DeliveryReceiptStage::LeaseExpired);
+        assert_eq!(
+            receipt.failure_class,
+            Some(OccurrenceFailureClass::LeaseLost)
+        );
+        assert_eq!(
+            receipt.detail.as_deref(),
+            Some("lease expired before completion")
+        );
+        expired
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt,
+                runtime_outcome: None,
+            })
+            .expect("generated receipt authority should accept matching receipt");
+    }
+
+    #[test]
     fn await_completion_requires_dispatching_phase() {
         let occurrence = sample_occurrence();
         let result =
@@ -989,16 +2910,135 @@ mod tests {
     }
 
     #[test]
+    fn runtime_completion_terminality_comes_from_occurrence_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let at_utc = Utc::now();
+        let awaiting = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-1".into()),
+                at_utc,
+            })?
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc })?
+            .into_occurrence();
+
+        let completed = awaiting
+            .clone()
+            .apply(OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                outcome: RuntimeCompletionOutcome::Completed,
+                detail: None,
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(completed.phase, OccurrencePhase::Completed);
+        assert_eq!(completed.failure_class, None);
+        assert_eq!(completed.failure_detail, None);
+
+        let rejected = awaiting
+            .apply(OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+                outcome: RuntimeCompletionOutcome::CallbackPending,
+                detail: Some("callback still pending".into()),
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(rejected.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            rejected.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+        assert_eq!(
+            rejected.failure_detail.as_deref(),
+            Some("callback still pending")
+        );
+
+        let completion_authority_missing = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-2".into()),
+                at_utc,
+            })?
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc })?
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+                reason: DeliveryCompletionFailureReason::RuntimeCompletionHandleMissing,
+                detail: Some("missing completion handle".into()),
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(
+            completion_authority_missing.phase,
+            OccurrencePhase::DeliveryFailed
+        );
+        assert_eq!(
+            completion_authority_missing.failure_class,
+            Some(OccurrenceFailureClass::InternalError)
+        );
+        assert_eq!(
+            completion_authority_missing.failure_detail.as_deref(),
+            Some("missing completion handle")
+        );
+
+        let completion_future_failed = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-3".into()),
+                at_utc,
+            })?
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc })?
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+                reason: DeliveryCompletionFailureReason::CompletionFutureFailed,
+                detail: Some("completion future failed".into()),
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(
+            completion_future_failed.phase,
+            OccurrencePhase::DeliveryFailed
+        );
+        assert_eq!(
+            completion_future_failed.failure_class,
+            Some(OccurrenceFailureClass::TransportError)
+        );
+        assert_eq!(
+            completion_future_failed.failure_detail.as_deref(),
+            Some("completion future failed")
+        );
+
+        let delivery_failure = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                reason: DeliveryFailureReason::TargetMaterializationFailed,
+                detail: Some("materialization failed".into()),
+                at_utc,
+            })?
+            .into_occurrence();
+
+        assert_eq!(delivery_failure.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            delivery_failure.failure_class,
+            Some(OccurrenceFailureClass::TargetMaterializationFailed)
+        );
+        assert_eq!(
+            delivery_failure.failure_detail.as_deref(),
+            Some("materialization failed")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn supersede_emits_occurrence_ack_effect() -> Result<(), Box<dyn std::error::Error>> {
         let occurrence = sample_occurrence();
+        let occurrence_id = occurrence.occurrence_id.clone();
         let superseding_revision = ScheduleRevision(2);
 
-        let mutator = occurrence
-            .clone()
-            .apply(OccurrenceLifecycleInput::Supersede {
-                superseded_by_revision: superseding_revision,
-                at_utc: Utc::now(),
-            })?;
+        let mutator = occurrence.apply(OccurrenceLifecycleInput::Supersede {
+            superseded_by_revision: superseding_revision,
+            at_utc: Utc::now(),
+        })?;
 
         assert_eq!(mutator.occurrence.phase, OccurrencePhase::Superseded);
         assert_eq!(
@@ -1010,32 +3050,316 @@ mod tests {
             vec![
                 OccurrenceLifecycleEffect::Superseded,
                 OccurrenceLifecycleEffect::OccurrencesSuperseded {
-                    occurrence_id: occurrence.occurrence_id,
+                    occurrence_id: occurrence_id.clone(),
                     superseding_revision,
                 },
             ]
         );
+        let (_updated, _effects, acks) = mutator.into_parts_with_supersession_feedback();
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].occurrence_id(), &occurrence_id);
+        assert_eq!(acks[0].superseding_revision(), superseding_revision);
         Ok(())
     }
 
     #[test]
-    fn schedule_records_supersede_ack_without_effects() -> Result<(), Box<dyn std::error::Error>> {
-        let schedule = sample_schedule();
-        let occurrence_id = crate::types::OccurrenceId::new();
-        let revision = schedule.revision.next();
+    fn schedule_records_supersede_ack_from_occurrence_feedback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = sample_schedule();
+        let old_occurrence =
+            Occurrence::planned_from_schedule(&original, OccurrenceOrdinal(0), Utc::now())?;
+        let revised = Schedule::apply(
+            Some(original.clone()),
+            ScheduleLifecycleInput::Update {
+                request: UpdateScheduleRequest {
+                    expected_revision: Some(original.revision),
+                    trigger: Some(TriggerSpec::Once {
+                        due_at_utc: Utc::now() + Duration::minutes(2),
+                    }),
+                    ..UpdateScheduleRequest::default()
+                },
+                at_utc: Utc::now(),
+            },
+        )?
+        .into_schedule();
+        let occurrence_id = old_occurrence.occurrence_id.clone();
+        let (_updated_occurrence, _effects, mut acks) = old_occurrence
+            .apply(OccurrenceLifecycleInput::Supersede {
+                superseded_by_revision: revised.revision,
+                at_utc: Utc::now(),
+            })?
+            .into_parts_with_supersession_feedback();
+        assert_eq!(acks.len(), 1);
 
         let mutator = Schedule::apply(
-            Some(schedule.clone()),
+            Some(revised.clone()),
             ScheduleLifecycleInput::ConfirmOccurrencesSuperseded {
-                occurrence_id: occurrence_id.clone(),
-                superseding_revision: revision,
+                ack: acks.pop().expect("supersede should mint feedback"),
             },
         )?;
 
         assert_eq!(mutator.schedule.phase, SchedulePhase::Active);
-        assert_eq!(mutator.schedule.revision, schedule.revision);
+        assert_eq!(mutator.schedule.revision, revised.revision);
         assert!(mutator.effects.is_empty());
         assert!(mutator.schedule.superseded_ack_ids.contains(&occurrence_id));
+        Ok(())
+    }
+
+    #[test]
+    fn public_occurrence_effect_tampering_cannot_forge_supersession_feedback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let occurrence =
+            Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), Utc::now())?;
+        let forged_id = occurrence.occurrence_id.clone();
+        let mut mutator = occurrence.apply(OccurrenceLifecycleInput::Claim {
+            owner_id: "owner".into(),
+            at_utc: Utc::now(),
+            lease_expires_at_utc: Utc::now() + Duration::seconds(30),
+            claim_token: Uuid::now_v7(),
+        })?;
+        mutator
+            .effects
+            .push(OccurrenceLifecycleEffect::OccurrencesSuperseded {
+                occurrence_id: forged_id.clone(),
+                superseding_revision: schedule.revision,
+            });
+
+        let (_updated_occurrence, _effects, acks) = mutator.into_parts_with_supersession_feedback();
+        assert!(acks.is_empty());
+        let schedule = crate::store::apply_supersession_feedback(schedule, acks)?;
+        assert!(!schedule.superseded_ack_ids.contains(&forged_id));
+        Ok(())
+    }
+
+    #[test]
+    fn config_only_update_emits_no_machine_effects() -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+
+        let mutator = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::Update {
+                request: UpdateScheduleRequest {
+                    name: Some("renamed".into()),
+                    ..UpdateScheduleRequest::default()
+                },
+                at_utc: Utc::now(),
+            },
+        )?;
+
+        assert_eq!(mutator.schedule.revision, schedule.revision);
+        assert!(!mutator.revision_bumped);
+        assert_eq!(mutator.schedule.config.name.as_deref(), Some("renamed"));
+        assert!(mutator.effects.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn supersede_effect_timestamp_comes_from_revise_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let at_utc = DateTime::from_timestamp(1_700_000_000, 0).expect("test timestamp is valid");
+
+        let mutator = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::Update {
+                request: UpdateScheduleRequest {
+                    expected_revision: Some(schedule.revision),
+                    trigger: Some(TriggerSpec::Once {
+                        due_at_utc: at_utc + Duration::minutes(30),
+                    }),
+                    ..UpdateScheduleRequest::default()
+                },
+                at_utc,
+            },
+        )?;
+
+        assert!(mutator.effects.iter().any(|effect| matches!(
+            effect,
+            ScheduleLifecycleEffect::SupersedePendingOccurrences {
+                superseding_revision,
+                at_utc: effect_at_utc,
+            } if *superseding_revision == mutator.schedule.revision && *effect_at_utc == at_utc
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn create_uses_generated_planning_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let mut request = CreateScheduleRequest {
+            name: None,
+            description: None,
+            trigger: TriggerSpec::Once {
+                due_at_utc: Utc::now() + Duration::minutes(1),
+            },
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: meerkat_core::SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: ContentInput::from("scheduled hello"),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: MisfirePolicy::Skip,
+            overlap_policy: OverlapPolicy::SkipIfRunning,
+            missing_target_policy: MissingTargetPolicy::MarkMisfired,
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        };
+
+        let schedule = Schedule::new(request.clone())?;
+        assert_eq!(
+            schedule.config.planning_horizon_days,
+            sched_dsl::ScheduleLifecycleMachineState::default().planning_horizon_days as u32
+        );
+        assert_eq!(
+            schedule.config.planning_horizon_occurrences,
+            sched_dsl::ScheduleLifecycleMachineState::default().planning_horizon_occurrences as u32
+        );
+
+        request.planning_horizon_days = Some(7);
+        request.planning_horizon_occurrences = Some(9);
+        let schedule = Schedule::new(request)?;
+        assert_eq!(schedule.config.planning_horizon_days, 7);
+        assert_eq!(schedule.config.planning_horizon_occurrences, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_transition_errors_preserve_generated_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let paused = Schedule::apply(
+            Some(schedule),
+            ScheduleLifecycleInput::Pause { at_utc: Utc::now() },
+        )?
+        .into_schedule();
+
+        let error = Schedule::apply(
+            Some(paused),
+            ScheduleLifecycleInput::RecordPlanningWindow {
+                planning_cursor_utc: Utc::now(),
+                next_occurrence_ordinal: OccurrenceOrdinal(1),
+            },
+        )
+        .expect_err("paused schedules should reject planning-window advancement");
+
+        assert!(matches!(
+            error,
+            ScheduleLifecycleError::TransitionRejected { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_inputs_reject_negative_timestamp_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let before_epoch = DateTime::from_timestamp(-1, 0).expect("test timestamp is valid");
+
+        let error = Schedule::apply(
+            Some(schedule),
+            ScheduleLifecycleInput::RecordPlanningWindow {
+                planning_cursor_utc: before_epoch,
+                next_occurrence_ordinal: OccurrenceOrdinal(1),
+            },
+        )
+        .expect_err("negative timestamp should fail before generated input");
+
+        assert!(matches!(
+            error,
+            ScheduleLifecycleError::InvalidTimestampMillis {
+                field: "planning_cursor_utc",
+                millis: -1000
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_write_back_rejects_invalid_generated_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let mut dsl = schedule_machine_state_for_test(&schedule)?;
+        dsl.planning_cursor_utc_ms = Some(u64::MAX);
+        let mut projected = schedule.clone();
+
+        assert!(matches!(
+            write_back_schedule(&dsl, &mut projected),
+            Err(ScheduleLifecycleError::InvalidPlanningCursorUtcMillis { millis })
+                if millis == u64::MAX
+        ));
+
+        let mut dsl = schedule_machine_state_for_test(&schedule)?;
+        dsl.superseded_ack_ids
+            .insert(sched_dsl::OccurrenceId("not-a-uuid".into()));
+        let mut projected = schedule;
+
+        assert!(matches!(
+            write_back_schedule(&dsl, &mut projected),
+            Err(ScheduleLifecycleError::InvalidSupersededAckId { id, .. })
+                if id == "not-a-uuid"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn occurrence_write_back_rejects_invalid_generated_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let occurrence = sample_occurrence();
+        let input = OccurrenceLifecycleInput::LeaseExpired { at_utc: Utc::now() };
+
+        let mut dsl = occurrence_machine_state_for_test(&occurrence)?;
+        dsl.claim_token = Some(occ_dsl::ClaimToken("not-a-uuid".into()));
+        let mut projected = occurrence.clone();
+        assert!(matches!(
+            write_back_occurrence(&dsl, &mut projected, &input),
+            Err(OccurrenceLifecycleError::InvalidClaimToken { token, .. })
+                if token == "not-a-uuid"
+        ));
+
+        let mut dsl = occurrence_machine_state_for_test(&occurrence)?;
+        dsl.attempt_count = u64::from(u32::MAX) + 1;
+        let mut projected = occurrence;
+        assert!(matches!(
+            write_back_occurrence(&dsl, &mut projected, &input),
+            Err(OccurrenceLifecycleError::InvalidAttemptCount { value })
+                if value == u64::from(u32::MAX) + 1
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn planning_window_effect_maps_generated_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let effect = map_schedule_effect(
+            &sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
+                planning_cursor_utc_ms: 1234,
+                next_occurrence_ordinal: 99,
+            },
+        )?;
+
+        assert_eq!(
+            effect,
+            ScheduleLifecycleEffect::PlanningWindowRecorded {
+                planning_cursor_utc: DateTime::from_timestamp_millis(1234)
+                    .expect("test timestamp should be valid"),
+                next_occurrence_ordinal: OccurrenceOrdinal(99),
+            }
+        );
+
+        assert!(matches!(
+            map_schedule_effect(
+                &sched_dsl::ScheduleLifecycleEffect::PlanningWindowRecorded {
+                    planning_cursor_utc_ms: u64::MAX,
+                    next_occurrence_ordinal: 1,
+                },
+            ),
+            Err(ScheduleLifecycleError::InvalidPlanningCursorUtcMillis { millis })
+                if millis == u64::MAX
+        ));
         Ok(())
     }
 

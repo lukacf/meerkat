@@ -2,14 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::oneshot;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::oneshot;
+use std::future::Future;
+use std::pin::Pin;
 
-use crate::comms::TrustedPeerDescriptor;
+use crate::comms::{PeerAddress, PeerId, TrustedPeerDescriptor};
 use crate::lifecycle::{RunId, WaitRequestId};
 pub use crate::ops::{OperationId, OperationResult};
+use crate::runtime_epoch::EpochCursorState;
 use crate::types::SessionId;
 
 /// Default maximum number of completed operations to retain before eviction.
@@ -21,12 +20,52 @@ pub const DEFAULT_MAX_COMPLETED: usize = 256;
 pub enum OperationKind {
     MobMemberChild,
     BackgroundToolOp,
+    BackgroundToolCapacitySlot,
 }
 
 impl OperationKind {
+    /// Closed variant set mirrored from the generated MeerkatMachine named type.
+    pub const ALL: [Self; 3] = [
+        Self::MobMemberChild,
+        Self::BackgroundToolOp,
+        Self::BackgroundToolCapacitySlot,
+    ];
+
+    /// Generated named-type variant spelling used by drift ratchets.
+    pub const fn generated_variant(self) -> &'static str {
+        match self {
+            Self::MobMemberChild => "MobMemberChild",
+            Self::BackgroundToolOp => "BackgroundToolOp",
+            Self::BackgroundToolCapacitySlot => "BackgroundToolCapacitySlot",
+        }
+    }
+
     /// Whether this kind can expose a peer-ready handoff.
     pub fn expects_peer_channel(self) -> bool {
         matches!(self, Self::MobMemberChild)
+    }
+}
+
+/// Generated-authority-owned source identity for an async operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OperationSource {
+    SessionChild {
+        session_id: SessionId,
+    },
+    BackendPeer {
+        peer_id: PeerId,
+        address: PeerAddress,
+    },
+}
+
+impl OperationSource {
+    pub fn session_child(session_id: SessionId) -> Self {
+        Self::SessionChild { session_id }
+    }
+
+    pub fn backend_peer(peer_id: PeerId, address: PeerAddress) -> Self {
+        Self::BackendPeer { peer_id, address }
     }
 }
 
@@ -43,6 +82,8 @@ pub struct OperationSpec {
     pub owner_session_id: SessionId,
     pub display_name: String,
     pub source_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_source: Option<OperationSource>,
     pub child_session_id: Option<SessionId>,
     pub expect_peer_channel: bool,
 }
@@ -103,22 +144,6 @@ pub enum OperationStatus {
 }
 
 impl OperationStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed
-                | Self::Failed
-                | Self::Aborted
-                | Self::Cancelled
-                | Self::Retired
-                | Self::Terminated
-        )
-    }
-
-    pub fn allows_terminalization(self) -> bool {
-        matches!(self, Self::Provisioning | Self::Running | Self::Retiring)
-    }
-
     /// Stable string representation for app-facing surfaces.
     ///
     /// Unlike `Debug` format, this is an explicit mapping that won't
@@ -139,13 +164,126 @@ impl OperationStatus {
     }
 }
 
+/// Public result class for an operation lifecycle snapshot.
+///
+/// This is the typed domain value emitted by generated operation lifecycle
+/// authority before shell/tool surfaces project it into their presentation
+/// structs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationPublicResultClass {
+    MissingAuthority,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl OperationPublicResultClass {
+    /// Closed variant set mirrored from the generated MeerkatMachine named type.
+    pub const ALL: [Self; 5] = [
+        Self::MissingAuthority,
+        Self::Running,
+        Self::Completed,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
+    /// Generated named-type variant spelling used by drift ratchets.
+    pub const fn generated_variant(self) -> &'static str {
+        match self {
+            Self::MissingAuthority => "MissingAuthority",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+/// Generated classification for completion-feed entries that should wake the
+/// owning agent as detached background job completions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationCompletionWakeClass {
+    Wake,
+    Ignore,
+}
+
+impl OperationCompletionWakeClass {
+    /// Closed variant set mirrored from the generated MeerkatMachine named type.
+    pub const ALL: [Self; 2] = [Self::Wake, Self::Ignore];
+
+    /// Generated named-type variant spelling used by drift ratchets.
+    pub const fn generated_variant(self) -> &'static str {
+        match self {
+            Self::Wake => "Wake",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+
+/// Operation lifecycle action observed by generated transition feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationLifecycleAction {
+    Start,
+    Fail,
+    PeerReady,
+    ProgressReported,
+    Complete,
+    Abort,
+    Cancel,
+    RetireRequested,
+    RetireCompleted,
+    Terminate,
+}
+
+impl OperationLifecycleAction {
+    /// Closed variant set mirrored from the generated MeerkatMachine named type.
+    pub const ALL: [Self; 10] = [
+        Self::Start,
+        Self::Fail,
+        Self::PeerReady,
+        Self::ProgressReported,
+        Self::Complete,
+        Self::Abort,
+        Self::Cancel,
+        Self::RetireRequested,
+        Self::RetireCompleted,
+        Self::Terminate,
+    ];
+
+    /// Generated named-type variant spelling used by drift ratchets.
+    pub const fn generated_variant(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Fail => "Fail",
+            Self::PeerReady => "PeerReady",
+            Self::ProgressReported => "ProgressReported",
+            Self::Complete => "Complete",
+            Self::Abort => "Abort",
+            Self::Cancel => "Cancel",
+            Self::RetireRequested => "RetireRequested",
+            Self::RetireCompleted => "RetireCompleted",
+            Self::Terminate => "Terminate",
+        }
+    }
+}
+
 /// Public snapshot of one operation's lifecycle state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OperationLifecycleSnapshot {
     pub id: OperationId,
     pub kind: OperationKind,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_source: Option<OperationSource>,
     pub status: OperationStatus,
+    /// Generated terminality classification for `status`.
+    pub terminal: bool,
+    /// Generated public result classification for `status`.
+    pub public_result_class: OperationPublicResultClass,
     pub peer_ready: bool,
     pub progress_count: u32,
     pub watcher_count: u32,
@@ -168,37 +306,28 @@ pub struct OperationLifecycleSnapshot {
     pub elapsed_ms: Option<u64>,
 }
 
-/// One watcher for a terminal lifecycle outcome.
-pub struct OperationCompletionWatch {
-    rx: oneshot::Receiver<OperationTerminalOutcome>,
-}
+/// One registry-owned watcher for a terminal lifecycle outcome.
+///
+/// This is a read-only waiter returned by [`OpsLifecycleRegistry`]. It does not
+/// expose terminal-outcome send authority to callers; registry implementations
+/// must resolve it only after generated operation lifecycle authority has
+/// accepted the terminal transition.
+pub type OperationCompletionWatch = Pin<
+    Box<
+        dyn Future<Output = Result<OperationTerminalOutcome, OperationCompletionWatchError>>
+            + Send
+            + 'static,
+    >,
+>;
 
-impl OperationCompletionWatch {
-    /// Create a pending watch and its sender.
-    pub fn channel() -> (
-        oneshot::Sender<OperationTerminalOutcome>,
-        OperationCompletionWatch,
-    ) {
-        let (tx, rx) = oneshot::channel();
-        (tx, Self { rx })
-    }
-
-    /// Await the operation's terminal outcome.
-    pub async fn wait(self) -> OperationTerminalOutcome {
-        match self.rx.await {
-            Ok(outcome) => outcome,
-            Err(_) => OperationTerminalOutcome::Terminated {
-                reason: "operation completion watch dropped".into(),
-            },
-        }
-    }
-
-    /// Create a watch that is already resolved.
-    pub fn already_resolved(outcome: OperationTerminalOutcome) -> Self {
-        let (tx, rx) = oneshot::channel();
-        let _ = tx.send(outcome);
-        Self { rx }
-    }
+/// Mechanical failure while waiting for operation completion plumbing.
+///
+/// This is intentionally not an [`OperationTerminalOutcome`]: a dropped waiter
+/// channel is not async-operation terminal truth.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OperationCompletionWatchError {
+    #[error("operation completion channel closed without an authorized terminal outcome")]
+    ChannelClosed,
 }
 
 /// Errors returned by the shared lifecycle registry.
@@ -256,8 +385,21 @@ pub struct WaitAllResult {
 pub struct WaitAllSatisfied {
     /// The authority-owned wait request that reached satisfaction.
     pub wait_request_id: WaitRequestId,
+    /// The run whose turn-state barrier was satisfied.
+    pub run_id: RunId,
     /// The operation IDs validated as terminal by the authority.
     pub operation_ids: Vec<OperationId>,
+}
+
+/// Completion-feed consumer cursor owned by generated machine authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompletionCursorConsumer {
+    /// Cursor advanced after the agent boundary has applied background notices.
+    AgentApplied,
+    /// Cursor advanced after the runtime loop has observed feed entries.
+    RuntimeObserved,
+    /// Cursor advanced after the runtime loop has injected detached continuation.
+    RuntimeInjected,
 }
 
 /// Shared async-operation lifecycle registry.
@@ -298,9 +440,71 @@ pub trait OpsLifecycleRegistry: Send + Sync {
     ) -> Result<(), OpsLifecycleError>;
     fn request_retire(&self, id: &OperationId) -> Result<(), OpsLifecycleError>;
     fn mark_retired(&self, id: &OperationId) -> Result<(), OpsLifecycleError>;
-    fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot>;
-    fn list_operations(&self) -> Vec<OperationLifecycleSnapshot>;
+    fn snapshot(
+        &self,
+        id: &OperationId,
+    ) -> Result<Option<OperationLifecycleSnapshot>, OpsLifecycleError>;
+    fn list_operations(&self) -> Result<Vec<OperationLifecycleSnapshot>, OpsLifecycleError>;
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError>;
+
+    /// Classify operation terminality through the registry's generated
+    /// lifecycle authority.
+    fn classify_operation_terminality(
+        &self,
+        _id: &OperationId,
+        _status: OperationStatus,
+    ) -> Result<bool, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "classify_operation_terminality".into(),
+        ))
+    }
+
+    /// Classify operation public result projection through generated lifecycle
+    /// authority.
+    fn classify_operation_public_result(
+        &self,
+        _id: &OperationId,
+    ) -> Result<OperationPublicResultClass, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "classify_operation_public_result".into(),
+        ))
+    }
+
+    /// Classify whether a completion-feed entry should wake the owning agent
+    /// as a detached background job completion.
+    fn classify_operation_completion_wake(
+        &self,
+        _id: &OperationId,
+        _kind: OperationKind,
+    ) -> Result<OperationCompletionWakeClass, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "classify_operation_completion_wake".into(),
+        ))
+    }
+
+    /// Classify whether a generated invalid-transition rejection is an
+    /// idempotent success for the requested lifecycle action.
+    fn classify_operation_transition_idempotence(
+        &self,
+        _id: &OperationId,
+        _action: OperationLifecycleAction,
+    ) -> Result<bool, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "classify_operation_transition_idempotence".into(),
+        ))
+    }
+
+    /// Register an operation while applying a caller-supplied generated
+    /// admission limit for this registration.
+    fn register_operation_with_admission_limit(
+        &self,
+        _spec: OperationSpec,
+        _max_concurrent: Option<usize>,
+    ) -> Result<(), OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "register_operation_with_admission_limit".into(),
+        ))
+    }
 
     /// Drain all completed operations from the registry, returning their outcomes.
     fn collect_completed(
@@ -318,6 +522,32 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         &self,
     ) -> Option<std::sync::Arc<dyn crate::completion_feed::CompletionFeed>> {
         None
+    }
+
+    /// Read the generated completion-consumer cursor for this registry.
+    ///
+    /// Implementations without generated cursor authority return `None`.
+    fn completion_cursor(
+        &self,
+        _consumer: CompletionCursorConsumer,
+    ) -> Option<crate::completion_feed::CompletionSeq> {
+        None
+    }
+
+    /// Advance a completion-consumer cursor through generated authority.
+    ///
+    /// Runtime-backed registries update `projection` only after the generated
+    /// transition emits the matching cursor-advanced effect. The projection is
+    /// an epoch-local cache, never the source of cursor truth.
+    fn advance_completion_cursor(
+        &self,
+        _consumer: CompletionCursorConsumer,
+        _cursor: crate::completion_feed::CompletionSeq,
+        _projection: Option<&EpochCursorState>,
+    ) -> Result<crate::completion_feed::CompletionSeq, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported(
+            "advance_completion_cursor".into(),
+        ))
     }
 
     /// Register an authority-owned barrier wait and await its completion.
@@ -344,29 +574,10 @@ pub trait OpsLifecycleRegistry: Send + Sync {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn already_resolved_watch_returns_terminal_outcome() {
-        let watch = OperationCompletionWatch::already_resolved(OperationTerminalOutcome::Retired);
-        assert_eq!(watch.wait().await, OperationTerminalOutcome::Retired);
-    }
-
     #[test]
     fn operation_kind_peer_expectation_matches_contract() {
         assert!(OperationKind::MobMemberChild.expects_peer_channel());
         assert!(!OperationKind::BackgroundToolOp.expects_peer_channel());
-    }
-
-    #[test]
-    fn terminal_statuses_match_contract() {
-        assert!(OperationStatus::Completed.is_terminal());
-        assert!(OperationStatus::Failed.is_terminal());
-        assert!(OperationStatus::Aborted.is_terminal());
-        assert!(OperationStatus::Cancelled.is_terminal());
-        assert!(OperationStatus::Retired.is_terminal());
-        assert!(OperationStatus::Terminated.is_terminal());
-        assert!(!OperationStatus::Running.is_terminal());
-        assert!(OperationStatus::Running.allows_terminalization());
-        assert!(OperationStatus::Retiring.allows_terminalization());
-        assert!(!OperationStatus::Completed.allows_terminalization());
+        assert!(!OperationKind::BackgroundToolCapacitySlot.expects_peer_channel());
     }
 }

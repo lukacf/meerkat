@@ -60,6 +60,9 @@ enum SeamEffect {
     },
     RequestRuntimeIngress {
         agent_runtime_id: String,
+        fence_token: u64,
+        generation: u64,
+        session_id: String,
         work_id: String,
         origin: String,
     },
@@ -98,10 +101,16 @@ impl ProducerEffect for SeamEffect {
             },
             Self::RequestRuntimeIngress {
                 agent_runtime_id,
+                fence_token,
+                generation,
+                session_id,
                 work_id,
                 origin,
             } => match id.as_str() {
                 "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id)),
+                "fence_token" => Some(FieldValue::U64(*fence_token)),
+                "generation" => Some(FieldValue::U64(*generation)),
+                "session_id" => Some(FieldValue::Str(session_id)),
                 "work_id" => Some(FieldValue::Str(work_id)),
                 "origin" => Some(FieldValue::Str(origin)),
                 _ => None,
@@ -229,6 +238,9 @@ async fn all_four_catalog_routes_dispatch_to_meerkat_consumer() {
                 variant: EffectVariantId::parse("RequestRuntimeIngress").unwrap(),
                 body: SeamEffect::RequestRuntimeIngress {
                     agent_runtime_id: "rt-1".into(),
+                    fence_token: 11,
+                    generation: 3,
+                    session_id: "019dbd3d-d7ad-75a1-96d0-8013927e78f8".into(),
                     work_id: "w-42".into(),
                     origin: "test".into(),
                 },

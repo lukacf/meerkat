@@ -125,7 +125,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat:meerkat",
+        "//meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "test-fixtures/surface-build-fixtures",
         normal = True,

@@ -9,8 +9,13 @@ use crate::interaction::{InteractionId, ResponseStatus};
 use crate::types::{ContentBlock, HandlingMode};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use uuid::Uuid;
 
 /// Comms request intent used for all supervisor bridge commands.
@@ -325,8 +330,8 @@ impl PeerRoute {
 /// with typed atoms: `PeerId` (runtime routing key), `PeerName` (display
 /// slug), `PeerAddress` (transport + endpoint), and a 32-byte signing
 /// public key that lets the receiver verify envelope signatures. Richer
-/// trust-store metadata (reachability snapshots, discovery labels) stays
-/// in `meerkat-comms::trust::TrustedPeer` — this descriptor is the
+/// trust-store metadata (discovery labels) stays in
+/// `meerkat-comms::trust::TrustedPeer` — this descriptor is the
 /// minimal typed subset the core seam needs to route and admit a peer.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,6 +348,713 @@ pub struct TrustedPeerDescriptor {
     /// verify envelope signatures; the router derives `PeerId` from it
     /// via UUIDv5 so `peer_id` and `pubkey` are consistent.
     pub pubkey: [u8; 32],
+}
+
+/// Generated authority context for mutating a comms trust projection.
+///
+/// The comms runtime stores the transport-level peer table, but it must not
+/// decide trust semantics itself. Callers that need to add or remove trust
+/// must carry the generated machine/composition handoff that authorized the
+/// mutation.
+#[derive(Debug, Clone)]
+pub struct CommsTrustMutationAuthority {
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    source_epoch: u64,
+    source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+    operation: GeneratedCommsTrustAuthorityOperation,
+    peer_id: String,
+    trust_store_peer_id: Option<String>,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
+    consumed: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub struct GeneratedPeerCommsOwnerToken {
+    inner: Arc<dyn Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for GeneratedPeerCommsOwnerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedPeerCommsOwnerToken").finish()
+    }
+}
+
+impl GeneratedPeerCommsOwnerToken {
+    #[cfg_attr(
+        any(test, not(meerkat_internal_generated_authority_bridge)),
+        allow(dead_code)
+    )]
+    pub(crate) fn from_generated_owner_token(inner: Arc<dyn Any + Send + Sync>) -> Self {
+        Self { inner }
+    }
+
+    pub fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    fn matches_raw_owner(&self, other: &Arc<dyn Any + Send + Sync>) -> bool {
+        Arc::ptr_eq(&self.inner, other)
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GeneratedCommsTrustAuthoritySourceKind {
+    MeerkatMachinePeerProjection,
+    MeerkatMachineSupervisorPublish,
+    MeerkatMachineSupervisorRevoke,
+    MobMachineMemberTrustWiring,
+    MobMachineMemberTrustUnwiring,
+    MobMachineExternalPeerTrustWiring,
+    MobMachineExternalPeerTrustUnwiring,
+    MobMachineExternalPeerTrustRepair,
+    MobMachineExternalPeerReciprocalTrust,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GeneratedCommsTrustAuthorityOperation {
+    PublicAdd,
+    PublicRemove,
+    PrivateAdd,
+    PrivateRemove,
+}
+
+impl CommsTrustMutationAuthority {
+    #[cfg_attr(not(meerkat_internal_generated_authority_bridge), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    fn from_generated_parts(
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        source_epoch: u64,
+        source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
+        trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        peer_id: impl Into<String>,
+        trust_store_peer_id: Option<String>,
+        peer_descriptor: Option<TrustedPeerDescriptor>,
+    ) -> Result<Self, String> {
+        let peer_id = peer_id.into();
+        if matches!(
+            operation,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd
+                | GeneratedCommsTrustAuthorityOperation::PrivateAdd
+        ) && peer_descriptor.is_none()
+        {
+            return Err(format!(
+                "generated comms trust add for peer {peer_id:?} requires a trusted peer descriptor"
+            ));
+        }
+        if let Some(peer) = peer_descriptor.as_ref()
+            && peer.peer_id.to_string() != peer_id
+        {
+            return Err(format!(
+                "generated comms trust descriptor peer_id {} does not match requested {:?}",
+                peer.peer_id, peer_id,
+            ));
+        }
+        if matches!(
+            operation,
+            GeneratedCommsTrustAuthorityOperation::PublicRemove
+                | GeneratedCommsTrustAuthorityOperation::PrivateRemove
+        ) && peer_descriptor.is_some()
+        {
+            return Err(format!(
+                "generated comms trust remove for peer {peer_id:?} must not carry a trusted peer descriptor"
+            ));
+        }
+        Ok(Self {
+            source_kind,
+            source_epoch,
+            source_owner_token,
+            trust_row_owner_kind,
+            operation,
+            peer_id,
+            trust_store_peer_id,
+            peer_descriptor,
+            consumed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub fn validate_public_add(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<(), String> {
+        self.validate_add_operation(
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            trust_store_peer_id,
+            peer,
+            "add a public trusted peer",
+        )
+    }
+
+    pub fn validate_public_remove(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
+        self.validate_operation(
+            GeneratedCommsTrustAuthorityOperation::PublicRemove,
+            trust_store_peer_id,
+            peer_id,
+            "remove a public trusted peer",
+        )
+    }
+
+    pub fn validate_private_add(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<(), String> {
+        self.validate_add_operation(
+            GeneratedCommsTrustAuthorityOperation::PrivateAdd,
+            trust_store_peer_id,
+            peer,
+            "add a private trusted peer",
+        )
+    }
+
+    pub fn validate_private_remove(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
+        self.validate_operation(
+            GeneratedCommsTrustAuthorityOperation::PrivateRemove,
+            trust_store_peer_id,
+            peer_id,
+            "remove a private trusted peer",
+        )
+    }
+
+    pub fn preflight_public_add(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<(), String> {
+        self.preflight_add_operation(
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            trust_store_peer_id,
+            peer,
+            "add a public trusted peer",
+        )
+    }
+
+    pub fn preflight_public_remove(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
+        self.preflight_operation(
+            GeneratedCommsTrustAuthorityOperation::PublicRemove,
+            trust_store_peer_id,
+            peer_id,
+            "remove a public trusted peer",
+        )
+    }
+
+    fn validate_operation(
+        &self,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+        action: &'static str,
+    ) -> Result<(), String> {
+        if self.operation != operation {
+            return Err(format!(
+                "trust authority from {:?} for {:?} cannot {action}",
+                self.source_kind, self.operation,
+            ));
+        }
+        self.validate_peer_match(peer_id)?;
+        self.validate_trust_store_peer_match(trust_store_peer_id)?;
+        self.consume_once()
+    }
+
+    fn preflight_operation(
+        &self,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        trust_store_peer_id: Option<PeerId>,
+        peer_id: PeerId,
+        action: &'static str,
+    ) -> Result<(), String> {
+        if self.operation != operation {
+            return Err(format!(
+                "trust authority from {:?} for {:?} cannot {action}",
+                self.source_kind, self.operation,
+            ));
+        }
+        self.validate_peer_match(peer_id)?;
+        self.validate_trust_store_peer_match(trust_store_peer_id)
+    }
+
+    fn validate_add_operation(
+        &self,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+        action: &'static str,
+    ) -> Result<(), String> {
+        if self.operation != operation {
+            return Err(format!(
+                "trust authority from {:?} for {:?} cannot {action}",
+                self.source_kind, self.operation,
+            ));
+        }
+        self.validate_peer_match(peer.peer_id)?;
+        self.validate_peer_descriptor_match(peer)?;
+        self.validate_trust_store_peer_match(trust_store_peer_id)?;
+        self.consume_once()
+    }
+
+    fn preflight_add_operation(
+        &self,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+        action: &'static str,
+    ) -> Result<(), String> {
+        if self.operation != operation {
+            return Err(format!(
+                "trust authority from {:?} for {:?} cannot {action}",
+                self.source_kind, self.operation,
+            ));
+        }
+        self.validate_peer_match(peer.peer_id)?;
+        self.validate_peer_descriptor_match(peer)?;
+        self.validate_trust_store_peer_match(trust_store_peer_id)
+    }
+
+    fn consume_once(&self) -> Result<(), String> {
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| "generated comms trust authority was already consumed".to_string())
+    }
+
+    fn validate_peer_match(&self, peer_id: PeerId) -> Result<(), String> {
+        let expected = self.peer_id();
+        if expected == peer_id.to_string() {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority peer_id {expected:?} does not match mutation peer_id {peer_id}"
+            ))
+        }
+    }
+
+    fn validate_trust_store_peer_match(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+    ) -> Result<(), String> {
+        let Some(expected) = self.trust_store_peer_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(actual) = trust_store_peer_id else {
+            return Err(format!(
+                "trust authority from {:?} requires trust-store peer_id {expected:?}, but the target runtime did not expose one",
+                self.source_kind,
+            ));
+        };
+        if expected == actual.to_string() {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority from {:?} for peer {:?} targets trust-store peer_id {expected:?}, not {actual}",
+                self.source_kind,
+                self.peer_id(),
+            ))
+        }
+    }
+
+    fn validate_peer_descriptor_match(&self, peer: &TrustedPeerDescriptor) -> Result<(), String> {
+        let Some(expected) = self.peer_descriptor.as_ref() else {
+            return Err(format!(
+                "trust authority from {:?} for {:?} did not carry a generated peer descriptor",
+                self.source_kind, self.operation,
+            ));
+        };
+        if expected == peer {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority descriptor for peer {:?} does not match mutation descriptor",
+                self.peer_id()
+            ))
+        }
+    }
+
+    fn peer_id(&self) -> &str {
+        self.peer_id.as_str()
+    }
+
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
+    }
+
+    pub fn validate_source_owner_token(
+        &self,
+        expected: Option<&GeneratedPeerCommsOwnerToken>,
+    ) -> Result<(), String> {
+        let Some(actual) = self.source_owner_token.as_ref() else {
+            return Err(format!(
+                "trust authority from {:?} did not carry a generated owner token",
+                self.source_kind,
+            ));
+        };
+        let Some(expected) = expected else {
+            return Err(format!(
+                "trust authority from {:?} requires the target runtime's generated owner token",
+                self.source_kind,
+            ));
+        };
+        if expected.matches_raw_owner(actual) {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority from {:?} was minted by a different generated owner",
+                self.source_kind,
+            ))
+        }
+    }
+
+    pub fn validate_target_source_owner_token(
+        &self,
+        expected_meerkat_machine_owner: Option<&GeneratedPeerCommsOwnerToken>,
+        expected_mob_machine_owner: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Result<(), String> {
+        if is_meerkat_machine_trust_source(self.source_kind) {
+            self.validate_source_owner_token(expected_meerkat_machine_owner)
+        } else if is_mob_machine_trust_source(self.source_kind) {
+            self.validate_raw_source_owner_token(expected_mob_machine_owner)
+        } else {
+            Err(format!(
+                "trust authority from {:?} has no target owner validator",
+                self.source_kind,
+            ))
+        }
+    }
+
+    pub fn validate_raw_source_owner_token(
+        &self,
+        expected: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Result<(), String> {
+        let Some(actual) = self.source_owner_token.as_ref() else {
+            return Err(format!(
+                "trust authority from {:?} did not carry a generated owner token",
+                self.source_kind,
+            ));
+        };
+        let Some(expected) = expected else {
+            return Err(format!(
+                "trust authority from {:?} requires the target runtime's generated owner token",
+                self.source_kind,
+            ));
+        };
+        if Arc::ptr_eq(actual, expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "trust authority from {:?} was minted by a different generated owner",
+                self.source_kind,
+            ))
+        }
+    }
+
+    pub fn is_mob_machine_source(&self) -> bool {
+        is_mob_machine_trust_source(self.source_kind)
+    }
+
+    pub fn trust_row_owner_kind(&self) -> GeneratedCommsTrustAuthoritySourceKind {
+        self.trust_row_owner_kind
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_comms_trust_reconcile_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_comms_trust_reconcile_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_supervisor_trust_publish_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_supervisor_trust_publish_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_supervisor_trust_revoke_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_supervisor_trust_revoke_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_member_trust_wiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_member_trust_wiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_member_trust_unwiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_member_trust_unwiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_trust_wiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_trust_wiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_trust_unwiring_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_trust_unwiring_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_trust_repair_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_trust_repair_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_reciprocal_trust_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_reciprocal_trust_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[allow(clippy::too_many_arguments)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_comms_trust_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_comms_trust_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    source_epoch: u64,
+    source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+    operation: GeneratedCommsTrustAuthorityOperation,
+    peer_id: String,
+    trust_store_peer_id: Option<String>,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
+) -> Result<CommsTrustMutationAuthority, String> {
+    validate_runtime_generated_authority_bridge_token(source_kind, token)?;
+    validate_meerkat_machine_trust_source(source_kind, trust_row_owner_kind)?;
+    CommsTrustMutationAuthority::from_generated_parts(
+        source_kind,
+        source_epoch,
+        source_owner_token,
+        trust_row_owner_kind,
+        operation,
+        peer_id,
+        trust_store_peer_id,
+        peer_descriptor,
+    )
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[allow(clippy::too_many_arguments)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_mob_generated_comms_trust_authority_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn mob_generated_comms_trust_authority_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    source_epoch: u64,
+    source_owner_token: Option<Arc<dyn Any + Send + Sync>>,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+    operation: GeneratedCommsTrustAuthorityOperation,
+    peer_id: String,
+    trust_store_peer_id: Option<String>,
+    peer_descriptor: Option<TrustedPeerDescriptor>,
+) -> Result<CommsTrustMutationAuthority, String> {
+    validate_mob_generated_authority_bridge_token(source_kind, token)?;
+    validate_mob_machine_trust_source(source_kind, trust_row_owner_kind)?;
+    CommsTrustMutationAuthority::from_generated_parts(
+        source_kind,
+        source_epoch,
+        source_owner_token,
+        trust_row_owner_kind,
+        operation,
+        peer_id,
+        trust_store_peer_id,
+        peer_descriptor,
+    )
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+fn validate_runtime_generated_authority_bridge_token(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe {
+        match source_kind {
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection => {
+                runtime_comms_trust_reconcile_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish => {
+                runtime_supervisor_trust_publish_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke => {
+                runtime_supervisor_trust_revoke_generated_authority_bridge_token_is_valid(token)
+            }
+            _ => false,
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("generated comms trust authority requires the matching generated runtime protocol bridge token".into())
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+fn validate_mob_generated_authority_bridge_token(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe {
+        match source_kind {
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring => {
+                mob_member_trust_wiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring => {
+                mob_member_trust_unwiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring => {
+                mob_external_peer_trust_wiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring => {
+                mob_external_peer_trust_unwiring_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair => {
+                mob_external_peer_trust_repair_generated_authority_bridge_token_is_valid(token)
+            }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust => {
+                mob_external_peer_reciprocal_trust_generated_authority_bridge_token_is_valid(token)
+            }
+            _ => false,
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("generated comms trust authority requires the matching generated MobMachine protocol bridge token".into())
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+fn validate_meerkat_machine_trust_source(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+) -> Result<(), String> {
+    if is_meerkat_machine_trust_source(source_kind)
+        && is_meerkat_machine_trust_source(trust_row_owner_kind)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "runtime generated comms trust authority cannot package source {source_kind:?} with row owner {trust_row_owner_kind:?}"
+        ))
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+fn validate_mob_machine_trust_source(
+    source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    trust_row_owner_kind: GeneratedCommsTrustAuthoritySourceKind,
+) -> Result<(), String> {
+    if is_mob_machine_trust_source(source_kind) && is_mob_machine_trust_source(trust_row_owner_kind)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "mob generated comms trust authority cannot package source {source_kind:?} with row owner {trust_row_owner_kind:?}"
+        ))
+    }
+}
+
+fn is_meerkat_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> bool {
+    matches!(
+        kind,
+        GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection
+            | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorPublish
+            | GeneratedCommsTrustAuthoritySourceKind::MeerkatMachineSupervisorRevoke
+    )
+}
+
+fn is_mob_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> bool {
+    matches!(
+        kind,
+        GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustUnwiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust
+    )
+}
+
+/// Trust-store projection mutation requested by generated authority.
+#[derive(Debug, Clone)]
+pub enum CommsTrustMutation {
+    AddTrustedPeer {
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    },
+    RemoveTrustedPeer {
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    },
+    AddPrivateTrustedPeer {
+        peer: TrustedPeerDescriptor,
+        authority: CommsTrustMutationAuthority,
+    },
+    RemovePrivateTrustedPeer {
+        peer_id: String,
+        authority: CommsTrustMutationAuthority,
+    },
+}
+
+/// Result from applying a generated trust-store projection mutation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommsTrustMutationResult {
+    Added { created: bool },
+    Removed { removed: bool },
 }
 
 impl TrustedPeerDescriptor {
@@ -509,9 +1221,9 @@ impl std::fmt::Display for PeerLifecycleKind {
 /// `status`) become serde deserialization errors rather than runtime
 /// string-match failures.
 ///
-/// Cross-field invariants that cannot be expressed structurally (e.g.
-/// `handling_mode` is forbidden on `Accepted` peer responses) are checked
-/// in [`CommsCommandRequest::into_command`].
+/// Cross-field invariants that depend on machine-owned semantics, such as
+/// progress-vs-terminal peer response handling, are checked by the runtime
+/// after generated authority emits the typed classification.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -579,11 +1291,12 @@ pub enum CommsCommandRequest {
 /// — only invariants that span multiple fields surface here.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CommsCommandError {
-    /// `handling_mode` is set on a `peer_response` whose `status` is
-    /// `Accepted`. Progress responses cannot carry a handling mode — the
-    /// receiver's admission gate would drop them, so reject at parse time.
-    #[error("handling_mode is forbidden on accepted peer responses")]
-    HandlingModeForbiddenForAcceptedResponse,
+    /// `handling_mode` is set on a `peer_response` whose machine-classified
+    /// terminality is progress. Progress responses cannot carry a handling
+    /// mode — the receiver's admission gate would drop them, so reject after
+    /// generated terminality feedback is available.
+    #[error("handling_mode is forbidden on progress peer responses")]
+    HandlingModeForbiddenForProgressResponse,
 }
 
 impl CommsCommandRequest {
@@ -654,19 +1367,14 @@ impl CommsCommandRequest {
                 result,
                 blocks,
                 handling_mode,
-            } => {
-                if status == ResponseStatus::Accepted && handling_mode.is_some() {
-                    return Err(CommsCommandError::HandlingModeForbiddenForAcceptedResponse);
-                }
-                CommsCommand::PeerResponse {
-                    to: PeerRoute::new(to),
-                    in_reply_to,
-                    status,
-                    result,
-                    blocks,
-                    handling_mode,
-                }
-            }
+            } => CommsCommand::PeerResponse {
+                to: PeerRoute::new(to),
+                in_reply_to,
+                status,
+                result,
+                blocks,
+                handling_mode,
+            },
         })
     }
 
@@ -907,28 +1615,6 @@ impl Default for PeerCapabilitySet {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PeerReachability {
-    Unknown,
-    Reachable,
-    Unreachable,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum PeerReachabilityReason {
-    OfflineOrNoAck,
-    TransportError,
-    /// The peer admitted the transport but rejected our envelope at its
-    /// ingress policy gate (untrusted sender, full inbox, etc.). The peer
-    /// is still reachable at the transport level; policy denied us.
-    AdmissionDropped,
-}
-
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerDirectoryEntry {
     /// Canonical runtime identity — the routing key.
@@ -943,8 +1629,6 @@ pub struct PeerDirectoryEntry {
     pub source: PeerDirectorySource,
     pub sendable_kinds: Vec<PeerSendability>,
     pub capabilities: PeerCapabilitySet,
-    pub reachability: PeerReachability,
-    pub last_unreachable_reason: Option<PeerReachabilityReason>,
     /// Supplementary discovery metadata (description, labels).
     pub meta: crate::PeerMeta,
 }
@@ -1089,8 +1773,6 @@ mod tests {
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec![PeerSendability::PeerMessage],
             capabilities: PeerCapabilitySet::default(),
-            reachability: PeerReachability::Unknown,
-            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");
@@ -1111,8 +1793,6 @@ mod tests {
             sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
             capabilities: PeerCapabilitySet::default()
                 .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
-            reachability: PeerReachability::Reachable,
-            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
 
@@ -1131,6 +1811,35 @@ mod tests {
             true
         );
         Ok(())
+    }
+
+    #[test]
+    fn generated_trust_authority_rejects_descriptor_peer_mismatch() {
+        let pubkey = [1u8; 32];
+        let descriptor_peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let requested_peer_id = PeerId::from_ed25519_pubkey(&[2u8; 32]);
+        let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "fake",
+            descriptor_peer_id.to_string(),
+            pubkey,
+            "inproc://fake",
+        )
+        .expect("valid descriptor");
+        let err = CommsTrustMutationAuthority::from_generated_parts(
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+            1,
+            None,
+            GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            requested_peer_id.to_string(),
+            Some(requested_peer_id.to_string()),
+            Some(descriptor),
+        )
+        .expect_err("descriptor for another peer must not mint authority");
+        assert!(
+            err.contains("does not match requested"),
+            "unexpected rejection: {err}"
+        );
     }
 
     #[test]

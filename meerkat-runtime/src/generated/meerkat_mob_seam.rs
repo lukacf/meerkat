@@ -230,6 +230,18 @@ pub fn route_work_request_reaches_meerkat() -> TypedRoutedInput {
                 FieldId::parse("runtime_id").expect("route consumer field slug"),
             ),
             (
+                FieldId::parse("fence_token").expect("route producer field slug"),
+                FieldId::parse("fence_token").expect("route consumer field slug"),
+            ),
+            (
+                FieldId::parse("generation").expect("route producer field slug"),
+                FieldId::parse("generation").expect("route consumer field slug"),
+            ),
+            (
+                FieldId::parse("session_id").expect("route producer field slug"),
+                FieldId::parse("session_id").expect("route consumer field slug"),
+            ),
+            (
                 FieldId::parse("work_id").expect("route producer field slug"),
                 FieldId::parse("work_id").expect("route consumer field slug"),
             ),

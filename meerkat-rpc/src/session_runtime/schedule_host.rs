@@ -8,7 +8,7 @@ use meerkat::surface::{
     schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
-    AgentBuildConfig, DeliveryDispatch, Occurrence, OccurrenceFailureClass, ScheduleDomainError,
+    AgentBuildConfig, DeliveryDispatch, DeliveryFailureReason, Occurrence, ScheduleDomainError,
     SessionMaterializationSpec, SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_core::SessionId;
@@ -16,6 +16,19 @@ use meerkat_core::SessionId;
 use meerkat_mob_mcp::MobMcpScheduleHost;
 
 use super::{SessionRuntime, SessionState};
+
+fn accepted_scheduled_input_from_runtime_handle(
+    correlation_id: Option<String>,
+    handle: Option<meerkat_runtime::completion::CompletionHandle>,
+) -> AcceptedScheduledInput {
+    match handle {
+        Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id, handle),
+        None => AcceptedScheduledInput::with_authority_unavailable(
+            correlation_id,
+            "runtime completion handle missing after accepted dispatch",
+        ),
+    }
+}
 
 fn runtime_delivery_dispatch(
     occurrence: &Occurrence,
@@ -25,22 +38,30 @@ fn runtime_delivery_dispatch(
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
     match outcome {
         meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
+            let accepted =
+                accepted_scheduled_input_from_runtime_handle(Some(input_id.to_string()), handle);
             Ok(build_dispatch_from_accepted(
                 occurrence,
-                AcceptedScheduledInput {
-                    correlation_id: Some(input_id.to_string()),
-                    handle,
-                },
+                accepted,
                 materialized_session_id,
             ))
         }
         meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+            let accepted = match handle {
+                Some(handle) => AcceptedScheduledInput::with_runtime_handle(
+                    Some(existing_id.to_string()),
+                    handle,
+                ),
+                None => AcceptedScheduledInput::with_authority_unavailable(
+                    Some(existing_id.to_string()),
+                    format!(
+                        "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
+                    ),
+                ),
+            };
             Ok(build_dispatch_from_accepted(
                 occurrence,
-                AcceptedScheduledInput {
-                    correlation_id: Some(existing_id.to_string()),
-                    handle: None,
-                },
+                accepted,
                 materialized_session_id,
             ))
         }
@@ -48,7 +69,7 @@ fn runtime_delivery_dispatch(
             Ok(immediate_delivery_failure(
                 occurrence,
                 reason.to_string(),
-                OccurrenceFailureClass::RuntimeRejected,
+                DeliveryFailureReason::RuntimeRejected,
                 None,
                 materialized_session_id,
             ))
@@ -56,7 +77,7 @@ fn runtime_delivery_dispatch(
         _ => Ok(immediate_delivery_failure(
             occurrence,
             "runtime returned an unknown admission outcome".to_string(),
-            OccurrenceFailureClass::RuntimeRejected,
+            DeliveryFailureReason::RuntimeRejected,
             None,
             materialized_session_id,
         )),
@@ -257,7 +278,14 @@ impl SessionRuntime {
 
         let comms_rt = self.service.comms_runtime(session_id).await;
         #[cfg(feature = "comms")]
-        let peer_ingress_enabled = self.preserve_existing_peer_ingress(session_id, false).await;
+        let peer_ingress_enabled = {
+            let keep_alive = self
+                .persisted_keep_alive(session_id)
+                .await
+                .map_err(rpc_to_schedule)?;
+            self.preserve_existing_peer_ingress(session_id, keep_alive)
+                .await
+        };
         #[cfg(not(feature = "comms"))]
         let peer_ingress_enabled = false;
         if comms_rt.is_some() || peer_ingress_enabled {
@@ -340,7 +368,14 @@ impl SessionRuntime {
 
         let comms_rt = self.service.comms_runtime(session_id).await;
         #[cfg(feature = "comms")]
-        let peer_ingress_enabled = self.preserve_existing_peer_ingress(session_id, false).await;
+        let peer_ingress_enabled = {
+            let keep_alive = self
+                .persisted_keep_alive(session_id)
+                .await
+                .map_err(rpc_to_schedule)?;
+            self.preserve_existing_peer_ingress(session_id, keep_alive)
+                .await
+        };
         #[cfg(not(feature = "comms"))]
         let peer_ingress_enabled = false;
         if comms_rt.is_some() || peer_ingress_enabled {

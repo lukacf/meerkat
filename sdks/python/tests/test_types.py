@@ -2165,6 +2165,36 @@ async def test_client_read_session_parses_details_shape():
 
 
 @pytest.mark.asyncio
+async def test_client_read_session_drops_malformed_resolved_capabilities():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        assert method == "session/read"
+        return {
+            "session_id": "s1",
+            "created_at": 10,
+            "updated_at": 20,
+            "message_count": 2,
+            "is_active": False,
+            "resolved_capabilities": {
+                "vision": True,
+                "image_input": True,
+                "image_tool_results": True,
+                "inline_video": False,
+                "realtime": False,
+                "web_search": "yes",
+                "image_generation": True,
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    details = await client.read_session("s1")
+
+    assert details.resolved_capabilities is None
+
+
+@pytest.mark.asyncio
 async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_methods():
     client = MeerkatClient()
     calls = []
@@ -2270,6 +2300,26 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
         "max_tokens": 512,
     }
     assert calls[4][1] == {"labels": {"env": "test"}, "limit": 5, "offset": 2}
+
+
+@pytest.mark.asyncio
+async def test_client_models_catalog_rejects_missing_or_malformed_contract_version():
+    malformed_responses = [
+        {"providers": []},
+        {"contract_version": {"major": -1, "minor": 5, "patch": 1}, "providers": []},
+    ]
+
+    for response in malformed_responses:
+        client = MeerkatClient()
+
+        async def fake_request(method, params, response=response):
+            assert method == "models/catalog"
+            return response
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError, match="contract_version"):
+            await client.get_models_catalog()
 
 
 def test_create_session_params_forward_workgraph_override():
@@ -3408,7 +3458,7 @@ async def test_client_live_refresh_returns_typed_result():
     ``{"status": "queued", "refresh_enqueued": true}`` (from
     `LiveRefreshResult::queued()`). Both fields must round-trip into the
     typed dataclass at the SDK boundary so callers can route on
-    ``status`` (forward-compatible enum) without dropping back-compat with
+    the generated ``status`` without dropping back-compat with
     R7-era clients that pattern-match on ``refresh_enqueued``.
     """
     from meerkat.generated.types import LiveRefreshResult
@@ -3420,7 +3470,7 @@ async def test_client_live_refresh_returns_typed_result():
     async def fake_request(method, params):
         captured.append((method, params))
         # Mirror exactly what `handle_live_refresh` ships on the wire after
-        # `host.send_command` accepts the queued command.
+        # host queue acceptance.
         return {"status": "queued", "refresh_enqueued": True}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -3436,32 +3486,67 @@ async def test_client_live_refresh_returns_typed_result():
 
 
 @pytest.mark.asyncio
-async def test_client_live_refresh_preserves_unknown_status():
-    """R4-5 (P3): the wire enum is open (`#[non_exhaustive]`) so a future
-    server may return a previously-unknown ``status`` value (e.g.
-    ``applied_sync``). The Python SDK must surface the raw string rather
-    than coercing it back to ``"queued"`` — coercion would silently lie
-    about the refresh outcome to forward-compatible clients that route on
-    the discriminator.
-    """
-    from meerkat.generated.types import LiveRefreshResult
+async def test_client_live_refresh_rejects_missing_or_unknown_generated_status():
+    malformed_responses = [
+        {"refresh_enqueued": True},
+        {"status": "queued"},
+        {"status": "applied_sync", "refresh_enqueued": True},
+    ]
+
+    for response in malformed_responses:
+        client = MeerkatClient()
+
+        async def fake_request(method, params, response=response):
+            assert method == "live/refresh"
+            return response
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError, match="Invalid live/refresh response"):
+            await client.live_refresh("live_channel_43")
+
+
+@pytest.mark.asyncio
+async def test_client_live_close_returns_typed_result():
+    from meerkat.generated.types import LiveCloseResult
 
     client = MeerkatClient()
 
+    captured: list[tuple[str, dict[str, object]]] = []
+
     async def fake_request(method, params):
-        # Simulate a future-server reply that this SDK build does not yet
-        # know about. The typed-status field is `Literal['queued']` today,
-        # but the runtime payload must round-trip the unknown variant
-        # untouched.
-        return {"status": "applied_sync", "refresh_enqueued": True}
+        captured.append((method, params))
+        return {"status": "closed", "closed": True}
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    result = await client.live_refresh("live_channel_43")
+    result = await client.live_close("live_channel_44")
 
-    assert isinstance(result, LiveRefreshResult)
-    assert result.status == "applied_sync"  # type: ignore[comparison-overlap]
-    assert result.refresh_enqueued is True
+    assert captured == [("live/close", {"channel_id": "live_channel_44"})]
+    assert isinstance(result, LiveCloseResult)
+    assert result.status == "closed"
+    assert result.closed is True
+
+
+@pytest.mark.asyncio
+async def test_client_live_close_rejects_missing_or_unknown_generated_status():
+    malformed_responses = [
+        {"closed": True},
+        {"status": "closed"},
+        {"status": "already_closed", "closed": True},
+    ]
+
+    for response in malformed_responses:
+        client = MeerkatClient()
+
+        async def fake_request(method, params, response=response):
+            assert method == "live/close"
+            return response
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError, match="Invalid live/close response"):
+            await client.live_close("live_channel_45")
 
 
 @pytest.mark.asyncio

@@ -791,7 +791,7 @@ async fn resolve_openai_binding(
 ) -> Result<meerkat_providers::ResolvedConnection, meerkat_providers::ProviderAuthError> {
     let mut env = ResolverEnvironment::testing()
         .with_token_store(harness.token_store.clone())
-        .with_auth_lease_handle(harness.runtime.auth_lease_handle())
+        .with_auth_lease_handle(harness.runtime.generated_auth_lease_handle())
         .with_force_refresh(force_refresh);
     if let Some(coordinator) = coordinator {
         env = env.with_refresh_coordinator(coordinator);
@@ -1039,7 +1039,7 @@ async fn auth_mock_concurrent_resolve_dedupes_refresh() {
         let registry = harness.registry.clone();
         let realm = realm.clone();
         let store = harness.token_store.clone();
-        let auth_lease = harness.runtime.auth_lease_handle();
+        let auth_lease = harness.runtime.generated_auth_lease_handle();
         let coordinator = coordinator.clone();
         tasks.push(tokio::spawn(async move {
             let env = ResolverEnvironment::testing()
@@ -1253,7 +1253,12 @@ async fn save_seeded_tokens_with_lifecycle(harness: &AuthHarness, tokens: &Persi
             meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
         )
         .expect("seed AuthMachine lifecycle");
-    let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(tokens, transition);
+    let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+        &harness.token_key(),
+        tokens,
+        &transition,
+    )
+    .expect("mark seeded tokens with AuthMachine lifecycle");
     harness
         .token_store
         .save(&harness.token_key(), &marked)

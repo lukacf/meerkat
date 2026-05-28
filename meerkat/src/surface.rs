@@ -24,9 +24,9 @@ pub use meerkat_core::{
 };
 pub use request_execution::{
     CancelActionInstallOutcome, CancelOutcome, CompleteOutcome, PreparedSurfaceSession,
-    PublishOutcome, RequestAlreadyExists, RequestAsyncAction, RequestContext, RequestTerminal,
-    RequestTerminalResolution, RequestTransitionError, SurfaceRequestExecution,
-    SurfaceRequestExecutor, SurfaceRequestPhase, SurfaceRequestSemantics,
+    PublishOutcome, RequestAdmissionError, RequestAlreadyExists, RequestAsyncAction,
+    RequestContext, RequestTerminal, RequestTerminalResolution, RequestTransitionError,
+    SurfaceRequestExecution, SurfaceRequestExecutor, SurfaceRequestPhase, SurfaceRequestSemantics,
     SurfaceRequestTerminalPolicy, noop_request_action, prepare_surface_session, request_action,
 };
 #[cfg(all(feature = "session-store", feature = "comms"))]
@@ -44,11 +44,11 @@ pub use runtime_schedule_host::{
     spawn_runtime_backed_schedule_host, spawn_runtime_backed_schedule_host_with_mobs,
 };
 pub use schedule_host::{
-    AcceptedScheduledInput, NoopScheduleMobHost, ScheduleHostHandle, ScheduledPromptDispatch,
-    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
-    async_completion_dispatch, build_dispatch_from_accepted, immediate_completed_dispatch,
-    immediate_delivery_failure, schedule_attempt_idempotency_key, schedule_host_supported,
-    spawn_schedule_host,
+    AcceptedScheduledInput, AcceptedScheduledInputCompletion, NoopScheduleMobHost,
+    ScheduleHostHandle, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, async_completion_dispatch,
+    build_dispatch_from_accepted, immediate_completed_dispatch, immediate_delivery_failure,
+    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};

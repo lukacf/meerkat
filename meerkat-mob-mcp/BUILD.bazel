@@ -61,6 +61,47 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "meerkat_mob_mcp_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-mob-mcp"),
+    crate_name = "meerkat_mob_mcp",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat-cli:__pkg__",
+        "//meerkat-mcp-server:__pkg__",
+        "//meerkat-mob-mcp:__pkg__",
+        "//meerkat-rest:__pkg__",
+        "//meerkat-rpc:__pkg__",
+        "//meerkat-web-runtime:__pkg__",
+        "//tests/integration:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.6.27",
+        "CARGO_MANIFEST_DIR": "./meerkat-mob-mcp",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-mcp",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-mcp",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "meerkat_mob_mcp_unit_test",
     aliases = aliases(
@@ -100,12 +141,12 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-mob:meerkat_mob",
-        "//meerkat:meerkat",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",
         normal = True,

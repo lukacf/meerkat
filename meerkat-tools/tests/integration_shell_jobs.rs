@@ -295,6 +295,7 @@ async fn ops_registry_integration_red_ok_background_job_visibility_survives_unti
                 .ok_or("status response should include job id")?,
         ))
         .await
+        .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?
         .ok_or("background job should register shared lifecycle state")?;
     assert_eq!(running_snapshot.status, OperationStatus::Running);
 
@@ -322,6 +323,7 @@ async fn ops_registry_integration_red_ok_background_job_visibility_survives_unti
                 .ok_or("cancelled status response should include job id")?,
         ))
         .await
+        .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?
         .ok_or("cancelled job should retain shared lifecycle snapshot")?;
     assert_eq!(cancelled_snapshot.status, OperationStatus::Cancelled);
 

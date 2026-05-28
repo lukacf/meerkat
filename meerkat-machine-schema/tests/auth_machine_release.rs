@@ -1,6 +1,7 @@
 // Every AuthMachine phase transition must emit `EmitLifecycleEvent` so external
 // observers — the auth-lease registry, external event bus, etc. — never miss a
 // lifecycle change, including the terminal move to `Released`.
+#![allow(clippy::panic, clippy::semicolon_if_nothing_returned)]
 
 use meerkat_machine_schema::catalog::dsl::dsl_auth_machine;
 use meerkat_machine_schema::identity::FieldId;
@@ -28,7 +29,88 @@ fn release_transition_is_valid_on_input_release() -> Result<(), String> {
 }
 
 #[test]
-fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(), String> {
+fn credential_release_terminality_is_generated_from_oauth_membership() {
+    let schema = dsl_auth_machine();
+    for (transition_name, target_phase, guard_name) in [
+        (
+            "ReleaseCredentialLifecycleWithOAuth",
+            "ReauthRequired",
+            "oauth_membership_present",
+        ),
+        (
+            "ReleaseCredentialLifecycleWithoutOAuth",
+            "Released",
+            "oauth_membership_absent",
+        ),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .unwrap_or_else(|| panic!("AuthMachine must declare `{transition_name}`"));
+        match &transition.on {
+            TriggerMatch::Input { variant, .. } => {
+                assert_eq!(variant.as_str(), "ReleaseCredentialLifecycle")
+            }
+            other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
+        }
+        assert_eq!(transition.to.as_str(), target_phase);
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == guard_name),
+            "`{transition_name}` must carry generated guard `{guard_name}`"
+        );
+    }
+}
+
+#[test]
+fn restore_snapshot_no_credential_terminality_is_generated_from_oauth_observation() {
+    let schema = dsl_auth_machine();
+    for (transition_name, target_phase, guard_name) in [
+        (
+            "RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth",
+            "ReauthRequired",
+            "restore_oauth_membership_present",
+        ),
+        (
+            "RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth",
+            "Released",
+            "restore_oauth_membership_absent",
+        ),
+    ] {
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .unwrap_or_else(|| panic!("AuthMachine must declare `{transition_name}`"));
+        match &transition.on {
+            TriggerMatch::Input { variant, .. } => {
+                assert_eq!(variant.as_str(), "RestoreCredentialLifecycleSnapshot")
+            }
+            other => panic!("`{transition_name}` must be input-triggered, got {other:?}"),
+        }
+        assert_eq!(transition.to.as_str(), target_phase);
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "restore_snapshot_has_no_credential"),
+            "`{transition_name}` must identify the no-credential restore case in generated authority"
+        );
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == guard_name),
+            "`{transition_name}` must carry generated guard `{guard_name}`"
+        );
+    }
+}
+
+#[test]
+fn release_transition_emits_lifecycle_event_with_publication_facts() -> Result<(), String> {
     let release = release_transition()?;
 
     assert_eq!(
@@ -45,13 +127,22 @@ fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(),
         "Release must emit EmitLifecycleEvent so the terminal phase is observable",
     );
 
-    assert_eq!(
-        fields.len(),
-        1,
-        "EmitLifecycleEvent carries exactly one field (new_state); got {fields:?}",
-    );
-    let Some((new_state_field, new_state_expr)) = fields.iter().next() else {
-        return Err("EmitLifecycleEvent field list non-empty by prior assertion".to_string());
+    for required in [
+        "new_state",
+        "expires_at",
+        "credential_generation",
+        "credential_published_at_millis",
+    ] {
+        assert!(
+            fields.iter().any(|(field, _)| field.as_str() == required),
+            "EmitLifecycleEvent must carry `{required}` for generated auth lease publication; got {fields:?}",
+        );
+    }
+    let Some((new_state_field, new_state_expr)) = fields
+        .iter()
+        .find(|(field, _)| field.as_str() == "new_state")
+    else {
+        return Err("EmitLifecycleEvent field list missing new_state".to_string());
     };
     let (new_state_field, new_state_expr): (&FieldId, &Expr) = (new_state_field, new_state_expr);
     assert_eq!(new_state_field.as_str(), "new_state");
@@ -68,18 +159,31 @@ fn release_transition_emits_lifecycle_event_with_lifecycle_phase() -> Result<(),
 }
 
 #[test]
-fn every_auth_machine_transition_emits_lifecycle_event() {
+fn every_auth_machine_lifecycle_event_carries_publication_facts() {
     let schema = dsl_auth_machine();
     for transition in &schema.transitions {
-        let emits_lifecycle = transition
+        let Some(lifecycle_event) = transition
             .emit
             .iter()
-            .any(|e| e.variant.as_str() == "EmitLifecycleEvent");
-        assert!(
-            emits_lifecycle,
-            "AuthMachine transition {:?} must emit EmitLifecycleEvent so the \
-             phase change is externally observable; emit list: {:?}",
-            transition.name, transition.emit,
-        );
+            .find(|e| e.variant.as_str() == "EmitLifecycleEvent")
+        else {
+            continue;
+        };
+        for required in [
+            "new_state",
+            "expires_at",
+            "credential_generation",
+            "credential_published_at_millis",
+        ] {
+            assert!(
+                lifecycle_event
+                    .fields
+                    .iter()
+                    .any(|(field, _)| field.as_str() == required),
+                "AuthMachine transition {:?} lifecycle event must carry `{required}` for generated publication; fields: {:?}",
+                transition.name,
+                lifecycle_event.fields,
+            );
+        }
     }
 }

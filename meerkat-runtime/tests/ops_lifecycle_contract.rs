@@ -8,8 +8,9 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
-    OperationStatus, OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
+    OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSource,
+    OperationSpec, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
+    OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
@@ -29,19 +30,22 @@ fn background_spec(name: &str) -> OperationSpec {
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "test-background".into(),
+        operation_source: None,
         child_session_id: None,
         expect_peer_channel: false,
     }
 }
 
 fn mob_member_spec(name: &str) -> OperationSpec {
+    let child_session_id = SessionId::new();
     OperationSpec {
         id: meerkat_core::ops_lifecycle::OperationId::new(),
         kind: OperationKind::MobMemberChild,
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "test-mob".into(),
-        child_session_id: Some(SessionId::new()),
+        operation_source: Some(OperationSource::session_child(child_session_id.clone())),
+        child_session_id: Some(child_session_id),
         expect_peer_channel: true,
     }
 }
@@ -84,7 +88,7 @@ async fn ops_lifecycle_contract_register_progress_peer_ready_complete_and_watch(
 
     registry.register_operation(spec.clone()).unwrap();
 
-    let initial = registry.snapshot(&op_id).unwrap();
+    let initial = registry.snapshot(&op_id).unwrap().unwrap();
     assert_eq!(initial.status, OperationStatus::Provisioning);
     assert!(!initial.peer_ready);
     assert_eq!(initial.progress_count, 0);
@@ -115,13 +119,13 @@ async fn ops_lifecycle_contract_register_progress_peer_ready_complete_and_watch(
         .peer_ready(&op_id, peer_handle("member-alpha"))
         .unwrap();
 
-    let running = registry.snapshot(&op_id).unwrap();
+    let running = registry.snapshot(&op_id).unwrap().unwrap();
     assert_eq!(running.status, OperationStatus::Running);
     assert!(running.peer_ready);
     assert_eq!(running.progress_count, 2);
     assert_eq!(running.watcher_count, 1);
 
-    let listed = registry.list_operations();
+    let listed = registry.list_operations().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].display_name, "member-alpha");
 
@@ -129,17 +133,21 @@ async fn ops_lifecycle_contract_register_progress_peer_ready_complete_and_watch(
     registry.complete_operation(&op_id, result.clone()).unwrap();
 
     assert_eq!(
-        watch.wait().await,
+        watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Completed(result.clone())
     );
 
     let late_watch = registry.register_watcher(&op_id).unwrap();
     assert_eq!(
-        late_watch.wait().await,
+        late_watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Completed(result.clone())
     );
 
-    let completed = registry.snapshot(&op_id).unwrap();
+    let completed = registry.snapshot(&op_id).unwrap().unwrap();
     assert_eq!(completed.status, OperationStatus::Completed);
     assert_eq!(completed.watcher_count, 0);
     assert_eq!(
@@ -161,7 +169,9 @@ async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes
         .fail_operation(&failed_id, "tool crashed".into())
         .unwrap();
     assert_eq!(
-        failed_watch.wait().await,
+        failed_watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Failed {
             error: "tool crashed".into(),
         }
@@ -176,7 +186,9 @@ async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes
         .cancel_operation(&cancelled_id, Some("operator request".into()))
         .unwrap();
     assert_eq!(
-        cancelled_watch.wait().await,
+        cancelled_watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Cancelled {
             reason: Some("operator request".into()),
         }
@@ -197,17 +209,19 @@ async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes
             },
         )
         .unwrap();
-    let retiring = registry.snapshot(&retired_id).unwrap();
+    let retiring = registry.snapshot(&retired_id).unwrap().unwrap();
     assert_eq!(retiring.status, OperationStatus::Retiring);
     assert_eq!(retiring.progress_count, 1);
 
     registry.mark_retired(&retired_id).unwrap();
     assert_eq!(
-        retired_watch.wait().await,
+        retired_watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Retired
     );
     assert_eq!(
-        registry.snapshot(&retired_id).unwrap().status,
+        registry.snapshot(&retired_id).unwrap().unwrap().status,
         OperationStatus::Retired
     );
 
@@ -219,13 +233,15 @@ async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes
         .abort_provisioning(&aborted_id, Some("mob is stopping".into()))
         .unwrap();
     assert_eq!(
-        aborted_watch.wait().await,
+        aborted_watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Aborted {
             reason: Some("mob is stopping".into()),
         }
     );
     assert_eq!(
-        registry.snapshot(&aborted_id).unwrap().status,
+        registry.snapshot(&aborted_id).unwrap().unwrap().status,
         OperationStatus::Aborted
     );
 }
@@ -252,22 +268,41 @@ async fn ops_lifecycle_contract_terminate_owner_resolves_all_pending_watches_onc
     let expected = OperationTerminalOutcome::Terminated {
         reason: "runtime shutting down".into(),
     };
-    assert_eq!(provisioning_watch.wait().await, expected.clone());
-    assert_eq!(running_watch.wait().await, expected.clone());
+    assert_eq!(
+        provisioning_watch
+            .await
+            .expect("operation completion watch should resolve"),
+        expected.clone()
+    );
+    assert_eq!(
+        running_watch
+            .await
+            .expect("operation completion watch should resolve"),
+        expected.clone()
+    );
 
     let late_watch = registry.register_watcher(&running_id).unwrap();
-    assert_eq!(late_watch.wait().await, expected);
+    assert_eq!(
+        late_watch
+            .await
+            .expect("operation completion watch should resolve"),
+        expected
+    );
 
     assert_eq!(
-        registry.snapshot(&provisioning_id).unwrap().status,
+        registry.snapshot(&provisioning_id).unwrap().unwrap().status,
         OperationStatus::Terminated
     );
     assert_eq!(
-        registry.snapshot(&running_id).unwrap().status,
+        registry.snapshot(&running_id).unwrap().unwrap().status,
         OperationStatus::Terminated
     );
     assert_eq!(
-        registry.snapshot(&running_id).unwrap().watcher_count,
+        registry
+            .snapshot(&running_id)
+            .unwrap()
+            .unwrap()
+            .watcher_count,
         0,
         "terminal watch resolution should drain the registry's active watcher set"
     );
@@ -326,10 +361,10 @@ async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries(
     registry_b.register_operation(job).unwrap();
     registry_b.provisioning_succeeded(&job_id).unwrap();
 
-    assert!(registry_a.snapshot(&member_id).is_some());
-    assert!(registry_a.snapshot(&job_id).is_none());
-    assert!(registry_b.snapshot(&job_id).is_some());
-    assert!(registry_b.snapshot(&member_id).is_none());
+    assert!(registry_a.snapshot(&member_id).unwrap().is_some());
+    assert!(registry_a.snapshot(&job_id).unwrap().is_none());
+    assert!(registry_b.snapshot(&job_id).unwrap().is_some());
+    assert!(registry_b.snapshot(&member_id).unwrap().is_none());
 }
 
 #[tokio::test]
@@ -400,23 +435,23 @@ async fn ops_lifecycle_contract_bounded_completed_retention_evicts_oldest() {
     }
 
     assert!(
-        registry.snapshot(&ids[0]).is_none(),
+        registry.snapshot(&ids[0]).unwrap().is_none(),
         "op-0 should be evicted"
     );
     assert!(
-        registry.snapshot(&ids[1]).is_none(),
+        registry.snapshot(&ids[1]).unwrap().is_none(),
         "op-1 should be evicted"
     );
     assert!(
-        registry.snapshot(&ids[2]).is_some(),
+        registry.snapshot(&ids[2]).unwrap().is_some(),
         "op-2 should be retained"
     );
     assert!(
-        registry.snapshot(&ids[3]).is_some(),
+        registry.snapshot(&ids[3]).unwrap().is_some(),
         "op-3 should be retained"
     );
     assert!(
-        registry.snapshot(&ids[4]).is_some(),
+        registry.snapshot(&ids[4]).unwrap().is_some(),
         "op-4 should be retained"
     );
 }
@@ -438,7 +473,9 @@ async fn ops_lifecycle_contract_multi_listener_completion_all_receive_outcome() 
 
     for watch in [watch1, watch2, watch3] {
         assert_eq!(
-            watch.wait().await,
+            watch
+                .await
+                .expect("operation completion watch should resolve"),
             OperationTerminalOutcome::Completed(result.clone())
         );
     }
@@ -530,8 +567,8 @@ async fn ops_lifecycle_contract_collect_completed_drains_terminal_operations() {
         OperationTerminalOutcome::Completed(_)
     ));
 
-    assert!(registry.snapshot(&id_a).is_none());
-    assert!(registry.snapshot(&id_b).is_some());
+    assert!(registry.snapshot(&id_a).unwrap().is_none());
+    assert!(registry.snapshot(&id_b).unwrap().is_some());
 
     assert!(registry.collect_completed().unwrap().is_empty());
 }
@@ -544,14 +581,14 @@ async fn ops_lifecycle_contract_snapshot_includes_peer_handle() {
     registry.register_operation(spec).unwrap();
     registry.provisioning_succeeded(&op_id).unwrap();
 
-    let snap1 = registry.snapshot(&op_id).unwrap();
+    let snap1 = registry.snapshot(&op_id).unwrap().unwrap();
     assert!(snap1.peer_handle.is_none());
 
     registry
         .peer_ready(&op_id, peer_handle("peer-snap"))
         .unwrap();
 
-    let snap2 = registry.snapshot(&op_id).unwrap();
+    let snap2 = registry.snapshot(&op_id).unwrap().unwrap();
     assert!(snap2.peer_handle.is_some());
     assert_eq!(snap2.peer_handle.unwrap().peer_name.as_str(), "peer-snap");
 }
@@ -563,14 +600,14 @@ async fn ops_lifecycle_contract_snapshot_includes_timestamps() {
     let op_id = spec.id.clone();
     registry.register_operation(spec).unwrap();
 
-    let snap1 = registry.snapshot(&op_id).unwrap();
+    let snap1 = registry.snapshot(&op_id).unwrap().unwrap();
     assert!(snap1.created_at_ms > 0, "created_at_ms should be set");
     assert!(snap1.started_at_ms.is_none(), "not yet started");
     assert!(snap1.completed_at_ms.is_none(), "not yet completed");
     assert!(snap1.elapsed_ms.is_none(), "no elapsed before completion");
 
     registry.provisioning_succeeded(&op_id).unwrap();
-    let snap2 = registry.snapshot(&op_id).unwrap();
+    let snap2 = registry.snapshot(&op_id).unwrap().unwrap();
     assert!(
         snap2.started_at_ms.is_some(),
         "started_at_ms set after provisioning_succeeded"
@@ -580,7 +617,7 @@ async fn ops_lifecycle_contract_snapshot_includes_timestamps() {
     registry
         .complete_operation(&op_id, op_result(&op_id, "done"))
         .unwrap();
-    let snap3 = registry.snapshot(&op_id).unwrap();
+    let snap3 = registry.snapshot(&op_id).unwrap().unwrap();
     assert!(snap3.completed_at_ms.is_some(), "completed_at_ms set");
     assert!(snap3.elapsed_ms.is_some(), "elapsed_ms computed");
     assert!(snap3.completed_at_ms.unwrap() >= snap3.started_at_ms.unwrap());

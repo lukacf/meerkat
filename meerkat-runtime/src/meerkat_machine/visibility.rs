@@ -13,9 +13,6 @@ use super::*;
 #[derive(Default)]
 pub struct MachineToolVisibilityOwner {
     pub state: StdRwLock<SessionToolVisibilityState>,
-    filter_authority_catalog: StdRwLock<std::collections::BTreeMap<String, ToolVisibilityWitness>>,
-    deferred_authority_catalog:
-        StdRwLock<std::collections::BTreeMap<String, ToolVisibilityWitness>>,
     /// Handle to the per-session DSL authority — set by
     /// `MeerkatMachine::session_management` immediately after the owner is
     /// created. When present, staging-path trait calls mint their revision
@@ -33,14 +30,6 @@ impl std::fmt::Debug for MachineToolVisibilityOwner {
         f.debug_struct("MachineToolVisibilityOwner")
             .field("state", &"<StdRwLock<SessionToolVisibilityState>>")
             .field(
-                "filter_authority_catalog",
-                &self
-                    .filter_authority_catalog
-                    .read()
-                    .map(|catalog| catalog.len())
-                    .unwrap_or_default(),
-            )
-            .field(
                 "dsl_authority",
                 &self
                     .dsl_authority
@@ -48,14 +37,6 @@ impl std::fmt::Debug for MachineToolVisibilityOwner {
                     .ok()
                     .and_then(|slot| slot.as_ref().map(|_| "bound"))
                     .unwrap_or("unbound"),
-            )
-            .field(
-                "deferred_authority_catalog",
-                &self
-                    .deferred_authority_catalog
-                    .read()
-                    .map(|catalog| catalog.len())
-                    .unwrap_or_default(),
             )
             .finish()
     }
@@ -81,11 +62,10 @@ impl MachineToolVisibilityOwner {
         *slot = Some(authority);
     }
 
-    fn mint_revision_via_dsl(
+    fn dsl_authority_for_stage(
         &self,
-        input: super::dsl::MeerkatMachineInput,
-        context: &'static str,
-    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+    ) -> Result<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>, ToolScopeStageError>
+    {
         let slot = self
             .dsl_authority
             .read()
@@ -100,23 +80,13 @@ impl MachineToolVisibilityOwner {
                     "machine visibility DSL authority not bound — staging call before session wiring"
                         .to_string(),
             })?;
-        drop(slot);
-        let mut guard = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        super::dsl::MeerkatMachineMutator::apply(&mut *guard, input).map_err(|err| {
-            ToolScopeStageError::Owner {
-                message: super::dsl_authority::map_error(err, context),
-            }
-        })?;
-        Ok(ToolScopeRevision(guard.state.staged_visibility_revision))
+        Ok(authority)
     }
 
-    fn apply_visibility_dsl_input(
+    fn dsl_authority_for_apply(
         &self,
-        input: super::dsl::MeerkatMachineInput,
-        context: &'static str,
-    ) -> Result<(), ToolScopeApplyError> {
+    ) -> Result<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>, ToolScopeApplyError>
+    {
         let slot = self
             .dsl_authority
             .read()
@@ -131,59 +101,12 @@ impl MachineToolVisibilityOwner {
                     "machine visibility DSL authority not bound — apply call before session wiring"
                         .to_string(),
             })?;
-        drop(slot);
-        let mut guard = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        super::dsl::MeerkatMachineMutator::apply(&mut *guard, input).map_err(|err| {
-            ToolScopeApplyError::Owner {
-                message: super::dsl_authority::map_error(err, context),
-            }
-        })?;
-        Ok(())
-    }
-
-    pub(super) fn canonical_deferred_authorities_for_visibility_state(
-        &self,
-        visibility_state: &SessionToolVisibilityState,
-    ) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError>
-    {
-        let names = deferred_authority_names_for_visibility_state(visibility_state);
-        if names.is_empty() {
-            return Ok(Default::default());
-        }
-        let authority_catalog =
-            self.deferred_authority_catalog
-                .read()
-                .map_err(|_| ToolScopeStageError::Owner {
-                    message: "machine visibility deferred authority catalog lock poisoned"
-                        .to_string(),
-                })?;
-        canonical_deferred_authorities_for_names(
-            &names,
-            &visibility_state.requested_witnesses,
-            &authority_catalog,
-        )
+        Ok(authority)
     }
 }
 
 pub fn formal_projection_value<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|err| format!("\"<serialization error: {err}>\""))
-}
-
-fn missing_visibility_witness_names(
-    names: &std::collections::BTreeSet<String>,
-    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> Vec<String> {
-    names
-        .iter()
-        .filter(|name| {
-            witnesses
-                .get(name.as_str())
-                .is_none_or(|witness| !witness.has_provenance_identity_witness())
-        })
-        .cloned()
-        .collect()
 }
 
 fn authority_witnesses_for_names(
@@ -197,16 +120,6 @@ fn authority_witnesses_for_names(
                 .get(name)
                 .map(|witness| (name.clone(), witness.clone()))
         })
-        .collect()
-}
-
-fn deferred_authority_names_for_visibility_state(
-    visibility_state: &SessionToolVisibilityState,
-) -> std::collections::BTreeSet<String> {
-    visibility_state
-        .active_requested_deferred_names
-        .union(&visibility_state.staged_requested_deferred_names)
-        .cloned()
         .collect()
 }
 
@@ -232,55 +145,6 @@ fn deferred_load_authority_map(
     Err(ToolScopeStageError::InvalidWitnesses { names: invalid })
 }
 
-fn invalid_deferred_authority_names(
-    names: &std::collections::BTreeSet<String>,
-    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    authority_catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> Vec<String> {
-    let mut invalid = names
-        .iter()
-        .filter(|name| {
-            let witness = witnesses.get(name.as_str());
-            let expected = authority_catalog.get(name.as_str());
-            !matches!(
-                (witness, expected),
-                (Some(witness), Some(expected))
-                    if witness.stable_owner_key == expected.stable_owner_key
-                        && witness.last_seen_provenance == expected.last_seen_provenance
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    invalid.sort_unstable();
-    invalid.dedup();
-    invalid
-}
-
-fn canonical_deferred_authorities_for_names(
-    names: &std::collections::BTreeSet<String>,
-    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    authority_catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError> {
-    let missing = missing_visibility_witness_names(names, witnesses);
-    if !missing.is_empty() {
-        return Err(ToolScopeStageError::MissingWitnesses { names: missing });
-    }
-    let invalid = invalid_deferred_authority_names(names, witnesses, authority_catalog);
-    if !invalid.is_empty() {
-        return Err(ToolScopeStageError::InvalidWitnesses { names: invalid });
-    }
-    let mut authorities = std::collections::BTreeMap::new();
-    for name in names {
-        let Some(witness) = authority_catalog.get(name.as_str()) else {
-            return Err(ToolScopeStageError::InvalidWitnesses {
-                names: vec![name.clone()],
-            });
-        };
-        authorities.insert(name.clone(), witness.clone());
-    }
-    Ok(authorities)
-}
-
 fn dsl_witnesses(
     witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
 ) -> std::collections::BTreeMap<String, super::dsl::ToolVisibilityWitness> {
@@ -295,28 +159,67 @@ fn dsl_witnesses(
         .collect()
 }
 
-fn validate_persistent_filter_authority(
-    filter: &ToolFilter,
-    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> Result<(), ToolScopeStageError> {
-    meerkat_core::tool_scope::validate_filter_witnesses_match_catalog(filter, witnesses, catalog)
+fn core_tool_source_kind(kind: super::dsl::ToolSourceKind) -> meerkat_core::types::ToolSourceKind {
+    match kind {
+        super::dsl::ToolSourceKind::Builtin => meerkat_core::types::ToolSourceKind::Builtin,
+        super::dsl::ToolSourceKind::Shell => meerkat_core::types::ToolSourceKind::Shell,
+        super::dsl::ToolSourceKind::Comms => meerkat_core::types::ToolSourceKind::Comms,
+        super::dsl::ToolSourceKind::Memory => meerkat_core::types::ToolSourceKind::Memory,
+        super::dsl::ToolSourceKind::Schedule => meerkat_core::types::ToolSourceKind::Schedule,
+        super::dsl::ToolSourceKind::WorkGraph => meerkat_core::types::ToolSourceKind::WorkGraph,
+        super::dsl::ToolSourceKind::Mob => meerkat_core::types::ToolSourceKind::Mob,
+        super::dsl::ToolSourceKind::Callback => meerkat_core::types::ToolSourceKind::Callback,
+        super::dsl::ToolSourceKind::Mcp => meerkat_core::types::ToolSourceKind::Mcp,
+        super::dsl::ToolSourceKind::RustBundle => meerkat_core::types::ToolSourceKind::RustBundle,
+    }
 }
 
-fn validate_visibility_state_persistent_filters(
-    visibility_state: &SessionToolVisibilityState,
-    catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
-) -> Result<(), ToolScopeStageError> {
-    validate_persistent_filter_authority(
-        &visibility_state.active_filter,
-        &visibility_state.filter_witnesses,
-        catalog,
-    )?;
-    validate_persistent_filter_authority(
-        &visibility_state.staged_filter,
-        &visibility_state.filter_witnesses,
-        catalog,
-    )
+fn core_tool_visibility_witness(
+    witness: &super::dsl::ToolVisibilityWitness,
+) -> ToolVisibilityWitness {
+    ToolVisibilityWitness {
+        stable_owner_key: witness.stable_owner_key.clone(),
+        last_seen_provenance: witness.last_seen_provenance.as_ref().map(|provenance| {
+            meerkat_core::types::ToolProvenance {
+                kind: core_tool_source_kind(provenance.kind),
+                source_id: meerkat_core::types::ToolSourceId::new(provenance.source_id.clone()),
+            }
+        }),
+    }
+}
+
+fn core_witnesses(
+    witnesses: &std::collections::BTreeMap<String, super::dsl::ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    witnesses
+        .iter()
+        .map(|(name, witness)| (name.clone(), core_tool_visibility_witness(witness)))
+        .collect()
+}
+
+fn mirror_visibility_projection_from_authority(
+    projection: &mut SessionToolVisibilityState,
+    authority: &super::dsl::MeerkatMachineAuthority,
+) {
+    let authority_state = authority.state();
+    projection.capability_base_filter = meerkat_core::ToolFilter::from(
+        authority_state
+            .current_session_capability_base_filter
+            .clone(),
+    );
+    projection.inherited_base_filter =
+        meerkat_core::ToolFilter::from(authority_state.inherited_base_filter.clone());
+    projection.active_filter =
+        meerkat_core::ToolFilter::from(authority_state.active_filter.clone());
+    projection.staged_filter =
+        meerkat_core::ToolFilter::from(authority_state.staged_filter.clone());
+    projection.active_requested_deferred_names = authority_state.active_deferred_names.clone();
+    projection.staged_requested_deferred_names = authority_state.staged_deferred_names.clone();
+    projection.active_revision = authority_state.active_visibility_revision;
+    projection.staged_revision = authority_state.staged_visibility_revision;
+    projection.requested_witnesses =
+        core_witnesses(&authority_state.requested_visibility_witnesses);
+    projection.filter_witnesses = core_witnesses(&authority_state.filter_visibility_witnesses);
 }
 
 impl ToolVisibilityOwner for MachineToolVisibilityOwner {
@@ -331,120 +234,51 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn replace_visibility_state(
         &self,
-        mut visibility_state: SessionToolVisibilityState,
+        visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
-        meerkat_core::tool_scope::validate_inherited_filter_witnesses(
-            &visibility_state.inherited_base_filter,
-            &visibility_state.filter_witnesses,
-        )
-        .map_err(|err| ToolScopeApplyError::Owner {
-            message: format!("invalid inherited visibility authority: {err}"),
-        })?;
-        let filter_authority_catalog =
-            self.filter_authority_catalog
-                .read()
-                .map_err(|_| ToolScopeApplyError::Owner {
-                    message: "machine visibility filter authority catalog lock poisoned"
-                        .to_string(),
-                })?;
-        validate_visibility_state_persistent_filters(&visibility_state, &filter_authority_catalog)
-            .map_err(|err| ToolScopeApplyError::Owner {
-                message: format!("invalid persistent visibility filter authority: {err}"),
-            })?;
-        drop(filter_authority_catalog);
-        let deferred_authorities = self
-            .canonical_deferred_authorities_for_visibility_state(&visibility_state)
-            .map_err(|err| ToolScopeApplyError::Owner {
-                message: format!("invalid deferred visibility authority: {err}"),
-            })?;
-        visibility_state
-            .requested_witnesses
-            .extend(deferred_authorities.clone());
         let active_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
             &visibility_state.active_requested_deferred_names,
-            &deferred_authorities,
+            &visibility_state.requested_witnesses,
         ));
         let staged_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
             &visibility_state.staged_requested_deferred_names,
-            &deferred_authorities,
+            &visibility_state.requested_witnesses,
         ));
-        // Sync the DSL monotonic counter up to the externally-installed
-        // revisions before we overwrite the owner-held state. The DSL
-        // owns `next_staged_visibility_revision`; without this sync,
-        // subsequent `stage_*` calls on a session whose durable state
-        // was just replaced (recovery, LLM hot-swap, shell-side
-        // projection re-install) would mint revisions starting from 0
-        // and regress behind the durable state just installed (dogma
-        // round 4, wave 2b #12 — single monotonic source, honest across
-        // recovery / hot-swap boundaries).
-        //
-        // The DSL guard on `SyncVisibilityRevisions` makes the call
-        // idempotent: when the installed revisions are at or below the
-        // counter the transition is guard-rejected (no-op), which the
-        // DSL classifies for us. Firing unconditionally is correct —
-        // the guard is the single place that decides whether the sync
-        // advances state, not a shell-side pre-check on the input
-        // fields.
-        let slot = self
-            .dsl_authority
-            .read()
-            .map_err(|_| ToolScopeApplyError::Owner {
-                message: "machine visibility DSL authority slot lock poisoned".to_string(),
-            })?;
-        let authority = slot
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| ToolScopeApplyError::Owner {
-                message:
-                    "machine visibility DSL authority not bound — restore before session wiring"
-                        .to_string(),
-            })?;
-        drop(slot);
+        let dsl_visibility_state =
+            super::dsl::SessionToolVisibilityState::from_domain(&visibility_state);
+        let authority = self.dsl_authority_for_apply()?;
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match super::dsl::MeerkatMachineMutator::apply(
+        super::dsl::MeerkatMachineMutator::apply(
             &mut *guard,
             super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
-                active_revision: visibility_state.active_revision,
-                staged_revision: visibility_state.staged_revision,
+                capability_base_filter: super::dsl::ToolFilter::from(
+                    &visibility_state.capability_base_filter,
+                ),
+                inherited_base_filter: super::dsl::ToolFilter::from(
+                    &visibility_state.inherited_base_filter,
+                ),
+                active_filter: super::dsl::ToolFilter::from(&visibility_state.active_filter),
+                staged_filter: super::dsl::ToolFilter::from(&visibility_state.staged_filter),
+                requested_witnesses: dsl_visibility_state.requested_witnesses.clone(),
+                filter_witnesses: dsl_visibility_state.filter_witnesses,
                 active_deferred_names: visibility_state.active_requested_deferred_names.clone(),
                 staged_deferred_names: visibility_state.staged_requested_deferred_names.clone(),
-                active_deferred_authorities: active_deferred_authorities.clone(),
-                staged_deferred_authorities: staged_deferred_authorities.clone(),
+                active_deferred_authorities,
+                staged_deferred_authorities,
+                active_revision: visibility_state.active_revision,
+                staged_revision: visibility_state.staged_revision,
             },
-        ) {
-            Ok(_) => {}
-            // Typed guard rejection is the idempotent no-op case:
-            // neither revision advances the counter and the installed
-            // deferred authority projection already matches the DSL.
-            Err(err @ super::dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {
-                let counter_covers_install = visibility_state.active_revision
-                    <= guard.state.next_staged_visibility_revision
-                    && visibility_state.staged_revision
-                        <= guard.state.next_staged_visibility_revision;
-                let deferred_authority_matches = guard.state.active_deferred_names
-                    == visibility_state.active_requested_deferred_names
-                    && guard.state.staged_deferred_names
-                        == visibility_state.staged_requested_deferred_names
-                    && guard.state.active_deferred_authorities == active_deferred_authorities
-                    && guard.state.staged_deferred_authorities == staged_deferred_authorities;
-                if !(counter_covers_install && deferred_authority_matches) {
-                    return Err(ToolScopeApplyError::Owner {
-                        message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
-                    });
-                }
-            }
-            Err(err) => {
-                return Err(ToolScopeApplyError::Owner {
-                    message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
-                });
-            }
-        }
-        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
-            message: "machine visibility state lock poisoned".to_string(),
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
         })?;
-        *state = visibility_state;
+        mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(())
     }
 
@@ -453,40 +287,27 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         filter: ToolFilter,
         witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
-        let authority_catalog = {
-            let state = self.state.read().map_err(|_| ToolScopeStageError::Owner {
-                message: "machine visibility state lock poisoned".to_string(),
-            })?;
-            let mut authority_catalog = state.filter_witnesses.clone();
-            let catalog =
-                self.filter_authority_catalog
-                    .read()
-                    .map_err(|_| ToolScopeStageError::Owner {
-                        message: "machine visibility filter authority catalog lock poisoned"
-                            .to_string(),
-                    })?;
-            authority_catalog.extend(catalog.clone());
-            authority_catalog
-        };
-        validate_persistent_filter_authority(&filter, &witnesses, &authority_catalog)?;
-        // DSL is the single monotonic source — mint first, then apply
-        // the projection to the owner-held state under the projection
-        // lock. The DSL input's `update {}` increments
-        // `next_staged_visibility_revision` and stamps
-        // `staged_visibility_revision` atomically inside the DSL
-        // authority lock.
-        let revision = self.mint_revision_via_dsl(
-            super::dsl::MeerkatMachineInput::StageVisibilityFilter {
-                filter: super::dsl::ToolFilter::from(&filter),
-            },
-            "StageVisibilityFilter",
-        )?;
+        let authority = self.dsl_authority_for_stage()?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        state.staged_filter = filter;
-        state.filter_witnesses.extend(witnesses);
-        state.staged_revision = revision.0;
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next_filter_witnesses = guard.state().filter_visibility_witnesses.clone();
+        next_filter_witnesses.extend(dsl_witnesses(&witnesses));
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::StageVisibilityFilter {
+                filter: super::dsl::ToolFilter::from(&filter),
+                witnesses: next_filter_witnesses,
+            },
+        )
+        .map_err(|err| ToolScopeStageError::Owner {
+            message: super::dsl_authority::map_error(err, "StageVisibilityFilter"),
+        })?;
+        let revision = ToolScopeRevision(guard.state().staged_visibility_revision);
+        mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(revision)
     }
 
@@ -499,17 +320,22 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
                 names: names.into_iter().collect(),
             });
         }
-        let revision = self.mint_revision_via_dsl(
-            super::dsl::MeerkatMachineInput::StageDeferredNames {
-                names: names.clone(),
-            },
-            "StageDeferredNames",
-        )?;
+        let authority = self.dsl_authority_for_stage()?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        state.staged_requested_deferred_names = names;
-        state.staged_revision = revision.0;
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::StageDeferredNames { names },
+        )
+        .map_err(|err| ToolScopeStageError::Owner {
+            message: super::dsl_authority::map_error(err, "StageDeferredNames"),
+        })?;
+        let revision = ToolScopeRevision(guard.state().staged_visibility_revision);
+        mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(revision)
     }
 
@@ -517,82 +343,127 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         authorities: Vec<DeferredToolLoadAuthority>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
-        // `request_deferred_tools` receives typed load authorities, then
-        // canonicalizes them against this owner before projecting the accepted
-        // witness map into the DSL input.
         let authorities = deferred_load_authority_map(&authorities)?;
-        let (extended, mut combined_witnesses): (
-            std::collections::BTreeSet<String>,
-            std::collections::BTreeMap<String, ToolVisibilityWitness>,
-        ) = {
-            let state = self.state.read().map_err(|_| ToolScopeStageError::Owner {
-                message: "machine visibility state lock poisoned".to_string(),
-            })?;
-            let names = authorities.keys().cloned().collect();
-            let extended = state
-                .staged_requested_deferred_names
-                .union(&names)
-                .cloned()
-                .collect();
-            let mut combined_witnesses = state.requested_witnesses.clone();
-            combined_witnesses.extend(authorities);
-            (extended, combined_witnesses)
-        };
-        let missing = missing_visibility_witness_names(&extended, &combined_witnesses);
-        if !missing.is_empty() {
-            return Err(ToolScopeStageError::MissingWitnesses { names: missing });
+        if authorities.is_empty() {
+            return Err(ToolScopeStageError::Owner {
+                message: "deferred tool request requires at least one authority".to_string(),
+            });
         }
-        let staged_authorities = {
-            let authority_catalog =
-                self.deferred_authority_catalog
-                    .read()
-                    .map_err(|_| ToolScopeStageError::Owner {
-                        message: "machine visibility deferred authority catalog lock poisoned"
-                            .to_string(),
-                    })?;
-            canonical_deferred_authorities_for_names(
-                &extended,
-                &combined_witnesses,
-                &authority_catalog,
-            )?
-        };
-        combined_witnesses.extend(staged_authorities.clone());
-        let dsl_witnesses = dsl_witnesses(&staged_authorities);
-        let revision = self.mint_revision_via_dsl(
-            super::dsl::MeerkatMachineInput::RequestDeferredTools {
-                authorities: dsl_witnesses,
-            },
-            "RequestDeferredTools",
-        )?;
+        let authority = self.dsl_authority_for_stage()?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
-        state.staged_requested_deferred_names = extended;
-        state.requested_witnesses = combined_witnesses;
-        state.staged_revision = revision.0;
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut target_authorities = guard.state().staged_deferred_authorities.clone();
+        target_authorities.extend(dsl_witnesses(&authorities));
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::RequestDeferredTools {
+                authorities: target_authorities,
+            },
+        )
+        .map_err(|err| ToolScopeStageError::Owner {
+            message: super::dsl_authority::map_error(err, "RequestDeferredTools"),
+        })?;
+        let revision = ToolScopeRevision(guard.state().staged_visibility_revision);
+        mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(revision)
     }
 
     fn replace_deferred_tool_authority_catalog(
         &self,
         catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    ) {
-        let mut guard = self
-            .deferred_authority_catalog
-            .write()
+    ) -> Result<(), ToolScopeApplyError> {
+        let authority = self.dsl_authority_for_apply()?;
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let mut guard = authority
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = catalog;
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::ReplaceDeferredToolAuthorityCatalog {
+                catalog: dsl_witnesses(&catalog),
+            },
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "ReplaceDeferredToolAuthorityCatalog"),
+        })?;
+        mirror_visibility_projection_from_authority(&mut state, &guard);
+        Ok(())
     }
 
     fn replace_filter_tool_authority_catalog(
         &self,
         catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
-    ) {
-        let mut guard = self
-            .filter_authority_catalog
-            .write()
+    ) -> Result<(), ToolScopeApplyError> {
+        let authority = self.dsl_authority_for_apply()?;
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let mut guard = authority
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = catalog;
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::ReplaceFilterToolAuthorityCatalog {
+                catalog: dsl_witnesses(&catalog),
+            },
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "ReplaceFilterToolAuthorityCatalog"),
+        })?;
+        mirror_visibility_projection_from_authority(&mut state, &guard);
+        Ok(())
+    }
+
+    fn set_turn_overlay(
+        &self,
+        allow: Option<std::collections::BTreeSet<String>>,
+        deny: std::collections::BTreeSet<String>,
+    ) -> Result<ToolScopeTurnOverlay, ToolScopeStageError> {
+        let authority = self.dsl_authority_for_stage()?;
+        let allow_active = allow.is_some();
+        let allow_names = allow.unwrap_or_default();
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::SetTurnToolOverlay {
+                allow_active,
+                allow_names,
+                deny_names: deny,
+            },
+        )
+        .map_err(|err| ToolScopeStageError::Owner {
+            message: super::dsl_authority::map_error(err, "SetTurnToolOverlay"),
+        })?;
+        let state = guard.state();
+        Ok(ToolScopeTurnOverlay::from_string_sets(
+            state
+                .turn_tool_overlay_allow_active
+                .then(|| state.turn_tool_overlay_allow_names.clone()),
+            state.turn_tool_overlay_deny_names.clone(),
+        ))
+    }
+
+    fn clear_turn_overlay(&self) -> Result<ToolScopeTurnOverlay, ToolScopeStageError> {
+        let authority = self.dsl_authority_for_stage()?;
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::ClearTurnToolOverlay,
+        )
+        .map_err(|err| ToolScopeStageError::Owner {
+            message: super::dsl_authority::map_error(err, "ClearTurnToolOverlay"),
+        })?;
+        Ok(ToolScopeTurnOverlay::cleared())
     }
 
     fn requires_filter_witnesses(&self) -> bool {
@@ -600,26 +471,38 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
     }
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
-        let (names, authorities) = {
-            let state = self.state.read().map_err(|_| ToolScopeApplyError::Owner {
-                message: "machine visibility state lock poisoned".to_string(),
-            })?;
-            let names = state.staged_requested_deferred_names.clone();
-            let authorities = authority_witnesses_for_names(&names, &state.requested_witnesses);
-            (names, authorities)
-        };
-        self.apply_visibility_dsl_input(
-            super::dsl::MeerkatMachineInput::CommitDeferredNames {
-                authorities: dsl_witnesses(&authorities),
+        let authority = self.dsl_authority_for_apply()?;
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let staged_filter = guard.state().staged_filter.clone();
+        let staged_revision = guard.state().staged_visibility_revision;
+        let staged_deferred_authorities = guard.state().staged_deferred_authorities.clone();
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::CommitVisibilityFilter {
+                filter: staged_filter,
+                revision: staged_revision,
             },
-            "CommitDeferredNames",
-        )?;
-        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
-            message: "machine visibility state lock poisoned".to_string(),
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "CommitVisibilityFilter"),
         })?;
-        state.active_filter = state.staged_filter.clone();
-        state.active_requested_deferred_names = names;
-        state.active_revision = state.staged_revision;
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::CommitDeferredNames {
+                authorities: staged_deferred_authorities,
+            },
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "CommitDeferredNames"),
+        })?;
+
+        mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(state.clone())
     }
 }
@@ -634,13 +517,13 @@ impl MeerkatMachine {
             control_snapshot,
             completions_handle,
             ops_lifecycle,
-            cursor_state,
             completions_present,
             ops_registry_present,
             attachment_live,
             epoch_id,
             _visibility_state,
             formal_pre_run_phase,
+            formal_visibility_authority_catalogs,
         ) = {
             let sessions = self.sessions.read().await;
             let entry = sessions.get(session_id)?;
@@ -679,18 +562,25 @@ impl MeerkatMachine {
                 .pre_run_phase
                 .and_then(crate::meerkat_machine::dsl_authority::pre_run_phase_from_runtime_state)
                 .map(|phase| format!("{phase:?}"));
+            let formal_visibility_authority_catalogs = {
+                let state = authority.state();
+                (
+                    core_witnesses(&state.deferred_visibility_authority_catalog),
+                    core_witnesses(&state.filter_visibility_authority_catalog),
+                )
+            };
             (
                 Arc::clone(&entry.driver),
                 snapshot,
                 Arc::clone(&entry.completions),
                 Arc::clone(&entry.ops_lifecycle),
-                Arc::clone(&entry.cursor_state),
                 true,
                 true,
                 entry.attachment_is_live(),
                 entry.epoch_id.clone(),
                 entry.tool_visibility_owner.visibility_state().ok()?,
                 formal_pre_run_phase,
+                formal_visibility_authority_catalogs,
             )
         };
         let completion_waiters = {
@@ -712,25 +602,25 @@ impl MeerkatMachine {
         let drain = {
             let sessions = self.sessions.read().await;
             if let Some(entry) = sessions.get(session_id) {
-                let slot = &entry.drain_slot;
-                // Wave-c C-H2 (37cc46a44) collapsed the separate
-                // `comms_drain_slots` map into `RuntimeSessionEntry`, so
-                // the slot is structurally always present once the
-                // session is registered. `slot_present` must keep its
-                // pre-collapse semantics: "has this session been
-                // drain-spawned?" — i.e. true once the slot has moved
-                // past `Inactive` with no bindings. Inactive + no
-                // bindings + no handle means the slot has never run.
-                let activated = slot.phase != crate::meerkat_machine::CommsDrainPhase::Inactive
-                    || slot.mode.is_some()
-                    || slot.handle.is_some()
-                    || slot.bound_runtime.is_some();
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let state = authority.state();
+                let phase = crate::meerkat_machine::CommsDrainPhase::from(state.drain_phase);
+                let mode = state
+                    .drain_mode
+                    .map(crate::meerkat_machine::CommsDrainMode::from);
+                let handle_present = entry.drain_slot.handle_present();
+                let activated = phase != crate::meerkat_machine::CommsDrainPhase::Inactive
+                    || mode.is_some()
+                    || handle_present;
                 if activated {
                     MeerkatDrainSnapshot {
                         slot_present: true,
-                        phase: Some(slot.phase),
-                        mode: slot.mode,
-                        handle_present: slot.handle.is_some(),
+                        phase: Some(phase),
+                        mode,
+                        handle_present,
                     }
                 } else {
                     MeerkatDrainSnapshot {
@@ -766,7 +656,7 @@ impl MeerkatMachine {
             attachment_live,
             epoch_id,
             cursor_state: {
-                let cursor_state = cursor_state.snapshot();
+                let cursor_state = ops_lifecycle.completion_cursor_snapshot();
                 MeerkatCursorSnapshot {
                     agent_applied_cursor: cursor_state.agent_applied_cursor,
                     runtime_observed_seq: cursor_state.runtime_observed_seq,
@@ -783,8 +673,7 @@ impl MeerkatMachine {
 
         let admission_order: Vec<MeerkatAdmittedInputSnapshot> = ingress
             .admission_order()
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|input_id| MeerkatAdmittedInputSnapshot {
                 content_shape: ingress.content_shape(&input_id),
                 request_id: ingress.request_id(&input_id),
@@ -845,10 +734,27 @@ impl MeerkatMachine {
 
             for (input_id, _state) in driver.ledger().iter() {
                 snapshot.input_count += 1;
-                let lifecycle = driver
-                    .input_phase(input_id)
-                    .unwrap_or(InputLifecycleState::Accepted);
-                if !lifecycle.is_terminal() {
+                let Some(lifecycle) = driver.input_phase(input_id) else {
+                    tracing::error!(
+                        input_id = %input_id,
+                        "missing generated input lifecycle authority for ledger snapshot"
+                    );
+                    continue;
+                };
+                let terminal = crate::meerkat_machine::input_phase_behavioral_terminality_via_authority(
+                    input_id,
+                    lifecycle,
+                    driver.input_terminal_outcome(input_id),
+                )
+                .unwrap_or_else(|err| {
+                    tracing::error!(
+                        input_id = %input_id,
+                        error = %err,
+                        "generated input terminality authority rejected ledger snapshot classification"
+                    );
+                    true
+                });
+                if !terminal {
                     snapshot.non_terminal_count += 1;
                 }
                 match lifecycle {
@@ -868,7 +774,17 @@ impl MeerkatMachine {
 
             snapshot
         };
-        let ops_snapshot = ops_lifecycle.diagnostic_snapshot();
+        let ops_snapshot = match ops_lifecycle.diagnostic_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    error = %error,
+                    "generated ops lifecycle authority rejected spine projection"
+                );
+                return None;
+            }
+        };
         let ops = MeerkatOpsSnapshot {
             operation_count: ops_snapshot.operation_count,
             active_count: ops_snapshot.active_count,
@@ -904,6 +820,14 @@ impl MeerkatMachine {
                         .into_iter()
                         .collect::<BTreeSet<_>>(),
                 ),
+            );
+            available_fields.insert(
+                "deferred_visibility_authority_catalog".into(),
+                formal_projection_value(&formal_visibility_authority_catalogs.0),
+            );
+            available_fields.insert(
+                "filter_visibility_authority_catalog".into(),
+                formal_projection_value(&formal_visibility_authority_catalogs.1),
             );
             MeerkatFormalStateProjection {
                 available_fields,

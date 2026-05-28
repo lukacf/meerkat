@@ -3,10 +3,9 @@
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::schema::empty_object_schema;
 use async_trait::async_trait;
-use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
+use meerkat_comms::{Router, ToolContext, TrustedPeersView, handle_tools_call, tools_list};
 use meerkat_core::ToolDef;
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
-use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -17,7 +16,7 @@ pub struct CommsToolState {
 }
 
 impl CommsToolState {
-    pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
+    pub fn new(router: Arc<Router>, trusted_peers: TrustedPeersView) -> Self {
         Self {
             tool_context: Arc::new(ToolContext {
                 router,
@@ -132,23 +131,21 @@ mod tests {
     fn make_test_state() -> CommsToolState {
         let keypair = Keypair::generate();
         let peer_keypair = Keypair::generate();
-        let trusted_peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".into(),
-                pubkey: peer_keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let trusted_peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".into(),
+            pubkey: peer_keypair.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
         let (_, inbox_sender) = meerkat_comms::Inbox::new();
-        let router = Arc::new(Router::with_shared_peers(
+        let router = Arc::new(Router::new(
             keypair,
-            trusted_peers.clone(),
+            trusted_peers,
             CommsConfig::default(),
             inbox_sender,
             true,
         ));
+        let trusted_peers = router.trusted_peers_view();
         CommsToolState::new(router, trusted_peers)
     }
 

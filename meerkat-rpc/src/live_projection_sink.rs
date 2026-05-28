@@ -25,7 +25,8 @@
 //!   authoritative stop_reason/usage. Orphan completions (no buffered final)
 //!   commit an empty assistant block — still correct because no transcript
 //!   was produced.
-//! - Terminal error -> tracing log + best-effort channel termination
+//! - Terminal error -> tracing log; transport close observations feed the
+//!   generated live-close authority before channel lifecycle is projected
 //!
 //! Identity-fidelity note: the host trait now passes `LiveTranscriptIdentity`
 //! end-to-end (closes A11 at the trait layer). Assistant deltas can populate
@@ -41,7 +42,13 @@ use async_trait::async_trait;
 use meerkat_core::RealtimeTranscriptEvent;
 use meerkat_core::live_adapter::LiveAdapterErrorCode;
 use meerkat_core::types::{AssistantBlock, ContentInput, SessionId, StopReason, Usage};
-use meerkat_live::{LiveProjectionError, LiveProjectionSink, LiveTranscriptIdentity};
+use meerkat_live::{
+    LiveChannelCloseFeedback, LiveChannelCloseObservation, LiveChannelId,
+    LiveChannelStatusFeedback, LiveChannelStatusObservation, LiveProjectionError,
+    LiveProjectionSink, LiveTokenString, LiveTranscriptIdentity, LiveWsTokenAdmission,
+    LiveWsTokenAdmissionPublicErrorClass, LiveWsTokenAdmissionRejection, LiveWsTokenAuthority,
+    LiveWsTokenIssue,
+};
 
 use crate::session_runtime::SessionRuntime;
 
@@ -226,6 +233,191 @@ fn session_error_to_projection(
         }
         meerkat_core::SessionError::Unsupported(reason) => LiveProjectionError::Rejected(reason),
         other => LiveProjectionError::Internal(other.to_string()),
+    }
+}
+
+#[async_trait]
+impl LiveChannelCloseFeedback for SessionServiceProjectionSink {
+    async fn record_live_channel_closed(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<meerkat_live::LiveChannelCloseCommitAuthority, String> {
+        let session_id = self
+            .runtime
+            .runtime_adapter()
+            .live_session_for_active_channel(channel_id)
+            .await
+            .ok_or_else(|| {
+                format!("generated live active-channel authority absent for channel {channel_id}")
+            })?;
+        self.runtime
+            .runtime_adapter()
+            .resolve_live_close_result(&session_id, observation)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_channel_close_commit_authority()
+            .ok_or_else(|| {
+                format!(
+                    "generated live close authority omitted host commit handoff for channel {channel_id}"
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl LiveChannelStatusFeedback for SessionServiceProjectionSink {
+    async fn record_live_channel_status(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        observation: &LiveChannelStatusObservation,
+    ) -> Result<meerkat_live::LiveChannelStatusCommitAuthority, String> {
+        if observation.channel_id() != channel_id.as_str() {
+            return Err(format!(
+                "generated live status observation channel mismatch: observed {}, requested {}",
+                observation.channel_id(),
+                channel_id
+            ));
+        }
+        let session_id = self
+            .runtime
+            .runtime_adapter()
+            .live_session_for_status_channel(channel_id)
+            .await
+            .ok_or_else(|| {
+                format!("generated live status-channel authority absent for channel {channel_id}")
+            })?;
+        self.runtime
+            .runtime_adapter()
+            .resolve_live_channel_status_result(&session_id, observation)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_channel_status_commit_authority()
+            .ok_or_else(|| {
+                format!(
+                    "generated live status authority omitted host commit handoff for channel {channel_id}"
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl LiveWsTokenAuthority for SessionServiceProjectionSink {
+    async fn record_live_ws_token_issued(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        token: &LiveTokenString,
+        issued_at_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<LiveWsTokenIssue, String> {
+        let authority = self
+            .runtime
+            .runtime_adapter()
+            .record_live_websocket_token_issued(
+                session_id,
+                channel_id,
+                token.as_str(),
+                issued_at_ms,
+                ttl_ms,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let token = LiveTokenString::new(authority.token).map_err(|err| err.to_string())?;
+        Ok(LiveWsTokenIssue {
+            token,
+            expires_at_ms: authority.expires_at_ms,
+            sequence: authority.sequence,
+        })
+    }
+
+    async fn resolve_live_ws_token_admission(
+        &self,
+        channel_id: &LiveChannelId,
+        token: &str,
+        observed_at_ms: u64,
+    ) -> Result<LiveWsTokenAdmission, String> {
+        let token_owner = self
+            .runtime
+            .runtime_adapter()
+            .live_session_for_websocket_token(token)
+            .await;
+        let authority = match token_owner {
+            Some(session_id) => {
+                self.runtime
+                    .runtime_adapter()
+                    .resolve_live_websocket_token_admission(
+                        &session_id,
+                        channel_id,
+                        token,
+                        observed_at_ms,
+                    )
+                    .await
+            }
+            None => match self
+                .runtime
+                .runtime_adapter()
+                .live_session_for_active_channel(channel_id)
+                .await
+            {
+                Some(session_id) => {
+                    self.runtime
+                        .runtime_adapter()
+                        .resolve_live_websocket_token_admission(
+                            &session_id,
+                            channel_id,
+                            token,
+                            observed_at_ms,
+                        )
+                        .await
+                }
+                None => {
+                    self.runtime
+                        .runtime_adapter()
+                        .resolve_unbound_live_websocket_token_admission(
+                            channel_id,
+                            token,
+                            observed_at_ms,
+                        )
+                        .await
+                }
+            },
+        }
+        .map_err(|err| err.to_string())?;
+
+        Ok(LiveWsTokenAdmission {
+            channel_id: channel_id.clone(),
+            admitted: authority.admitted,
+            rejection: authority
+                .rejection
+                .map(live_ws_token_admission_rejection_from_machine),
+            public_error_class: authority
+                .public_error_class
+                .map(live_ws_token_public_error_class_from_machine),
+            sequence: authority.sequence,
+        })
+    }
+}
+
+fn live_ws_token_admission_rejection_from_machine(
+    rejection: meerkat_runtime::meerkat_machine::dsl::LiveWebsocketTokenAdmissionRejection,
+) -> LiveWsTokenAdmissionRejection {
+    use meerkat_runtime::meerkat_machine::dsl::LiveWebsocketTokenAdmissionRejection as Dsl;
+    match rejection {
+        Dsl::TokenNotFound => LiveWsTokenAdmissionRejection::TokenNotFound,
+        Dsl::TokenExpired => LiveWsTokenAdmissionRejection::TokenExpired,
+        Dsl::TokenChannelMismatch => LiveWsTokenAdmissionRejection::TokenChannelMismatch,
+        Dsl::TokenAlreadyConsumed => LiveWsTokenAdmissionRejection::TokenAlreadyConsumed,
+        Dsl::ChannelNotBound => LiveWsTokenAdmissionRejection::ChannelNotBound,
+    }
+}
+
+fn live_ws_token_public_error_class_from_machine(
+    public_error_class: meerkat_runtime::meerkat_machine::dsl::LiveWebsocketTokenAdmissionPublicErrorClass,
+) -> LiveWsTokenAdmissionPublicErrorClass {
+    use meerkat_runtime::meerkat_machine::dsl::LiveWebsocketTokenAdmissionPublicErrorClass as Dsl;
+    match public_error_class {
+        Dsl::InvalidToken => LiveWsTokenAdmissionPublicErrorClass::InvalidToken,
     }
 }
 
@@ -661,6 +853,37 @@ mod tests {
     use meerkat_live::LiveAdapterHost;
     use std::sync::Mutex as StdMutex;
 
+    fn test_live_identity() -> meerkat_core::SessionLlmIdentity {
+        meerkat_core::SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
+    async fn open_test_channel(
+        host: &LiveAdapterHost,
+        session_id: SessionId,
+    ) -> meerkat_live::LiveChannelId {
+        let machine = meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral();
+        machine.register_session(session_id.clone()).await;
+        let channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let identity = test_live_identity();
+        let authority = machine
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("generated live open admission");
+        host.open_channel_with_authority(
+            authority
+                .channel_open_authority()
+                .expect("generated live open handoff"),
+        )
+        .await
+        .expect("open_channel")
+    }
+
     // ------------------------------------------------------------------
     // Fakes that record sink/dispatcher activity without spinning a real
     // SessionRuntime. The tests below call host.apply_observation(...)
@@ -941,7 +1164,7 @@ mod tests {
         let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
 
         let obs = LiveAdapterObservation::UserTranscriptFinal {
             provider_item_id: Some("item_1".to_string()),
@@ -969,7 +1192,7 @@ mod tests {
         let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
 
         let obs = LiveAdapterObservation::AssistantTextDelta {
             provider_item_id: Some("item_2".to_string()),
@@ -1004,7 +1227,7 @@ mod tests {
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>)
             .with_tool_dispatcher(Arc::clone(&dispatcher) as Arc<dyn AgentToolDispatcher>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
         host.attach_adapter(&channel, Arc::clone(&adapter) as Arc<dyn LiveAdapter>)
             .await
             .unwrap();
@@ -1036,7 +1259,7 @@ mod tests {
         let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
 
         host.apply_observation(
             &channel,
@@ -1065,7 +1288,7 @@ mod tests {
         let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
 
         let obs = LiveAdapterObservation::AssistantTranscriptTruncated {
             provider_item_id: Some("item_99".to_string()),
@@ -2234,7 +2457,7 @@ mod tests {
         let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
 
         // Mixed-response stream as described by CC7:
         //   1. AssistantTextDelta("Here's the report:")
@@ -2370,7 +2593,7 @@ mod tests {
         let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
         let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
         let session_id = test_session_id();
-        let channel = host.open_channel(session_id.clone()).await.unwrap();
+        let channel = open_test_channel(&host, session_id.clone()).await;
 
         host.apply_observation(
             &channel,

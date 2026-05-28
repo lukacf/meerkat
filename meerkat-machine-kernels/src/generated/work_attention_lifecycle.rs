@@ -5,7 +5,8 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {

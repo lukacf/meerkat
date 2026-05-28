@@ -9,17 +9,13 @@ use crate::error::MobError;
 use crate::ids::{MeerkatId, MobId, ProfileName};
 use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
+use meerkat_core::InheritedToolVisibilityAuthority;
 use meerkat_core::PeerMeta;
 use meerkat_core::RealmId;
-use meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY;
 use meerkat_core::Session;
 use meerkat_core::SessionToolVisibilityState;
 use meerkat_core::ToolCategoryOverride;
-use meerkat_core::WitnessedToolFilter;
-use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext,
-    resolve_mob_operator_access,
-};
+use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext};
 use meerkat_core::session::SessionMetadata;
 use meerkat_core::types::SessionId;
 use std::sync::Arc;
@@ -42,17 +38,19 @@ fn builtin_skill_key(name: &str) -> meerkat_core::skills::SkillKey {
 /// Derive the effective `(override_mob, authority)` for a profile.
 ///
 /// `profile.tools.mob` is the policy declaration.
-/// The canonical resolver `resolve_mob_operator_access` synthesizes a typed
-/// `MobToolAuthorityContext` (defaulting to a generated create-only shape) when
-/// the profile says enable and no persisted authority is supplied. This is the
-/// single source of truth for both build-time `override_mob` and runtime tool
-/// dispatcher mounting; do not invent a parallel rule.
+/// The generated MeerkatMachine resolver synthesizes a typed
+/// `MobToolAuthorityContext` when the profile says enable and no persisted
+/// authority is supplied. This keeps build-time `override_mob` and dispatcher
+/// mounting under the same generated authority path.
 pub(crate) fn resolve_profile_mob_operator_access(
     profile: &Profile,
     persisted_authority: Option<MobToolAuthorityContext>,
 ) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
     let enable_mob = ToolCategoryOverride::from_effective(profile.tools.mob);
-    resolve_mob_operator_access(enable_mob, persisted_authority)
+    meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
+        enable_mob,
+        persisted_authority,
+    )
 }
 
 /// Open profile tool categories for an already-witnessed inherited filter.
@@ -98,7 +96,7 @@ pub struct BuildAgentConfigParams<'a> {
     ///
     /// When set, stored in canonical session tool-visibility state so the
     /// runtime-backed core build restores it through the machine owner.
-    pub inherited_tool_filter: Option<WitnessedToolFilter>,
+    pub inherited_tool_filter: Option<InheritedToolVisibilityAuthority>,
     /// Typed per-spawn system prompt replacement.
     pub system_prompt_override: Option<crate::runtime::SpawnSystemPromptOverride>,
 }
@@ -221,8 +219,18 @@ pub async fn build_agent_config(
             .keys()
             .map(|profile| profile.as_str().to_string())
             .collect::<Vec<_>>();
-        authority =
-            Some(authority_context.grant_spawn_profiles_in_mob(mob_id.as_str(), profile_names));
+        authority = Some(
+            meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
+                &authority_context,
+                mob_id.as_str(),
+                profile_names,
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "generated mob operator authority rejected default spawn profiles: {error}"
+                ))
+            })?,
+        );
     }
     config.override_mob = override_mob;
     config.mob_tool_authority_context = authority;
@@ -252,25 +260,10 @@ pub async fn build_agent_config(
         });
     }
 
-    // Inherited tool filter: inject canonical visibility metadata so the
-    // factory-backed core build restores it through the runtime owner.
+    // Inherited tool filter: carry typed visibility state to the
+    // factory-backed core build so it restores through the runtime owner.
     if let Some(authority) = inherited_tool_filter {
-        meerkat_core::tool_scope::validate_witnessed_filter_authority(
-            &authority.filter,
-            &authority.witnesses,
-        )
-        .map_err(|err| {
-            MobError::WiringError(format!("invalid inherited tool visibility: {err}"))
-        })?;
-        if let Ok(value) = serde_json::to_value(SessionToolVisibilityState {
-            inherited_base_filter: authority.filter,
-            filter_witnesses: authority.witnesses,
-            ..Default::default()
-        }) {
-            config
-                .initial_metadata_entries
-                .insert(SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(), value);
-        }
+        config.initial_tool_visibility_state = Some(authority);
     }
 
     Ok(config)
@@ -287,7 +280,7 @@ pub async fn build_resumed_agent_config(
     let BuildResumedAgentConfigParams {
         base,
         expected_session_id,
-        mut resumed_session,
+        resumed_session,
     } = params;
     let inherited_tool_filter = base.inherited_tool_filter.clone();
     if resumed_session.id() != expected_session_id {
@@ -298,10 +291,13 @@ pub async fn build_resumed_agent_config(
         )));
     }
     let mut config = build_agent_config(base).await?;
-    config
-        .initial_metadata_entries
-        .remove(SESSION_TOOL_VISIBILITY_STATE_KEY);
-    merge_inherited_filter_into_resumed_visibility(&mut resumed_session, inherited_tool_filter)?;
+    if inherited_tool_filter.is_some() {
+        resumed_session.try_tool_visibility_state().map_err(|err| {
+            MobError::Internal(format!(
+                "invalid canonical tool visibility state for resumed mob member: {err}"
+            ))
+        })?;
+    }
     let metadata = resumed_session
         .session_metadata()
         .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
@@ -314,39 +310,6 @@ pub async fn build_resumed_agent_config(
     config.app_context = None;
     config.shell_env = None;
     Ok(config)
-}
-
-fn merge_inherited_filter_into_resumed_visibility(
-    session: &mut Session,
-    inherited_tool_filter: Option<WitnessedToolFilter>,
-) -> Result<(), MobError> {
-    let Some(authority) = inherited_tool_filter else {
-        return Ok(());
-    };
-    meerkat_core::tool_scope::validate_witnessed_filter_authority(
-        &authority.filter,
-        &authority.witnesses,
-    )
-    .map_err(|err| MobError::Internal(format!("invalid inherited tool visibility: {err}")))?;
-    let mut visibility_state = session
-        .try_tool_visibility_state()
-        .map_err(|err| {
-            MobError::Internal(format!(
-                "invalid canonical tool visibility state for resumed mob member: {err}"
-            ))
-        })?
-        .unwrap_or_default();
-    visibility_state.inherited_base_filter = authority.filter;
-    visibility_state
-        .filter_witnesses
-        .extend(authority.witnesses);
-    session
-        .set_tool_visibility_state(visibility_state)
-        .map_err(|err| {
-            MobError::Internal(format!(
-                "failed to merge inherited tool visibility into resumed mob member: {err}"
-            ))
-        })
 }
 
 fn apply_resumed_session_metadata(
@@ -581,63 +544,140 @@ mod tests {
             },
         );
 
-        MobDefinition {
-            id: MobId::from("test-mob"),
-            orchestrator: Some(OrchestratorConfig {
-                profile: ProfileName::from("lead"),
-            }),
-            profiles,
-            wiring: WiringRules::default(),
-            skills,
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit("test-mob");
+        definition.orchestrator = Some(OrchestratorConfig {
+            profile: ProfileName::from("lead"),
+        });
+        definition.profiles = profiles;
+        definition.skills = skills;
+        definition
     }
 
     fn injected_authority() -> Option<MobToolAuthorityContext> {
-        Some(
-            meerkat_core::service::MobToolAuthorityContext::new(
-                meerkat_core::service::OpaquePrincipalToken::new("test-principal"),
-                true,
-            )
-            .with_managed_mob_scope(["test-mob"]),
-        )
+        let authority =
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority().ok()?;
+        meerkat_runtime::mob_operator_authority::grant_manage_mob(&authority, "test-mob").ok()
     }
 
-    fn witnessed_filter(
+    struct TestVisibilityToolDispatcher {
+        tools: Arc<[Arc<meerkat_core::types::ToolDef>]>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::AgentToolDispatcher for TestVisibilityToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            Err(meerkat_core::ToolError::not_found(call.name))
+        }
+    }
+
+    struct CaptureSnapshotMobFactory {
+        captured: Arc<Mutex<Option<meerkat_core::service::MobToolSnapshotContext>>>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::service::MobToolsFactory for CaptureSnapshotMobFactory {
+        async fn build_mob_tools(
+            &self,
+            args: meerkat_core::service::MobToolsBuildArgs,
+        ) -> Result<
+            Arc<dyn meerkat_core::AgentToolDispatcher>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            *self.captured.lock().expect("snapshot capture lock") =
+                Some(args.snapshot_context.clone());
+            Ok(Arc::new(TestVisibilityToolDispatcher {
+                tools: Arc::from(Vec::<Arc<meerkat_core::types::ToolDef>>::new()),
+            }))
+        }
+    }
+
+    async fn parent_composition_authority_for_tools(
+        tools: Vec<Arc<meerkat_core::types::ToolDef>>,
+    ) -> meerkat_core::service::ParentToolCompositionAuthority {
+        let captured = Arc::new(Mutex::new(None));
+        let mob_factory = Arc::new(CaptureSnapshotMobFactory {
+            captured: Arc::clone(&captured),
+        });
+        let temp = tempfile::tempdir().expect("temp agent factory dir");
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .mob(true)
+            .mob_tools_factory(mob_factory.clone());
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(meerkat_core::Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_mob = ToolCategoryOverride::Enable;
+        build.mob_tool_authority_context = injected_authority();
+        build.mob_tools = Some(mob_factory);
+        build.tool_dispatcher_override = Some(Arc::new(TestVisibilityToolDispatcher {
+            tools: Arc::from(tools),
+        }));
+
+        let agent = factory
+            .build_agent(build, &meerkat_core::Config::default())
+            .await
+            .expect("agent build should mint parent tool composition authority");
+        let context = captured
+            .lock()
+            .expect("snapshot capture lock")
+            .take()
+            .expect("mob factory should capture snapshot context");
+        let _agent = Box::leak(Box::new(agent));
+        match context {
+            meerkat_core::service::MobToolSnapshotContext::ParentOwned(authority) => authority,
+            meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                panic!("mob factory should receive parent-owned snapshot authority")
+            }
+        }
+    }
+
+    fn test_visibility_tool(
+        name: &str,
+        with_provenance: bool,
+    ) -> Arc<meerkat_core::types::ToolDef> {
+        let tool = meerkat_core::types::ToolDef::new(
+            name,
+            format!("test tool {name}"),
+            serde_json::json!({ "type": "object" }),
+        );
+        Arc::new(if with_provenance {
+            tool.with_provenance(meerkat_core::types::ToolProvenance {
+                kind: meerkat_core::types::ToolSourceKind::Callback,
+                source_id: name.into(),
+            })
+        } else {
+            tool
+        })
+    }
+
+    async fn witnessed_filter(
         filter: meerkat_core::tool_scope::ToolFilter,
         names: &[&str],
-    ) -> WitnessedToolFilter {
-        WitnessedToolFilter::new(
-            filter,
+    ) -> InheritedToolVisibilityAuthority {
+        let authority = parent_composition_authority_for_tools(
             names
                 .iter()
-                .map(|name| {
-                    (
-                        (*name).to_string(),
-                        meerkat_core::ToolVisibilityWitness {
-                            stable_owner_key: Some(format!("test-owner:{name}")),
-                            last_seen_provenance: None,
-                        },
-                    )
-                })
+                .map(|name| test_visibility_tool(name, true))
                 .collect(),
         )
+        .await;
+        authority
+            .authorize_inherited_tool_visibility(filter)
+            .expect("test visibility authority should mint from snapshot")
     }
 
     fn resumed_session_with_metadata(session_id: SessionId) -> Session {
         let mut resumed_session = Session::with_id(session_id);
         resumed_session
             .set_session_metadata(SessionMetadata {
-                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                schema_version: meerkat_core::session_metadata_schema_version(),
                 model: "claude-opus-4-6".to_string(),
                 max_tokens: 2048,
                 structured_output_retries: 2,
@@ -667,6 +707,22 @@ mod tests {
             })
             .expect("session metadata");
         resumed_session
+    }
+
+    fn session_with_visibility_state_for_test(
+        session: Session,
+        state: SessionToolVisibilityState,
+    ) -> Session {
+        let mut raw_session = serde_json::to_value(session).expect("session should serialize");
+        raw_session
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session metadata should be an object")
+            .insert(
+                meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
+                serde_json::to_value(state).expect("visibility state should serialize"),
+            );
+        serde_json::from_value(raw_session).expect("visibility-state session fixture")
     }
 
     #[tokio::test]
@@ -982,7 +1038,7 @@ mod tests {
                 .collect(),
         );
         let inherited_authority =
-            witnessed_filter(inherited_filter.clone(), &["bash", "mob_spawn_member"]);
+            witnessed_filter(inherited_filter.clone(), &["bash", "mob_spawn_member"]).await;
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
@@ -1035,7 +1091,7 @@ mod tests {
             .unwrap();
         let inherited_filter =
             meerkat_core::tool_scope::ToolFilter::Deny(["shell".to_string()].into_iter().collect());
-        let inherited_authority = witnessed_filter(inherited_filter.clone(), &["shell"]);
+        let inherited_authority = witnessed_filter(inherited_filter.clone(), &["shell"]).await;
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
@@ -1060,52 +1116,38 @@ mod tests {
                 .contains_key(meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY),
             "mob build must not write legacy inherited visibility metadata"
         );
+        assert!(
+            !config
+                .initial_metadata_entries
+                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
+            "mob build must not write canonical visibility as raw metadata"
+        );
         let visibility_state = config
-            .initial_metadata_entries
-            .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY)
-            .and_then(|value| {
-                serde_json::from_value::<meerkat_core::SessionToolVisibilityState>(value.clone())
-                    .ok()
-            })
-            .expect("canonical visibility metadata should be present");
+            .initial_tool_visibility_state
+            .as_ref()
+            .expect("typed visibility handoff should be present");
         assert_eq!(
-            visibility_state.inherited_base_filter, inherited_filter,
+            visibility_state.filter(),
+            &inherited_filter,
             "inherited mob filter should flow through canonical visibility state"
         );
         assert_eq!(
-            visibility_state.filter_witnesses, inherited_authority.witnesses,
+            visibility_state.witnesses(),
+            inherited_authority.witnesses(),
             "inherited mob filter witnesses should flow through canonical visibility state"
         );
     }
 
     #[tokio::test]
     async fn test_build_agent_config_rejects_name_only_inherited_filter() {
-        let def = sample_definition();
-        let profile = def.profiles[&ProfileName::from("lead")]
-            .as_inline()
-            .unwrap();
-        let err = build_agent_config(BuildAgentConfigParams {
-            mob_id: &def.id,
-            profile_name: &ProfileName::from("lead"),
-            agent_identity: &MeerkatId::from("lead-1"),
-            profile,
-            definition: &def,
-            external_tools: None,
-            context: None,
-            labels: None,
-            additional_instructions: None,
-            shell_env: None,
-            mob_tool_authority_context: None,
-            inherited_tool_filter: Some(WitnessedToolFilter::new(
-                meerkat_core::tool_scope::ToolFilter::Allow(
-                    ["shell".to_string()].into_iter().collect(),
-                ),
-                Default::default(),
-            )),
-            system_prompt_override: None,
-        })
-        .await
-        .expect_err("name-only inherited filter should fail closed");
+        let authority =
+            parent_composition_authority_for_tools(vec![test_visibility_tool("shell", false)])
+                .await;
+        let err = authority
+            .authorize_inherited_tool_visibility(meerkat_core::tool_scope::ToolFilter::Allow(
+                ["shell".to_string()].into_iter().collect(),
+            ))
+            .expect_err("name-only inherited filter should fail closed");
 
         assert!(
             err.to_string().contains("shell"),
@@ -1254,11 +1296,12 @@ mod tests {
             .as_inline()
             .unwrap();
         let session_id = SessionId::new();
-        let mut resumed_session = resumed_session_with_metadata(session_id.clone());
+        let resumed_session = resumed_session_with_metadata(session_id.clone());
         let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
             ["parent_shell".to_string()].into_iter().collect(),
         );
-        let inherited_authority = witnessed_filter(inherited_filter.clone(), &["parent_shell"]);
+        let inherited_authority =
+            witnessed_filter(inherited_filter.clone(), &["parent_shell"]).await;
         let original_state = SessionToolVisibilityState {
             inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
                 ["old_parent".to_string()].into_iter().collect(),
@@ -1293,9 +1336,8 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        resumed_session
-            .set_tool_visibility_state(original_state.clone())
-            .expect("visibility state");
+        let resumed_session =
+            session_with_visibility_state_for_test(resumed_session, original_state.clone());
 
         let config = build_resumed_agent_config(BuildResumedAgentConfigParams {
             base: BuildAgentConfigParams {
@@ -1323,7 +1365,16 @@ mod tests {
             !config
                 .initial_metadata_entries
                 .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
-            "resumed mob config must not stage replacement canonical visibility metadata"
+            "resumed inherited visibility must not use raw metadata handoff"
+        );
+        let inherited_visibility_state = config
+            .initial_tool_visibility_state
+            .as_ref()
+            .expect("resumed inherited visibility handoff should be present");
+        assert_eq!(inherited_visibility_state.filter(), &inherited_filter);
+        assert_eq!(
+            inherited_visibility_state.witnesses(),
+            inherited_authority.witnesses()
         );
         let visibility_state = config
             .resume_session
@@ -1332,7 +1383,10 @@ mod tests {
             .try_tool_visibility_state()
             .expect("parse visibility")
             .expect("visibility state");
-        assert_eq!(visibility_state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            visibility_state.inherited_base_filter,
+            original_state.inherited_base_filter
+        );
         assert_eq!(visibility_state.active_filter, original_state.active_filter);
         assert_eq!(visibility_state.staged_filter, original_state.staged_filter);
         assert_eq!(
@@ -1355,9 +1409,10 @@ mod tests {
             visibility_state.requested_witnesses,
             original_state.requested_witnesses
         );
-        let mut expected_filter_witnesses = original_state.filter_witnesses.clone();
-        expected_filter_witnesses.extend(inherited_authority.witnesses);
-        assert_eq!(visibility_state.filter_witnesses, expected_filter_witnesses);
+        assert_eq!(
+            visibility_state.filter_witnesses,
+            original_state.filter_witnesses
+        );
     }
 
     #[tokio::test]
@@ -1367,11 +1422,20 @@ mod tests {
             .as_inline()
             .unwrap();
         let session_id = SessionId::new();
-        let mut resumed_session = resumed_session_with_metadata(session_id.clone());
-        resumed_session.set_metadata(
-            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
-            serde_json::json!("not-a-visibility-state"),
-        );
+        let resumed_session = resumed_session_with_metadata(session_id.clone());
+        let mut raw_session =
+            serde_json::to_value(&resumed_session).expect("session should serialize");
+        raw_session["metadata"][meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY] =
+            serde_json::json!("not-a-visibility-state");
+        let resumed_session: Session =
+            serde_json::from_value(raw_session).expect("raw malformed session fixture");
+        let inherited_authority = witnessed_filter(
+            meerkat_core::tool_scope::ToolFilter::Deny(
+                ["parent_shell".to_string()].into_iter().collect(),
+            ),
+            &["parent_shell"],
+        )
+        .await;
 
         let err = build_resumed_agent_config(BuildResumedAgentConfigParams {
             base: BuildAgentConfigParams {
@@ -1386,12 +1450,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
-                inherited_tool_filter: Some(witnessed_filter(
-                    meerkat_core::tool_scope::ToolFilter::Deny(
-                        ["parent_shell".to_string()].into_iter().collect(),
-                    ),
-                    &["parent_shell"],
-                )),
+                inherited_tool_filter: Some(inherited_authority),
                 system_prompt_override: None,
             },
             expected_session_id: &session_id,

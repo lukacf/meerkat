@@ -64,23 +64,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Each agent declares which peers it trusts. The trust entry includes
     // the peer's name, public key, and transport address.
 
-    let trusted_for_a = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "agent-b".to_string(),
-            pubkey: pubkey_b,
-            addr: format!("tcp://{addr_b}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    };
+    let trusted_for_a = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "agent-b".to_string(),
+        pubkey: pubkey_b,
+        addr: format!("tcp://{addr_b}"),
+        meta: meerkat_comms::PeerMeta::default(),
+    }]);
 
-    let trusted_for_b = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "agent-a".to_string(),
-            pubkey: pubkey_a,
-            addr: format!("tcp://{addr_a}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    };
+    let trusted_for_b = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "agent-a".to_string(),
+        pubkey: pubkey_a,
+        addr: format!("tcp://{addr_a}"),
+        meta: meerkat_comms::PeerMeta::default(),
+    }]);
 
     // ── 4. Create CommsManagers ─────────────────────────────────────────────
     // Each CommsManager owns a keypair, inbox, and router. It is the
@@ -127,11 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tools_a = Arc::new(CommsToolDispatcher::new(
         comms_a.router().clone(),
-        trusted_a_shared,
+        comms_a.router().trusted_peers_view(),
     ));
     let tools_b = Arc::new(CommsToolDispatcher::new(
         comms_b.router().clone(),
-        trusted_b_shared,
+        comms_b.router().trusted_peers_view(),
     ));
 
     println!("\nComms tools available to each agent:");

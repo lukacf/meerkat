@@ -1,5 +1,9 @@
 #![allow(clippy::expect_used)]
 
+use meerkat_core::ops_lifecycle::{
+    OperationCompletionWakeClass, OperationKind, OperationLifecycleAction,
+    OperationPublicResultClass,
+};
 use meerkat_core::turn_execution_authority::ContentShape;
 use meerkat_machine_codegen::{
     render_composition_semantic_model, render_machine_ci_cfg, render_machine_semantic_model,
@@ -52,7 +56,7 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
 
     assert!(rendered.contains("SessionIdValues"));
     assert!(rendered.contains(
-        "PrepareBindingsInitializing(agent_runtime_id, fence_token, generation, arg_session_id) =="
+        "PrepareBindingsInitializing(agent_runtime_id, fence_token, generation, runtime_epoch_id, arg_session_id) =="
     ));
     assert!(rendered.contains("MapIncrement(map, key, amount) == [x \\in DOMAIN map \\cup {key}"));
     assert!(
@@ -86,15 +90,59 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
         !rendered.contains("ContentShapeValues = {\"contentshape_1\""),
         "ContentShapeValues must not fall back to open placeholder strings:\n{rendered}"
     );
+    let operation_kind_values = OperationKind::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
     assert!(
-        rendered.contains("OperationKindValues = {\"MobMemberChild\", \"BackgroundToolOp\"}"),
-        "OperationKindValues must come from the closed StringEnum binding:\n{rendered}"
+        rendered.contains(&format!(
+            "OperationKindValues = {{{operation_kind_values}}}"
+        )),
+        "OperationKindValues must come from the closed generated/core contract:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("OperationCompletionFeedClassValues = {\"Emit\", \"Suppress\"}"),
+        "OperationCompletionFeedClassValues must come from the closed generated contract:\n{rendered}"
+    );
+    let completion_wake_values = OperationCompletionWakeClass::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OperationCompletionWakeClassValues = {{{completion_wake_values}}}"
+        )),
+        "OperationCompletionWakeClassValues must come from the closed generated/core contract:\n{rendered}"
     );
     assert!(
         rendered.contains(
             "OperationStatusValues = {\"Absent\", \"Provisioning\", \"Running\", \"Retiring\", \"Completed\", \"Failed\", \"Aborted\", \"Cancelled\", \"Retired\", \"Terminated\"}"
         ),
         "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
+    );
+    let public_result_values = OperationPublicResultClass::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OperationPublicResultClassValues = {{{public_result_values}}}"
+        )),
+        "OperationPublicResultClassValues must come from the closed generated/core contract:\n{rendered}"
+    );
+    let lifecycle_action_values = OperationLifecycleAction::ALL
+        .into_iter()
+        .map(|value| format!("\"{}\"", value.generated_variant()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!(
+            "OpLifecycleActionKindValues = {{{lifecycle_action_values}}}"
+        )),
+        "OpLifecycleActionKindValues must come from the closed generated/core contract:\n{rendered}"
     );
     assert_eq!(
         tool_filter_override_line(&rendered),

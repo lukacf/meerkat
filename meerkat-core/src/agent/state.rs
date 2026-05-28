@@ -7,6 +7,9 @@ use crate::event::{
     ToolCallArgumentsError, ToolConfigChangeDomain, ToolConfigChangeOperation,
     ToolConfigChangeStatus, ToolConfigChangedPayload,
 };
+use crate::generated::protocol_ops_barrier_satisfaction::{
+    OpsBarrierSatisfactionObligation, submit_ops_barrier_satisfied,
+};
 use crate::hooks::{
     HookExecutionReport, HookInvocation, HookLlmRequest, HookLlmResponse, HookPoint, HookToolCall,
     HookToolResult,
@@ -14,14 +17,14 @@ use crate::hooks::{
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
 use crate::lifecycle::run_primitive::ProviderParamsOverride;
+use crate::ops_lifecycle::OperationCompletionWakeClass;
 use crate::session::TranscriptRewriteReason;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
-    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
-    terminal_outcome_for_budget_exceeded,
+    TurnFailureSource, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
     BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
@@ -61,65 +64,9 @@ struct LlmRetryRequest<'a> {
     allow_empty_success: bool,
 }
 
-fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
+fn turn_input_failure_source(input: &TurnExecutionInput) -> Option<&TurnFailureSource> {
     match input {
-        TurnExecutionInput::StartConversationRun { run_id }
-        | TurnExecutionInput::StartImmediateAppend { run_id }
-        | TurnExecutionInput::StartImmediateContext { run_id }
-        | TurnExecutionInput::PrimitiveApplied { run_id, .. }
-        | TurnExecutionInput::LlmReturnedToolCalls { run_id, .. }
-        | TurnExecutionInput::LlmReturnedTerminal { run_id }
-        | TurnExecutionInput::RegisterPendingOps { run_id, .. }
-        | TurnExecutionInput::ToolCallsResolved { run_id }
-        | TurnExecutionInput::OpsBarrierSatisfied { run_id, .. }
-        | TurnExecutionInput::BoundaryContinue { run_id }
-        | TurnExecutionInput::BoundaryComplete { run_id }
-        | TurnExecutionInput::RecoverableFailure { run_id, .. }
-        | TurnExecutionInput::FatalFailure { run_id, .. }
-        | TurnExecutionInput::RetryRequested { run_id, .. }
-        | TurnExecutionInput::CancelNow { run_id }
-        | TurnExecutionInput::CancelAfterBoundary { run_id }
-        | TurnExecutionInput::CancellationObserved { run_id }
-        | TurnExecutionInput::AcknowledgeTerminal { run_id }
-        | TurnExecutionInput::TurnLimitReached { run_id }
-        | TurnExecutionInput::BudgetExhausted { run_id }
-        | TurnExecutionInput::TimeBudgetExceeded { run_id }
-        | TurnExecutionInput::BudgetLimitExceeded { run_id, .. }
-        | TurnExecutionInput::EnterExtraction { run_id, .. }
-        | TurnExecutionInput::ExtractionValidationPassed { run_id }
-        | TurnExecutionInput::ExtractionValidationFailed { run_id, .. }
-        | TurnExecutionInput::ExtractionFailed { run_id, .. }
-        | TurnExecutionInput::ExtractionStart { run_id } => Some(run_id.clone()),
-        TurnExecutionInput::ForceCancelNoRun => None,
-    }
-}
-
-fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureReason> {
-    match input {
-        TurnExecutionInput::FatalFailure { reason, .. } => Some(reason.clone()),
-        TurnExecutionInput::TurnLimitReached { .. } => Some(TurnFailureReason::new(
-            crate::event::AgentErrorClass::MaxTurns,
-            "turn limit reached",
-        )),
-        TurnExecutionInput::BudgetExhausted { .. } => Some(TurnFailureReason::with_cause(
-            crate::TurnTerminalCauseKind::BudgetExhausted,
-            crate::event::AgentErrorClass::Budget,
-            "budget exhausted",
-        )),
-        TurnExecutionInput::TimeBudgetExceeded { .. } => Some(TurnFailureReason::with_cause(
-            crate::TurnTerminalCauseKind::TimeBudgetExceeded,
-            crate::event::AgentErrorClass::Budget,
-            "time budget exceeded",
-        )),
-        TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
-            Some(TurnFailureReason::budget_exceeded(*exceeded))
-        }
-        TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
-            Some(TurnFailureReason::new(
-                crate::event::AgentErrorClass::StructuredOutput,
-                error.clone(),
-            ))
-        }
+        TurnExecutionInput::FatalFailure { failure, .. } => Some(failure),
         _ => None,
     }
 }
@@ -163,11 +110,11 @@ fn assistant_blocks_have_user_visible_output(blocks: &[crate::types::AssistantBl
 }
 
 fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
-    if let Some(reason) = turn_input_failure_reason(input)
-        && !reason.cause_kind.is_specific_failure_cause()
+    if let Some(failure) = turn_input_failure_source(input)
+        && !failure.source_kind.is_known()
     {
         return Err(AgentError::InternalError(format!(
-            "turn input {input:?} has unknown machine-owned terminal_cause_kind"
+            "turn input {input:?} has unknown generated-authority failure source"
         )));
     }
     Ok(())
@@ -401,7 +348,12 @@ where
 
     fn turn_extraction_attempts(&self) -> Result<u32, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
-        Ok(u32::try_from(snapshot.extraction_attempts).unwrap_or(u32::MAX))
+        u32::try_from(snapshot.extraction_attempts).map_err(|_| {
+            AgentError::InternalError(
+                "runtime turn-state authority projected extraction_attempts outside u32 range"
+                    .to_string(),
+            )
+        })
     }
 
     /// Resolve the effective call timeout for this LLM call.
@@ -700,113 +652,17 @@ where
         Ok(())
     }
 
-    /// Apply a typed input to the runtime-backed turn state when available,
-    /// then mirror through the standalone local fallback and observable
-    /// `LoopState`.
+    /// Apply a typed input to the runtime-backed turn-state authority and
+    /// return the generated effects emitted by that transition.
     fn apply_turn_input_via_runtime_handle(
         &self,
         input: &TurnExecutionInput,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Vec<TurnExecutionEffect>, AgentError> {
         let Some(handle) = self.turn_state_handle.as_deref() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
-        let result = match input {
-            TurnExecutionInput::StartConversationRun { run_id }
-                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
-            {
-                Ok(())
-            }
-            TurnExecutionInput::StartConversationRun { run_id } => handle.start_conversation_run(
-                run_id.clone(),
-                TurnPrimitiveKind::ConversationTurn,
-                ContentShape::Conversation,
-                false,
-                false,
-                0,
-            ),
-            TurnExecutionInput::StartImmediateAppend { run_id }
-                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
-            {
-                Ok(())
-            }
-            TurnExecutionInput::StartImmediateAppend { run_id } => {
-                handle.start_immediate_append(run_id.clone())
-            }
-            TurnExecutionInput::StartImmediateContext { run_id }
-                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
-            {
-                Ok(())
-            }
-            TurnExecutionInput::StartImmediateContext { run_id } => {
-                handle.start_immediate_context(run_id.clone())
-            }
-            TurnExecutionInput::PrimitiveApplied {
-                run_id: _,
-                admitted_content_shape: _,
-                vision_enabled: _,
-                image_tool_results_enabled: _,
-            } => handle.primitive_applied(),
-            TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
-                handle.llm_returned_tool_calls(u64::from(*tool_count))
-            }
-            TurnExecutionInput::LlmReturnedTerminal { .. } => handle.llm_returned_terminal(),
-            TurnExecutionInput::RegisterPendingOps {
-                op_refs,
-                barrier_operation_ids,
-                ..
-            } => handle.register_pending_ops(
-                op_refs.iter().cloned().collect(),
-                barrier_operation_ids.iter().cloned().collect(),
-            ),
-            TurnExecutionInput::ToolCallsResolved { .. } => handle.tool_calls_resolved(),
-            TurnExecutionInput::OpsBarrierSatisfied { operation_ids, .. } => {
-                handle.ops_barrier_satisfied(operation_ids.iter().cloned().collect())
-            }
-            TurnExecutionInput::BoundaryContinue { .. } => handle.boundary_continue(),
-            TurnExecutionInput::BoundaryComplete { .. } => handle.boundary_complete(),
-            TurnExecutionInput::RecoverableFailure { retry, .. } => {
-                handle.recoverable_failure(retry.clone())
-            }
-            TurnExecutionInput::FatalFailure { reason, .. } => handle.fatal_failure(reason.clone()),
-            TurnExecutionInput::RetryRequested { retry_attempt, .. } => {
-                handle.retry_requested(*retry_attempt)
-            }
-            TurnExecutionInput::CancelNow { .. } => handle.cancel_now(),
-            TurnExecutionInput::CancelAfterBoundary { .. } => {
-                handle.request_cancel_after_boundary()
-            }
-            TurnExecutionInput::CancellationObserved { .. } => handle.cancellation_observed(),
-            TurnExecutionInput::AcknowledgeTerminal { .. } => {
-                handle.acknowledge_terminal(self.turn_terminal_outcome()?)
-            }
-            TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
-            TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
-            TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),
-            TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
-                match terminal_outcome_for_budget_exceeded(*exceeded) {
-                    TurnTerminalOutcome::TimeBudgetExceeded => handle.time_budget_exceeded(),
-                    TurnTerminalOutcome::BudgetExhausted => handle.budget_exhausted(),
-                    _ => unreachable!("budget exceeded maps only to budget terminal outcomes"),
-                }
-            }
-            TurnExecutionInput::EnterExtraction { max_retries, .. } => {
-                handle.enter_extraction(*max_retries)
-            }
-            TurnExecutionInput::ExtractionValidationPassed { .. } => {
-                handle.extraction_validation_passed()
-            }
-            TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
-                handle.extraction_validation_failed(error.clone())
-            }
-            TurnExecutionInput::ExtractionFailed { error, .. } => {
-                handle.extraction_failed(error.clone())
-            }
-            TurnExecutionInput::ExtractionStart { .. } => handle.extraction_start(),
-            TurnExecutionInput::ForceCancelNoRun => handle.force_cancel_no_run(),
-        };
-
-        result.map_err(|err| {
+        handle.apply_turn_input(input.clone()).map_err(|err| {
             AgentError::InternalError(format!(
                 "runtime turn-state handle rejected {input:?}: {err}"
             ))
@@ -819,36 +675,8 @@ where
     ) -> Result<TurnExecutionTransition, AgentError> {
         validate_turn_input_failure_reason(&input)?;
         let prev_phase = self.turn_phase()?;
-        self.apply_turn_input_via_runtime_handle(&input)?;
+        let effects = self.apply_turn_input_via_runtime_handle(&input)?;
         let next_phase = self.turn_phase()?;
-
-        // Effects are derived from phase transitions only. The runtime
-        // authority owns all other side-effect decisions; core just
-        // surfaces the compaction tick on CallingLlm entry so the
-        // standalone compactor path still fires.
-        let mut effects = Vec::new();
-        if prev_phase != TurnPhase::CallingLlm && next_phase == TurnPhase::CallingLlm {
-            effects.push(TurnExecutionEffect::CheckCompaction);
-        }
-        if prev_phase != TurnPhase::Completed
-            && next_phase == TurnPhase::Completed
-            && let Some(run_id) = turn_input_run_id(&input)
-        {
-            effects.push(TurnExecutionEffect::RunCompleted { run_id });
-        }
-        if prev_phase != TurnPhase::Failed
-            && next_phase == TurnPhase::Failed
-            && let Some(run_id) = turn_input_run_id(&input)
-        {
-            let reason = self.turn_failure_reason_for_failed_transition(&input)?;
-            effects.push(TurnExecutionEffect::RunFailed { run_id, reason });
-        }
-        if prev_phase != TurnPhase::Cancelled
-            && next_phase == TurnPhase::Cancelled
-            && let Some(run_id) = turn_input_run_id(&input)
-        {
-            effects.push(TurnExecutionEffect::RunCancelled { run_id });
-        }
 
         Ok(TurnExecutionTransition {
             prev_phase,
@@ -857,23 +685,36 @@ where
         })
     }
 
-    fn turn_failure_reason_for_failed_transition(
-        &self,
-        input: &TurnExecutionInput,
-    ) -> Result<TurnFailureReason, AgentError> {
-        if let Some(reason) = turn_input_failure_reason(input) {
-            return Ok(reason);
+    fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
+        let snapshot = self.runtime_turn_authority_snapshot()?;
+        if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
+            return Ok(None);
         }
-
-        let outcome = self.turn_terminal_outcome()?;
-        let cause_kind = self.require_machine_terminal_failure_cause_kind(format!(
-            "failed turn transition for input {input:?}"
-        ))?;
-        Ok(TurnFailureReason::with_cause(
-            cause_kind,
-            cause_kind.agent_error_class(),
-            cause_kind.default_message(outcome),
-        ))
+        let run_id = snapshot.active_run_id.ok_or_else(|| {
+            AgentError::InternalError(
+                "generated turn authority entered ApplyingPrimitive without active_run_id"
+                    .to_string(),
+            )
+        })?;
+        let primitive_kind = snapshot.primitive_kind.ok_or_else(|| {
+            AgentError::InternalError(
+                "generated turn authority entered ApplyingPrimitive without primitive_kind"
+                    .to_string(),
+            )
+        })?;
+        if primitive_kind == TurnPrimitiveKind::None {
+            return Err(AgentError::InternalError(
+                "generated turn authority entered ApplyingPrimitive with primitive_kind None"
+                    .to_string(),
+            ));
+        }
+        snapshot.admitted_content_shape.ok_or_else(|| {
+            AgentError::InternalError(
+                "generated turn authority entered ApplyingPrimitive without admitted_content_shape"
+                    .to_string(),
+            )
+        })?;
+        Ok(Some(run_id))
     }
 
     fn require_machine_terminal_failure_cause_kind(
@@ -1168,7 +1009,7 @@ where
         self.terminal_error_detail = Some(error.to_string());
         let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
             run_id: run_id.clone(),
-            reason: TurnFailureReason::from_agent_error(error),
+            failure: TurnFailureSource::from_agent_error(error),
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
             .await;
@@ -1265,21 +1106,28 @@ where
         let mut run_has_visible_or_actionable_output = false;
         self.extraction_state.reset();
 
-        // --- Authority lifecycle: start a conversation run ---
-        let run_id = self
-            .turn_state_handle
-            .as_deref()
-            .and_then(|handle| handle.snapshot().active_run_id)
-            .unwrap_or_else(|| RunId(uuid::Uuid::new_v4()));
-        self.apply_turn_input(TurnExecutionInput::StartConversationRun {
-            run_id: run_id.clone(),
-        })?;
+        // --- Authority lifecycle: consume the generated primitive start ---
+        let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
+            run_id
+        } else {
+            let run_id = self
+                .turn_state_handle
+                .as_deref()
+                .and_then(|handle| handle.snapshot().active_run_id)
+                .unwrap_or_else(|| RunId(uuid::Uuid::new_v4()));
+            self.apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: run_id.clone(),
+                primitive_kind: TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            })?;
+            run_id
+        };
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
-            admitted_content_shape: ContentShape::Conversation,
-            vision_enabled: false,
-            image_tool_results_enabled: false,
         })?;
         self.execute_turn_effects(&t, 0, &event_tx).await;
 
@@ -1420,11 +1268,29 @@ where
                         tracing::warn!(error = %error, "failed to clean up background-job synthetic notices");
                     }
                     // Feed path: ops-lifecycle-tracked completions from the runtime.
-                    if let Some(ref feed) = self.completion_feed {
+                    if let (Some(feed), Some(registry)) =
+                        (self.completion_feed.as_ref(), self.ops_lifecycle.as_deref())
+                    {
                         let batch = feed.list_since(self.applied_cursor);
-                        for entry in batch.entries.iter().filter(|e| {
-                            e.kind == crate::ops_lifecycle::OperationKind::BackgroundToolOp
-                        }) {
+                        let mut delivery_authority_ok = true;
+                        for entry in &batch.entries {
+                            match registry
+                                .classify_operation_completion_wake(&entry.operation_id, entry.kind)
+                            {
+                                Ok(OperationCompletionWakeClass::Wake) => {}
+                                Ok(OperationCompletionWakeClass::Ignore) => continue,
+                                Err(err) => {
+                                    tracing::warn!(
+                                        operation_id = %entry.operation_id,
+                                        kind = ?entry.kind,
+                                        error = %err,
+                                        "generated completion-wake authority rejected agent feed entry"
+                                    );
+                                    delivery_authority_ok = false;
+                                    break;
+                                }
+                            }
+
                             let enrichment = self
                                 .completion_enrichment
                                 .as_ref()
@@ -1467,56 +1333,28 @@ where
                                 },
                             ));
                         }
-                        self.applied_cursor = batch.watermark;
-                        if let Some(ref cs) = self.epoch_cursor_state {
-                            cs.agent_applied_cursor
-                                .store(batch.watermark, std::sync::atomic::Ordering::Release);
+                        if delivery_authority_ok {
+                            match registry.advance_completion_cursor(
+                                crate::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                                batch.watermark,
+                                self.epoch_cursor_state.as_deref(),
+                            ) {
+                                Ok(cursor) => {
+                                    self.applied_cursor = cursor;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        error = %err,
+                                        cursor = batch.watermark,
+                                        "generated completion cursor authority rejected agent-applied cursor advance"
+                                    );
+                                }
+                            }
                         }
-                    }
-
-                    // Legacy path: completions from custom/override dispatchers that
-                    // report through poll_external_updates().background_completions
-                    // without wiring into the ops-lifecycle registry. This runs
-                    // independently of the feed — they are complementary sources.
-                    for completion in &ext.background_completions {
-                        let Some(terminal_status) = completion
-                            .terminal_outcome
-                            .as_ref()
-                            .map(BackgroundJobTerminalStatus::from_terminal_outcome)
-                            .or_else(|| {
-                                BackgroundJobTerminalStatus::from_operation_status(
-                                    completion.status,
-                                )
-                            })
-                        else {
-                            continue;
-                        };
-                        let status_str = terminal_status.as_str();
-
-                        emit_event!(AgentEvent::background_job_completed(
-                            completion.job_id.clone(),
-                            completion.display_name.clone(),
-                            terminal_status,
-                            completion.detail.clone(),
-                        ));
-                        let mut notice = format!(
-                            "Background job `{}` (id={}) {}: {}",
-                            completion.display_name,
-                            completion.job_id,
-                            status_str,
-                            completion.detail,
+                    } else if self.completion_feed.is_some() {
+                        tracing::debug!(
+                            "completion feed present without generated ops cursor authority; skipping feed delivery"
                         );
-                        notice.push_str("\nUse shell_job_status to get the full output.");
-                        self.session.push(synthetic_notice_block_message(
-                            SystemNoticeKind::BackgroundJob,
-                            notice,
-                            crate::types::SystemNoticeBlock::BackgroundJob {
-                                job_id: completion.job_id.clone(),
-                                display_name: Some(completion.display_name.clone()),
-                                status: terminal_status,
-                                detail: Some(completion.detail.clone()),
-                            },
-                        ));
                     }
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
@@ -1921,16 +1759,16 @@ where
                                 // Recoverable LLM failures reaching this point have
                                 // exhausted retry authority; non-recoverable LLM
                                 // failures keep their typed LLM cause.
-                                let reason = if crate::retry::LlmRetryFailure::from_agent_error(&e)
+                                let failure = if crate::retry::LlmRetryFailure::from_agent_error(&e)
                                     .is_some()
                                 {
-                                    TurnFailureReason::retry_exhausted(&e)
+                                    TurnFailureSource::llm_retry_exhausted(&e)
                                 } else {
-                                    TurnFailureReason::from_agent_error(&e)
+                                    TurnFailureSource::from_agent_error(&e)
                                 };
                                 self.apply_turn_input(TurnExecutionInput::FatalFailure {
                                     run_id: run_id.clone(),
-                                    reason,
+                                    failure,
                                 })?;
                                 return self.build_result(turn_count, tool_call_count).await;
                             }
@@ -2766,12 +2604,30 @@ where
                                 "barrier ops registered without ops_lifecycle registry".to_string(),
                             ));
                         };
-                        // Feed OpsBarrierSatisfied through the shared turn-input
-                        // path so the runtime handle remains the primary writer
-                        // when present.
-                        self.apply_turn_input(TurnExecutionInput::OpsBarrierSatisfied {
-                            run_id: run_id.clone(),
-                            operation_ids: wait_result.satisfied.operation_ids,
+                        // Feed the authority-owned wait-all obligation back through the
+                        // generated handoff helper without relabeling its run identity.
+                        let turn_handle = self.turn_state_handle.as_deref().ok_or_else(|| {
+                            AgentError::InternalError(
+                                "runtime turn-state handle missing while submitting \
+                                 ops barrier satisfaction feedback"
+                                    .to_string(),
+                            )
+                        })?;
+                        submit_ops_barrier_satisfied(
+                            turn_handle,
+                            OpsBarrierSatisfactionObligation {
+                                run_id: wait_result.satisfied.run_id,
+                                operation_ids: wait_result
+                                    .satisfied
+                                    .operation_ids
+                                    .into_iter()
+                                    .collect(),
+                            },
+                        )
+                        .map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "generated ops_barrier_satisfaction feedback rejected: {err}"
+                            ))
                         })?;
                     }
                     self.observe_cancel_after_boundary_request(&run_id)?;
@@ -2935,7 +2791,8 @@ mod tests {
         EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter,
     };
     use crate::turn_execution_authority::{
-        ContentShape, TurnFailureReason, TurnPrimitiveKind, TurnTerminalOutcome,
+        ContentShape, TurnFailureSource, TurnFailureSourceKind, TurnPrimitiveKind,
+        TurnTerminalOutcome,
     };
     use crate::types::{
         AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCall, ToolCallView,
@@ -2960,13 +2817,19 @@ mod tests {
     /// `meerkat-core` and the trait impls do not unify). Instead we use
     /// the in-core test helper
     /// [`super::test_turn_state_handle::TestTurnStateHandle`], which
-    /// ports the deleted pre-wave-a `LocalTurnExecutionState` transition
-    /// logic verbatim so the agent loop sees faithful phase advancement.
+    /// applies the generated MeerkatMachine kernel from
+    /// `meerkat-machine-kernels` so lifecycle and terminal facts still move
+    /// only through generated authority.
     ///
     /// See #32 Class W1 — runtime_turn_authority missing handle.
     fn with_test_turn_state_handle(builder: AgentBuilder) -> AgentBuilder {
         use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
         builder
+            .resume_session(session)
             .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
@@ -4365,19 +4228,16 @@ mod tests {
             .await
             .expect("tool should start");
 
-        {
-            let mut guard = state.lock().unwrap();
-            guard
-                .stage_active_turn_append(
-                    &crate::service::AppendSystemContextRequest {
-                        text: "STEER_MARKER_visible_after_tool".to_string(),
-                        source: Some("test:active-steer".to_string()),
-                        idempotency_key: Some("test:active-steer".to_string()),
-                    },
-                    crate::time_compat::SystemTime::now(),
-                )
-                .expect("active-turn append should stage");
-        }
+        state
+            .stage_active_turn_append(
+                &crate::service::AppendSystemContextRequest {
+                    text: "STEER_MARKER_visible_after_tool".to_string(),
+                    source: Some("test:active-steer".to_string()),
+                    idempotency_key: Some("test:active-steer".to_string()),
+                },
+                crate::time_compat::SystemTime::now(),
+            )
+            .expect("active-turn append should stage");
 
         release_tool.notify_waiters();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), run)
@@ -4401,10 +4261,11 @@ mod tests {
         );
     }
 
-    fn start_test_conversation_turn(handle: &dyn crate::TurnStateHandle) {
+    fn start_test_conversation_turn(handle: &dyn crate::TurnStateHandle) -> RunId {
+        let run_id = RunId::new();
         handle
             .start_conversation_run(
-                RunId::new(),
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 ContentShape::Conversation,
                 false,
@@ -4412,7 +4273,19 @@ mod tests {
                 0,
             )
             .unwrap();
-        handle.primitive_applied().unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+        run_id
+    }
+
+    fn assert_generated_visibility_authority_required(message: impl std::fmt::Display) {
+        let message = message.to_string();
+        assert!(
+            message.contains("generated MeerkatMachine visibility authority is required")
+                || message
+                    .contains("generated MeerkatMachine tool visibility authority is required")
+                || message.contains("local tool visibility owner is read-only"),
+            "expected generated visibility authority failure, got: {message}"
+        );
     }
 
     #[tokio::test]
@@ -5134,43 +5007,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_receives_filtered_tools_and_hidden_tool_calls_terminalize() {
+    async fn standalone_filter_staging_requires_generated_visibility_authority() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
-        agent
+        let err = agent
             .stage_external_tool_filter(ToolFilter::Deny(
                 ["secret".to_string()].into_iter().collect(),
             ))
-            .unwrap();
-        agent.config.max_turns = Some(2);
+            .expect_err("standalone core must not mutate visibility without generated authority");
+        assert_generated_visibility_authority_required(err);
 
-        let err = agent
-            .run("prompt".to_string().into())
-            .await
-            .expect_err("hidden LLM tool denial should terminalize the run");
-        assert!(
-            matches!(err, AgentError::ToolError(message) if message.contains("not allowed by policy"))
-        );
-
-        // Provider sees only visible tools (filtered by ToolScope)
-        let seen = client.seen_tools();
-        assert_eq!(
-            seen.len(),
-            1,
-            "hidden tool denial must not continue into a follow-up LLM turn"
-        );
-        assert_eq!(seen[0], vec!["visible".to_string()]);
-
-        // Hidden tools are NOT dispatched — blocked at execution time too
-        let dispatched = tools.dispatched();
-        assert!(
-            dispatched.is_empty(),
-            "hidden tools should not be dispatched, but got: {dispatched:?}"
-        );
+        assert!(client.seen_tools().is_empty());
+        assert!(tools.dispatched().is_empty());
     }
 
     #[tokio::test]
@@ -5320,90 +5172,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_tool_dispatch_terminalizes_hidden_tools() {
+    async fn standalone_external_hidden_tool_policy_requires_generated_visibility_authority() {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client, tools.clone(), Arc::new(NoopStore))
             .await;
-        agent
+        let err = agent
             .stage_external_tool_filter(ToolFilter::Deny(
                 ["secret".to_string()].into_iter().collect(),
             ))
-            .expect("stage hidden-tool filter");
-        let visibility_state = agent
-            .tool_scope
-            .promote_staged_visibility()
-            .expect("promote staged filter");
-        agent
-            .tool_scope
-            .apply_staged_projection(
-                tools.tools(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-                &visibility_state,
-            )
-            .expect("apply staged filter at boundary");
-
-        let outcome = agent
-            .dispatch_external_tool_call(ToolCall::new(
-                "tool-call-hidden".to_string(),
-                "secret".to_string(),
-                serde_json::json!({}),
-            ))
-            .await
-            .expect("hidden external tool dispatch should terminalize as a tool result");
-
-        assert_eq!(outcome.result.tool_use_id, "tool-call-hidden");
-        assert!(outcome.result.is_error);
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).expect("error payload JSON");
-        assert!(
-            payload
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|code| code == "access_denied"),
-            "expected access_denied payload, got {payload:?}"
-        );
+            .expect_err("hidden-tool policy cannot be staged without generated authority");
+        assert_generated_visibility_authority_required(err);
         assert!(
             tools.dispatched().is_empty(),
-            "hidden tools must not reach the dispatcher"
+            "failed policy staging must not reach the dispatcher"
         );
     }
 
     #[tokio::test]
-    async fn external_tool_dispatch_applies_session_effects() {
+    async fn external_tool_dispatch_fails_closed_without_deferred_visibility_authority() {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(DeferredLoadDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client, tools, Arc::new(NoopStore))
             .await;
 
-        let outcome = agent
+        let err = agent
             .dispatch_external_tool_call(ToolCall::new(
                 "tool-call-2".to_string(),
                 "tool_catalog_load".to_string(),
                 serde_json::json!({}),
             ))
             .await
-            .expect("external tool dispatch should apply deferred-tool effects");
+            .expect_err("deferred tool effects require generated visibility authority");
 
-        assert_eq!(outcome.result.tool_use_id, "tool-call-2");
-        let visibility_state = agent
+        assert_generated_visibility_authority_required(err);
+        if let Some(visibility_state) = agent
             .session()
             .tool_visibility_state()
             .expect("session visibility state should decode")
-            .expect("session effects should publish canonical visibility state");
-        assert!(
-            visibility_state
-                .staged_requested_deferred_names
-                .contains("deferred_tool"),
-            "expected deferred_tool to be staged after tool session effects"
-        );
+        {
+            assert!(
+                !visibility_state
+                    .staged_requested_deferred_names
+                    .contains("deferred_tool"),
+                "failed deferred visibility effects must not stage deferred_tool"
+            );
+            assert!(
+                !visibility_state
+                    .active_requested_deferred_names
+                    .contains("deferred_tool"),
+                "failed deferred visibility effects must not activate deferred_tool"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn llm_hidden_tool_denial_terminalizes_without_tool_result() {
+    async fn llm_hidden_tool_policy_staging_requires_generated_visibility_authority() {
         use crate::hooks::{
             HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
         };
@@ -5452,73 +5278,30 @@ mod tests {
             .build_standalone(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
-        agent
+        let err = agent
             .stage_external_tool_filter(ToolFilter::Deny(
                 ["secret".to_string()].into_iter().collect(),
             ))
-            .expect("stage hidden-tool filter");
-        agent.config.max_turns = Some(2);
-
-        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
-        let err = agent
-            .run_with_events("prompt".to_string().into(), tx)
-            .await
-            .expect_err("hidden LLM tool denial should fail the run");
-
-        assert!(
-            matches!(err, AgentError::ToolError(message) if message.contains("not allowed by policy"))
-        );
+            .expect_err("hidden-tool policy cannot be staged without generated authority");
+        assert_generated_visibility_authority_required(err);
         let seen = client.seen_tools();
-        assert_eq!(
-            seen.len(),
-            1,
-            "hidden LLM tool denial should not continue into a follow-up model turn"
-        );
+        assert!(seen.is_empty());
         assert!(
             !agent
                 .session()
                 .messages()
                 .iter()
                 .any(|message| matches!(message, Message::ToolResults { .. })),
-            "hidden LLM tool denial must not fabricate a transcript ToolResult"
+            "failed policy staging must not fabricate a transcript ToolResult"
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "hidden LLM tool denial should not pass through post-tool hooks as a tool result"
+            "failed policy staging should not pass through post-tool hooks as a tool result"
         );
         assert!(
             tools.dispatched().is_empty(),
-            "hidden tools must not reach the dispatcher"
-        );
-        let snapshot = agent
-            .execution_snapshot()
-            .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
-        assert_eq!(
-            snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
-        );
-
-        let mut saw_run_failed = false;
-        let mut saw_tool_result_event = false;
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                crate::event::AgentEvent::RunFailed { .. } => saw_run_failed = true,
-                crate::event::AgentEvent::ToolExecutionCompleted { .. }
-                | crate::event::AgentEvent::ToolResultReceived { .. } => {
-                    saw_tool_result_event = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            saw_run_failed,
-            "hidden LLM tool denial should emit RunFailed"
-        );
-        assert!(
-            !saw_tool_result_event,
-            "hidden LLM tool denial should not emit recoverable tool-result events"
+            "failed policy staging must not reach the dispatcher"
         );
     }
 
@@ -5990,11 +5773,13 @@ mod tests {
         let tools = Arc::new(ImageEffectDispatcher::new());
         let turn_handle =
             Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
         let mut agent = AgentBuilder::new()
+            .resume_session(session)
             .with_turn_state_handle(turn_handle.clone())
-            .with_runtime_execution_kind_for_test(
-                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
-            )
             .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
@@ -6027,44 +5812,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_and_dispatch_share_the_same_combined_visible_set_for_control_tools() {
+    async fn control_tool_visibility_policy_staging_requires_generated_authority() {
         let client = Arc::new(ControlPlaneVisibilityClient::new());
         let tools = Arc::new(PlaneAwareToolDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
-        agent
+        let err = agent
             .stage_external_tool_filter(ToolFilter::Deny(
                 ["secret".to_string()].into_iter().collect(),
             ))
-            .unwrap();
-        agent.config.max_turns = Some(2);
-
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "done");
-
-        let seen = client.seen_tools();
-        assert_eq!(seen.len(), 2);
-        assert_eq!(
-            seen[0],
-            vec!["visible".to_string(), "tool_catalog_search".to_string()]
-        );
-        assert_eq!(
-            seen[1],
-            vec!["visible".to_string(), "tool_catalog_search".to_string()]
-        );
+            .expect_err("control/session filter policy cannot be staged without authority");
+        assert_generated_visibility_authority_required(err);
+        assert!(client.seen_tools().is_empty());
 
         let dispatched = tools.dispatched();
         assert_eq!(
             dispatched,
-            vec!["tool_catalog_search".to_string()],
-            "dispatch gating should allow control tools while still blocking hidden session tools"
+            Vec::<String>::new(),
+            "failed policy staging must not invoke control-plane dispatch"
         );
     }
 
     #[tokio::test]
-    async fn deferred_tools_become_visible_only_after_load_effect_reaches_the_next_boundary() {
+    async fn deferred_tool_load_effect_fails_closed_without_generated_visibility_authority() {
         let client = Arc::new(DeferredLoadVisibilityClient::new());
         let tools = Arc::new(DeferredLoadDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
@@ -6072,8 +5844,11 @@ mod tests {
             .await;
         agent.config.max_turns = Some(2);
 
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "done");
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("deferred load effects require generated visibility authority");
+        assert_generated_visibility_authority_required(err);
 
         let seen = client.seen_tools();
         assert_eq!(
@@ -6082,14 +5857,14 @@ mod tests {
             "deferred tools should stay hidden before the load effect is applied"
         );
         assert_eq!(
-            seen[1],
-            vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
-            "the next boundary should reveal the requested deferred tool"
+            seen.len(),
+            1,
+            "failed deferred visibility effects must not continue to a follow-up model request"
         );
     }
 
     #[tokio::test]
-    async fn deferred_catalog_delta_events_track_hidden_catalog_changes_across_boundaries() {
+    async fn deferred_catalog_delta_events_require_generated_visibility_authority() {
         let client = Arc::new(DeferredLoadVisibilityClient::new());
         let tools = Arc::new(DeferredLoadDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
@@ -6098,61 +5873,31 @@ mod tests {
         agent.config.max_turns = Some(2);
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        let result = agent
+        let err = agent
             .run_with_events("prompt".to_string().into(), tx)
             .await
-            .unwrap();
-        assert_eq!(result.text, "done");
+            .expect_err("deferred catalog delta requires generated visibility authority");
+        assert_generated_visibility_authority_required(err);
 
-        let mut added_hidden_batches = Vec::new();
-        let mut removed_hidden_batches = Vec::new();
-        let mut deferred_status_counts = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
-                && payload.domain == Some(crate::event::ToolConfigChangeDomain::DeferredCatalog)
-                && let Some(delta) = payload.deferred_catalog_delta.as_ref()
-            {
-                added_hidden_batches.push(delta.added_hidden_names.clone());
-                removed_hidden_batches.push(delta.removed_hidden_names.clone());
-                if let crate::event::ToolConfigChangeStatus::DeferredCatalogDelta {
-                    added_hidden_count,
-                    removed_hidden_count,
-                    pending_source_count,
-                } = payload.status_info()
-                {
-                    deferred_status_counts.push((
-                        *added_hidden_count,
-                        *removed_hidden_count,
-                        *pending_source_count,
-                    ));
-                }
-            }
+        while rx.try_recv().is_ok() {}
+        if let Some(visibility_state) = agent
+            .session()
+            .tool_visibility_state()
+            .expect("session visibility state should decode")
+        {
+            assert!(
+                !visibility_state
+                    .staged_requested_deferred_names
+                    .contains("deferred_tool"),
+                "failed deferred visibility effects must not stage deferred_tool"
+            );
+            assert!(
+                !visibility_state
+                    .active_requested_deferred_names
+                    .contains("deferred_tool"),
+                "failed deferred visibility effects must not activate deferred_tool"
+            );
         }
-
-        assert!(
-            added_hidden_batches
-                .iter()
-                .any(|names| names.iter().any(|name| name == "deferred_tool")),
-            "expected a deferred catalog delta that advertises deferred_tool as newly hidden"
-        );
-        assert!(
-            removed_hidden_batches
-                .iter()
-                .any(|names| names.iter().any(|name| name == "deferred_tool")),
-            "expected a deferred catalog delta that removes deferred_tool after it is loaded"
-        );
-        assert!(
-            deferred_status_counts
-                .iter()
-                .any(|(added, _, _)| *added > 0),
-            "expected structured deferred catalog status for newly hidden tools"
-        );
-        assert!(
-            deferred_status_counts
-                .iter()
-                .any(|(_, removed, _)| *removed > 0),
-            "expected structured deferred catalog status for removed hidden tools"
-        );
     }
 
     #[tokio::test]
@@ -6181,51 +5926,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_loop_boundary_applies_filter_and_emits_tool_config_changed_and_notice() {
+    async fn run_loop_filter_boundary_requires_generated_visibility_authority() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
-        agent
+        let err = agent
             .stage_external_tool_filter(ToolFilter::Deny(
                 ["secret".to_string()].into_iter().collect(),
             ))
-            .unwrap();
-
-        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        let result = agent
-            .run_with_events("prompt".to_string().into(), tx)
-            .await
-            .unwrap();
-        assert_eq!(result.text, "done");
-        assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
-
-        // ToolConfigChanged event is now emitted through MeerkatMachine,
-        // not the core agent loop. Drain events but don't assert on the
-        // specific event type — verify state instead.
-        while rx.try_recv().is_ok() {}
-
-        let visibility_state = agent
-            .session()
-            .tool_visibility_state()
-            .expect("boundary visibility state should decode")
-            .expect("boundary visibility apply should persist committed state");
-        let expected_filter = crate::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
-        assert_eq!(visibility_state.active_filter, expected_filter);
-        assert_eq!(
-            visibility_state.staged_filter,
-            visibility_state.active_filter
+            .expect_err("boundary filter staging requires generated visibility authority");
+        assert_generated_visibility_authority_required(err);
+        assert!(client.seen_tools().is_empty());
+        assert!(
+            agent
+                .session()
+                .tool_visibility_state()
+                .expect("visibility state should decode")
+                .is_none(),
+            "failed staging must not persist committed visibility state"
         );
-        assert!(visibility_state.active_revision > 0);
-        assert_eq!(
-            visibility_state.staged_revision,
-            visibility_state.active_revision
-        );
-
-        // ToolScope notice and ToolConfigChanged event are now emitted
-        // through MeerkatMachine, not the standalone agent loop. The
-        // visibility state assertions above verify correctness.
     }
 
     #[tokio::test]
@@ -6235,11 +5956,6 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
-        agent
-            .stage_external_tool_filter(ToolFilter::Deny(
-                ["secret".to_string()].into_iter().collect(),
-            ))
-            .unwrap();
         agent.inject_tool_scope_boundary_failure_once_for_test();
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
@@ -6286,7 +6002,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_restores_persisted_external_filter_from_session_metadata() {
+    async fn standalone_builder_rejects_legacy_external_filter_without_authority() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut session = crate::Session::new();
@@ -6298,19 +6014,26 @@ mod tests {
             .unwrap(),
         );
 
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+        let result = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .try_build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
-        agent.config.max_turns = Some(2);
+        let err = match result {
+            Ok(_) => panic!("legacy visibility metadata needs generated visibility authority"),
+            Err(err) => err,
+        };
 
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "done");
-        assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
+        match err {
+            crate::agent::builder::AgentBuildPolicyError::ToolVisibilityRestore { message } => {
+                assert_generated_visibility_authority_required(message);
+            }
+            other => panic!("unexpected build error: {other}"),
+        }
+        assert!(client.seen_tools().is_empty());
     }
 
     #[tokio::test]
-    async fn builder_preserves_unknown_persisted_filter_tools_as_dormant_intent() {
+    async fn standalone_builder_rejects_unknown_legacy_filter_without_authority() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut session = crate::Session::new();
@@ -6324,34 +6047,26 @@ mod tests {
             .unwrap(),
         );
 
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+        let result = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .try_build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
-        agent.config.max_turns = Some(2);
+        let err = match result {
+            Ok(_) => panic!("legacy visibility metadata needs generated visibility authority"),
+            Err(err) => err,
+        };
 
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "done");
-        let seen = client.seen_tools();
-        assert_eq!(seen, vec![vec!["visible".to_string()]]);
-        let visibility_state = agent
-            .session()
-            .tool_visibility_state()
-            .expect("canonical visibility state should decode")
-            .expect("canonical visibility state should be present after restore");
-        assert_eq!(
-            visibility_state.active_filter,
-            ToolFilter::Allow(
-                ["missing".to_string(), "visible".to_string()]
-                    .into_iter()
-                    .collect()
-            ),
-            "missing names should remain in canonical durable state instead of being pruned"
-        );
+        match err {
+            crate::agent::builder::AgentBuildPolicyError::ToolVisibilityRestore { message } => {
+                assert_generated_visibility_authority_required(message);
+            }
+            other => panic!("unexpected build error: {other}"),
+        }
+        assert!(client.seen_tools().is_empty());
     }
 
     #[tokio::test]
-    async fn builder_restores_inherited_filter_from_session_metadata() {
+    async fn standalone_builder_rejects_legacy_inherited_filter_without_authority() {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut session = crate::Session::new();
@@ -6363,16 +6078,22 @@ mod tests {
             .unwrap(),
         );
 
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+        let result = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .try_build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
-        agent.config.max_turns = Some(2);
+        let err = match result {
+            Ok(_) => panic!("legacy inherited visibility metadata needs generated authority"),
+            Err(err) => err,
+        };
 
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "done");
-        // The inherited base filter restricts to only "visible"
-        assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
+        match err {
+            crate::agent::builder::AgentBuildPolicyError::ToolVisibilityRestore { message } => {
+                assert_generated_visibility_authority_required(message);
+            }
+            other => panic!("unexpected build error: {other}"),
+        }
+        assert!(client.seen_tools().is_empty());
     }
 
     struct FatalLlmClient;
@@ -6516,26 +6237,30 @@ mod tests {
     #[tokio::test]
     async fn display_failure_text_does_not_classify_after_machine_terminalization() {
         use crate::TurnExecutionInput;
-        use crate::turn_execution_authority::TurnFailureReason;
 
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         let run_id = crate::lifecycle::RunId::new();
         agent
             .apply_turn_input(TurnExecutionInput::StartConversationRun {
                 run_id: run_id.clone(),
+                primitive_kind:
+                    crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: crate::turn_execution_authority::ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
             })
             .expect("start conversation run should apply");
 
         agent
             .apply_turn_input(TurnExecutionInput::FatalFailure {
                 run_id,
-                reason: TurnFailureReason::with_cause(
-                    crate::TurnTerminalCauseKind::LlmFailure,
-                    crate::event::AgentErrorClass::Llm,
+                failure: TurnFailureSource::new(
+                    TurnFailureSourceKind::Llm,
                     "misleading hook-denied display text",
                 ),
             })
-            .expect("fatal failure with typed machine cause should apply");
+            .expect("fatal failure with typed source should apply");
 
         let err = agent
             .build_result(0, 0)
@@ -6607,115 +6332,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hard_failure_missing_machine_cause_fails_closed_without_synthesizing() {
+    async fn run_loop_consumes_generated_prestarted_turn_without_restarting() {
         use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+        use crate::handles::TurnStateHandle;
 
         let turn_handle = Arc::new(TestTurnStateHandle::new());
-        turn_handle.suppress_terminal_cause_snapshots_for_test();
+        let run_id = crate::lifecycle::RunId::new();
+        turn_handle
+            .start_conversation_run(
+                run_id,
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::ConversationAndContext,
+                false,
+                false,
+                0,
+            )
+            .expect("generated start should prepare ApplyingPrimitive");
+
         let mut agent = AgentBuilder::new()
             .with_turn_state_handle(turn_handle.clone())
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
             .build_standalone(
-                Arc::new(FatalLlmClient),
+                Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
             )
             .await;
-        agent.config.max_turns = Some(1);
 
-        let err = agent
-            .run("prompt".to_string().into())
+        agent
+            .run("hello".to_string().into())
             .await
-            .expect_err("missing machine terminal cause should fail closed");
-
-        match err {
-            AgentError::InternalError(message) => {
-                assert!(
-                    message.contains("missing machine-owned terminal_cause_kind"),
-                    "unexpected missing-cause invariant error: {message}"
-                );
-                assert!(
-                    message.contains("Failed"),
-                    "invariant error should name the terminal outcome: {message}"
-                );
-            }
-            AgentError::TerminalFailure { cause_kind, .. } => panic!(
-                "core shell must not synthesize a public terminal cause from outcome, got {cause_kind:?}"
-            ),
-            other => panic!("expected fail-closed invariant error, got {other:?}"),
-        }
+            .expect("prestarted generated turn should be consumed");
 
         let snapshot = agent
             .execution_snapshot()
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
-            snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
-        );
-        assert_eq!(
-            snapshot.terminal_cause_kind, None,
-            "fixture must prove the machine snapshot has no terminal cause"
+            snapshot.admitted_content_shape,
+            Some(ContentShape::ConversationAndContext)
         );
     }
 
     #[tokio::test]
-    async fn budget_exhausted_missing_or_unknown_machine_cause_fails_closed() {
-        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
-        use crate::handles::TurnStateHandle;
-
-        for forced_cause in [None, Some(crate::TurnTerminalCauseKind::Unknown)] {
-            let turn_handle = Arc::new(TestTurnStateHandle::new());
-            let mut agent = AgentBuilder::new()
-                .with_turn_state_handle(turn_handle.clone())
-                .with_runtime_execution_kind_for_test(
-                    crate::lifecycle::RuntimeExecutionKind::ContentTurn,
-                )
-                .build_standalone(
-                    Arc::new(StaticLlmClient),
-                    Arc::new(NoTools),
-                    Arc::new(NoopStore),
-                )
-                .await;
-
-            start_test_conversation_turn(turn_handle.as_ref());
-            turn_handle
-                .budget_exhausted()
-                .expect("budget exhausted transition should apply");
-            turn_handle
-                .force_terminal_cause_kind_for_test(forced_cause)
-                .expect("force budget terminal cause fixture");
-
-            let err = agent
-                .build_result(0, 0)
-                .await
-                .expect_err("ambiguous budget exhaustion cause must fail closed");
-
-            match err {
-                AgentError::InternalError(message) => {
-                    assert!(
-                        message.contains("machine-owned terminal_cause_kind"),
-                        "unexpected budget cause invariant error: {message}"
-                    );
-                    assert!(
-                        message.contains("BudgetExhausted"),
-                        "invariant error should name the budget terminal outcome: {message}"
-                    );
-                }
-                AgentError::TerminalFailure { cause_kind, .. } => panic!(
-                    "core shell must not publish ambiguous budget terminal semantics, got {cause_kind:?}"
-                ),
-                other => panic!("expected fail-closed invariant error, got {other:?}"),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn fatal_failure_unknown_input_cause_fails_before_machine_apply() {
+    async fn fatal_failure_unknown_input_source_fails_before_machine_apply() {
         use crate::TurnExecutionInput;
         use crate::agent::test_turn_state_handle::TestTurnStateHandle;
-        use crate::turn_execution_authority::TurnFailureReason;
 
         let turn_handle = Arc::new(TestTurnStateHandle::new());
         let mut agent = AgentBuilder::new()
@@ -6734,25 +6397,30 @@ mod tests {
         agent
             .apply_turn_input(TurnExecutionInput::StartConversationRun {
                 run_id: run_id.clone(),
+                primitive_kind:
+                    crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: crate::turn_execution_authority::ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
             })
             .expect("start conversation run should apply");
 
         let err = agent
             .apply_turn_input(TurnExecutionInput::FatalFailure {
                 run_id,
-                reason: TurnFailureReason::with_cause(
-                    crate::TurnTerminalCauseKind::Unknown,
-                    crate::event::AgentErrorClass::Terminal,
-                    "display text must not classify unknown terminal cause",
+                failure: TurnFailureSource::new(
+                    TurnFailureSourceKind::Unknown,
+                    "display text must not classify unknown terminal source",
                 ),
             })
-            .expect_err("unknown failure input cause should fail before machine apply");
+            .expect_err("unknown failure source should fail before machine apply");
 
         match err {
             AgentError::InternalError(message) => {
                 assert!(
-                    message.contains("unknown machine-owned terminal_cause_kind"),
-                    "unexpected unknown-cause invariant error: {message}"
+                    message.contains("unknown generated-authority failure source"),
+                    "unexpected unknown-source invariant error: {message}"
                 );
                 assert!(
                     message.contains("FatalFailure"),
@@ -6784,177 +6452,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unrecognized_failed_transition_missing_cause_fails_closed() {
-        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
-        use crate::{ContentShape, TurnExecutionInput};
-
-        let turn_handle = Arc::new(TestTurnStateHandle::new());
-        let mut agent = AgentBuilder::new()
-            .with_turn_state_handle(turn_handle.clone())
-            .with_runtime_execution_kind_for_test(
-                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
-            )
-            .build_standalone(
-                Arc::new(FatalLlmClient),
-                Arc::new(NoTools),
-                Arc::new(NoopStore),
-            )
-            .await;
-
-        let run_id = crate::lifecycle::RunId::new();
-        agent
-            .apply_turn_input(TurnExecutionInput::StartConversationRun {
-                run_id: run_id.clone(),
-            })
-            .expect("start conversation run should apply");
-        agent
-            .apply_turn_input(TurnExecutionInput::PrimitiveApplied {
-                run_id: run_id.clone(),
-                admitted_content_shape: ContentShape::Conversation,
-                vision_enabled: false,
-                image_tool_results_enabled: false,
-            })
-            .expect("primitive application should enter CallingLlm");
-
-        turn_handle
-            .force_next_llm_terminal_failed_for_test(None)
-            .expect("force terminal failure without cause");
-
-        let err = agent
-            .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal { run_id })
-            .expect_err("unrecognized failed transition without machine cause should fail closed");
-
-        match err {
-            AgentError::InternalError(message) => {
-                assert!(
-                    message.contains("missing machine-owned terminal_cause_kind"),
-                    "unexpected missing-cause invariant error: {message}"
-                );
-                assert!(
-                    message.contains("LlmReturnedTerminal"),
-                    "invariant error should name the unrecognized failed input: {message}"
-                );
-            }
-            AgentError::TerminalFailure { cause_kind, .. } => panic!(
-                "core shell must not synthesize a public terminal cause from outcome, got {cause_kind:?}"
-            ),
-            other => panic!("expected fail-closed invariant error, got {other:?}"),
-        }
-
-        let snapshot = agent
-            .execution_snapshot()
-            .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(
-            snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
-        );
-        assert_eq!(
-            snapshot.terminal_cause_kind, None,
-            "fixture must prove the machine snapshot has no terminal cause"
-        );
-    }
-
-    #[tokio::test]
-    async fn unrecognized_failed_transition_unknown_cause_fails_closed() {
-        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
-        use crate::{ContentShape, TurnExecutionInput};
-
-        let turn_handle = Arc::new(TestTurnStateHandle::new());
-        let mut agent = AgentBuilder::new()
-            .with_turn_state_handle(turn_handle.clone())
-            .with_runtime_execution_kind_for_test(
-                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
-            )
-            .build_standalone(
-                Arc::new(FatalLlmClient),
-                Arc::new(NoTools),
-                Arc::new(NoopStore),
-            )
-            .await;
-
-        let run_id = crate::lifecycle::RunId::new();
-        agent
-            .apply_turn_input(TurnExecutionInput::StartConversationRun {
-                run_id: run_id.clone(),
-            })
-            .expect("start conversation run should apply");
-        agent
-            .apply_turn_input(TurnExecutionInput::PrimitiveApplied {
-                run_id: run_id.clone(),
-                admitted_content_shape: ContentShape::Conversation,
-                vision_enabled: false,
-                image_tool_results_enabled: false,
-            })
-            .expect("primitive application should enter CallingLlm");
-
-        turn_handle
-            .force_next_llm_terminal_failed_for_test(Some(crate::TurnTerminalCauseKind::Unknown))
-            .expect("force terminal failure with ambiguous cause");
-
-        let err = agent
-            .apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
-                run_id: run_id.clone(),
-            })
-            .expect_err("unrecognized failed transition with Unknown cause should fail closed");
-
-        match err {
-            AgentError::InternalError(message) => {
-                assert!(
-                    message.contains("unknown machine-owned terminal_cause_kind"),
-                    "unexpected unknown-cause invariant error: {message}"
-                );
-                assert!(
-                    message.contains("LlmReturnedTerminal"),
-                    "invariant error should name the unrecognized failed input: {message}"
-                );
-            }
-            AgentError::TerminalFailure { cause_kind, .. } => {
-                panic!("core shell must not publish Unknown terminal semantics, got {cause_kind:?}")
-            }
-            other => panic!("expected fail-closed invariant error, got {other:?}"),
-        }
-
-        let snapshot = agent
-            .execution_snapshot()
-            .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(
-            snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
-        );
-        assert_eq!(
-            snapshot.terminal_cause_kind,
-            Some(crate::TurnTerminalCauseKind::Unknown),
-            "fixture must prove the machine snapshot has an ambiguous terminal cause"
-        );
-
-        let err = agent
-            .build_result(0, 0)
-            .await
-            .expect_err("unknown machine terminal cause should not publish final result semantics");
-
-        match err {
-            AgentError::InternalError(message) => {
-                assert!(
-                    message.contains("unknown machine-owned terminal_cause_kind"),
-                    "unexpected unknown-cause final-result invariant error: {message}"
-                );
-                assert!(
-                    message.contains("Failed"),
-                    "final-result invariant error should name the terminal outcome: {message}"
-                );
-            }
-            AgentError::TerminalFailure {
-                cause_kind,
-                message,
-                ..
-            } => panic!(
-                "core shell must not publish Unknown terminal result semantics, got {cause_kind:?}: {message}"
-            ),
-            other => panic!("expected fail-closed final-result invariant error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn build_result_cancelled_terminal_does_not_return_success() {
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
 
@@ -6963,9 +6460,9 @@ mod tests {
                 .turn_state_handle
                 .as_deref()
                 .expect("test agent should have a turn-state handle");
-            start_test_conversation_turn(handle);
-            handle.cancel_now().unwrap();
-            handle.cancellation_observed().unwrap();
+            let run_id = start_test_conversation_turn(handle);
+            handle.cancel_now(run_id.clone()).unwrap();
+            handle.cancellation_observed(run_id).unwrap();
         }
 
         let error = agent
@@ -7066,13 +6563,15 @@ mod tests {
                 .turn_state_handle
                 .as_deref()
                 .expect("test agent should have a turn-state handle");
-            start_test_conversation_turn(handle);
+            let run_id = start_test_conversation_turn(handle);
             handle
-                .fatal_failure(TurnFailureReason::with_cause(
-                    crate::TurnTerminalCauseKind::LlmFailure,
-                    AgentErrorClass::Llm,
-                    "machine-owned LLM terminal cause",
-                ))
+                .fatal_failure(
+                    run_id,
+                    TurnFailureSource::new(
+                        TurnFailureSourceKind::Llm,
+                        "machine-owned LLM terminal cause",
+                    ),
+                )
                 .unwrap();
         }
 

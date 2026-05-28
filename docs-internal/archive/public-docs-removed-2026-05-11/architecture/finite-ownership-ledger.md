@@ -51,7 +51,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine.sessions` | `capability-index` | `closed` | `MeerkatMachine registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.drain_slot` | `capability-index` | `closed` | `MeerkatMachine registered-session contract + drain-control region` | src: `per-session comms drain lifecycle slot co-owned by the registered-session entry`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.driver` | `capability-handle` | `closed` | `MeerkatMachine control + admission + input-lifecycle regions` | - |
-| `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.phase` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
+| `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.attachment_slot` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.completions` | `capability-handle` | `closed` | `InputLifecycle terminal wait plumbing` | - |
 | `meerkat-runtime/src/driver/ephemeral.rs` | `EphemeralRuntimeDriver.queue` | `derived-projection` | `closed` | `MeerkatMachine admission queue lane` | src: `MeerkatMachine admission queue entries`; trigger: `any ingress queue mutation or rollback/recovery rebuild`; stale: `forbidden` |
 | `meerkat-runtime/src/driver/ephemeral.rs` | `EphemeralRuntimeDriver.steer_queue` | `derived-projection` | `closed` | `MeerkatMachine admission steer lane` | src: `MeerkatMachine admission steer entries`; trigger: `any ingress steer mutation or rollback/recovery rebuild`; stale: `forbidden` |
@@ -86,7 +86,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
-| `runtime_attachment_alignment` | `RuntimeSessionEntry.phase`, `RuntimeSessionEntry.driver` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
+| `runtime_attachment_alignment` | `RuntimeSessionEntry.attachment_slot`, `RuntimeSessionEntry.driver` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
 | `runtime_queue_projection_alignment` | `MeerkatMachine.admission.queue`, `EphemeralRuntimeDriver.queue`, `EphemeralRuntimeDriver.steer_queue` | `closed` | `MeerkatMachine admission region` |
 | `runtime_comms_bridge_projection_alignment` | `MeerkatMachine.peer_ingress.classified_interactions`, `RuntimeCommsBridge.runtime_input_projection` | `closed` | `MeerkatMachine peer-ingress classification + RuntimeCommsBridge projection contract` |
 | `runtime_external_event_projection_alignment` | `CLI.stdin_external_event_projection`, `MeerkatMachine.peer_ingress.plain_events`, `Runtime.ExternalEventInput`, `RuntimeLoop.external_event_rendering` | `closed` | `ExternalEventInput projection contract + runtime external-event render contract` |
@@ -149,7 +149,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-mob/src/runtime/pending_spawn_lineage.rs` | `PendingSpawnLineage.tasks` | `capability-index` | `closed` | `PendingSpawnLineage metadata + MobOrchestratorAuthority.pending_spawn_count` | src: `machine-owned pending spawn set`; trigger: `spawn begin/complete/rollback transitions`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/provisioner.rs` | `SessionBackend.runtime_sessions` | `capability-index` | `closed` | `MeerkatMachine registered sessions` | src: `runtime adapter registration truth + runtime bridge sidecar handles`; trigger: `runtime session ensure/reattach + retire/unregister + interrupt stale-bridge cleanup`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/provisioner.rs` | `RuntimeSessionState.queued_turns` | `transport-buffer` | `closed` | `InputLifecycle canonical input identity + runtime primitive contributing ids` | src: `event transport handles keyed by canonical input ids`; trigger: `accept/dedup rekey + primitive contributing-id consumption + retire/unregister clear`; stale: `forbidden` |
-| `meerkat-mob/src/runtime/ops_adapter.rs` | `MobOpsAdapter.fallback_registry` | `capability-handle` | `closed` | `RuntimeOpsLifecycleRegistry` | - |
+| `meerkat-mob/src/runtime/ops_adapter.rs` | `MobOpsAdapter.member_bindings` | `capability-handle` | `closed` | `RuntimeOpsLifecycleRegistry` | - |
 
 ## Mob Semantic Operations
 
@@ -198,7 +198,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
 | `mob_pending_spawn_alignment` | `MobActor.pending_spawns`, `PendingSpawnLineage.tasks`, `MobOrchestratorAuthority.pending_spawn_count` | `closed` | `pending spawn lineage helpers + MobOrchestratorAuthority.pending_spawn_count` |
-| `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turns`, `MobOpsAdapter.fallback_registry` | `closed` | `SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry` |
+| `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turns`, `MobOpsAdapter.member_bindings` | `closed` | `SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry` |
 | `mob_wiring_alignment` | `Roster.wired_to`, `trust edges`, `edge locks` | `closed` | `Roster wiring projection contract + do_wire/handle_unwire edge-lock discipline` |
 
 ## Auth State Cells

@@ -16,6 +16,7 @@ fn test_op_spec(name: &str) -> OperationSpec {
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "test-bindings".into(),
+        operation_source: None,
         child_session_id: None,
         expect_peer_channel: false,
     }
@@ -105,7 +106,7 @@ async fn prepare_bindings_returns_same_registry_instance() {
 
     // Get bindings again — should see the same operation
     let second = adapter.prepare_bindings(session_id.clone()).await.unwrap();
-    let snapshot = second.ops_lifecycle().snapshot(&op_id);
+    let snapshot = second.ops_lifecycle().snapshot(&op_id).unwrap();
 
     assert!(
         snapshot.is_some(),
@@ -139,7 +140,7 @@ async fn prepare_bindings_idempotent_with_prior_registration() {
         .expect("session should be registered");
 
     assert!(
-        direct_registry.snapshot(&op_id).is_some(),
+        direct_registry.snapshot(&op_id).unwrap().is_some(),
         "prepare_bindings registry must be the same instance as ops_lifecycle_registry"
     );
 }

@@ -4,7 +4,6 @@ use crate::ids::{
     AgentIdentity, AgentRuntimeId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId,
 };
 use crate::store::MobEventStore;
-use meerkat_core::event::{AgentErrorReport, TurnErrorMetadata};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -80,27 +79,14 @@ impl MobEventEmitter {
         agent_identity: MeerkatId,
         reason: String,
     ) -> Result<MobEvent, MobError> {
-        self.step_target_failed_with_error(run_id, step_id, agent_identity, reason, None, None)
-            .await
-    }
-
-    pub async fn step_target_failed_with_error(
-        &self,
-        run_id: RunId,
-        step_id: StepId,
-        agent_identity: MeerkatId,
-        reason: String,
-        error_report: Option<AgentErrorReport>,
-        error: Option<TurnErrorMetadata>,
-    ) -> Result<MobEvent, MobError> {
         let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
         self.append(MobEventKind::StepTargetFailed {
             run_id,
             step_id,
             target,
             reason,
-            error_report,
-            error,
+            error_report: None,
+            error: None,
         })
         .await
     }
@@ -172,35 +158,19 @@ mod tests {
     use crate::event::MobEventKind;
     use crate::ids::{MeerkatId, MobId, RunId, StepId};
     use crate::store::{InMemoryMobEventStore, MobEventStore};
-    use meerkat_core::event::{AgentErrorClass, AgentErrorReason, AgentErrorReport};
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn step_target_failed_persists_typed_error_metadata() {
+    async fn step_target_failed_persists_display_reason_only() {
         let store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
-        let emitter = MobEventEmitter::new(Arc::clone(&store), MobId::from("mob-typed-error"));
-        let report = AgentErrorReport {
-            class: AgentErrorClass::Terminal,
-            reason: Some(AgentErrorReason::TurnTerminalCause {
-                outcome: meerkat_core::TurnTerminalOutcome::Failed,
-                cause_kind: meerkat_core::TurnTerminalCauseKind::LlmFailure,
-            }),
-            message: "LLM failure terminal turn".to_string(),
-        };
-        let error = meerkat_core::TurnErrorMetadata::terminal(
-            meerkat_core::TurnTerminalCauseKind::LlmFailure,
-            meerkat_core::TurnTerminalOutcome::Failed,
-            "LLM failure terminal turn",
-        );
+        let emitter = MobEventEmitter::new(Arc::clone(&store), MobId::from("mob-display-error"));
 
         emitter
-            .step_target_failed_with_error(
+            .step_target_failed(
                 RunId::new(),
                 StepId::from("review"),
                 MeerkatId::from("reviewer"),
                 "LLM failure terminal turn".to_string(),
-                Some(report.clone()),
-                Some(error.clone()),
             )
             .await
             .expect("event append should succeed");
@@ -221,8 +191,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(reason, "LLM failure terminal turn");
-                assert_eq!(error_report.as_ref(), Some(&report));
-                assert_eq!(persisted_error.as_ref(), Some(&error));
+                assert_eq!(error_report.as_ref(), None);
+                assert_eq!(persisted_error.as_ref(), None);
             }
             other => panic!("expected StepTargetFailed, got {other:?}"),
         }

@@ -146,6 +146,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         // back to opaque `Value` / `Any` / `unknown`.
         "LiveRefreshResult": schema_for!(crate::wire::LiveRefreshResult),
         "LiveRefreshStatus": schema_for!(crate::wire::LiveRefreshStatus),
+        "LiveCloseResult": schema_for!(crate::wire::LiveCloseResult),
+        "LiveCloseStatus": schema_for!(crate::wire::LiveCloseStatus),
         // CC5/CC6: emit the typed wire mirrors at the top level so SDK
         // codegen produces named typed shapes (TypedDict / interface /
         // discriminated union) instead of inlining them as anonymous `Any`
@@ -283,6 +285,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "BridgeDestroyResponse": schema_for!(crate::wire::BridgeDestroyResponse),
         "BridgeHardCancelPayload": schema_for!(crate::wire::BridgeHardCancelPayload),
         "BridgeMemberRuntimeState": schema_for!(crate::wire::BridgeMemberRuntimeState),
+        "BridgeMobPeerOverlayHandoff": schema_for!(crate::wire::BridgeMobPeerOverlayHandoff),
         "BridgeObservationResponse": schema_for!(crate::wire::BridgeObservationResponse),
         "BridgePeerConnectivity": schema_for!(crate::wire::BridgePeerConnectivity),
         "BridgePeerSpec": schema_for!(crate::wire::BridgePeerSpec),
@@ -308,8 +311,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "PeerDirectorySource": schema_for!(crate::wire::PeerDirectorySource),
         "PeerSendability": schema_for!(crate::wire::PeerSendability),
         "PeerCapabilitySet": schema_for!(crate::wire::PeerCapabilitySet),
-        "PeerReachability": schema_for!(crate::wire::PeerReachability),
-        "PeerReachabilityReason": schema_for!(crate::wire::PeerReachabilityReason),
         "PeerDirectoryEntry": schema_for!(crate::wire::PeerDirectoryEntry),
         "PeerDirectoryListing": schema_for!(crate::wire::PeerDirectoryListing),
         "CommsPeersResult": schema_for!(crate::wire::CommsPeersResult),

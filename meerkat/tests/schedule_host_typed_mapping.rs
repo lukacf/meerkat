@@ -22,8 +22,8 @@ use meerkat::surface::{
 };
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
-    CreateScheduleRequest, DeliveryReceiptStage, DeliveryTerminal, IntervalTriggerSpec,
-    MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFailureClass, OccurrenceOrdinal,
+    CreateScheduleRequest, DeliveryFailureReason, DeliveryReceiptStage, DeliveryTerminal,
+    IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceOrdinal,
     OccurrencePhase, OverlapPolicy, Schedule, ScheduledSessionAction, SessionTargetBinding,
     TargetBinding, TriggerSpec,
 };
@@ -53,10 +53,12 @@ fn sample_occurrence(attempt_count: u32) -> Occurrence {
         labels: BTreeMap::new(),
         planning_horizon_days: None,
         planning_horizon_occurrences: None,
-    });
+    })
+    .expect("sample schedule creation should pass generated authority");
 
     let mut occ =
-        Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now());
+        Occurrence::planned_from_schedule(&schedule, OccurrenceOrdinal(0), chrono::Utc::now())
+            .expect("sample occurrence planning should pass generated authority");
     occ.attempt_count = attempt_count;
     occ
 }
@@ -89,14 +91,14 @@ fn idempotency_key_encodes_schedule_occurrence_and_attempt() {
 }
 
 #[tokio::test]
-async fn immediate_delivery_failure_carries_typed_failure_class_and_detail() {
+async fn immediate_delivery_failure_carries_generated_failure_reason_and_detail() {
     let occ = sample_occurrence(2);
     let session_id = SessionId::new();
 
     let dispatch = immediate_delivery_failure(
         &occ,
         "target unreachable".to_string(),
-        OccurrenceFailureClass::TargetMissing,
+        DeliveryFailureReason::TargetMissing,
         Some("corr-123".to_string()),
         Some(session_id.clone()),
     );
@@ -118,20 +120,19 @@ async fn immediate_delivery_failure_carries_typed_failure_class_and_detail() {
     assert_eq!(dispatch.materialized_session_id.as_ref(), Some(&session_id));
 
     // Completion future resolves immediately to DeliveryFailed carrying
-    // the typed failure class + detail.
+    // generated failure-reason evidence + detail.
     let terminal: DeliveryTerminal = dispatch.completion.await.unwrap();
     assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
     assert_eq!(terminal.detail.as_deref(), Some("target unreachable"));
     assert_eq!(
-        terminal.failure_class,
-        Some(OccurrenceFailureClass::TargetMissing),
+        terminal.delivery_failure_reason,
+        Some(DeliveryFailureReason::TargetMissing),
     );
     assert!(
         terminal.runtime_outcome.is_none(),
         "immediate-failure path has no runtime outcome; got {:?}",
         terminal.runtime_outcome,
     );
-    assert_eq!(terminal.materialized_session_id, Some(session_id));
 }
 
 #[tokio::test]
@@ -160,7 +161,6 @@ async fn immediate_completed_dispatch_maps_to_accepted_stage_and_completes() {
         "immediate completion maps to OccurrencePhase::Completed; got {:?}",
         terminal.phase,
     );
-    assert!(terminal.failure_class.is_none());
     assert!(terminal.detail.is_none());
 }
 
@@ -170,16 +170,16 @@ async fn async_completion_dispatch_threads_correlation_and_custom_future() {
     let correlation = Some("corr-async".to_string());
 
     // Build a custom completion future that lands on DeliveryFailed with
-    // a runtime-rejected class — this simulates the
+    // runtime-rejected failure evidence — this simulates the
     // admission-rejected-after-dispatch path.
     let custom_future = Box::pin(async move {
         Ok(DeliveryTerminal {
             phase: OccurrencePhase::DeliveryFailed,
             receipt: None,
             detail: Some("simulated runtime rejection".to_string()),
-            failure_class: Some(OccurrenceFailureClass::RuntimeRejected),
+            delivery_failure_reason: Some(DeliveryFailureReason::RuntimeRejected),
             runtime_outcome: None,
-            materialized_session_id: None,
+            runtime_completion_outcome: None,
         })
     });
 
@@ -195,8 +195,8 @@ async fn async_completion_dispatch_threads_correlation_and_custom_future() {
     let terminal = dispatch.completion.await.unwrap();
     assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
     assert_eq!(
-        terminal.failure_class,
-        Some(OccurrenceFailureClass::RuntimeRejected),
+        terminal.delivery_failure_reason,
+        Some(DeliveryFailureReason::RuntimeRejected),
     );
 }
 

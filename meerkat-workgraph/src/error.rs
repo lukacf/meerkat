@@ -28,6 +28,8 @@ pub enum WorkGraphError {
     InvalidTransition(String),
     #[error("invalid work graph input: {0}")]
     InvalidInput(String),
+    #[error("work graph timestamp `{field}` cannot be represented as unsigned millis: {millis}")]
+    InvalidTimestampMillis { field: &'static str, millis: i64 },
     #[error("work graph store error: {0}")]
     Store(String),
     #[error("work graph backend '{0}' does not support this operation")]

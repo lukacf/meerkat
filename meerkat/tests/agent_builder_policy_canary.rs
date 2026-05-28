@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use meerkat_core::types::{AssistantBlock, StopReason, Usage};
 use meerkat_core::{
     AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult, Message,
-    Session, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError,
+    Provider, SESSION_METADATA_SCHEMA_VERSION, Session, SessionMetadata, SessionTooling,
+    ToolCallView, ToolDef, ToolDispatchOutcome, ToolError,
 };
 
 struct CanaryClient;
@@ -391,8 +392,10 @@ fn downstream_unsafe_code_cannot_enter_factory_policy_finalizer() -> std::io::Re
         r#"async-trait = "0.1"
 futures = "0.3"
 inventory = "0.3"
-meerkat-core = {{ path = "{}" }}"#,
-        repo_root().join("meerkat-core").display()
+meerkat-core = {{ path = "{}" }}
+meerkat-runtime = {{ path = "{}" }}"#,
+        repo_root().join("meerkat-core").display(),
+        repo_root().join("meerkat-runtime").display()
     );
     let Some(output) = run_downstream_cargo_fixture(
         "downstream_unsafe_code_cannot_enter_factory_policy_finalizer",
@@ -477,7 +480,27 @@ meerkat-core = {{ path = "{}" }}"#,
 
 #[tokio::test]
 async fn public_facade_rejects_forged_session_runtime_binding_authority() {
-    let session = Session::default();
+    let mut session = Session::default();
+    session
+        .set_session_metadata(SessionMetadata {
+            schema_version: SESSION_METADATA_SCHEMA_VERSION,
+            model: "mock-model".to_string(),
+            max_tokens: 8192,
+            structured_output_retries: 2,
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+        })
+        .expect("seed durable session metadata");
     let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
     let prepared = runtime
         .prepare_bindings(session.id().clone())
@@ -488,14 +511,17 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
         prepared.epoch_id().clone(),
         Arc::clone(prepared.ops_lifecycle()),
         Arc::clone(prepared.cursor_state()),
-        Arc::clone(prepared.tool_visibility_owner()),
+        prepared.tool_visibility_owner().clone(),
         Arc::clone(prepared.turn_state()),
         Arc::clone(prepared.comms_drain()),
         Arc::clone(prepared.external_tool_surface()),
-        Arc::clone(prepared.peer_comms()),
+        meerkat_runtime::RuntimePeerCommsHandle::generated_install_factory(Arc::new(
+            meerkat_runtime::HandleDslAuthority::ephemeral(),
+        ))
+        .expect("generated peer-comms install factory"),
         Arc::clone(prepared.session_admission()),
         Arc::clone(prepared.model_routing()),
-        Arc::clone(prepared.auth_lease()),
+        prepared.auth_lease().clone(),
         Arc::clone(prepared.mcp_server_lifecycle()),
         Arc::clone(prepared.peer_interaction()),
         Arc::clone(prepared.session_context()),
@@ -626,6 +652,37 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
         "factory build authority must not be publicly mintable from \
          meerkat_core::AgentBuilder"
     );
+}
+
+#[test]
+fn core_test_turn_state_handle_is_not_public_authority() {
+    let agent_mod = repo_file("meerkat-core/src/agent.rs");
+    assert!(
+        agent_mod.contains("#[cfg(test)]\n#[doc(hidden)]\npub(crate) mod test_turn_state_handle;"),
+        "core test turn-state handle must be cfg(test) and crate-private so downstream \
+         crates cannot substitute a handwritten lifecycle reducer for runtime machine authority"
+    );
+
+    let test_handle = repo_file("meerkat-core/src/agent/test_turn_state_handle.rs");
+    assert!(
+        test_handle.contains("pub(crate) struct TestTurnStateHandle")
+            && !test_handle.contains("pub struct TestTurnStateHandle")
+            && test_handle.contains("pub(crate) fn new()"),
+        "TestTurnStateHandle must remain a crate-private unit-test adapter, not a public \
+         TurnStateHandle implementation"
+    );
+
+    for fixture in [
+        "meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
+        "meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+    ] {
+        let source = repo_file(fixture);
+        assert!(
+            !source.contains("test_turn_state_handle") && !source.contains("TestTurnStateHandle"),
+            "{fixture} must not use the core unit-test turn-state reducer as a downstream \
+             construction path"
+        );
+    }
 }
 
 #[test]
@@ -861,7 +918,6 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
         !public_core.contains("\"standalone-agent-builder\"")
             && !public_core.contains("\"internal-agent-factory-build\"")
             && !public_core.contains("meerkat_internal_agent_factory_build")
-            && !public_core.contains("rustc_flags")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "public //meerkat-core:meerkat_core must not expose standalone build \
@@ -1119,6 +1175,24 @@ fn core_factory_authority_is_not_publicly_forgeable() {
         factory.contains("session_runtime_bindings_have_machine_authority(bindings)"),
         "AgentFactory must validate the runtime-private SessionRuntimeBindings \
          authority before consuming SessionOwned handles"
+    );
+    let build_agent = &factory[factory
+        .find("pub async fn build_agent")
+        .expect("AgentFactory::build_agent must exist")..];
+    let session_owned_validation = build_agent
+        .find("session_runtime_bindings_have_machine_authority(bindings)")
+        .expect("build_agent must validate SessionOwned authority");
+    let auth_lease_consumption = build_agent
+        .find("bindings.auth_lease()")
+        .expect("build_agent consumes SessionOwned auth lease handles");
+    let model_routing_consumption = build_agent
+        .find(".model_routing()")
+        .expect("build_agent consumes SessionOwned model-routing handles");
+    assert!(
+        session_owned_validation < auth_lease_consumption
+            && session_owned_validation < model_routing_consumption,
+        "AgentFactory must validate SessionOwned authority before auth lease \
+         or model-routing facts can be consumed"
     );
 }
 

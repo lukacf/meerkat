@@ -2554,7 +2554,9 @@ async fn wait_for_run_terminal(handle: &MobHandle, run_id: &meerkat_mob::RunId) 
             .await
             .expect("flow_status should succeed")
             .expect("run should exist");
-        if run.status.is_terminal() {
+        if meerkat_mob::mob_machine_run_status_is_terminal(&run.run_id, &run.status)
+            .expect("MobMachine terminality classifier should accept run status")
+        {
             return run;
         }
         assert!(

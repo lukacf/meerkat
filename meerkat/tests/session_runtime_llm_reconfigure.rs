@@ -1,7 +1,7 @@
 //! Smoke test for `meerkat::session_runtime::llm_reconfigure`.
 //!
-//! Asserts the surface-agnostic [`hot_swap_llm_client_on_idle_session`]
-//! flow drives the [`SessionLlmReconfigureHost`] trait in the expected
+//! Asserts the generated runtime-adapter reconfigure flow drives the
+//! [`SessionLlmReconfigureHost`] trait in the expected
 //! order: hydrate → resolve → apply identity → apply visibility →
 //! persist. A stub host records each call and lets us verify both the
 //! happy path and the rollback-on-persist-failure path.
@@ -9,19 +9,16 @@
 #![cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use meerkat::session_runtime::llm_reconfigure::{
-    derive_reconfigured_visibility_state, hot_swap_llm_client_on_idle_session,
-    profile_to_capability_surface,
-};
+use meerkat::session_runtime::llm_reconfigure::profile_to_capability_surface;
 use meerkat_core::types::SessionId;
 use meerkat_core::{Provider, SessionLlmIdentity, SessionToolVisibilityState};
 use meerkat_runtime::{
-    HydratedSessionLlmState, ResolvedSessionLlmReconfigure, RuntimeDriverError,
+    HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
-    SessionLlmReconfigureRequest,
+    SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
 };
 
 #[derive(Debug, Default)]
@@ -59,6 +56,15 @@ fn empty_capability_surface() -> SessionLlmCapabilitySurface {
     }
 }
 
+fn visibility_for_surface(surface: &SessionLlmCapabilitySurface) -> SessionToolVisibilityState {
+    SessionToolVisibilityState {
+        capability_base_filter: meerkat_core::capability_base_filter_for_image_tool_results(
+            surface.image_tool_results,
+        ),
+        ..Default::default()
+    }
+}
+
 impl StubReconfigureHost {
     fn new(target_provider: Provider, target_model: &str) -> Self {
         let current_identity = SessionLlmIdentity {
@@ -91,10 +97,11 @@ impl SessionLlmReconfigureHost for StubReconfigureHost {
         _session_id: &SessionId,
     ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
         self.state.lock().unwrap().hydrate_calls += 1;
+        let current_capability_surface = empty_capability_surface();
         Ok(HydratedSessionLlmState {
             current_identity: self.current_identity.clone(),
-            current_visibility_state: SessionToolVisibilityState::default(),
-            current_capability_surface: Some(empty_capability_surface()),
+            current_visibility_state: visibility_for_surface(&current_capability_surface),
+            current_capability_surface: Some(current_capability_surface),
             capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
             base_tool_names: std::collections::BTreeSet::new(),
         })
@@ -153,8 +160,11 @@ impl SessionLlmReconfigureHost for StubReconfigureHost {
 
 #[tokio::test]
 async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
-    let host = StubReconfigureHost::new(Provider::OpenAI, "gpt-target");
+    let host = Arc::new(StubReconfigureHost::new(Provider::OpenAI, "gpt-target"));
+    let adapter = MeerkatMachine::ephemeral();
+    adapter.set_session_llm_reconfigure_host(host.clone());
     let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
     let request = SessionLlmReconfigureRequest {
         model: Some("gpt-target".into()),
         provider: None,
@@ -164,9 +174,10 @@ async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
         clear_auth_binding: false,
     };
 
-    hot_swap_llm_client_on_idle_session(&host, &session_id, &request)
+    adapter
+        .reconfigure_session_llm_identity(&session_id, request)
         .await
-        .expect("hot swap succeeds");
+        .expect("runtime adapter reconfigure succeeds");
 
     let state = host.state.lock().unwrap();
     assert_eq!(state.hydrate_calls, 1);
@@ -179,12 +190,15 @@ async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
 
 #[tokio::test]
 async fn persist_failure_triggers_rollback_to_previous_identity() {
-    let host = StubReconfigureHost::new(Provider::OpenAI, "gpt-target");
+    let host = Arc::new(StubReconfigureHost::new(Provider::OpenAI, "gpt-target"));
     {
         let mut state = host.state.lock().unwrap();
         state.persist_error = Some("disk full".into());
     }
+    let adapter = MeerkatMachine::ephemeral();
+    adapter.set_session_llm_reconfigure_host(host.clone());
     let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
     let request = SessionLlmReconfigureRequest {
         model: Some("gpt-target".into()),
         provider: None,
@@ -194,7 +208,8 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
         clear_auth_binding: false,
     };
 
-    let err = hot_swap_llm_client_on_idle_session(&host, &session_id, &request)
+    let err = adapter
+        .reconfigure_session_llm_identity(&session_id, request)
         .await
         .expect_err("persist failure must propagate after rollback");
     assert!(matches!(err, RuntimeDriverError::Internal(_)));
@@ -205,15 +220,6 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
     assert_eq!(state.apply_visibility_calls, 2);
     // Discard never fires when rollback succeeds.
     assert_eq!(state.discard_calls, 0);
-}
-
-#[test]
-fn derive_reconfigured_visibility_state_clones_when_no_view_image() {
-    let current = SessionToolVisibilityState::default();
-    let target = empty_capability_surface();
-    let names = std::collections::BTreeSet::new();
-    let next = derive_reconfigured_visibility_state(&current, &target, &names);
-    assert_eq!(next.active_revision, current.active_revision);
 }
 
 // `profile_to_capability_surface` round-trip is exercised indirectly by

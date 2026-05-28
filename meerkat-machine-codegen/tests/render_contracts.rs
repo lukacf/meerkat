@@ -2,9 +2,10 @@
 
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
-    render_composition_driver, render_composition_mapping_coverage, render_composition_module,
-    render_composition_semantic_model, render_generated_kernel_mod, render_machine_kernel_module,
-    render_machine_mapping_coverage, render_machine_module,
+    render_composition_ci_cfg, render_composition_driver, render_composition_mapping_coverage,
+    render_composition_module, render_composition_semantic_model, render_generated_kernel_mod,
+    render_machine_ci_cfg, render_machine_kernel_module, render_machine_mapping_coverage,
+    render_machine_module, render_machine_semantic_model,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
@@ -66,6 +67,28 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
 }
 
 #[test]
+fn tla_renderer_abstracts_u64_max_literals_for_tlc() {
+    let model = render_machine_semantic_model(&meerkat_machine());
+    let cfg = render_machine_ci_cfg(&meerkat_machine(), false);
+
+    assert!(
+        !model.contains("18446744073709551615"),
+        "TLC rejects u64::MAX-sized literals in the model body"
+    );
+    assert!(
+        !model.contains("2147483647"),
+        "the model must use the explicit RustU64Max boundary, not a hidden literal rewrite"
+    );
+    assert!(model.contains("CONSTANTS"));
+    assert!(model.contains("RustU64Max"));
+    assert!(model.contains("RustU64Max - now_ms"));
+    assert!(
+        cfg.contains("RustU64Max = 2147483647"),
+        "TLC-safe finite value belongs in cfg, not in expression rendering"
+    );
+}
+
+#[test]
 fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     let rendered = render_machine_module(&mob_machine());
 
@@ -92,6 +115,55 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
 }
 
 #[test]
+fn mob_native_tla_helpers_escape_state_field_parameter_names() {
+    let rendered = render_machine_semantic_model(&mob_machine());
+
+    assert!(rendered.contains(
+        "mob_machine_identity_has_session_binding(arg_member_session_bindings, agent_identity) =="
+    ));
+    assert!(rendered.contains("agent_identity \\in DOMAIN arg_member_session_bindings"));
+    assert!(rendered.contains(
+        "mob_machine_session_bound_live_runtime_ids_match(arg_identity_to_runtime, arg_member_session_bindings, arg_live_runtime_ids, expected_runtime_ids) =="
+    ));
+    assert!(
+        rendered
+            .contains("LET eligible_ids == { candidate \\in DOMAIN arg_member_session_bindings :")
+    );
+    assert!(rendered.contains(
+        "IN expected_runtime_ids = { arg_identity_to_runtime[id] : id \\in eligible_ids }"
+    ));
+    assert!(rendered.contains(
+        "mob_machine_member_peer_overlay(arg_wiring_edges, arg_member_peer_endpoints, arg_external_peer_edges, agent_identity) =="
+    ));
+    assert!(rendered.contains("LET outgoing_edges == { edge \\in arg_wiring_edges :"));
+    assert!(!rendered.contains(
+        "mob_machine_identity_has_session_binding(member_session_bindings, agent_identity) =="
+    ));
+    assert!(!rendered.contains(
+        "mob_machine_member_peer_overlay(wiring_edges, member_peer_endpoints, external_peer_edges, agent_identity) =="
+    ));
+    assert!(!rendered.contains(": edge \\in arg_wiring_edges /\\"));
+}
+
+#[test]
+fn seam_tla_renders_mob_external_peer_native_projection_helpers() {
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
+    let cfg = render_composition_ci_cfg(&meerkat_mob_seam_composition(), false);
+
+    assert!(
+        rendered
+            .contains("mob__mob_machine_external_peer_edge_peer_id(edge) == edge.endpoint.peer_id")
+    );
+    assert!(rendered.contains(
+        "mob__entry_packet__mob_machine_external_peer_edge_peer_id(edge) == edge.endpoint.peer_id"
+    ));
+    assert!(
+        rendered.contains("RustU64Max") && cfg.contains("RustU64Max = 2147483647"),
+        "composition model and cfg should carry the explicit u64::MAX TLC boundary"
+    );
+}
+
+#[test]
 fn renders_kernel_seam_composition_with_routes() {
     let rendered = render_composition_module(&meerkat_mob_seam_composition());
 
@@ -108,6 +180,19 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
     let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
 
     for helper in [
+        "mob__mob_machine_external_peer_edge_has_matching_key(edges_by_key, edge) ==",
+        "mob__mob_machine_external_peer_key_matches_edge(key, edge) ==",
+        "mob__entry_packet__mob_machine_external_peer_key_matches_edge(key, edge) ==",
+        "mob__mob_machine_external_peer_identity_absent(edges, agent_identity) ==",
+        "mob__mob_machine_identity_has_session_binding(arg_member_session_bindings, agent_identity) ==",
+        "mob__mob_machine_member_peer_endpoint_peer_id(endpoint) ==",
+        "mob__mob_machine_run_step_status_after_set(",
+        "mob__mob_machine_run_step_bool_after_set(",
+        "mob__mob_machine_run_step_condition_result_after_set(",
+        "mob__mob_machine_run_step_u64_after_set(",
+        "mob__mob_machine_run_step_u64_after_increment(",
+        "mob__mob_machine_run_retry_count_after_increment(",
+        "mob__mob_machine_frame_node_bool_after_set(",
         "mob__mob_machine_node_terminal(status) ==",
         "mob__mob_machine_step_status_from_frame_node_status(status) ==",
         "mob__mob_machine_frame_node_status_after_admit(",
@@ -447,7 +532,7 @@ fn generated_meerkat_kernel_content_shape_routes_wire_labels_through_core() {
 }
 
 #[test]
-fn generated_meerkat_terminal_failures_require_typed_cause() {
+fn generated_meerkat_terminal_failures_derive_typed_cause_from_source() {
     let rendered = render_machine_kernel_module(&meerkat_machine());
 
     assert!(
@@ -459,8 +544,18 @@ fn generated_meerkat_terminal_failures_require_typed_cause() {
         "FatalFailure must not remain constructible as a string-only semantic cause path:\n{rendered}"
     );
     assert!(
+        rendered.contains("pub terminal_failure_source: RunFailureSourceKind,"),
+        "FatalFailure input must carry a typed raw failure source beside display text:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(
+            "pub struct FatalFailure {\n        pub run_id: RunId,\n        pub terminal_cause_kind: TurnTerminalCauseKind,"
+        ),
+        "FatalFailure input must not accept caller-supplied terminal cause beside display text:\n{rendered}"
+    );
+    assert!(
         rendered.contains("pub terminal_cause_kind: TurnTerminalCauseKind,"),
-        "terminal failure inputs/effects must carry a typed cause beside display text:\n{rendered}"
+        "TurnRunFailed effect must carry the generated typed cause payload:\n{rendered}"
     );
     assert!(
         rendered.contains("pub struct TurnRunFailed")

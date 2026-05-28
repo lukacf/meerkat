@@ -57,7 +57,9 @@ use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState};
 use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 #[cfg(test)]
-use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
+use meerkat_runtime::input_state::{
+    InputLifecycleState, InputStatePersistenceRecord, InputTerminalOutcome, StoredInputState,
+};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{
     MachineSessionControlAuthority, MeerkatMachine, RuntimeMode, RuntimeState, RuntimeStore,
@@ -353,7 +355,7 @@ fn session_materialized_at_transcript_revision(
                     "failed to materialize transcript revision {revision}: {err}"
                 )))
             })?;
-        materialized.remove_metadata(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+        materialized.clear_transcript_history_state();
         return Ok(materialized);
     }
     materialized
@@ -1330,6 +1332,23 @@ impl<'a> MachineSessionArchiveProtocol<'a> {
         self.runtime_adapter.contains_session(id).await
     }
 
+    fn require_shared_runtime_store(
+        &self,
+        id: &SessionId,
+        runtime_store: &Arc<dyn RuntimeStore>,
+    ) -> Result<(), SessionError> {
+        if self
+            .runtime_adapter
+            .shares_runtime_store_authority(runtime_store)
+        {
+            return Ok(());
+        }
+
+        Err(SessionError::Unsupported(format!(
+            "archive for session {id} requires MachineSessionArchiveProtocol backed by the same durable runtime/session machine store"
+        )))
+    }
+
     async fn retire_session(&self, id: &SessionId) -> Result<(), SessionError> {
         let runtime_id = LogicalRuntimeId::for_session(id);
         let retire_once =
@@ -1945,8 +1964,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<RuntimeState>, SessionError> {
         let runtime_id = Self::runtime_id_for_session(id);
-        runtime_store
-            .load_runtime_state(&runtime_id)
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
             .await
             .map_err(|err| {
                 SessionError::Agent(AgentError::InternalError(format!(
@@ -2151,30 +2169,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         let durable_state = durable.system_context_state().unwrap_or_default();
-        let state_arc = self.inner.system_context_state(id).await.ok_or_else(|| {
+        let state_handle = self.inner.system_context_state(id).await.ok_or_else(|| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "runtime-backed live session {id} is missing its system-context authority handle"
             )))
         })?;
 
-        let changed = {
-            let mut guard = match state_arc.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    tracing::warn!(
-                        session_id = %id,
-                        "system-context state lock poisoned while synchronizing durable realtime context"
-                    );
-                    poisoned.into_inner()
-                }
-            };
-            if *guard == durable_state {
-                false
-            } else {
-                *guard = durable_state;
-                true
-            }
-        };
+        let changed = state_handle
+            .replace_from_generated_restore_if_changed(durable_state)
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to restore durable runtime-system-context state: {err}"
+                )))
+            })?;
 
         if changed {
             self.inner.sync_system_context_state(id).await?;
@@ -3612,6 +3619,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(session)
     }
 
+    async fn save_compatibility_projection_only(
+        &self,
+        session: Session,
+    ) -> Result<Session, SessionError> {
+        let session = self.normalized_session_for_persistence(session).await?;
+        self.store
+            .save(&session)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
+        Ok(session)
+    }
+
     async fn transcript_rewrite_commit_chain_for_persistence(
         &self,
         session: &Session,
@@ -3808,59 +3827,56 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Err(SessionError::NotRunning { id: id.clone() });
         }
 
-        let state_arc = self
+        let state_handle = self
             .inner
             .system_context_state(id)
             .await
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
-        let (snapshot_state, staged_state) = {
-            let mut guard = match state_arc.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    tracing::warn!(
-                        session_id = %id,
-                        "system-context state lock poisoned while staging live boundary context"
-                    );
-                    poisoned.into_inner()
-                }
-            };
-            let locked_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
-                turn_state_handle.as_ref(),
-            )
-            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
-            if locked_token != initial_token {
-                return Err(SessionError::NotRunning { id: id.clone() });
-            }
-            let snapshot_state = guard.clone();
-            let mut candidate = snapshot_state.clone();
-            for append in appends {
-                let req = AppendSystemContextRequest {
-                    text: append.text,
-                    source: append.source,
-                    idempotency_key: append.idempotency_key,
-                };
-                candidate
-                    .stage_active_turn_append(&req, append.accepted_at)
-                    .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
-            }
-            let staged_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
-                turn_state_handle.as_ref(),
-            )
-            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
-            if staged_token != initial_token {
-                return Err(SessionError::NotRunning { id: id.clone() });
-            }
-            *guard = candidate.clone();
-            tracing::debug!(
-                session_id = %id,
-                pending_count = candidate.pending.len(),
-                applied_count = candidate.applied.len(),
-                active_turn_pending_count = candidate.active_turn_pending_keys.len(),
-                "staged live active-turn runtime system context"
-            );
-            (snapshot_state, candidate)
-        };
+        let locked_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
+            turn_state_handle.as_ref(),
+        )
+        .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        if locked_token != initial_token {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+        let stage_inputs = appends
+            .into_iter()
+            .map(|append| {
+                (
+                    AppendSystemContextRequest {
+                        text: append.text,
+                        source: append.source,
+                        idempotency_key: append.idempotency_key,
+                    },
+                    append.accepted_at,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (snapshot_state, staged_state) = state_handle
+            .stage_active_turn_appends_with_snapshot(stage_inputs)
+            .map_err(|err| control_error_into_session_error(err.into_control_error(id)))?;
+        let staged_token = EphemeralSessionService::<B>::active_turn_boundary_staging_token(
+            turn_state_handle.as_ref(),
+        )
+        .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
+        if staged_token != initial_token {
+            state_handle
+                .replace_from_generated_restore_if_current(&staged_state, snapshot_state.clone())
+                .map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to roll back stale live boundary context: {err}"
+                    )))
+                })?;
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+        tracing::debug!(
+            session_id = %id,
+            pending_count = staged_state.pending_len(),
+            applied_count = staged_state.applied_len(),
+            active_turn_pending_count = staged_state.active_turn_pending_len(),
+            "staged live active-turn runtime system context"
+        );
 
         let snapshot = async {
             let mut session = self
@@ -3884,19 +3900,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match snapshot {
             Ok(snapshot) => Ok(Some(snapshot)),
             Err(error) => {
-                let mut guard = match state_arc.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        tracing::warn!(
-                            session_id = %id,
-                            "system-context state lock poisoned while rolling back live boundary context"
-                        );
-                        poisoned.into_inner()
-                    }
-                };
-                if *guard == staged_state {
-                    *guard = snapshot_state;
-                } else {
+                let rolled_back = state_handle
+                    .replace_from_generated_restore_if_current(&staged_state, snapshot_state)
+                    .map_err(|err| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to roll back live boundary context: {err}"
+                        )))
+                    })?;
+                if !rolled_back {
                     tracing::warn!(
                         session_id = %id,
                         "live system-context state diverged after failed boundary snapshot; leaving newer live state intact"
@@ -4859,6 +4870,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         store_only_mode: StoreOnlyArchiveMode,
         machine_archive: Option<MachineSessionArchiveProtocol<'_>>,
     ) -> Result<(), SessionError> {
+        if let Some(protocol) = machine_archive.as_ref()
+            && let Some(runtime_store) = self.runtime_store.as_ref()
+        {
+            protocol.require_shared_runtime_store(id, runtime_store)?;
+        }
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _recovery_guard = recovery_gate.lock().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
@@ -4866,6 +4882,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let archived_snapshot = match self.export_session_with_labels(id).await {
             Ok(session) => Some(session),
             Err(SessionError::NotFound { .. }) => match store_only_mode {
+                StoreOnlyArchiveMode::Reject if self.runtime_store.is_none() => self
+                    .store
+                    .load(id)
+                    .await
+                    .map_err(|e| SessionError::Store(Box::new(e)))?,
                 StoreOnlyArchiveMode::Reject => {
                     self.load_persisted_session_for_control(id, "archive")
                         .await?
@@ -4876,9 +4897,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             },
             Err(err) => return Err(err),
         };
-        if let Some(ref session) = archived_snapshot
-            && self.session_archived_by_authority(id, session).await?
-        {
+        let already_retired_by_machine = if let Some(ref session) = archived_snapshot {
+            self.session_archived_by_authority(id, session).await?
+        } else {
+            false
+        };
+        if already_retired_by_machine {
             return Err(SessionError::NotFound { id: id.clone() });
         }
 
@@ -4896,37 +4920,42 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         let had_durable_snapshot = archived_snapshot.is_some();
-        let mut saved_archived_snapshot = false;
-        if let Some(mut session) = archived_snapshot.clone() {
-            session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
-            match self.save_normalized_session(session).await {
-                Ok(_) => {
-                    saved_archived_snapshot = true;
-                }
-                Err(err) => {
-                    if let Some(ref mut guard) = gate_guard {
-                        **guard = false;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-
+        let mut machine_retired = already_retired_by_machine;
         if let Some(protocol) = machine_archive {
-            let should_retire =
-                archived_snapshot.is_some() || protocol.session_registered(id).await;
+            let should_retire = !already_retired_by_machine
+                && (archived_snapshot.is_some() || protocol.session_registered(id).await);
             if should_retire && let Err(err) = protocol.retire_session(id).await {
                 if let Some(ref mut guard) = gate_guard {
                     **guard = false;
                 }
-                if let Some(session) = archived_snapshot.clone()
-                    && let Err(restore_err) = self.save_normalized_session(session).await
-                {
-                    return Err(SessionError::Agent(AgentError::InternalError(format!(
-                        "machine archive retire failed ({err}); archived projection rollback failed: {restore_err}"
-                    ))));
-                }
                 return Err(err);
+            }
+            machine_retired = should_retire;
+        }
+
+        let mut saved_archived_snapshot = false;
+        if let Some(session) = archived_snapshot.clone() {
+            let mut session = session;
+            session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+            match self.save_compatibility_projection_only(session).await {
+                Ok(_) => {
+                    saved_archived_snapshot = true;
+                }
+                Err(err) => {
+                    if self.runtime_store.is_some() && machine_retired {
+                        tracing::warn!(
+                            session_id = %id,
+                            error = %err,
+                            "machine archive retired session but compatibility projection save failed"
+                        );
+                        saved_archived_snapshot = false;
+                    } else {
+                        if let Some(ref mut guard) = gate_guard {
+                            **guard = false;
+                        }
+                        return Err(err);
+                    }
+                }
             }
         }
 
@@ -4940,6 +4969,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match (&live_result, saved_archived_snapshot) {
             // At least one side had the session - success.
             (Ok(()), _) | (_, true) => Ok(()),
+            (_, false) if machine_retired => Ok(()),
             (_, false) if had_durable_snapshot => Ok(()),
             // Neither side had it - propagate NotFound from the live service.
             _ => live_result,
@@ -4948,8 +4978,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Archive with a concrete machine protocol. Runtime-backed surfaces must
     /// use this path so archive behavior is backed by a durable
-    /// `MeerkatMachine::Retire` transition, while projection write failures
-    /// fail before the machine lifecycle can advance.
+    /// `MeerkatMachine::Retire` transition. Compatibility projection writes
+    /// happen only after that canonical lifecycle transition has landed.
     pub async fn archive_with_machine_protocol(
         &self,
         id: &SessionId,
@@ -5213,16 +5243,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .await
     }
 
-    async fn update_session_keep_alive(
-        &self,
-        _id: &SessionId,
-        _keep_alive: bool,
-    ) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported(
-            "update_session_keep_alive is a bespoke metadata seam that bypasses the canonical RuntimeTurnMetadata carrier; keep_alive intent must travel through the single runtime-backed turn seam instead".to_string(),
-        ))
-    }
-
     async fn update_session_mob_authority_context(
         &self,
         id: &SessionId,
@@ -5479,7 +5499,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError> {
         let existing_gate = self.existing_gate_for_session(id).await;
-        if let Some(state_arc) = self.inner.system_context_state(id).await {
+        if let Some(state_handle) = self.inner.system_context_state(id).await {
             let created_gate = existing_gate.is_none();
             let gate = match existing_gate {
                 Some(gate) => gate,
@@ -5495,25 +5515,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             }
 
             let accepted_at = meerkat_core::time_compat::SystemTime::now();
-            let (status, snapshot_state, persisted_state) = {
-                let mut guard = match state_arc.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        tracing::warn!(
-                            session_id = %id,
-                            "system-context state lock poisoned while staging live append"
-                        );
-                        poisoned.into_inner()
-                    }
-                };
-                let snapshot_state = guard.clone();
-                let mut candidate = snapshot_state.clone();
-                let status = candidate
-                    .stage_append(&req, accepted_at)
-                    .map_err(|err| err.into_control_error(id))?;
-                *guard = candidate.clone();
-                (status, snapshot_state, candidate)
-            };
+            let (status, snapshot_state, persisted_state) = state_handle
+                .stage_append_with_snapshot(&req, accepted_at)
+                .map_err(|err| err.into_control_error(id))?;
 
             let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
             let mut session = if self.runtime_store.is_some() {
@@ -5545,26 +5549,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
 
             let gate_guard = gate.cancelled.lock().await;
             if *gate_guard {
-                let rollback_result = {
-                    let mut guard = match state_arc.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => {
-                            tracing::warn!(
-                                session_id = %id,
-                                "system-context state lock poisoned while rolling back cancelled live append"
-                            );
-                            poisoned.into_inner()
-                        }
-                    };
-                    if *guard == persisted_state {
-                        *guard = snapshot_state;
-                        Ok(())
-                    } else {
-                        Err(())
-                    }
-                };
+                let rollback_result = state_handle
+                    .replace_from_generated_restore_if_current(&persisted_state, snapshot_state)
+                    .map_err(|_| ());
                 drop(gate_guard);
-                if rollback_result.is_ok() {
+                if matches!(rollback_result, Ok(true)) {
                     let _ = self.inner.sync_system_context_state(id).await;
                 } else {
                     tracing::warn!(
@@ -5589,25 +5578,10 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             .await;
 
             if let Err(err) = persist_result {
-                let rollback_result = {
-                    let mut guard = match state_arc.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => {
-                            tracing::warn!(
-                                session_id = %id,
-                                "system-context state lock poisoned while rolling back failed live append"
-                            );
-                            poisoned.into_inner()
-                        }
-                    };
-                    if *guard == persisted_state {
-                        *guard = snapshot_state;
-                        Ok(())
-                    } else {
-                        Err(())
-                    }
-                };
-                if rollback_result.is_ok() {
+                let rollback_result = state_handle
+                    .replace_from_generated_restore_if_current(&persisted_state, snapshot_state)
+                    .map_err(|_| ());
+                if matches!(rollback_result, Ok(true)) {
                     let _ = self.inner.sync_system_context_state(id).await;
                 } else {
                     tracing::warn!(
@@ -5620,19 +5594,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 return Err(err);
             }
 
-            let reconciled_state = {
-                let guard = match state_arc.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        tracing::warn!(
-                            session_id = %id,
-                            "system-context state lock poisoned while reconciling durable append state"
-                        );
-                        poisoned.into_inner()
-                    }
-                };
-                guard.clone()
-            };
+            let reconciled_state = state_handle.snapshot();
             if reconciled_state != persisted_state {
                 let mut session = if self.runtime_store.is_some() {
                     match self.load_authoritative_session_base(id).await? {
@@ -5935,7 +5897,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(matches!(
-            state.first_turn_phase,
+            state.first_turn_phase(),
             DeferredFirstTurnPhase::Pending
         ))
     }
@@ -5999,7 +5961,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 mod tests {
     use super::*;
     use crate::ephemeral::{
-        EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+        EphemeralSessionService, ObservedSessionTailKind, SessionAgent, SessionAgentBuilder,
+        SessionSnapshot,
     };
     use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
     use meerkat_core::ToolDispatchOutcome;
@@ -6685,7 +6648,7 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<meerkat_runtime::store::SessionDelta>,
             receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-            input_updates: Vec<StoredInputState>,
+            input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<SessionId>,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner
@@ -6859,7 +6822,7 @@ mod tests {
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &StoredInputState,
+            state: &InputStatePersistenceRecord,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner.persist_input_state(runtime_id, state).await
         }
@@ -6872,19 +6835,18 @@ mod tests {
             self.inner.load_input_state(runtime_id, input_id).await
         }
 
-        async fn load_runtime_state(
+        async fn load_machine_lifecycle_record(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<meerkat_runtime::RuntimeState>, meerkat_runtime::store::RuntimeStoreError>
-        {
-            self.inner.load_runtime_state(runtime_id).await
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
         }
 
         async fn commit_machine_lifecycle(
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: meerkat_runtime::store::MachineLifecycleCommit,
-            input_states: &[StoredInputState],
+            input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
@@ -7025,45 +6987,31 @@ mod tests {
             &mut self,
             filter: meerkat_core::ToolFilter,
         ) -> Result<(), meerkat_core::error::AgentError> {
-            let mut session = match self.session.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
+            let mut state = {
+                let session = match self.session.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                session
+                    .tool_visibility_state()
+                    .map_err(|err| {
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to decode dummy visibility state: {err}"
+                        ))
+                    })?
+                    .unwrap_or_default()
             };
-            let mut state = session
-                .tool_visibility_state()
-                .map_err(|err| {
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to decode dummy visibility state: {err}"
-                    ))
-                })?
-                .unwrap_or_default();
             state.staged_filter = filter;
             state.staged_revision = state.staged_revision.max(state.active_revision) + 1;
-            session.set_tool_visibility_state(state).map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to update dummy visibility state: {err}"
-                ))
-            })
+            self.set_tool_visibility_state(Some(state))
         }
 
         fn set_tool_visibility_state(
             &mut self,
             state: Option<meerkat_core::SessionToolVisibilityState>,
         ) -> Result<(), meerkat_core::error::AgentError> {
-            let mut session = match self.session.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(state) = state {
-                session.set_tool_visibility_state(state).map_err(|err| {
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to replace dummy visibility state: {err}"
-                    ))
-                })
-            } else {
-                session.remove_metadata(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
-                Ok(())
-            }
+            let _ = state;
+            Ok(())
         }
 
         fn session_id(&self) -> SessionId {
@@ -7093,6 +7041,22 @@ mod tests {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
             }
+        }
+
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            Some(test_durable_llm_identity(&session))
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
         }
 
         fn update_keep_alive(&mut self, keep_alive: bool) {
@@ -7157,10 +7121,10 @@ mod tests {
             }
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            meerkat_core::SystemContextStateHandle::from_shared_authority_state(Arc::clone(
+                &self.system_context_state,
+            ))
         }
 
         fn sync_session_from_durable_snapshot(
@@ -7278,6 +7242,14 @@ mod tests {
             self.inner.session_clone()
         }
 
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            self.inner.durable_llm_identity()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
+        }
+
         fn update_keep_alive(&mut self, keep_alive: bool) {
             self.inner.update_keep_alive(keep_alive);
         }
@@ -7304,9 +7276,7 @@ mod tests {
             self.inner.apply_runtime_system_context(appends);
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
             self.inner.system_context_state()
         }
     }
@@ -7445,6 +7415,14 @@ mod tests {
             self.inner.session_clone()
         }
 
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            self.inner.durable_llm_identity()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
+        }
+
         fn update_keep_alive(&mut self, keep_alive: bool) {
             self.inner.update_keep_alive(keep_alive);
         }
@@ -7471,9 +7449,7 @@ mod tests {
             self.inner.apply_runtime_system_context(appends);
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
             self.inner.system_context_state()
         }
 
@@ -7845,6 +7821,14 @@ mod tests {
             self.inner.session_clone()
         }
 
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            self.inner.durable_llm_identity()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
+        }
+
         fn update_keep_alive(&mut self, keep_alive: bool) {
             self.inner.update_keep_alive(keep_alive);
         }
@@ -7871,9 +7855,7 @@ mod tests {
             self.inner.apply_runtime_system_context(appends);
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
             self.inner.system_context_state()
         }
     }
@@ -8086,12 +8068,28 @@ mod tests {
             }
         }
 
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            Some(test_durable_llm_identity(&session))
+        }
+
         fn session_id(&self) -> SessionId {
             let guard = match self.session.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
             guard.id().clone()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
         }
 
         fn apply_runtime_system_context(
@@ -8107,10 +8105,10 @@ mod tests {
             self.system_context_state = Arc::new(std::sync::Mutex::new(state));
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            meerkat_core::SystemContextStateHandle::from_shared_authority_state(Arc::clone(
+                &self.system_context_state,
+            ))
         }
 
         fn sync_session_from_durable_snapshot(
@@ -8271,7 +8269,7 @@ mod tests {
             &mut self,
             call: ToolCall,
         ) -> Result<ToolDispatchOutcome, meerkat_core::error::AgentError> {
-            let mut session = match self.session.lock() {
+            let session = match self.session.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -8290,11 +8288,7 @@ mod tests {
             state
                 .requested_witnesses
                 .insert(requested_name, expected_tool_dispatch_witness(&call.name));
-            session.set_tool_visibility_state(state).map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to persist tool dispatch state: {err}"
-                ))
-            })?;
+            let _ = state;
             Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
                 call.id,
                 format!("handled {}", call.name),
@@ -8372,6 +8366,22 @@ mod tests {
             }
         }
 
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            Some(test_durable_llm_identity(&session))
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
+        }
+
         fn apply_runtime_system_context(
             &mut self,
             appends: &[meerkat_core::PendingSystemContextAppend],
@@ -8385,10 +8395,10 @@ mod tests {
             self.system_context_state = Arc::new(std::sync::Mutex::new(state));
         }
 
-        fn system_context_state(
-            &self,
-        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-            Arc::clone(&self.system_context_state)
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            meerkat_core::SystemContextStateHandle::from_shared_authority_state(Arc::clone(
+                &self.system_context_state,
+            ))
         }
     }
 
@@ -8430,6 +8440,19 @@ mod tests {
             build: None,
             labels: None,
         }
+    }
+
+    fn test_durable_llm_identity(session: &Session) -> meerkat_core::SessionLlmIdentity {
+        session
+            .session_metadata()
+            .map(|metadata| metadata.llm_identity())
+            .unwrap_or(meerkat_core::SessionLlmIdentity {
+                model: "test".to_string(),
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            })
     }
 
     fn resume_request(session: Session) -> CreateSessionRequest {
@@ -8562,6 +8585,50 @@ mod tests {
             )
             .await
             .expect("machine-owned runtime output commit should succeed");
+    }
+
+    fn recovered_input_persistence_record(
+        runtime_id: &LogicalRuntimeId,
+        mut bundle: StoredInputState,
+    ) -> InputStatePersistenceRecord {
+        if bundle.state.persisted_input.is_none() {
+            let mut input = meerkat_runtime::PromptInput::new("recovered test input", None);
+            input.header.id = bundle.state.input_id.clone();
+            let input = meerkat_runtime::Input::Prompt(input);
+            bundle.state.runtime_semantics.get_or_insert_with(|| {
+                meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                    &input, true,
+                )
+                .expect("test input should receive generated runtime semantics")
+            });
+            bundle.state.persisted_input = Some(input);
+        }
+        bundle
+            .seed
+            .recovery_lane
+            .get_or_insert(meerkat_core::types::HandlingMode::Queue);
+        let mut driver = meerkat_runtime::EphemeralRuntimeDriver::new(runtime_id.clone());
+        driver
+            .recover_input_state_persistence_record(bundle)
+            .expect("test input-state bundle should recover through generated authority")
+    }
+
+    fn applied_system_context_state(
+        append: PendingSystemContextAppend,
+    ) -> SessionSystemContextState {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    text: append.text,
+                    source: append.source,
+                    idempotency_key: append.idempotency_key,
+                },
+                append.accepted_at,
+            )
+            .expect("test system-context append should stage");
+        state.mark_pending_applied();
+        state
     }
 
     fn start_turn_request_with_system_prompt(
@@ -10296,7 +10363,7 @@ mod tests {
         assert!(
             authoritative
                 .system_context_state()
-                .is_none_or(|state| state.applied.is_empty()),
+                .is_none_or(|state| state.applied().is_empty()),
             "failed pre-turn context must not be committed to durable session state"
         );
         assert!(
@@ -10941,8 +11008,8 @@ mod tests {
             .expect("create_session should succeed");
         let mut durable = Session::with_id(created.session_id.clone());
         durable
-            .set_system_context_state(SessionSystemContextState {
-                applied: vec![PendingSystemContextAppend {
+            .set_system_context_state(applied_system_context_state(
+                PendingSystemContextAppend {
                     text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string(),
                     source: Some(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
@@ -10950,9 +11017,8 @@ mod tests {
                     ),
                     idempotency_key: Some("req-123".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
-                }],
-                ..Default::default()
-            })
+                },
+            ))
             .expect("set durable system context state");
         runtime_store
             .commit_session_snapshot(
@@ -10978,7 +11044,7 @@ mod tests {
         let runtime_context = realtime_snapshot.system_context_state().unwrap_or_default();
         assert!(
             runtime_context
-                .applied
+                .applied()
                 .iter()
                 .any(|append| append.text.contains("birch seventeen")),
             "realtime open snapshot should preserve durable runtime context: {runtime_context:?}"
@@ -11010,8 +11076,8 @@ mod tests {
             .expect("create_session should succeed");
         let mut durable = Session::with_id(created.session_id.clone());
         durable
-            .set_system_context_state(SessionSystemContextState {
-                applied: vec![PendingSystemContextAppend {
+            .set_system_context_state(applied_system_context_state(
+                PendingSystemContextAppend {
                     text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string(),
                     source: Some(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
@@ -11019,9 +11085,8 @@ mod tests {
                     ),
                     idempotency_key: Some("req-123".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
-                }],
-                ..Default::default()
-            })
+                },
+            ))
             .expect("set durable system context state");
         runtime_store
             .commit_session_snapshot(
@@ -11051,7 +11116,7 @@ mod tests {
         let runtime_context = persisted.system_context_state().unwrap_or_default();
         assert!(
             runtime_context
-                .applied
+                .applied()
                 .iter()
                 .any(|append| append.text.contains("birch seventeen")),
             "live persistence after realtime open must not erase durable runtime context: {runtime_context:?}"
@@ -11105,29 +11170,29 @@ mod tests {
             )
             .await
             .expect("archive should retire through machine authority");
-        let archived = service
-            .load_authoritative_session(&created.session_id)
+        let archived_projection = store
+            .load(&created.session_id)
             .await
-            .expect("archive authority should load")
-            .expect("archive should persist the durable snapshot");
+            .expect("compatibility projection load should succeed")
+            .expect("archive should persist the compatibility projection");
         assert!(
-            metadata_marks_archived(archived.metadata()),
+            metadata_marks_archived(archived_projection.metadata()),
             "archive should mirror retired lifecycle into the compatibility projection"
         );
         assert_eq!(
-            runtime_store
-                .load_runtime_state(
-                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
-                        &created.session_id
-                    )
-                )
-                .await
-                .expect("runtime state load should succeed"),
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &created.session_id
+                ),
+            )
+            .await
+            .expect("runtime state load should succeed"),
             Some(RuntimeState::Retired),
             "archive must persist machine-owned retired lifecycle"
         );
         assert!(
-            archived.messages().is_empty(),
+            archived_projection.messages().is_empty(),
             "archive() must not persist uncommitted live transcript as durable truth"
         );
         assert!(
@@ -11306,17 +11371,13 @@ mod tests {
             None,
             memory_blob_store(),
         );
-        let created = service
-            .create_session(create_request("archived", InitialTurnPolicy::Defer))
+        let mut archived = Session::new();
+        let id = archived.id().clone();
+        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        store
+            .save(&archived)
             .await
-            .expect("create_session should succeed");
-        let id = created.session_id.clone();
-        service.archive(&id).await.unwrap();
-        let archived = store
-            .load(&id)
-            .await
-            .unwrap()
-            .expect("archive should retain a durable archived snapshot");
+            .expect("test should seed an archived compatibility row");
 
         let err = service
             .append_system_context(
@@ -11378,7 +11439,16 @@ mod tests {
         assert!(page.has_more);
         assert_eq!(page.messages.len(), 2);
 
-        service.archive(&id).await.expect("archive should succeed");
+        let mut archived_projection = store
+            .load(&id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("session-store projection should exist");
+        archived_projection.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        store
+            .save(&archived_projection)
+            .await
+            .expect("test should seed archived compatibility projection");
 
         let archived = service
             .read_history(
@@ -13338,7 +13408,7 @@ mod tests {
         graphless_post_turn.push(Message::User(UserMessage::text(
             "normal turn after rewrite".to_string(),
         )));
-        graphless_post_turn.remove_metadata(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+        graphless_post_turn.clear_transcript_history_state();
 
         let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         recovery_store
@@ -14186,10 +14256,20 @@ mod tests {
             .expect("load authoritative")
             .expect("session should exist");
 
-        service
-            .archive(&created.session_id)
+        let mut archived = store
+            .load(&created.session_id)
             .await
-            .expect("archive should succeed");
+            .expect("raw store load should succeed")
+            .expect("session-store projection should exist");
+        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        store
+            .save(&archived)
+            .await
+            .expect("test should seed archived compatibility projection");
+        service
+            .discard_live_session(&created.session_id)
+            .await
+            .expect("test archive seed should release live capacity");
 
         let rejected = service.create_session(resume_request(stale_resume)).await;
         assert!(
@@ -14225,10 +14305,20 @@ mod tests {
             .expect("load authoritative")
             .expect("session should exist");
 
-        service
-            .archive(&created.session_id)
+        let mut archived = store
+            .load(&created.session_id)
             .await
-            .expect("archive should succeed");
+            .expect("raw store load should succeed")
+            .expect("session-store projection should exist");
+        archived.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
+        store
+            .save(&archived)
+            .await
+            .expect("test should seed archived compatibility projection");
+        service
+            .discard_live_session(&created.session_id)
+            .await
+            .expect("test archive seed should release live capacity");
         let stored = service
             .load_authoritative_session(&created.session_id)
             .await
@@ -14256,7 +14346,7 @@ mod tests {
             .await
             .expect("machine-authorized pending-promotion retry may resume archived durable base");
         service
-            .archive(&created.session_id)
+            .discard_live_session(&created.session_id)
             .await
             .expect("authorized retry should remain controllable and release capacity");
 
@@ -14839,8 +14929,8 @@ mod tests {
         let state = stored
             .system_context_state()
             .expect("restored row should contain pending system-context state");
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].text, "runtime notice");
+        assert_eq!(state.pending().len(), 1);
+        assert_eq!(state.pending()[0].text, "runtime notice");
     }
 
     #[tokio::test]
@@ -14882,13 +14972,13 @@ mod tests {
             .system_context_state(&id)
             .await
             .expect("live session should still exist");
-        let guard = state.lock().expect("system-context state lock");
+        let guard = state.snapshot();
         assert!(
-            guard.pending.is_empty(),
+            guard.pending().is_empty(),
             "failed append must not mutate live runtime state"
         );
         assert!(
-            !guard.seen.contains_key("ctx-save-failure"),
+            !guard.seen().contains_key("ctx-save-failure"),
             "failed append must not reserve the idempotency key in live state"
         );
     }
@@ -14913,19 +15003,16 @@ mod tests {
             .system_context_state(&id)
             .await
             .expect("live session should expose shared system-context state");
-        {
-            let mut guard = state.lock().expect("system-context state lock");
-            guard
-                .stage_append(
-                    &AppendSystemContextRequest {
-                        text: "queued live append".to_string(),
-                        source: Some("mob".to_string()),
-                        idempotency_key: Some("ctx-export-merge".to_string()),
-                    },
-                    meerkat_core::time_compat::SystemTime::now(),
-                )
-                .expect("staging into shared state should succeed");
-        }
+        state
+            .stage_append_with_snapshot(
+                &AppendSystemContextRequest {
+                    text: "queued live append".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-export-merge".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .expect("staging into shared state should succeed");
 
         let exported = service
             .export_live_session(&id)
@@ -14934,10 +15021,10 @@ mod tests {
         let exported_state = exported
             .system_context_state()
             .expect("exported session should include merged system-context state");
-        assert_eq!(exported_state.pending.len(), 1);
-        assert_eq!(exported_state.pending[0].text, "queued live append");
+        assert_eq!(exported_state.pending().len(), 1);
+        assert_eq!(exported_state.pending()[0].text, "queued live append");
         assert!(
-            exported_state.seen.contains_key("ctx-export-merge"),
+            exported_state.seen().contains_key("ctx-export-merge"),
             "exported session should include the staged idempotency key"
         );
     }
@@ -15467,9 +15554,9 @@ mod tests {
         let append_state = append_authoritative
             .system_context_state()
             .expect("runtime authority should carry the committed append");
-        assert_eq!(append_state.pending.len(), 1);
+        assert_eq!(append_state.pending().len(), 1);
         assert_eq!(
-            append_state.pending[0].text,
+            append_state.pending()[0].text,
             "runtime-backed control context"
         );
         let append_raw = store
@@ -15479,7 +15566,7 @@ mod tests {
             .expect("stale append projection should remain present");
         let raw_pending_context_count = append_raw
             .system_context_state()
-            .map_or(0, |state| state.pending.len());
+            .map_or(0, |state| state.pending().len());
         assert_eq!(
             raw_pending_context_count, 0,
             "failed append projection update must not silently refresh raw store state"
@@ -15527,7 +15614,7 @@ mod tests {
         let stage_deferred = stage_authoritative
             .deferred_turn_state()
             .expect("runtime authority should carry staged tool results");
-        assert_eq!(stage_deferred.pending_tool_results.len(), 1);
+        assert_eq!(stage_deferred.pending_tool_results().len(), 1);
         let stage_raw = store
             .load(&stage_result.session_id)
             .await
@@ -15535,7 +15622,7 @@ mod tests {
             .expect("stale stage projection should remain present");
         let raw_tool_result_count = stage_raw
             .deferred_turn_state()
-            .map_or(0, |state| state.pending_tool_results.len());
+            .map_or(0, |state| state.pending_tool_results().len());
         assert_eq!(
             raw_tool_result_count, 0,
             "failed stage projection update must not silently refresh raw store state"
@@ -15632,8 +15719,8 @@ mod tests {
         let state = stored
             .system_context_state()
             .expect("runtime-backed append should persist pending context");
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].text, "Remember runtime-backed context");
+        assert_eq!(state.pending().len(), 1);
+        assert_eq!(state.pending()[0].text, "Remember runtime-backed context");
     }
 
     #[tokio::test]
@@ -15694,8 +15781,8 @@ mod tests {
         let state = stored
             .system_context_state()
             .expect("runtime-backed append should persist pending control state");
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].text, "durable pending context");
+        assert_eq!(state.pending().len(), 1);
+        assert_eq!(state.pending()[0].text, "durable pending context");
         let raw = store
             .load(&result.session_id)
             .await
@@ -15708,8 +15795,8 @@ mod tests {
         let raw_state = raw
             .system_context_state()
             .expect("projection should mirror committed control state");
-        assert_eq!(raw_state.pending.len(), 1);
-        assert_eq!(raw_state.pending[0].text, "durable pending context");
+        assert_eq!(raw_state.pending().len(), 1);
+        assert_eq!(raw_state.pending()[0].text, "durable pending context");
     }
 
     #[tokio::test]
@@ -15764,9 +15851,9 @@ mod tests {
         let state = stored
             .system_context_state()
             .expect("runtime snapshot should carry pending control state");
-        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending().len(), 1);
         assert_eq!(
-            state.pending[0].text,
+            state.pending()[0].text,
             "control snapshot should not mint a receipt"
         );
     }
@@ -15851,8 +15938,8 @@ mod tests {
         let state = stored
             .system_context_state()
             .expect("append should persist pending control state");
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].text, "runtime append");
+        assert_eq!(state.pending().len(), 1);
+        assert_eq!(state.pending()[0].text, "runtime append");
     }
 
     #[tokio::test]
@@ -15921,8 +16008,8 @@ mod tests {
         let state = authoritative
             .system_context_state()
             .expect("runtime authority should carry pending context");
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].text, "persisted runtime append");
+        assert_eq!(state.pending().len(), 1);
+        assert_eq!(state.pending()[0].text, "persisted runtime append");
 
         let view = service
             .read(&result.session_id)
@@ -15971,7 +16058,7 @@ mod tests {
         let resumed_state = resumed_live
             .system_context_state()
             .expect("resumed session should preserve runtime-authoritative pending context");
-        assert_eq!(resumed_state.pending[0].text, "persisted runtime append");
+        assert_eq!(resumed_state.pending()[0].text, "persisted runtime append");
     }
 
     #[tokio::test]
@@ -16014,10 +16101,17 @@ mod tests {
             "runtime-only turn",
             None,
         )));
-        runtime_session.remove_metadata(SESSION_METADATA_KEY);
-        runtime_session.remove_metadata(meerkat_core::SESSION_BUILD_STATE_KEY);
-        let session_snapshot =
-            serde_json::to_vec(&runtime_session).expect("runtime snapshot should serialize");
+        let mut runtime_session_value =
+            serde_json::to_value(&runtime_session).expect("runtime snapshot should serialize");
+        runtime_session_value
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized session metadata should be an object")
+            .retain(|key, _| {
+                key != SESSION_METADATA_KEY && key != meerkat_core::SESSION_BUILD_STATE_KEY
+            });
+        let session_snapshot = serde_json::to_vec(&runtime_session_value)
+            .expect("runtime snapshot value should serialize");
         runtime_store
             .commit_session_snapshot(
                 &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
@@ -16314,6 +16408,7 @@ mod tests {
             state: input_state,
             seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
         };
+        let stored = recovered_input_persistence_record(&canonical_runtime_id, stored);
         runtime_store
             .persist_input_state(&canonical_runtime_id, &stored)
             .await
@@ -16419,6 +16514,8 @@ mod tests {
             state: canonical_state.clone(),
             seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
         };
+        let canonical_stored =
+            recovered_input_persistence_record(&canonical_runtime_id, canonical_stored);
         runtime_store
             .persist_input_state(&canonical_runtime_id, &canonical_stored)
             .await
@@ -16431,10 +16528,13 @@ mod tests {
         runtime_store
             .persist_input_state(
                 &legacy_runtime_id,
-                &StoredInputState {
-                    state: legacy_state,
-                    seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
-                },
+                &recovered_input_persistence_record(
+                    &legacy_runtime_id,
+                    StoredInputState {
+                        state: legacy_state,
+                        seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+                    },
+                ),
             )
             .await
             .expect("test should seed newer stale legacy input state");
@@ -16914,8 +17014,8 @@ mod tests {
         let state = stored
             .system_context_state()
             .expect("append should persist pending control state");
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].text, "prefer store");
+        assert_eq!(state.pending().len(), 1);
+        assert_eq!(state.pending()[0].text, "prefer store");
     }
 
     #[tokio::test]
@@ -16966,8 +17066,8 @@ mod tests {
         let deferred = authoritative
             .deferred_turn_state()
             .expect("runtime authority should carry deferred-turn state");
-        assert_eq!(deferred.pending_tool_results.len(), 1);
-        assert_eq!(deferred.pending_tool_results[0].results.len(), 1);
+        assert_eq!(deferred.pending_tool_results().len(), 1);
+        assert_eq!(deferred.pending_tool_results()[0].results.len(), 1);
 
         let raw = store
             .load(&result.session_id)
@@ -16977,7 +17077,7 @@ mod tests {
         let raw_deferred = raw
             .deferred_turn_state()
             .expect("projection should mirror committed deferred-turn state");
-        assert_eq!(raw_deferred.pending_tool_results.len(), 1);
+        assert_eq!(raw_deferred.pending_tool_results().len(), 1);
 
         let view = service
             .read(&result.session_id)
@@ -17025,7 +17125,7 @@ mod tests {
         let resumed_deferred = resumed_live
             .deferred_turn_state()
             .expect("resumed session should preserve staged tool results");
-        assert_eq!(resumed_deferred.pending_tool_results.len(), 1);
+        assert_eq!(resumed_deferred.pending_tool_results().len(), 1);
     }
 
     #[tokio::test]
@@ -17099,22 +17199,21 @@ mod tests {
                 "{mode} stage error should require machine authority: {stage_err:?}"
             );
 
-            let archive_err = service
-                .archive(&id)
-                .await
-                .expect_err("store-only projection must not own lifecycle archive");
-            assert!(
-                matches!(
-                    archive_err,
-                    SessionError::Unsupported(ref message)
-                        if (runtime_backed
-                            && message.contains("MachineSessionArchiveProtocol"))
-                            || (!runtime_backed
-                                && message.contains("store-only compatibility projection")
-                                && message.contains("machine snapshot"))
-                ),
-                "{mode} archive error should require machine authority: {archive_err:?}"
-            );
+            let archive_result = service.archive(&id).await;
+            if runtime_backed {
+                let archive_err =
+                    archive_result.expect_err("runtime-backed archive must route through machine");
+                assert!(
+                    matches!(
+                        archive_err,
+                        SessionError::Unsupported(ref message)
+                            if message.contains("MachineSessionArchiveProtocol")
+                    ),
+                    "{mode} archive error should require machine authority: {archive_err:?}"
+                );
+            } else {
+                archive_result.expect("runtime-less compatibility archive should remain supported");
+            }
 
             let raw = store
                 .load(&id)
@@ -17129,9 +17228,10 @@ mod tests {
                 raw.deferred_turn_state().is_none(),
                 "{mode} stage rejection must not mutate the store-only projection"
             );
-            assert!(
-                !metadata_marks_archived(raw.metadata()),
-                "{mode} archive rejection must not mutate lifecycle metadata"
+            assert_eq!(
+                metadata_marks_archived(raw.metadata()),
+                !runtime_backed,
+                "{mode} archive lifecycle metadata should reflect runtime-less compatibility support"
             );
             if let Some(runtime_store) = runtime_store {
                 assert!(
@@ -17221,12 +17321,12 @@ mod tests {
                     "store-only machine archive rejection must not create runtime authority"
                 );
                 assert_eq!(
-                    runtime_store
-                        .load_runtime_state(
-                            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                        )
-                        .await
-                        .expect("runtime state load should succeed"),
+                    meerkat_runtime::store::load_runtime_state(
+                        runtime_store.as_ref(),
+                        &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                    )
+                    .await
+                    .expect("runtime state load should succeed"),
                     None,
                     "store-only machine archive rejection must not create retired lifecycle"
                 );
@@ -17537,7 +17637,7 @@ mod tests {
         let context = session.system_context_state().unwrap_or_default();
         assert!(
             context
-                .applied
+                .applied()
                 .iter()
                 .any(|append| append.text.contains("birch seventeen")),
             "no-pending terminal snapshot should preserve pre-turn context: {context:?}"
@@ -17865,7 +17965,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_session_tool_filter_persists_to_store() {
+    async fn test_set_session_tool_filter_does_not_forge_visibility_state() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
@@ -17895,18 +17995,16 @@ mod tests {
         let exported = service.export_session_with_labels(&id).await.unwrap();
         let exported_state = exported
             .tool_visibility_state()
-            .expect("live visibility state should decode")
-            .expect("live session should carry visibility state after staging");
-        assert_eq!(exported_state.staged_filter, filter);
-        assert_eq!(exported_state.active_filter, meerkat_core::ToolFilter::All);
-        assert_eq!(exported_state.staged_revision, 1);
-        assert_eq!(exported_state.active_revision, 0);
+            .expect("live visibility state should decode");
+        assert!(
+            exported_state.is_none(),
+            "store-only filter update must not forge generated visibility authority"
+        );
 
         let persisted = store.load(&id).await.unwrap().unwrap();
         let persisted_state = persisted
             .tool_visibility_state()
-            .expect("persisted visibility state should decode")
-            .expect("persisted session should carry visibility state after staging");
+            .expect("persisted visibility state should decode");
         assert_eq!(persisted_state, exported_state);
     }
 
@@ -18094,10 +18192,16 @@ mod tests {
             .as_mut()
             .and_then(|build| build.resume_session.as_mut())
             .expect("request should carry a resumable session");
-        session.set_metadata(
-            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
-            malformed_visibility_state.clone(),
-        );
+        let mut raw_session = serde_json::to_value(&*session).expect("session should serialize");
+        raw_session
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session JSON should carry metadata")
+            .insert(
+                meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
+                malformed_visibility_state.clone(),
+            );
+        *session = serde_json::from_value(raw_session).expect("session should deserialize");
 
         let created = service
             .create_session(request)
@@ -18302,7 +18406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_external_tool_call_persists_live_session_changes() {
+    async fn test_dispatch_external_tool_call_does_not_forge_tool_visibility_state() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             ToolDispatchBuilder,
@@ -18339,13 +18443,10 @@ mod tests {
             .expect("persisted session should exist");
         let visibility_state = persisted
             .tool_visibility_state()
-            .expect("persisted visibility state should decode")
-            .expect("persistent dispatch should save session mutations");
+            .expect("persisted visibility state should decode");
         assert!(
-            visibility_state
-                .staged_requested_deferred_names
-                .contains("requested:callback_probe_tool"),
-            "expected persisted tool-dispatch state to include the requested tool"
+            visibility_state.is_none(),
+            "external dispatch must not forge generated tool-visibility authority: {visibility_state:?}"
         );
     }
 

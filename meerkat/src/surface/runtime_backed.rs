@@ -299,12 +299,18 @@ where
         return Err(error);
     }
 
-    adapter
+    if let Err(error) = adapter
         .ensure_session_with_executor(
             result.session_id.clone(),
             executor_factory(result.session_id.clone()),
         )
-        .await;
+        .await
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+    }
 
     Ok(result)
 }
@@ -406,12 +412,18 @@ where
         return Err(error);
     }
 
-    adapter
+    if let Err(error) = adapter
         .ensure_session_with_executor(
             result.session_id.clone(),
             executor_factory(result.session_id.clone()),
         )
-        .await;
+        .await
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+    }
 
     Ok(result)
 }
@@ -510,11 +522,15 @@ impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
         &self,
         expected_run_id: &meerkat_core::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
-    ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
-        self.service
+    ) -> Result<meerkat_core::lifecycle::CoreBoundaryStageOutput, CoreExecutorError> {
+        let session_snapshot = self
+            .service
             .stage_live_system_context_boundary_snapshot(&self.session_id, expected_run_id, appends)
             .await
-            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?;
+        Ok(meerkat_core::lifecycle::CoreBoundaryStageOutput::new(
+            session_snapshot,
+        ))
     }
 
     async fn discard_staged_system_context_at_boundary(
@@ -1026,6 +1042,25 @@ mod tests {
         }
     }
 
+    fn has_applied_runtime_context(session: &Session, source: &str, text: &str) -> bool {
+        session
+            .system_context_state()
+            .unwrap_or_default()
+            .applied()
+            .iter()
+            .any(|append| append.source.as_deref() == Some(source) && append.text.contains(text))
+    }
+
+    fn runtime_output_session_snapshot(output: &CoreApplyOutput) -> Session {
+        serde_json::from_slice(
+            output
+                .session_snapshot
+                .as_deref()
+                .expect("runtime output should carry a machine-owned session snapshot"),
+        )
+        .expect("runtime session snapshot should deserialize")
+    }
+
     async fn build_default_persistence(
         session_dir: PathBuf,
     ) -> Result<PersistenceBundle, SessionStoreError> {
@@ -1036,7 +1071,8 @@ mod tests {
             .map_err(|error| SessionStoreError::Internal(error.to_string()))?;
         Ok(PersistenceBundle::new(
             jsonl_store as Arc<dyn SessionStore>,
-            None,
+            Some(Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
+                as Arc<dyn meerkat_runtime::RuntimeStore>),
             Arc::new(MemoryBlobStore::new()),
         ))
     }
@@ -1325,7 +1361,8 @@ mod tests {
         let handle = handle.expect("completion handle");
         let outcome = tokio::time::timeout(Duration::from_secs(2), handle.wait())
             .await
-            .expect("prompt should complete");
+            .expect("prompt should complete")
+            .expect("completion waiter should resolve");
         assert!(
             matches!(outcome, CompletionOutcome::Completed(ref run) if run.text == "ok"),
             "unexpected completion outcome: {outcome:?}"
@@ -1556,7 +1593,8 @@ mod tests {
         tool_release.notify_waiters();
         let outcome = tokio::time::timeout(Duration::from_secs(2), completion.wait())
             .await
-            .expect("prompt should complete");
+            .expect("prompt should complete")
+            .expect("completion waiter should resolve");
         assert!(
             matches!(outcome, CompletionOutcome::Completed(ref run) if run.text == "ok"),
             "unexpected completion outcome: {outcome:?}"
@@ -2275,22 +2313,15 @@ mod tests {
         );
         assert!(adapter.contains_session(&result.session_id).await);
 
-        let exported = service
-            .export_live_session(&result.session_id)
-            .await
-            .expect("export recovered live session");
-        let system_context = exported
-            .messages()
-            .iter()
-            .find_map(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or("");
+        let staged_snapshot = runtime_output_session_snapshot(&output);
         assert!(
-            system_context.contains("runtime-backed-context-recovery")
-                && system_context.contains("runtime-backed recovered context"),
-            "context-only recovery should persist runtime context append: {system_context}"
+            has_applied_runtime_context(
+                &staged_snapshot,
+                "runtime-backed-context-recovery",
+                "runtime-backed recovered context"
+            ),
+            "context-only recovery should persist runtime context append: {:?}",
+            staged_snapshot.system_context_state()
         );
 
         service
@@ -2429,7 +2460,7 @@ mod tests {
             .await
             .expect("terminal peer response should run requester reaction turn");
 
-        match output.terminal {
+        match output.terminal.as_ref() {
             Some(CoreApplyTerminal::RunResult(run_result)) => {
                 assert_eq!(run_result.text, "ok");
                 assert_eq!(run_result.session_id, result.session_id);
@@ -2437,25 +2468,15 @@ mod tests {
             other => panic!("expected terminal peer response run result, got {other:?}"),
         }
 
-        let exported = service
-            .export_live_session(&result.session_id)
-            .await
-            .expect("export live session after terminal peer response");
-        let system_context = exported
-            .messages()
-            .iter()
-            .find_map(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or("");
+        let staged_snapshot = runtime_output_session_snapshot(&output);
         assert!(
-            system_context.contains("peer_response_terminal:analyst-rt:req-456"),
-            "terminal peer response source must be applied before reaction turn: {system_context}"
-        );
-        assert!(
-            system_context.contains("Peer terminal response from analyst-rt"),
-            "terminal peer response context must be applied before reaction turn: {system_context}"
+            has_applied_runtime_context(
+                &staged_snapshot,
+                "peer_response_terminal:analyst-rt:req-456",
+                "Peer terminal response from analyst-rt"
+            ),
+            "terminal peer response context must be applied before reaction turn: {:?}",
+            staged_snapshot.system_context_state()
         );
 
         service

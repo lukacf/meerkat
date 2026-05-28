@@ -27,6 +27,8 @@
 //! [`crate::session_runtime::live_orchestration::LiveOrchestrator`]
 //! struct that will own the methods consuming `LiveAdapterHost`.
 
+use meerkat_core::error::AgentError;
+use meerkat_core::service::SessionError;
 use meerkat_core::types::{Message, SessionId, SystemMessage};
 use meerkat_core::{
     PendingSystemContextAppend, Session, SessionLlmIdentity, SessionToolVisibilityState,
@@ -156,9 +158,9 @@ pub fn build_live_projection_snapshot_for_runtime(
 /// Returns `true` when the channel must be closed (so the SDK can reopen
 /// against the new identity); `false` when an in-place `Refresh` is safe.
 ///
-/// `bound_identity = None` means the channel was opened without identity
-/// recording (degraded factory-less path). Treat as "no swap" so the
-/// legacy Refresh fallthrough path still applies.
+/// Callers must obtain `bound_identity` from generated live-open admission
+/// authority. Missing generated identity is handled as a fail-closed channel
+/// close before this comparison is reached.
 ///
 /// Audio-rate change is intentionally NOT checked here. The OpenAI
 /// Refresh guard rejects it, but R11's typed runtime path is scoped to
@@ -167,13 +169,10 @@ pub fn build_live_projection_snapshot_for_runtime(
 /// `LiveAdapterErrorCode::ConfigRejected` error from the adapter.
 #[must_use]
 pub fn live_channel_requires_close_for_identity_change(
-    bound_identity: Option<&SessionLlmIdentity>,
+    bound_identity: &SessionLlmIdentity,
     new_identity: &SessionLlmIdentity,
 ) -> bool {
-    match bound_identity {
-        Some(prev) => prev.model != new_identity.model || prev.provider != new_identity.provider,
-        None => false,
-    }
+    bound_identity.model != new_identity.model || bound_identity.provider != new_identity.provider
 }
 
 /// Decide whether `propagate_config_to_live_channels` should hot-swap a
@@ -259,11 +258,18 @@ pub fn should_fire_live_propagation(
 /// content is the union of the resolved `system_prompt` (or the first
 /// existing `System`/`SystemNotice` lead) and any session-build
 /// `additional_instructions`.
-#[must_use]
-pub fn realtime_projection_root_system_message(session: &Session) -> Option<Message> {
-    let build_state = session.build_state().unwrap_or_default();
+pub fn realtime_projection_root_system_message(
+    session: &Session,
+) -> Result<Option<Message>, SessionError> {
+    let build_state = session.build_state().ok_or_else(|| {
+        SessionError::Agent(AgentError::InternalError(format!(
+            "session {} is missing session build state",
+            session.id()
+        )))
+    })?;
     let mut content = build_state
         .system_prompt
+        .clone()
         .or_else(|| {
             session
                 .messages()
@@ -276,7 +282,7 @@ pub fn realtime_projection_root_system_message(session: &Session) -> Option<Mess
         })
         .unwrap_or_default();
 
-    if let Some(additional_instructions) = build_state.additional_instructions
+    if let Some(additional_instructions) = &build_state.additional_instructions
         && !additional_instructions.is_empty()
     {
         if !content.trim().is_empty() {
@@ -294,35 +300,40 @@ pub fn realtime_projection_root_system_message(session: &Session) -> Option<Mess
     }
 
     if content.trim().is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(Message::System(SystemMessage::new(content)))
+        Ok(Some(Message::System(SystemMessage::new(content))))
     }
 }
 
 /// Project a session's transcript for realtime delivery: prepend or
 /// rewrite the lead message with [`realtime_projection_root_system_message`]
 /// when one is available.
-#[must_use]
-pub fn realtime_projection_messages(session: &Session) -> Vec<Message> {
+pub fn realtime_projection_messages(session: &Session) -> Result<Vec<Message>, SessionError> {
     let mut projected = session.messages().to_vec();
-    if let Some(root_system) = realtime_projection_root_system_message(session) {
+    if let Some(root_system) = realtime_projection_root_system_message(session)? {
         match projected.first() {
             Some(Message::System(_) | Message::SystemNotice(_)) => projected[0] = root_system,
             _ => projected.insert(0, root_system),
         }
     }
-    projected
+    Ok(projected)
 }
 
 /// Project a session's runtime system context into the realtime
 /// open-config shape (applied + pending appends concatenated).
-#[must_use]
 pub fn realtime_projection_runtime_system_context(
     session: &Session,
-) -> Vec<PendingSystemContextAppend> {
-    let state = session.system_context_state().unwrap_or_default();
-    state.applied.into_iter().chain(state.pending).collect()
+) -> Result<Vec<PendingSystemContextAppend>, SessionError> {
+    let state = session
+        .try_system_context_state()
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "generated system-context authority rejected realtime projection restore: {err}"
+            )))
+        })?
+        .unwrap_or_default();
+    Ok(state.realtime_projection_appends())
 }
 
 /// Read the typed visibility state directly from the session without
@@ -384,12 +395,10 @@ mod orchestrator {
         CreateSessionRequest, InitialTurnPolicy, SessionError, SessionService,
     };
     use meerkat_core::types::{ContentInput, SessionId};
-    use meerkat_core::{DeferredPromptPolicy, SurfaceSessionRecoveryOverrides};
+    use meerkat_core::{DeferredPromptPolicy, SessionLlmIdentity, SurfaceSessionRecoveryOverrides};
     use meerkat_live::LiveAdapterHost;
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
-    use meerkat_runtime::{
-        MeerkatMachine, SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
-    };
+    use meerkat_runtime::{MeerkatMachine, SessionLlmReconfigureRequest, SessionServiceRuntimeExt};
     use meerkat_session::PersistentSessionService;
 
     use super::{
@@ -408,6 +417,7 @@ mod orchestrator {
     use crate::session_runtime::runtime_state::ArchiveRuntimeCleanup;
     use crate::session_runtime::staged_promotion::PendingPromotionCleanup;
     use crate::{StagedLifecycleError, StagedSessionRegistry};
+    use meerkat_core::error::AgentError;
 
     /// Surface-agnostic live-channel orchestrator.
     ///
@@ -441,9 +451,6 @@ mod orchestrator {
         pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
         /// Surface-supplied archive cleanup for failed recoveries.
         pub archive_runtime_cleanup: ArchiveRuntimeCleanup,
-        /// Surface-supplied LLM reconfigure host used for the idle
-        /// hot-swap branch of `propagate_config_to_live_channels`.
-        pub llm_reconfigure_host: &'a dyn SessionLlmReconfigureHost,
         /// Active realm id (cloned from the slot once per call).
         pub realm_id: Option<&'a meerkat_core::connection::RealmId>,
         /// Active instance id.
@@ -621,8 +628,12 @@ mod orchestrator {
                 })?;
             let keep_alive = session
                 .session_metadata()
-                .map(|metadata| metadata.keep_alive)
-                .unwrap_or(false);
+                .ok_or_else(|| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id} is missing session metadata"
+                    )))
+                })?
+                .keep_alive;
             let recovery_overrides = SurfaceSessionRecoveryOverrides {
                 keep_alive: Some(keep_alive),
                 ..Default::default()
@@ -679,9 +690,9 @@ mod orchestrator {
                 turning_mode,
                 llm_identity,
                 visible_tools,
-                realtime_projection_messages(&session),
+                realtime_projection_messages(&session)?,
             )
-            .with_runtime_system_context(realtime_projection_runtime_system_context(&session)))
+            .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?))
         }
 
         /// Build a live open config for a session that may be deferred
@@ -695,6 +706,31 @@ mod orchestrator {
                 .await
         }
 
+        /// Resolve the LLM identity that a new live channel will bind to
+        /// before generated `live/open` admission records it.
+        pub async fn live_llm_identity_for_session(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<SessionLlmIdentity, SessionError> {
+            if let Some(info) = self
+                .staged_sessions
+                .try_info(session_id)
+                .await
+                .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?
+            {
+                return Ok(info.effective_llm_identity);
+            }
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            match self.service.live_session_llm_identity(session_id).await {
+                Ok(identity) => Ok(identity),
+                Err(SessionError::NotFound { .. }) => {
+                    Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+                    self.service.live_session_llm_identity(session_id).await
+                }
+                Err(error) => Err(error),
+            }
+        }
+
         /// Pre-flight checks for `live/open` before any infra is minted.
         pub async fn precheck_live_open(
             &self,
@@ -704,7 +740,16 @@ mod orchestrator {
                 session_id: session_id.clone(),
                 source: err,
             };
-            if let Some(info) = self.staged_sessions.info(session_id).await {
+            if let Some(info) = self
+                .staged_sessions
+                .try_info(session_id)
+                .await
+                .map_err(|err| {
+                    map_lookup_err(SessionError::Agent(AgentError::InternalError(
+                        err.to_string(),
+                    )))
+                })?
+            {
                 return precheck_identity(&info.effective_llm_identity);
             }
             Box::pin(self.recover_live_session_for_realtime_open(session_id))
@@ -724,6 +769,78 @@ mod orchestrator {
                 Err(other) => return Err(map_lookup_err(other)),
             };
             precheck_identity(&identity)
+        }
+
+        async fn close_live_channel_for_config_rejection(
+            &self,
+            host: &meerkat_live::LiveAdapterHost,
+            session_id: &SessionId,
+            channel_id: &meerkat_live::LiveChannelId,
+            reason: meerkat_core::live_adapter::LiveConfigRejectionReason,
+            context: &'static str,
+        ) {
+            match host
+                .signal_terminal_error_observed(
+                    channel_id,
+                    meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason },
+                )
+                .await
+            {
+                Ok(observation) => {
+                    let authority = match self
+                        .runtime_adapter
+                        .resolve_live_close_result(session_id, &observation)
+                        .await
+                    {
+                        Ok(authority) => authority,
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "meerkat::session_runtime::live_orchestration",
+                                ?channel_id,
+                                ?session_id,
+                                ?err,
+                                context,
+                                "live close authority rejected config-rejection terminal cleanup"
+                            );
+                            return;
+                        }
+                    };
+                    let Some(close_commit_authority) = authority.channel_close_commit_authority()
+                    else {
+                        tracing::warn!(
+                            target: "meerkat::session_runtime::live_orchestration",
+                            ?channel_id,
+                            ?session_id,
+                            context,
+                            "live close authority omitted config-rejection host commit handoff"
+                        );
+                        return;
+                    };
+                    if let Err(err) = host
+                        .commit_channel_close_observation(&observation, close_commit_authority)
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "meerkat::session_runtime::live_orchestration",
+                            ?channel_id,
+                            ?session_id,
+                            ?err,
+                            context,
+                            "host close commit failed after config-rejection generated terminal cleanup"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "meerkat::session_runtime::live_orchestration",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        context,
+                        "failed to signal terminal error on live channel after config rejection"
+                    );
+                }
+            }
         }
 
         /// Fan out `Refresh` (or `Close` if the new resolved model is no
@@ -753,7 +870,10 @@ mod orchestrator {
             let channels = host.active_channels().await;
             let mut unique_sessions: Vec<SessionId> = Vec::new();
             for channel_id in &channels {
-                if let Ok(session_id) = host.channel_session(channel_id).await
+                if let Some(session_id) = self
+                    .runtime_adapter
+                    .live_session_for_active_channel(channel_id)
+                    .await
                     && !unique_sessions.iter().any(|sid| sid == &session_id)
                 {
                     unique_sessions.push(session_id);
@@ -808,12 +928,10 @@ mod orchestrator {
                         auth_binding: None,
                         clear_auth_binding: false,
                     };
-                    if let Err(err) = crate::session_runtime::llm_reconfigure::hot_swap_llm_client_on_idle_session(
-                        self.llm_reconfigure_host,
-                        session_id,
-                        &request,
-                    )
-                    .await
+                    if let Err(err) = self
+                        .runtime_adapter
+                        .reconfigure_session_llm_identity(session_id, request)
+                        .await
                     {
                         tracing::debug!(
                             target: "meerkat::session_runtime::live_orchestration",
@@ -826,14 +944,17 @@ mod orchestrator {
                 }
             }
             for channel_id in channels {
-                let session_id = match host.channel_session(&channel_id).await {
-                    Ok(id) => id,
-                    Err(err) => {
+                let session_id = match self
+                    .runtime_adapter
+                    .live_session_for_active_channel(&channel_id)
+                    .await
+                {
+                    Some(id) => id,
+                    None => {
                         tracing::debug!(
                             target: "meerkat::session_runtime::live_orchestration",
                             ?channel_id,
-                            ?err,
-                            "live channel session lookup failed during config propagation"
+                            "skipping live channel absent from generated active-channel authority"
                         );
                         continue;
                     }
@@ -849,14 +970,14 @@ mod orchestrator {
                     let reason = meerkat_core::live_adapter::LiveConfigRejectionReason::NonRealtimeResolution {
                         detail: format!("{precheck_err:?}"),
                     };
-                    let _ = host
-                        .signal_terminal_error(
-                            &channel_id,
-                            meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected {
-                                reason,
-                            },
-                        )
-                        .await;
+                    self.close_live_channel_for_config_rejection(
+                        host,
+                        &session_id,
+                        &channel_id,
+                        reason,
+                        "non_realtime",
+                    )
+                    .await;
                     continue;
                 }
                 let open_config = match Box::pin(self.live_open_config_for_session(
@@ -877,32 +998,66 @@ mod orchestrator {
                         continue;
                     }
                 };
-                let bound_identity = match host.channel_llm_identity(&channel_id).await {
-                    Ok(identity) => identity,
+                let bound_identity = match self
+                    .runtime_adapter
+                    .live_channel_bound_llm_identity(&session_id, &channel_id)
+                    .await
+                {
+                    Ok(Some(identity)) => identity,
+                    Ok(None) => {
+                        tracing::warn!(
+                            target: "meerkat::session_runtime::live_orchestration",
+                            ?channel_id,
+                            ?session_id,
+                            "closing live channel: generated bound LLM identity authority is absent"
+                        );
+                        self.close_live_channel_for_config_rejection(
+                            host,
+                            &session_id,
+                            &channel_id,
+                            meerkat_core::live_adapter::LiveConfigRejectionReason::Other {
+                                detail: "missing generated live-channel bound identity authority"
+                                    .to_string(),
+                            },
+                            "missing_generated_identity",
+                        )
+                        .await;
+                        continue;
+                    }
                     Err(err) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             target: "meerkat::session_runtime::live_orchestration",
                             ?channel_id,
                             ?session_id,
                             ?err,
-                            "channel identity lookup failed; skipping live channel"
+                            "closing live channel: generated bound LLM identity authority lookup failed"
                         );
+                        self.close_live_channel_for_config_rejection(
+                            host,
+                            &session_id,
+                            &channel_id,
+                            meerkat_core::live_adapter::LiveConfigRejectionReason::Other {
+                                detail: format!(
+                                    "generated live-channel bound identity authority lookup failed: {err}"
+                                ),
+                            },
+                            "generated_identity_lookup_failed",
+                        )
+                        .await;
                         continue;
                     }
                 };
-                if let Some(prev) = bound_identity.as_ref()
-                    && live_channel_requires_close_for_identity_change(
-                        Some(prev),
-                        &open_config.llm_identity,
-                    )
-                {
+                if live_channel_requires_close_for_identity_change(
+                    &bound_identity,
+                    &open_config.llm_identity,
+                ) {
                     tracing::info!(
                         target: "meerkat::session_runtime::live_orchestration",
                         %channel_id,
                         %session_id,
-                        old_model_id = %prev.model,
+                        old_model_id = %bound_identity.model,
                         new_model_id = %open_config.llm_identity.model,
-                        old_provider_id = ?prev.provider,
+                        old_provider_id = ?bound_identity.provider,
                         new_provider_id = ?open_config.llm_identity.provider,
                         reason = "model_swap",
                         "closing live channel: config patch swapped \
@@ -910,28 +1065,19 @@ mod orchestrator {
                     );
                     let reason =
                         meerkat_core::live_adapter::LiveConfigRejectionReason::ChannelIdentitySwap {
-                            from_model: prev.model.clone(),
-                            from_provider: prev.provider,
+                            from_model: bound_identity.model.clone(),
+                            from_provider: bound_identity.provider,
                             to_model: open_config.llm_identity.model.clone(),
                             to_provider: open_config.llm_identity.provider,
                         };
-                    if let Err(err) = host
-                        .signal_terminal_error(
-                            &channel_id,
-                            meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected {
-                                reason,
-                            },
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            target: "meerkat::session_runtime::live_orchestration",
-                            ?channel_id,
-                            ?session_id,
-                            ?err,
-                            "failed to signal terminal error on live channel after model swap"
-                        );
-                    }
+                    self.close_live_channel_for_config_rejection(
+                        host,
+                        &session_id,
+                        &channel_id,
+                        reason,
+                        "model_swap",
+                    )
+                    .await;
                     continue;
                 }
                 let mut snapshot =
@@ -949,20 +1095,31 @@ mod orchestrator {
                         continue;
                     }
                 }
-                if let Err(err) = host
-                    .send_command(
-                        &channel_id,
-                        meerkat_core::live_adapter::LiveAdapterCommand::Refresh { snapshot },
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        target: "meerkat::session_runtime::live_orchestration",
-                        ?channel_id,
-                        ?session_id,
-                        ?err,
-                        "failed to dispatch Refresh command to live channel"
-                    );
+                match host.enqueue_refresh(&channel_id, snapshot).await {
+                    Ok(acceptance) => {
+                        if let Err(err) = self
+                            .runtime_adapter
+                            .resolve_live_refresh_queued_result(&session_id, &acceptance)
+                            .await
+                        {
+                            tracing::warn!(
+                                target: "meerkat::session_runtime::live_orchestration",
+                                ?channel_id,
+                                ?session_id,
+                                ?err,
+                                "live refresh queue acceptance was rejected by generated authority"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "meerkat::session_runtime::live_orchestration",
+                            ?channel_id,
+                            ?session_id,
+                            ?err,
+                            "failed to enqueue Refresh command to live channel"
+                        );
+                    }
                 }
             }
         }

@@ -18,11 +18,13 @@ pub use catalog::{
     canonical_machine_schemas, compat_composition_schemas, meerkat_mob_seam_composition,
 };
 pub use composition::{
-    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriver,
+    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CommsTrustAuthorityOperation,
+    CommsTrustAuthorityProtocol, CommsTrustAuthoritySourceKind, CompositionDriver,
     CompositionDriverRustBinding, CompositionInvariant, CompositionInvariantKind,
     CompositionSchema, CompositionSchemaError, CompositionStateLimits, CompositionTransactionPlan,
     CompositionWitness, CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, DriverDispatchRoute,
+    DurableMarkerFieldBinding, DurableMarkerProtocol, DurableMarkerRelationProtocol,
     EffectHandoffProtocol, EntryInput, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef,
     HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
     ProtocolHelperReturnShape, ProtocolRustBinding, Route, RouteBindingSource, RouteDelivery,

@@ -24,8 +24,8 @@ use meerkat_auth_core::resolver::interactive_login_error;
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
     load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
-    managed_store_oauth_refresh_failure_is_permanent, mark_managed_store_oauth_refresh_failed,
-    publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
+    mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
+    refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -90,17 +90,19 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-fn anthropic_oauth_refresh_failure_is_permanent(error: &oauth::AnthropicOAuthError) -> bool {
+fn anthropic_oauth_refresh_failure_observation(
+    error: &oauth::AnthropicOAuthError,
+) -> meerkat_auth_core::RefreshFailureObservation {
     match error {
         oauth::AnthropicOAuthError::InteractiveLoginRequired
-        | oauth::AnthropicOAuthError::MissingRefreshToken => true,
-        oauth::AnthropicOAuthError::Refresh(meerkat_auth_core::RefreshError::Refresh(message)) => {
-            managed_store_oauth_refresh_failure_is_permanent(message)
+        | oauth::AnthropicOAuthError::MissingRefreshToken => {
+            meerkat_auth_core::RefreshFailureObservation::local_credential_unusable()
         }
+        oauth::AnthropicOAuthError::Refresh(error) => error.observation(),
         oauth::AnthropicOAuthError::OAuth(error) => {
-            managed_store_oauth_refresh_failure_is_permanent(&error.to_string())
+            meerkat_auth_core::auth_oauth::oauth_refresh_observation(error)
         }
-        _ => false,
+        _ => meerkat_auth_core::RefreshFailureObservation::transient(),
     }
 }
 
@@ -395,13 +397,13 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                     .refresh_tokens_with_commit(commit, env.force_refresh)
                                     .await;
                                 refreshed.map_err(|e| {
-                                    let permanent =
-                                        anthropic_oauth_refresh_failure_is_permanent(&e);
+                                    let observation =
+                                        anthropic_oauth_refresh_failure_observation(&e);
                                     let failure = mark_managed_store_oauth_refresh_failed(
                                         env,
                                         binding,
                                         refresh_started,
-                                        permanent,
+                                        observation,
                                     )
                                     .err()
                                     .map(|err| format!("; {err}"))

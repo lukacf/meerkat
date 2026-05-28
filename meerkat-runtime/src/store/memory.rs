@@ -15,13 +15,12 @@ use tokio::sync::Mutex;
 use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
-    AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
-    SessionDelta,
+    AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, MachineLifecycleSnapshot,
+    MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError, SessionDelta,
 };
 use crate::identifiers::LogicalRuntimeId;
-use crate::input_state::StoredInputState;
+use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
-use crate::runtime_state::RuntimeState;
 
 /// Receipt key: (runtime_id, run_id, sequence).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,8 +39,8 @@ struct Inner {
     receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
     /// Runtime session snapshots keyed by canonical runtime id.
     sessions: HashMap<String, Vec<u8>>,
-    /// Persisted runtime state.
-    runtime_states: HashMap<String, RuntimeState>,
+    /// Persisted machine lifecycle snapshots.
+    runtime_lifecycle: HashMap<String, MachineLifecycleSnapshot>,
     /// Persisted ops lifecycle snapshots.
     ops_lifecycle_snapshots: HashMap<String, PersistedOpsSnapshot>,
 }
@@ -159,7 +158,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<StoredInputState>,
+        input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
@@ -210,7 +209,8 @@ impl RuntimeStore for InMemoryRuntimeStore {
 
         // Input states
         let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_updates {
+        for record in input_updates {
+            let bundle = record.into_stored();
             states.insert(bundle.state.input_id.clone(), bundle);
         }
 
@@ -300,11 +300,12 @@ impl RuntimeStore for InMemoryRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &StoredInputState,
+        state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
-        states.insert(state.state.input_id.clone(), state.clone());
+        let bundle = state.as_stored();
+        states.insert(bundle.state.input_id.clone(), bundle.clone());
         Ok(())
     }
 
@@ -321,29 +322,34 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(state)
     }
 
-    async fn load_runtime_state(
+    async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
         let inner = self.inner.lock().await;
-        Ok(inner.runtime_states.get(&runtime_id.0).copied())
+        inner
+            .runtime_lifecycle
+            .get(&runtime_id.0)
+            .map(|snapshot| MachineLifecycleStoreRecord::from_snapshot(snapshot).encode())
+            .transpose()
     }
 
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: MachineLifecycleCommit,
-        input_states: &[StoredInputState],
+        input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
 
         // Single lock acquisition — atomic for in-memory
         inner
-            .runtime_states
-            .insert(rid.clone(), commit.runtime_state());
+            .runtime_lifecycle
+            .insert(rid.clone(), commit.into_snapshot());
         let states = inner.input_states.entry(rid).or_default();
-        for bundle in input_states {
+        for record in input_states {
+            let bundle = record.as_stored();
             states.insert(bundle.state.input_id.clone(), bundle.clone());
         }
 
@@ -369,12 +375,22 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let inner = self.inner.lock().await;
         Ok(inner.ops_lifecycle_snapshots.get(&runtime_id.0).cloned())
     }
+
+    async fn delete_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        inner.ops_lifecycle_snapshots.remove(&runtime_id.0);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::store::MachineLifecycleBindingFacts;
     use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 
     fn make_receipt(run_id: RunId, seq: u64) -> RunBoundaryReceipt {
@@ -386,6 +402,10 @@ mod tests {
             message_count: 0,
             sequence: seq,
         }
+    }
+
+    fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
+        InputStatePersistenceRecord::from_machine_snapshot(bundle).unwrap()
     }
 
     #[tokio::test]
@@ -405,7 +425,7 @@ mod tests {
                     session_snapshot: b"session-data".to_vec(),
                 }),
                 receipt.clone(),
-                vec![bundle],
+                vec![persistable(bundle)],
                 None,
             )
             .await
@@ -428,7 +448,10 @@ mod tests {
         let input_id = InputId::new();
         let bundle = StoredInputState::new_accepted(input_id.clone());
 
-        store.persist_input_state(&rid, &bundle).await.unwrap();
+        store
+            .persist_input_state(&rid, &persistable(bundle))
+            .await
+            .unwrap();
 
         let loaded = store.load_input_state(&rid, &input_id).await.unwrap();
         assert!(loaded.is_some());
@@ -466,7 +489,7 @@ mod tests {
                 &rid,
                 None,
                 make_receipt(RunId::new(), 0),
-                vec![bundle1],
+                vec![persistable(bundle1)],
                 None,
             )
             .await
@@ -480,7 +503,7 @@ mod tests {
                 &rid,
                 None,
                 make_receipt(RunId::new(), 1),
-                vec![bundle2],
+                vec![persistable(bundle2)],
                 None,
             )
             .await
@@ -578,7 +601,7 @@ mod tests {
                     session_snapshot: snapshot,
                 }),
                 receipt.clone(),
-                vec![StoredInputState::new_accepted(input_id)],
+                vec![persistable(StoredInputState::new_accepted(input_id))],
                 None,
             )
             .await
@@ -604,15 +627,24 @@ mod tests {
         let rid2 = LogicalRuntimeId::new("runtime-2");
 
         store
-            .persist_input_state(&rid1, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid1,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
         store
-            .persist_input_state(&rid2, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid2,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
         store
-            .persist_input_state(&rid2, &StoredInputState::new_accepted(InputId::new()))
+            .persist_input_state(
+                &rid2,
+                &persistable(StoredInputState::new_accepted(InputId::new())),
+            )
             .await
             .unwrap();
 
@@ -643,5 +675,41 @@ mod tests {
 
         let loaded = store.load_session_snapshot(&rid).await.unwrap();
         assert_eq!(loaded, Some(snapshot));
+    }
+
+    #[tokio::test]
+    async fn commit_machine_lifecycle_persists_binding_facts() {
+        use crate::runtime_state::RuntimeState;
+
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-binding");
+        let binding = MachineLifecycleBindingFacts::new(
+            Some("rt:session:abc".to_string()),
+            Some(7),
+            Some(3),
+            Some("epoch-1".to_string()),
+        );
+
+        store
+            .commit_machine_lifecycle(
+                &rid,
+                MachineLifecycleCommit::new_with_binding(RuntimeState::Retired, binding.clone()),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let lifecycle = crate::store::load_machine_lifecycle(&store, &rid)
+            .await
+            .unwrap()
+            .expect("machine lifecycle snapshot");
+        assert_eq!(lifecycle.runtime_state(), RuntimeState::Retired);
+        assert_eq!(lifecycle.binding(), &binding);
+        assert_eq!(
+            crate::store::load_runtime_state(&store, &rid)
+                .await
+                .unwrap(),
+            Some(RuntimeState::Retired)
+        );
     }
 }

@@ -8,6 +8,11 @@
         "updated_at": { "secs_since_epoch": 1727784000, "nanos_since_epoch": 0 },
         "metadata": {
             "session_metadata": {
+                "model": "gpt-4o-mini",
+                "max_tokens": 4096,
+                "provider": "open_a_i",
+                "tooling": {},
+                "comms_name": null,
                 "provider_params": {
                     "thinking": {"type": "enabled", "budget_tokens": 32000}
                 }

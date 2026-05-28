@@ -73,6 +73,58 @@ rust_library(
 )
 
 rust_library(
+    name = "meerkat_tools_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-tools"),
+    crate_name = "meerkat_tools",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "comms",
+        "mcp",
+        "skills",
+        "sqlite",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/builtin-utilities-workflow/SKILL.md",
+        "skills/shell-patterns/SKILL.md",
+        "skills/skill-discovery-workflow/SKILL.md",
+        "skills/task-workflow/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+        "//meerkat-cli:__pkg__",
+        "//meerkat-mcp-server:__pkg__",
+        "//meerkat-rest:__pkg__",
+        "//meerkat-tools:__pkg__",
+        "//meerkat-web-runtime:__pkg__",
+        "//tests/integration:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.6.27",
+        "CARGO_MANIFEST_DIR": "./meerkat-tools",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-tools",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-capabilities:meerkat_capabilities",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-mcp:meerkat_mcp",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+        "//meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-tools",
+        normal = True,
+    ),
+)
+
+rust_library(
     name = "meerkat_tools_agent_factory_build",
     aliases = aliases(package_name = "meerkat-tools"),
     crate_name = "meerkat_tools",
@@ -111,6 +163,52 @@ rust_library(
         "//meerkat:meerkat_llm_core_agent_factory_build",
         "//meerkat:meerkat_mcp_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
+        "//meerkat:meerkat_skills_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-tools",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_tools_agent_factory_build_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-tools"),
+    crate_name = "meerkat_tools",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "comms",
+        "mcp",
+        "skills",
+        "sqlite",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/builtin-utilities-workflow/SKILL.md",
+        "skills/shell-patterns/SKILL.md",
+        "skills/skill-discovery-workflow/SKILL.md",
+        "skills/task-workflow/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.6.27",
+        "CARGO_MANIFEST_DIR": "./meerkat-tools",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-tools",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_capabilities_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_llm_core_agent_factory_build",
+        "//meerkat:meerkat_mcp_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
@@ -172,7 +270,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
@@ -237,9 +335,9 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools",
+        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -303,9 +401,9 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools",
+        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -367,9 +465,9 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools",
+        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -430,9 +528,9 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools",
+        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -499,9 +597,9 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools",
+        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,
@@ -564,9 +662,9 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-mcp:meerkat_mcp",
-        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools",
+        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
     ] + all_crate_deps(
         package_name = "meerkat-tools",
         normal = True,

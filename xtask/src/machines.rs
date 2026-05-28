@@ -2978,16 +2978,6 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const MEERKAT: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
-            target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_initializes_with_typed_signal",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_fields_removed_from_state",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
             filter: "session_turn_admission_kernel_attached_state_reached",
         },

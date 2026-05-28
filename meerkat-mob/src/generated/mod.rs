@@ -5,4 +5,12 @@
 // `pub mod` index, and `xtask audit-generated-headers` forbids the
 // codegen marker here to keep that honest.
 
+pub mod mob_coordination_lifecycle_authority;
 pub mod protocol_mob_destroying_session_ingress;
+pub mod protocol_mob_external_peer_reciprocal_trust;
+pub mod protocol_mob_external_peer_trust_repair;
+pub mod protocol_mob_external_peer_trust_unwiring;
+pub mod protocol_mob_external_peer_trust_wiring;
+pub mod protocol_mob_member_peer_overlay;
+pub mod protocol_mob_member_trust_unwiring;
+pub mod protocol_mob_member_trust_wiring;

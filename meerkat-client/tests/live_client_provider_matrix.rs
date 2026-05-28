@@ -390,7 +390,7 @@ async fn e2e_smoke_openai_live_image_generation() -> Result<(), Box<dyn std::err
     let output = client.execute_image_generation(request).await?;
     eprintln!(
         "OpenAI image smoke terminal={:?} images={} warnings={:?}",
-        output.terminal,
+        output.terminal_observation,
         output.images.len(),
         output.warnings
     );
@@ -437,7 +437,7 @@ async fn e2e_smoke_gemini_live_image_generation() -> Result<(), Box<dyn std::err
     let output = client.execute_image_generation(request).await?;
     eprintln!(
         "Gemini image smoke terminal={:?} images={} warnings={:?}",
-        output.terminal,
+        output.terminal_observation,
         output.images.len(),
         output.warnings
     );

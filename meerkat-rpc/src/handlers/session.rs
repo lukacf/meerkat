@@ -434,9 +434,26 @@ pub async fn handle_create(
             runtime.clone(),
             session_id.clone(),
         ));
-        runtime_adapter
+        if let Err(error) = runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+        {
+            if let Err(cleanup_error) = runtime.archive_session(&session_id).await {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "runtime executor registration failed: {error}; staged session cleanup failed: {}",
+                        cleanup_error.message
+                    ),
+                );
+            }
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("runtime executor registration failed: {error}"),
+            );
+        }
     }
 
     if let Some(context) = request_context.as_ref() {

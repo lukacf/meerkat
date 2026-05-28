@@ -1,4 +1,4 @@
-use crate::{OccurrenceId, ScheduleId, ScheduleStoreKind};
+use crate::{OccurrenceId, ScheduleId, ScheduleStoreKind, types::DeliveryCompletionFailureReason};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScheduleStoreError {
@@ -32,6 +32,11 @@ pub enum ScheduleDomainError {
     DeliveryFailed {
         occurrence_id: OccurrenceId,
         reason: String,
+    },
+    #[error("delivery completion failed ({reason:?}): {detail}")]
+    DeliveryCompletionFailed {
+        reason: DeliveryCompletionFailureReason,
+        detail: String,
     },
     #[error("target probe failed: {0}")]
     ProbeFailed(String),

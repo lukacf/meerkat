@@ -3,9 +3,12 @@
 //! This module provides [`JobManager`] which handles spawning, tracking, and managing
 //! background shell jobs with async execution, timeout handling, and event notification.
 
+#[cfg(test)]
+use meerkat_core::ops_lifecycle::OperationStatus;
 use meerkat_core::ops_lifecycle::{
-    OperationId, OperationKind, OperationLifecycleSnapshot, OperationResult, OperationSpec,
-    OperationStatus, OpsLifecycleRegistry,
+    OperationId, OperationKind, OperationLifecycleSnapshot, OperationPublicResultClass,
+    OperationResult, OperationSpec, OperationTerminalOutcome, OpsLifecycleError,
+    OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
@@ -182,8 +185,6 @@ pub struct JobManager {
     cancel_notifiers: Arc<Mutex<HashMap<JobId, Arc<Notify>>>>,
     /// Map of job ID to completion time (for cleanup)
     completed_at: Arc<Mutex<HashMap<JobId, Instant>>>,
-    /// Number of synchronous slots currently occupied
-    sync_slots: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for JobManager {
@@ -214,7 +215,6 @@ impl JobManager {
             handles: Arc::new(Mutex::new(HashMap::new())),
             cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
             completed_at: Arc::new(Mutex::new(HashMap::new())),
-            sync_slots: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -268,70 +268,295 @@ impl JobManager {
         now.saturating_sub(started_at_unix) as f64
     }
 
-    fn snapshot_for_job(&self, job: &BackgroundJobRecord) -> Option<OperationLifecycleSnapshot> {
-        self.ops_registry.snapshot(&job.operation_id)
+    fn snapshot_for_job(
+        &self,
+        job: &BackgroundJobRecord,
+    ) -> Result<Option<OperationLifecycleSnapshot>, ShellError> {
+        self.ops_registry
+            .snapshot(&job.operation_id)
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))
+    }
+
+    fn operation_admission_limit(&self) -> Option<usize> {
+        match self.config.max_concurrent_processes {
+            0 => None,
+            limit => Some(limit),
+        }
+    }
+
+    fn shell_error_for_ops_lifecycle_admission(error: OpsLifecycleError) -> ShellError {
+        match error {
+            OpsLifecycleError::MaxConcurrentExceeded { limit, active } => {
+                ShellError::Io(std::io::Error::other(format!(
+                    "Concurrency limit exceeded: {active} active operations, limit is {limit}"
+                )))
+            }
+            other => ShellError::Io(std::io::Error::other(other.to_string())),
+        }
+    }
+
+    fn register_background_operation(
+        &self,
+        operation_id: OperationId,
+        display_name: String,
+    ) -> Result<(), ShellError> {
+        self.ops_registry
+            .register_operation_with_admission_limit(
+                OperationSpec {
+                    id: operation_id,
+                    kind: OperationKind::BackgroundToolOp,
+                    owner_session_id: self.owner_bridge_session_id.clone(),
+                    display_name,
+                    source_label: "shell_job".to_string(),
+                    operation_source: None,
+                    child_session_id: None,
+                    expect_peer_channel: false,
+                },
+                self.operation_admission_limit(),
+            )
+            .map_err(Self::shell_error_for_ops_lifecycle_admission)
+    }
+
+    fn start_background_operation(&self, operation_id: &OperationId) -> Result<(), ShellError> {
+        self.ops_registry
+            .provisioning_succeeded(operation_id)
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))
+    }
+
+    fn operation_public_result_class(
+        &self,
+        job: &BackgroundJobRecord,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> Result<OperationPublicResultClass, OpsLifecycleError> {
+        if let Some(snapshot) = snapshot {
+            if snapshot.id != job.operation_id {
+                return Err(OpsLifecycleError::Internal(format!(
+                    "background job {} snapshot operation {} does not match canonical operation {}",
+                    job.view.id, snapshot.id, job.operation_id
+                )));
+            }
+            return Ok(snapshot.public_result_class);
+        }
+        self.ops_registry
+            .classify_operation_public_result(&job.operation_id)
+    }
+
+    fn summary_status_from_public_result(
+        result: OperationPublicResultClass,
+    ) -> Result<JobSummaryStatus, OpsLifecycleError> {
+        Ok(match result {
+            OperationPublicResultClass::MissingAuthority => {
+                return Err(OpsLifecycleError::Internal(
+                    "background job lifecycle authority missing".into(),
+                ));
+            }
+            OperationPublicResultClass::Running => JobSummaryStatus::Running,
+            OperationPublicResultClass::Completed => JobSummaryStatus::Completed,
+            OperationPublicResultClass::Failed => JobSummaryStatus::Failed,
+            OperationPublicResultClass::Cancelled => JobSummaryStatus::Cancelled,
+        })
     }
 
     fn lifecycle_summary_status(
         &self,
         job: &BackgroundJobRecord,
         snapshot: Option<&OperationLifecycleSnapshot>,
-    ) -> JobSummaryStatus {
-        if matches!(job.view.status, JobStatus::TimedOut { .. }) {
-            return JobSummaryStatus::TimedOut;
-        }
-
-        match snapshot.map(|value| value.status) {
-            Some(OperationStatus::Provisioning | OperationStatus::Running) => {
-                JobSummaryStatus::Running
-            }
-            Some(OperationStatus::Completed) => JobSummaryStatus::Completed,
-            Some(OperationStatus::Failed | OperationStatus::Terminated) => JobSummaryStatus::Failed,
-            Some(
-                OperationStatus::Aborted
-                | OperationStatus::Cancelled
-                | OperationStatus::Retiring
-                | OperationStatus::Retired,
-            ) => JobSummaryStatus::Cancelled,
-            Some(OperationStatus::Absent) | None => JobSummaryStatus::from(&job.view.status),
-        }
+    ) -> Result<JobSummaryStatus, OpsLifecycleError> {
+        let result = self.operation_public_result_class(job, snapshot)?;
+        Self::summary_status_from_public_result(result)
     }
 
     fn reconcile_job_status(
         &self,
         job: &BackgroundJobRecord,
         snapshot: Option<&OperationLifecycleSnapshot>,
-    ) -> JobStatus {
-        match snapshot.map(|value| value.status) {
-            Some(OperationStatus::Provisioning | OperationStatus::Running) => JobStatus::Running {
+    ) -> Result<JobStatus, OpsLifecycleError> {
+        let public_result = self.operation_public_result_class(job, snapshot)?;
+        match public_result {
+            OperationPublicResultClass::Running => Ok(JobStatus::Running {
                 started_at_unix: job.view.started_at_unix,
-            },
-            Some(OperationStatus::Completed) => job.view.status.clone(),
-            Some(OperationStatus::Failed | OperationStatus::Terminated) => match &job.view.status {
-                JobStatus::Failed { .. } | JobStatus::TimedOut { .. } => job.view.status.clone(),
-                _ => JobStatus::Failed {
-                    error: "background job failed".to_string(),
-                    duration_secs: Self::lifecycle_duration_secs(job.view.started_at_unix),
-                },
-            },
-            Some(
-                OperationStatus::Aborted
-                | OperationStatus::Cancelled
-                | OperationStatus::Retiring
-                | OperationStatus::Retired,
-            ) => JobStatus::Cancelled {
-                duration_secs: Self::lifecycle_duration_secs(job.view.started_at_unix),
-            },
-            Some(OperationStatus::Absent) | None => job.view.status.clone(),
+            }),
+            OperationPublicResultClass::MissingAuthority => Err(OpsLifecycleError::Internal(
+                "background job lifecycle authority missing".into(),
+            )),
+            OperationPublicResultClass::Completed
+            | OperationPublicResultClass::Failed
+            | OperationPublicResultClass::Cancelled => {
+                match Self::terminal_status_from_authority(job, snapshot, &job.view.status) {
+                    Ok(Some(status)) => Ok(status),
+                    Ok(None) => Err(OpsLifecycleError::Internal(
+                        "background job lifecycle authority missing".into(),
+                    )),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    fn duration_from_process_or_snapshot(
+        job: &BackgroundJobRecord,
+        process_status: &JobStatus,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> f64 {
+        match process_status {
+            JobStatus::Completed { duration_secs, .. }
+            | JobStatus::Failed { duration_secs, .. }
+            | JobStatus::Cancelled { duration_secs } => *duration_secs,
+            JobStatus::Running { .. } => snapshot
+                .and_then(|snapshot| snapshot.elapsed_ms)
+                .map(|elapsed_ms| elapsed_ms as f64 / 1000.0)
+                .unwrap_or_else(|| Self::lifecycle_duration_secs(job.view.started_at_unix)),
+        }
+    }
+
+    fn terminal_status_from_authority(
+        job: &BackgroundJobRecord,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+        process_status: &JobStatus,
+    ) -> Result<Option<JobStatus>, OpsLifecycleError> {
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let public_result = snapshot.public_result_class;
+        let terminal = snapshot.terminal;
+        let duration_secs =
+            Self::duration_from_process_or_snapshot(job, process_status, Some(snapshot));
+        Ok(match public_result {
+            OperationPublicResultClass::Running => Some(JobStatus::Running {
+                started_at_unix: job.view.started_at_unix,
+            }),
+            OperationPublicResultClass::Completed => {
+                if !terminal {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "generated op public result class completed for non-terminal status {:?} on {}",
+                        snapshot.status, snapshot.id
+                    )));
+                }
+                let result = match snapshot.terminal_outcome.as_ref() {
+                    Some(OperationTerminalOutcome::Completed(result)) => result,
+                    Some(other) => {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "generated op public result class completed with non-completed terminal outcome for {}: {other:?}",
+                            snapshot.id
+                        )));
+                    }
+                    None => {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "generated op public result class completed without terminal outcome for {}",
+                            snapshot.id
+                        )));
+                    }
+                };
+                let (stdout, stderr) = if result.is_error {
+                    (String::new(), result.content.clone())
+                } else {
+                    (result.content.clone(), String::new())
+                };
+                let exit_code = match process_status {
+                    JobStatus::Completed { exit_code, .. } => *exit_code,
+                    _ => None,
+                };
+                Some(JobStatus::Completed {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    duration_secs,
+                })
+            }
+            OperationPublicResultClass::Failed => {
+                if !terminal {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "generated op public result class failed for non-terminal status {:?} on {}",
+                        snapshot.status, snapshot.id
+                    )));
+                }
+                let error = match snapshot.terminal_outcome.as_ref() {
+                    Some(OperationTerminalOutcome::Failed { error }) => error.clone(),
+                    Some(OperationTerminalOutcome::Terminated { reason }) => reason.clone(),
+                    Some(other) => {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "generated op public result class failed with non-failed terminal outcome for {}: {other:?}",
+                            snapshot.id
+                        )));
+                    }
+                    None => {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "generated op public result class failed without terminal outcome for {}",
+                            snapshot.id
+                        )));
+                    }
+                };
+                Some(JobStatus::Failed {
+                    error,
+                    duration_secs,
+                })
+            }
+            OperationPublicResultClass::Cancelled => {
+                if !terminal {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "generated op public result class cancelled for non-terminal status {:?} on {}",
+                        snapshot.status, snapshot.id
+                    )));
+                }
+                match snapshot.terminal_outcome.as_ref() {
+                    Some(
+                        OperationTerminalOutcome::Aborted { .. }
+                        | OperationTerminalOutcome::Cancelled { .. }
+                        | OperationTerminalOutcome::Retired,
+                    ) => Some(JobStatus::Cancelled { duration_secs }),
+                    Some(other) => {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "generated op public result class cancelled with non-cancelled terminal outcome for {}: {other:?}",
+                            snapshot.id
+                        )));
+                    }
+                    None => {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "generated op public result class cancelled without terminal outcome for {}",
+                            snapshot.id
+                        )));
+                    }
+                }
+            }
+            OperationPublicResultClass::MissingAuthority => None,
+        })
+    }
+
+    fn shell_error_for_ops_lifecycle_cancel(
+        job_id: &JobId,
+        error: OpsLifecycleError,
+    ) -> ShellError {
+        match error {
+            OpsLifecycleError::NotFound(_) => ShellError::JobNotFound(job_id.to_string()),
+            OpsLifecycleError::InvalidTransition { .. } => ShellError::JobNotRunning,
+            other => ShellError::Io(std::io::Error::other(other.to_string())),
+        }
+    }
+
+    fn cancelled_view_from_authority(
+        &self,
+        job: &BackgroundJobRecord,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> Result<JobStatus, ShellError> {
+        match Self::terminal_status_from_authority(job, snapshot, &job.view.status)
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?
+        {
+            Some(status @ JobStatus::Cancelled { .. }) => Ok(status),
+            Some(_) => Err(ShellError::JobNotRunning),
+            None => Err(ShellError::Io(std::io::Error::other(
+                "background job lifecycle authority missing after cancellation",
+            ))),
         }
     }
 
     pub async fn ops_lifecycle_snapshot(
         &self,
         job_id: &JobId,
-    ) -> Option<OperationLifecycleSnapshot> {
+    ) -> Result<Option<OperationLifecycleSnapshot>, ShellError> {
         let jobs = self.jobs.lock().await;
-        let job = jobs.get(job_id)?;
+        let Some(job) = jobs.get(job_id) else {
+            return Ok(None);
+        };
         self.snapshot_for_job(job)
     }
 
@@ -373,18 +598,13 @@ impl JobManager {
             .unwrap_or_default()
             .as_secs();
         let operation_id = OperationId::new();
-        self.ops_registry
-            .register_operation(OperationSpec {
-                id: operation_id.clone(),
-                kind: OperationKind::BackgroundToolOp,
-                owner_session_id: self.owner_bridge_session_id.clone(),
-                display_name: format!("shell:{command}"),
-                source_label: "shell_job".to_string(),
-                child_session_id: None,
-                expect_peer_channel: false,
-            })
-            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
-        let _ = self.ops_registry.provisioning_succeeded(&operation_id);
+        self.register_background_operation(operation_id.clone(), format!("shell:{command}"))?;
+        if let Err(error) = self.start_background_operation(&operation_id) {
+            let _ = self
+                .ops_registry
+                .abort_provisioning(&operation_id, Some(error.to_string()));
+            return Err(error);
+        }
 
         let job = BackgroundJob {
             id: job_id.clone(),
@@ -459,18 +679,6 @@ impl JobManager {
         }
         info!("Spawning background job");
 
-        // Check concurrency limit (0 means unlimited)
-        let limit = self.config.max_concurrent_processes;
-        if limit > 0 {
-            let current = self.running_job_count().await;
-            if current >= limit {
-                warn!(current = %current, limit = %limit, "Concurrency limit exceeded");
-                return Err(ShellError::Io(std::io::Error::other(format!(
-                    "Concurrency limit exceeded: {current} running jobs, limit is {limit}"
-                ))));
-            }
-        }
-
         // Run cleanup before spawning new job
         self.cleanup_old_jobs().await;
 
@@ -503,17 +711,7 @@ impl JobManager {
             .as_secs();
 
         let operation_id = OperationId::new();
-        self.ops_registry
-            .register_operation(OperationSpec {
-                id: operation_id.clone(),
-                kind: OperationKind::BackgroundToolOp,
-                owner_session_id: self.owner_bridge_session_id.clone(),
-                display_name: format!("shell:{command}"),
-                source_label: "shell_job".to_string(),
-                child_session_id: None,
-                expect_peer_channel: false,
-            })
-            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
+        self.register_background_operation(operation_id.clone(), format!("shell:{command}"))?;
 
         // Create the job with Running status
         let job = BackgroundJob {
@@ -566,7 +764,14 @@ impl JobManager {
                 return Err(ShellError::Io(error));
             }
         };
-        let _ = self.ops_registry.provisioning_succeeded(&operation_id);
+        if let Err(error) = self.start_background_operation(&operation_id) {
+            let mut child = child;
+            let _ = graceful_kill(&mut child).await;
+            let _ = self
+                .ops_registry
+                .abort_provisioning(&operation_id, Some(error.to_string()));
+            return Err(error);
+        }
         debug!("Spawned child process");
 
         // Store the job and cancellation notifier
@@ -681,9 +886,8 @@ impl JobManager {
                     error: err.to_string(),
                     duration_secs,
                 },
-                WaitOutcome::TimedOut => JobStatus::TimedOut {
-                    stdout,
-                    stderr,
+                WaitOutcome::TimedOut => JobStatus::Failed {
+                    error: "background job timed out".to_string(),
                     duration_secs,
                 },
                 WaitOutcome::Cancelled => JobStatus::Cancelled { duration_secs },
@@ -695,7 +899,7 @@ impl JobManager {
                 },
             };
 
-            match &final_status {
+            let lifecycle_result = match &final_status {
                 JobStatus::Completed { stdout, stderr, .. } => {
                     let content = if !stdout.is_empty() {
                         stdout.clone()
@@ -704,7 +908,7 @@ impl JobManager {
                     } else {
                         command_clone.clone()
                     };
-                    let _ = ops_registry.complete_operation(
+                    ops_registry.complete_operation(
                         &operation_id_for_task,
                         OperationResult {
                             id: operation_id_for_task.clone(),
@@ -713,36 +917,75 @@ impl JobManager {
                             duration_ms: (duration_secs * 1000.0) as u64,
                             tokens_used: 0,
                         },
-                    );
+                    )
                 }
                 JobStatus::Failed { error, .. } => {
-                    let _ = ops_registry.fail_operation(&operation_id_for_task, error.clone());
+                    ops_registry.fail_operation(&operation_id_for_task, error.clone())
                 }
-                JobStatus::TimedOut { .. } => {
-                    let _ = ops_registry
-                        .fail_operation(&operation_id_for_task, "background job timed out".into());
-                }
-                JobStatus::Cancelled { .. } => {
-                    let _ = ops_registry.cancel_operation(
-                        &operation_id_for_task,
-                        Some("cancelled by caller".into()),
-                    );
-                }
-                JobStatus::Running { .. } => {}
-            }
+                JobStatus::Cancelled { .. } => ops_registry
+                    .cancel_operation(&operation_id_for_task, Some("cancelled by caller".into())),
+                JobStatus::Running { .. } => Ok(()),
+            };
+            let authority_snapshot = ops_registry.snapshot(&operation_id_for_task);
 
-            // Update job status (preserve Cancelled if already set)
+            // Publish only the class accepted by the generated operation
+            // lifecycle. If authority feedback is unavailable, fail closed.
+            let mut record_completed_at = false;
             {
                 let mut jobs_guard = jobs.lock().await;
-                if let Some(job) = jobs_guard.get_mut(&job_id_clone)
-                    && !matches!(job.view.status, JobStatus::Cancelled { .. })
-                {
-                    job.view.status = final_status;
+                if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
+                    let generated_terminal_authority = authority_snapshot
+                        .as_ref()
+                        .ok()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|snapshot| snapshot.terminal);
+                    let authority_status = match authority_snapshot.as_ref() {
+                        Ok(snapshot) => Self::terminal_status_from_authority(
+                            job,
+                            snapshot.as_ref(),
+                            &final_status,
+                        ),
+                        Err(error) => Err(OpsLifecycleError::Internal(format!(
+                            "background job lifecycle authority projection failed: {error}"
+                        ))),
+                    };
+                    match authority_status {
+                        Ok(Some(status)) => {
+                            record_completed_at = generated_terminal_authority;
+                            job.view.status = status;
+                        }
+                        Ok(None) => {
+                            let error = match lifecycle_result {
+                                Ok(()) => {
+                                    "background job lifecycle authority missing after terminal transition"
+                                        .to_string()
+                                }
+                                Err(error) => format!(
+                                    "background job lifecycle authority rejected terminal transition: {error}"
+                                ),
+                            };
+                            warn!(
+                                job_id = %job.view.id,
+                                operation_id = %operation_id_for_task,
+                                error = %error,
+                                "background job terminal status not updated because generated authority did not project a public result"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                job_id = %job.view.id,
+                                operation_id = %operation_id_for_task,
+                                error = %error,
+                                "background job terminal status not updated because generated authority projection failed"
+                            );
+                        }
+                    }
                 }
             }
 
-            // Record completion time for cleanup
-            {
+            // Record cleanup eligibility only after generated lifecycle
+            // authority has projected a terminal public result.
+            if record_completed_at {
                 completed_at
                     .lock()
                     .await
@@ -765,43 +1008,37 @@ impl JobManager {
     ///
     /// Returns the full job information if found, or None if the job doesn't exist.
     #[instrument(skip(self), fields(job_id = %job_id))]
-    pub async fn get_status(&self, job_id: &JobId) -> Option<BackgroundJob> {
-        let result = {
-            let jobs = self.jobs.lock().await;
-            jobs.get(job_id).cloned().map(|mut job| {
-                let snapshot = self.snapshot_for_job(&job);
-                job.view.status = self.reconcile_job_status(&job, snapshot.as_ref());
-                job.view
-            })
-        };
-        if result.is_none() {
+    pub async fn get_status(&self, job_id: &JobId) -> Result<Option<BackgroundJob>, ShellError> {
+        let Some(mut job) = self.jobs.lock().await.get(job_id).cloned() else {
             debug!("Job not found");
-        }
-        result
+            return Ok(None);
+        };
+        let snapshot = self.snapshot_for_job(&job)?;
+        job.view.status = self
+            .reconcile_job_status(&job, snapshot.as_ref())
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
+        Ok(Some(job.view))
     }
 
     /// List all jobs with summary information
     #[instrument(skip(self))]
-    pub async fn list_jobs(&self) -> Vec<JobSummary> {
-        let summaries: Vec<JobSummary> = self
-            .jobs
-            .lock()
-            .await
-            .values()
-            .map(|job| {
-                let snapshot = self.snapshot_for_job(job);
-                let status = self.lifecycle_summary_status(job, snapshot.as_ref());
-
-                JobSummary {
-                    id: job.view.id.clone(),
-                    command: job.view.command.clone(),
-                    status,
-                    started_at_unix: job.view.started_at_unix,
-                }
-            })
-            .collect();
+    pub async fn list_jobs(&self) -> Result<Vec<JobSummary>, ShellError> {
+        let jobs: Vec<BackgroundJobRecord> = self.jobs.lock().await.values().cloned().collect();
+        let mut summaries = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let snapshot = self.snapshot_for_job(&job)?;
+            let status = self
+                .lifecycle_summary_status(&job, snapshot.as_ref())
+                .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
+            summaries.push(JobSummary {
+                id: job.view.id.clone(),
+                command: job.view.command.clone(),
+                status,
+                started_at_unix: job.view.started_at_unix,
+            });
+        }
         debug!(count = summaries.len(), "Listed jobs");
-        summaries
+        Ok(summaries)
     }
 
     /// Cancel a running job
@@ -814,30 +1051,34 @@ impl JobManager {
     pub async fn cancel_job(&self, job_id: &JobId) -> Result<(), ShellError> {
         info!("Cancelling job");
 
-        // Atomically check if job exists, is running, and update status in a single lock scope.
-        // This prevents race conditions where another operation could change the status
-        // between checking and modifying.
+        let operation_id = {
+            let jobs_guard = self.jobs.lock().await;
+            jobs_guard
+                .get(job_id)
+                .ok_or_else(|| {
+                    warn!("Job not found");
+                    ShellError::JobNotFound(job_id.to_string())
+                })?
+                .operation_id
+                .clone()
+        };
+
+        self.ops_registry
+            .cancel_operation(&operation_id, Some("cancelled by caller".into()))
+            .map_err(|error| Self::shell_error_for_ops_lifecycle_cancel(job_id, error))?;
+
+        let snapshot = self
+            .ops_registry
+            .snapshot(&operation_id)
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
         {
             let mut jobs_guard = self.jobs.lock().await;
             let job = jobs_guard.get_mut(job_id).ok_or_else(|| {
                 warn!("Job not found");
                 ShellError::JobNotFound(job_id.to_string())
             })?;
-
-            // Check and update atomically
-            let duration_secs = if let JobStatus::Running { started_at_unix } = &job.view.status {
-                Self::lifecycle_duration_secs(*started_at_unix)
-            } else {
-                warn!("Job is not running");
-                return Err(ShellError::JobNotRunning);
-            };
-
-            // Update status while still holding the lock
-            job.view.status = JobStatus::Cancelled { duration_secs };
-            let _ = self
-                .ops_registry
-                .cancel_operation(&job.operation_id, Some("cancelled by caller".into()));
-        };
+            job.view.status = self.cancelled_view_from_authority(job, snapshot.as_ref())?;
+        }
 
         // Signal the background task to terminate the process.
         let notify = { self.cancel_notifiers.lock().await.get(job_id).cloned() };
@@ -903,10 +1144,21 @@ impl JobManager {
                 continue;
             }
 
-            let snapshot = self.ops_registry.snapshot(&record.operation_id);
-            let Some(snapshot) = snapshot else { continue };
+            let snapshot = match self.ops_registry.snapshot(&record.operation_id) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(
+                        job_id = %record.view.id,
+                        operation_id = %record.operation_id,
+                        error = %error,
+                        "background job completion drain skipped operation without generated projection authority"
+                    );
+                    continue;
+                }
+            };
 
-            if !snapshot.status.is_terminal() {
+            if !snapshot.terminal {
                 continue;
             }
 
@@ -984,9 +1236,6 @@ impl JobManager {
             } => {
                 parts.push(format!("error: {error}"));
                 parts.push(format!("duration: {duration_secs:.1}s"));
-            }
-            JobStatus::TimedOut { duration_secs, .. } => {
-                parts.push(format!("timed_out after {duration_secs:.1}s"));
             }
             JobStatus::Cancelled { duration_secs } => {
                 parts.push(format!("cancelled after {duration_secs:.1}s"));
@@ -1078,92 +1327,85 @@ impl JobManager {
 
     /// Get the number of currently running jobs
     ///
-    /// Returns the count of jobs that are in Running state plus active synchronous slots.
-    pub async fn running_job_count(&self) -> usize {
-        let jobs = self.jobs.lock().await;
-        let background = jobs
-            .values()
-            .filter(|job| matches!(job.view.status, JobStatus::Running { .. }))
-            .count();
-        let sync = self.sync_slots.load(std::sync::atomic::Ordering::Relaxed);
-        background + sync
+    /// Returns the count of active shell operations according to generated
+    /// operation lifecycle authority.
+    pub async fn running_job_count(&self) -> Result<usize, ShellError> {
+        let mut count = 0;
+        for snapshot in self
+            .ops_registry
+            .list_operations()
+            .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?
+        {
+            if snapshot.kind != OperationKind::BackgroundToolOp
+                && snapshot.kind != OperationKind::BackgroundToolCapacitySlot
+            {
+                continue;
+            }
+            if !snapshot.terminal {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     /// Acquire a slot for synchronous execution.
     ///
-    /// Returns a guard that decrements the count when dropped, or an error if
-    /// the concurrency limit is reached.
-    ///
-    /// Uses atomic compare_exchange to prevent TOCTOU race conditions where
-    /// multiple concurrent calls could all pass the limit check before any
-    /// increments the counter.
+    /// Returns a guard that releases the generated operation capacity
+    /// reservation when dropped, or an error if the generated admission
+    /// authority rejects the concurrency limit.
     pub async fn acquire_sync_slot(&self) -> Result<SyncSlotGuard, ShellError> {
-        use std::sync::atomic::Ordering;
-
-        let limit = self.config.max_concurrent_processes;
-
-        // If unlimited, just increment and return
-        if limit == 0 {
-            self.sync_slots.fetch_add(1, Ordering::SeqCst);
-            return Ok(SyncSlotGuard {
-                sync_slots: Arc::clone(&self.sync_slots),
-            });
+        let operation_id = OperationId::new();
+        self.ops_registry
+            .register_operation_with_admission_limit(
+                OperationSpec {
+                    id: operation_id.clone(),
+                    kind: OperationKind::BackgroundToolCapacitySlot,
+                    owner_session_id: self.owner_bridge_session_id.clone(),
+                    display_name: "shell:sync-slot".to_string(),
+                    source_label: "shell_sync_slot".to_string(),
+                    operation_source: None,
+                    child_session_id: None,
+                    expect_peer_channel: false,
+                },
+                self.operation_admission_limit(),
+            )
+            .map_err(Self::shell_error_for_ops_lifecycle_admission)?;
+        if let Err(error) = self.ops_registry.provisioning_succeeded(&operation_id) {
+            let _ = self
+                .ops_registry
+                .abort_provisioning(&operation_id, Some(error.to_string()));
+            return Err(ShellError::Io(std::io::Error::other(error.to_string())));
         }
-
-        // Lock jobs map to get consistent count of running background jobs.
-        // We hold this lock during the compare_exchange to ensure background job
-        // count doesn't change between our read and the atomic increment.
-        let jobs = self.jobs.lock().await;
-        let background = jobs
-            .values()
-            .filter(|job| matches!(job.view.status, JobStatus::Running { .. }))
-            .count();
-
-        // Atomic compare_exchange loop to prevent TOCTOU race.
-        // Multiple concurrent calls will race on compare_exchange; only one wins,
-        // others retry and may find the limit exceeded.
-        loop {
-            let current_sync = self.sync_slots.load(Ordering::Acquire);
-            let total = background + current_sync;
-
-            if total >= limit {
-                return Err(ShellError::Io(std::io::Error::other(format!(
-                    "Concurrency limit exceeded: {total} processes, limit is {limit}"
-                ))));
-            }
-
-            // Try to atomically increment sync_slots
-            match self.sync_slots.compare_exchange_weak(
-                current_sync,
-                current_sync + 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    // Successfully acquired the slot
-                    return Ok(SyncSlotGuard {
-                        sync_slots: Arc::clone(&self.sync_slots),
-                    });
-                }
-                Err(_) => {
-                    // Another thread modified sync_slots, retry
-                    continue;
-                }
-            }
-        }
+        Ok(SyncSlotGuard {
+            ops_registry: Arc::clone(&self.ops_registry),
+            operation_id,
+        })
     }
 }
 
 /// Guard for a synchronous execution slot that releases it when dropped
-#[derive(Debug)]
 pub struct SyncSlotGuard {
-    sync_slots: Arc<std::sync::atomic::AtomicUsize>,
+    ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    operation_id: OperationId,
+}
+
+impl std::fmt::Debug for SyncSlotGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncSlotGuard")
+            .field("operation_id", &self.operation_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for SyncSlotGuard {
     fn drop(&mut self) {
-        self.sync_slots
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if let Err(error) = self.ops_registry.mark_retired(&self.operation_id) {
+            tracing::error!(
+                operation_id = %self.operation_id,
+                error = %error,
+                "generated shell sync-slot lifecycle authority rejected release"
+            );
+        }
     }
 }
 
@@ -1251,7 +1493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timed_out_job_summary_preserves_timed_out_status_over_failed_snapshot() {
+    async fn timed_out_job_summary_uses_generated_failed_snapshot() {
         let manager = bound_job_manager(ShellConfig::default());
         let operation_id = OperationId::new();
         manager
@@ -1262,6 +1504,7 @@ mod tests {
                 owner_session_id: manager.owner_bridge_session_id.clone(),
                 display_name: "shell:sleep".to_string(),
                 source_label: "shell_job".to_string(),
+                operation_source: None,
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -1283,9 +1526,8 @@ mod tests {
                 placement: None,
                 timeout_secs: 30,
                 started_at_unix: 123,
-                status: JobStatus::TimedOut {
-                    stdout: String::new(),
-                    stderr: String::new(),
+                status: JobStatus::Failed {
+                    error: "background job timed out".to_string(),
                     duration_secs: 30.0,
                 },
             },
@@ -1293,10 +1535,249 @@ mod tests {
             completion_notified: false,
         };
 
-        let snapshot = manager.snapshot_for_job(&job);
+        let snapshot = manager.snapshot_for_job(&job).unwrap();
         assert_eq!(
-            manager.lifecycle_summary_status(&job, snapshot.as_ref()),
-            JobSummaryStatus::TimedOut
+            manager
+                .lifecycle_summary_status(&job, snapshot.as_ref())
+                .expect("generated summary status"),
+            JobSummaryStatus::Failed
+        );
+    }
+
+    #[test]
+    fn terminal_job_status_uses_generated_lifecycle_class() {
+        let manager = bound_job_manager(ShellConfig::default());
+        let operation_id = OperationId::new();
+        manager
+            .ops_registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: manager.owner_bridge_session_id.clone(),
+                display_name: "shell:false".to_string(),
+                source_label: "shell_job".to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        manager
+            .ops_registry
+            .provisioning_succeeded(&operation_id)
+            .unwrap();
+        manager
+            .ops_registry
+            .fail_operation(&operation_id, "generated lifecycle rejected success".into())
+            .unwrap();
+
+        let job = BackgroundJobRecord {
+            view: BackgroundJob {
+                id: JobId::new(),
+                command: "false".to_string(),
+                working_dir: None,
+                placement: None,
+                timeout_secs: 30,
+                started_at_unix: 123,
+                status: JobStatus::Completed {
+                    exit_code: Some(0),
+                    stdout: "local success".to_string(),
+                    stderr: String::new(),
+                    duration_secs: 1.25,
+                },
+            },
+            operation_id,
+            completion_notified: false,
+        };
+
+        let snapshot = manager.snapshot_for_job(&job).unwrap();
+        assert_eq!(
+            JobManager::terminal_status_from_authority(&job, snapshot.as_ref(), &job.view.status)
+                .expect("generated public result class"),
+            Some(JobStatus::Failed {
+                error: "generated lifecycle rejected success".to_string(),
+                duration_secs: 1.25,
+            })
+        );
+    }
+
+    #[test]
+    fn local_process_completion_remains_running_until_generated_terminal_authority() {
+        let manager = bound_job_manager(ShellConfig::default());
+        let operation_id = OperationId::new();
+        manager
+            .ops_registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: manager.owner_bridge_session_id.clone(),
+                display_name: "shell:local-complete".to_string(),
+                source_label: "shell_job".to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        manager
+            .ops_registry
+            .provisioning_succeeded(&operation_id)
+            .unwrap();
+
+        let job = BackgroundJobRecord {
+            view: BackgroundJob {
+                id: JobId::new(),
+                command: "true".to_string(),
+                working_dir: None,
+                placement: None,
+                timeout_secs: 30,
+                started_at_unix: 123,
+                status: JobStatus::Completed {
+                    exit_code: Some(0),
+                    stdout: "local success".to_string(),
+                    stderr: String::new(),
+                    duration_secs: 1.0,
+                },
+            },
+            operation_id,
+            completion_notified: false,
+        };
+
+        let snapshot = manager
+            .snapshot_for_job(&job)
+            .unwrap()
+            .expect("generated lifecycle snapshot");
+        assert_eq!(snapshot.status, OperationStatus::Running);
+        assert!(!snapshot.terminal);
+        assert_eq!(
+            JobManager::terminal_status_from_authority(&job, Some(&snapshot), &job.view.status)
+                .expect("generated public result class"),
+            Some(JobStatus::Running {
+                started_at_unix: 123,
+            })
+        );
+    }
+
+    #[test]
+    fn failed_terminal_status_uses_generated_terminal_outcome() {
+        let manager = bound_job_manager(ShellConfig::default());
+        let operation_id = OperationId::new();
+        manager
+            .ops_registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: manager.owner_bridge_session_id.clone(),
+                display_name: "shell:timeout".to_string(),
+                source_label: "shell_job".to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        manager
+            .ops_registry
+            .provisioning_succeeded(&operation_id)
+            .unwrap();
+        manager
+            .ops_registry
+            .fail_operation(&operation_id, "generated failure reason".into())
+            .unwrap();
+
+        let job = BackgroundJobRecord {
+            view: BackgroundJob {
+                id: JobId::new(),
+                command: "sleep 30".to_string(),
+                working_dir: None,
+                placement: None,
+                timeout_secs: 1,
+                started_at_unix: 123,
+                status: JobStatus::Failed {
+                    error: "local shell timeout".to_string(),
+                    duration_secs: 1.0,
+                },
+            },
+            operation_id,
+            completion_notified: false,
+        };
+
+        let snapshot = manager.snapshot_for_job(&job).unwrap();
+        assert_eq!(
+            JobManager::terminal_status_from_authority(&job, snapshot.as_ref(), &job.view.status)
+                .expect("generated public result class"),
+            Some(JobStatus::Failed {
+                error: "generated failure reason".to_string(),
+                duration_secs: 1.0,
+            })
+        );
+    }
+
+    #[test]
+    fn retiring_job_status_remains_nonterminal_until_generated_terminal_outcome() {
+        let manager = bound_job_manager(ShellConfig::default());
+        let operation_id = OperationId::new();
+        manager
+            .ops_registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: manager.owner_bridge_session_id.clone(),
+                display_name: "shell:retiring".to_string(),
+                source_label: "shell_job".to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        manager
+            .ops_registry
+            .provisioning_succeeded(&operation_id)
+            .unwrap();
+        manager.ops_registry.request_retire(&operation_id).unwrap();
+
+        let job = BackgroundJobRecord {
+            view: BackgroundJob {
+                id: JobId::new(),
+                command: "sleep 30".to_string(),
+                working_dir: None,
+                placement: None,
+                timeout_secs: 30,
+                started_at_unix: 123,
+                status: JobStatus::Running {
+                    started_at_unix: 123,
+                },
+            },
+            operation_id,
+            completion_notified: false,
+        };
+
+        let snapshot = manager.snapshot_for_job(&job).unwrap();
+        let snapshot = snapshot.as_ref().expect("snapshot");
+        assert_eq!(snapshot.status, OperationStatus::Retiring);
+        assert!(snapshot.terminal_outcome.is_none());
+        assert_eq!(
+            manager
+                .lifecycle_summary_status(&job, Some(snapshot))
+                .expect("generated summary status"),
+            JobSummaryStatus::Running
+        );
+        assert_eq!(
+            manager
+                .reconcile_job_status(&job, Some(snapshot))
+                .expect("generated status"),
+            JobStatus::Running {
+                started_at_unix: 123,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_authority_public_class_is_not_shell_failed() {
+        let error = JobManager::summary_status_from_public_result(
+            OperationPublicResultClass::MissingAuthority,
+        )
+        .expect_err("missing authority must fail projection");
+        assert!(
+            matches!(error, OpsLifecycleError::Internal(ref message) if message.contains("authority missing")),
+            "unexpected missing authority error: {error:?}"
         );
     }
 
@@ -1316,6 +1797,7 @@ mod tests {
         let snapshot = manager
             .ops_lifecycle_snapshot(&job_id)
             .await
+            .expect("job manager should project snapshot from injected registry")
             .expect("job manager should resolve snapshot from injected registry");
         assert_eq!(snapshot.kind, OperationKind::BackgroundToolOp);
         assert_eq!(snapshot.status, OperationStatus::Running);
@@ -1323,8 +1805,32 @@ mod tests {
             registry
                 .snapshot(&snapshot.id)
                 .expect("injected registry should own the operation")
+                .expect("injected registry should own the operation")
                 .status,
             OperationStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn synthetic_running_job_concurrency_uses_generated_admission() {
+        let config = ShellConfig {
+            max_concurrent_processes: 1,
+            ..Default::default()
+        };
+        let manager = bound_job_manager(config);
+
+        let _job_id = manager
+            .register_synthetic_running_job("shell:synthetic-one", None, 30)
+            .await
+            .expect("first synthetic running job should register");
+        let err = manager
+            .register_synthetic_running_job("shell:synthetic-two", None, 30)
+            .await
+            .expect_err("generated operation admission should reject over limit");
+
+        assert!(
+            err.to_string().contains("Concurrency limit exceeded"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1344,7 +1850,11 @@ mod tests {
             )
             .await
             .expect("synthetic running job should register");
-        let job = manager.get_status(&job_id).await.expect("job status");
+        let job = manager
+            .get_status(&job_id)
+            .await
+            .expect("job status")
+            .expect("job exists");
         let placement = job.placement.expect("placement metadata");
 
         assert_eq!(
@@ -1404,7 +1914,7 @@ mod tests {
         );
 
         // Job should exist
-        let job = manager.get_status(&job_id).await;
+        let job = manager.get_status(&job_id).await.unwrap();
         assert!(job.is_some());
     }
 
@@ -1421,7 +1931,7 @@ mod tests {
         let job_id = manager.spawn_job("sleep 10", None, 30).await.unwrap();
 
         // Get status immediately - should be Running
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Running { .. }),
             "Job should be Running, got {:?}",
@@ -1455,14 +1965,14 @@ mod tests {
 
         // Non-existent job
         let fake_id = JobId::from_string("job_nonexistent");
-        let status = manager.get_status(&fake_id).await;
+        let status = manager.get_status(&fake_id).await.unwrap();
         assert!(status.is_none());
 
         // Create a job
         let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
 
         // Now it should exist
-        let status = manager.get_status(&job_id).await;
+        let status = manager.get_status(&job_id).await.unwrap();
         assert!(status.is_some());
         let job = status.unwrap();
         assert_eq!(job.id, job_id);
@@ -1482,7 +1992,7 @@ mod tests {
         let manager = bound_job_manager(config);
 
         // Initially empty
-        let jobs = manager.list_jobs().await;
+        let jobs = manager.list_jobs().await.unwrap();
         assert!(jobs.is_empty());
 
         // Add some jobs
@@ -1490,7 +2000,7 @@ mod tests {
         let id2 = manager.spawn_job("echo two", None, 30).await.unwrap();
 
         // Should have 2 jobs
-        let jobs = manager.list_jobs().await;
+        let jobs = manager.list_jobs().await.unwrap();
         assert_eq!(jobs.len(), 2);
 
         // Check summaries contain expected data
@@ -1512,6 +2022,36 @@ mod tests {
             .as_secs();
 
         let operation_id = OperationId::new();
+        manager
+            .ops_registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: manager.owner_bridge_session_id.clone(),
+                display_name: "shell:echo done".to_string(),
+                source_label: "shell_job".to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        manager
+            .ops_registry
+            .provisioning_succeeded(&operation_id)
+            .unwrap();
+        manager
+            .ops_registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".to_string(),
+                    is_error: false,
+                    duration_ms: 10,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
         let job = BackgroundJobRecord {
             view: BackgroundJob {
                 id: job_id.clone(),
@@ -1538,7 +2078,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id.clone(), operation_id);
 
-        let summaries = manager.list_jobs().await;
+        let summaries = manager.list_jobs().await.expect("job summaries");
         let summary = summaries
             .iter()
             .find(|s| s.id == job_id)
@@ -1569,7 +2109,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Status should be Cancelled
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Cancelled { .. }),
             "Job should be Cancelled, got {:?}",
@@ -1622,7 +2162,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Should be completed
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Completed { .. }),
             "Job should be Completed, got {:?}",
@@ -1648,7 +2188,7 @@ mod tests {
         // Wait for completion
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         if let JobStatus::Completed {
             exit_code,
             stdout,
@@ -1680,7 +2220,7 @@ mod tests {
         // Wait for completion
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
 
         // Should be Completed with non-zero exit code (not Failed - Failed is for spawn errors)
         if let JobStatus::Completed { exit_code, .. } = &job.status {
@@ -1709,15 +2249,16 @@ mod tests {
         // Wait for timeout
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let job = manager.get_status(&job_id).await.unwrap();
-        assert!(
-            matches!(job.status, JobStatus::TimedOut { .. }),
-            "Job should be TimedOut, got {:?}",
-            job.status
-        );
-
-        if let JobStatus::TimedOut { duration_secs, .. } = &job.status {
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
+        if let JobStatus::Failed {
+            error,
+            duration_secs,
+        } = &job.status
+        {
+            assert!(error.contains("timed out"));
             assert!(*duration_secs >= 1.0);
+        } else {
+            unreachable!("Expected Failed timeout status, got {:?}", job.status);
         }
     }
 
@@ -1739,7 +2280,7 @@ mod tests {
         // Cancel
         manager.cancel_job(&job_id).await.unwrap();
 
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Cancelled { .. }),
             "Job should be Cancelled, got {:?}",
@@ -1786,7 +2327,7 @@ mod tests {
 
         // Verify all jobs are running
         for id in [&id1, &id2, &id3] {
-            let job = manager.get_status(id).await.unwrap();
+            let job = manager.get_status(id).await.unwrap().unwrap();
             assert!(
                 matches!(job.status, JobStatus::Running { .. }),
                 "Job {id} should be running"
@@ -1802,7 +2343,7 @@ mod tests {
     /// Regression test: timeout should be enforced for background jobs
     ///
     /// A job that runs longer than its timeout should be terminated and
-    /// marked as TimedOut.
+    /// marked as Failed through generated public result authority.
     #[tokio::test]
     #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: spawns shell processes"]
@@ -1820,19 +2361,20 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
 
         // Verify job timed out
-        let job = manager.get_status(&job_id).await.unwrap();
-        assert!(
-            matches!(job.status, JobStatus::TimedOut { .. }),
-            "Job should have timed out, got {:?}",
-            job.status
-        );
-
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         // Verify duration is approximately the timeout value
-        if let JobStatus::TimedOut { duration_secs, .. } = &job.status {
+        if let JobStatus::Failed {
+            error,
+            duration_secs,
+        } = &job.status
+        {
+            assert!(error.contains("timed out"));
             assert!(
                 *duration_secs >= 1.0 && *duration_secs < 3.0,
                 "Duration should be close to timeout: {duration_secs}"
             );
+        } else {
+            unreachable!("Expected Failed timeout status, got {:?}", job.status);
         }
     }
 
@@ -1857,7 +2399,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Verify it's running
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Running { .. }),
             "Job should be running before cancel"
@@ -1870,7 +2412,7 @@ mod tests {
             .expect("Cancel should succeed");
 
         // Verify it's cancelled
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Cancelled { .. }),
             "Job should be cancelled, got {:?}",
@@ -1879,7 +2421,7 @@ mod tests {
 
         // Wait a moment and verify it stays cancelled (process is gone)
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Cancelled { .. }),
             "Job should still be cancelled"
@@ -1932,7 +2474,7 @@ mod tests {
         // Verify all jobs complete
         tokio::time::sleep(Duration::from_secs(2)).await;
         for job_id in &job_ids {
-            let job = manager.get_status(job_id).await.unwrap();
+            let job = manager.get_status(job_id).await.unwrap().unwrap();
             assert!(
                 matches!(job.status, JobStatus::Completed { .. }),
                 "Job {} should be completed, got {:?}",
@@ -1959,7 +2501,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Job should exist
-        assert!(manager.get_status(&job_id).await.is_some());
+        assert!(manager.get_status(&job_id).await.unwrap().is_some());
         assert_eq!(manager.job_count().await, 1);
 
         // Remove the job
@@ -1967,7 +2509,7 @@ mod tests {
         assert!(removed, "Job should be removed");
 
         // Job should no longer exist
-        assert!(manager.get_status(&job_id).await.is_none());
+        assert!(manager.get_status(&job_id).await.unwrap().is_none());
         assert_eq!(manager.job_count().await, 0);
 
         // Removing again should return false
@@ -2061,7 +2603,7 @@ mod tests {
         );
 
         // The new job should still be running (not counted in completed)
-        let job = manager.get_status(&trigger_id).await.unwrap();
+        let job = manager.get_status(&trigger_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Running { .. }),
             "Trigger job should be running"
@@ -2110,7 +2652,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Verify job completed successfully
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Completed { .. }),
             "Job with UTF-8 output should complete successfully, got {:?}",
@@ -2149,7 +2691,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify it's running
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Running { .. }),
             "Job should be Running before kill"
@@ -2159,7 +2701,7 @@ mod tests {
         manager.cancel_job(&job_id).await.unwrap();
 
         // Verify status is Cancelled (not still Running)
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Cancelled { .. }),
             "Job should be Cancelled after kill, got {:?}",
@@ -2170,7 +2712,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Verify status remains Cancelled (process didn't become zombie)
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Cancelled { .. }),
             "Job should still be Cancelled (process reaped), got {:?}",
@@ -2196,7 +2738,7 @@ mod tests {
         let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
 
         // Immediately should be Running
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Running { .. }),
             "Job should start as Running"
@@ -2206,7 +2748,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Status should have auto-updated to Completed
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Completed { .. }),
             "Job should auto-complete to Completed, got {:?}",
@@ -2555,15 +3097,15 @@ mod tests {
         let manager = bound_job_manager(config);
 
         // Initially no running jobs
-        assert_eq!(manager.running_job_count().await, 0);
+        assert_eq!(manager.running_job_count().await.unwrap(), 0);
 
         // Spawn a long-running job
         let job1 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
-        assert_eq!(manager.running_job_count().await, 1);
+        assert_eq!(manager.running_job_count().await.unwrap(), 1);
 
         // Spawn another long-running job
         let job2 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
-        assert_eq!(manager.running_job_count().await, 2);
+        assert_eq!(manager.running_job_count().await.unwrap(), 2);
 
         let _ = manager.cancel_job(&job1).await;
         let _ = manager.cancel_job(&job2).await;
@@ -2651,7 +3193,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Verify job completed
-        let job = manager.get_status(&job_id).await.unwrap();
+        let job = manager.get_status(&job_id).await.unwrap().unwrap();
         assert!(
             matches!(job.status, JobStatus::Completed { .. }),
             "Job should be completed, got {:?}",
@@ -2659,7 +3201,7 @@ mod tests {
         );
 
         // Get the job summary via list_jobs
-        let summaries = manager.list_jobs().await;
+        let summaries = manager.list_jobs().await.unwrap();
         let summary = summaries
             .iter()
             .find(|s| s.id == job_id)
@@ -2811,6 +3353,50 @@ mod tests {
         assert!(
             err.to_string().contains("Concurrency limit exceeded"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_slot_release_does_not_publish_background_completion() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        config.max_concurrent_processes = 1;
+
+        let manager = bound_job_manager(config);
+        let feed = manager
+            .ops_registry
+            .completion_feed()
+            .expect("runtime ops registry should expose completion feed");
+
+        let operation_id = {
+            let guard = manager
+                .acquire_sync_slot()
+                .await
+                .expect("sync slot should be available");
+            let operation_id = guard.operation_id.clone();
+            let snapshot = manager
+                .ops_registry
+                .snapshot(&operation_id)
+                .expect("sync slot projection should succeed")
+                .expect("sync slot should be registered");
+            assert_eq!(snapshot.kind, OperationKind::BackgroundToolCapacitySlot);
+            operation_id
+        };
+
+        let batch = feed.list_since(0);
+        assert!(
+            batch.entries.is_empty(),
+            "sync-slot release must not publish background completion entries: {:?}",
+            batch.entries
+        );
+        assert_eq!(batch.watermark, 0);
+        assert!(
+            manager
+                .ops_registry
+                .snapshot(&operation_id)
+                .unwrap()
+                .is_none(),
+            "sync-slot release must discard volatile capacity-slot state"
         );
     }
 

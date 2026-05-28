@@ -396,14 +396,14 @@ rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
 	./scripts/audit-effect-authority.sh
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
-	$(CARGO) run -p xtask -- rmat-audit --strict
+	bash -lc 'ulimit -s unlimited && exec "$$@"' _ $(CARGO) run -p xtask -- rmat-audit --strict
 
 # Seam inventory (strict): every Local/External effect must have an
 # explicit classification and every routed effect must resolve via
 # the typed Route table in the composition schema.
 seam-inventory:
 	@echo "$(GREEN)Running seam inventory (strict)...$(NC)"
-	$(CARGO) run -p xtask -- seam-inventory --strict
+	bash -lc 'ulimit -s unlimited && exec "$$@"' _ $(CARGO) run -p xtask -- seam-inventory --strict
 
 # Strict `@generated` header truthfulness audit: every `@generated` marker
 # must correspond to a codegen-emit path, and every codegen-emit path must

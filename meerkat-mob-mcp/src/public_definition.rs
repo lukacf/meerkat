@@ -15,8 +15,8 @@ use meerkat_mob::{
         BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode,
         EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
         FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode, RepeatUntilSpec, RoleWiringRule,
-        SessionCleanupPolicy, SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorSpec,
-        TopologyRule, TopologySpec, WiringRules,
+        SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorSpec, TopologyRule,
+        TopologySpec, WiringRules,
     },
 };
 use std::convert::TryFrom;
@@ -66,8 +66,6 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
     definition.limits = input.limits.map(decode_limits);
     definition.spawn_policy = input.spawn_policy.map(decode_spawn_policy);
     definition.event_router = input.event_router.map(decode_event_router);
-    definition.session_cleanup_policy = SessionCleanupPolicy::Manual;
-    definition.is_implicit = false;
     Ok(definition)
 }
 

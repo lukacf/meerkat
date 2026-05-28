@@ -14,10 +14,42 @@ use std::future::Future;
 
 use meerkat_core::TurnErrorMetadata;
 use meerkat_core::lifecycle::InputId;
-use meerkat_core::types::RunResult;
+#[cfg(test)]
+use meerkat_core::lifecycle::RunId;
+use meerkat_core::types::{RunResult, SessionId};
 use serde_json::Value;
 
+use crate::meerkat_machine::driver::RuntimeCompletionResultAuthority;
+use crate::meerkat_machine::dsl::RuntimeCompletionResultClass;
 use crate::tokio::sync::oneshot;
+
+/// Mechanical failure while waiting for completion plumbing.
+///
+/// This is intentionally separate from [`CompletionOutcome`]: a closed waiter
+/// channel or missing generated completion authority is not a public runtime
+/// result class.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CompletionWaitError {
+    #[error("completion channel closed without an authorized result")]
+    ChannelClosed,
+    #[error("{0}")]
+    AuthorityUnavailable(String),
+}
+
+impl CompletionWaitError {
+    pub fn wait_failure_observation(
+        &self,
+    ) -> crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation {
+        match self {
+            Self::ChannelClosed => {
+                crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::ChannelClosed
+            }
+            Self::AuthorityUnavailable(_) => {
+                crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::AuthorityUnavailable
+            }
+        }
+    }
+}
 
 /// Outcome delivered to a completion waiter.
 #[derive(Debug)]
@@ -48,6 +80,73 @@ pub enum CompletionOutcome {
     RuntimeTerminated(String),
 }
 
+/// Runtime-minted observation for post-completion cleanup.
+///
+/// Cleanup code can inspect this generated-facing observation, but it cannot
+/// rewrite the public [`CompletionOutcome`] that the waiter received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionCleanupObservation {
+    owner_session_id: SessionId,
+    owner_agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
+    owner_fence_token: Option<crate::meerkat_machine::dsl::FenceToken>,
+    owner_runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
+    owner_runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
+    observed_outcome: crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome,
+}
+
+impl CompletionCleanupObservation {
+    fn from_authority(authority: RuntimeCompletionResultAuthority) -> Self {
+        Self {
+            owner_session_id: authority.session_id().clone(),
+            owner_agent_runtime_id: authority.agent_runtime_id().cloned(),
+            owner_fence_token: authority.fence_token(),
+            owner_runtime_generation: authority.runtime_generation(),
+            owner_runtime_epoch_id: authority.runtime_epoch_id().cloned(),
+            observed_outcome: authority.cleanup_observation(),
+        }
+    }
+
+    pub(crate) fn owner_session_id(&self) -> &SessionId {
+        &self.owner_session_id
+    }
+
+    pub(crate) fn owner_agent_runtime_id(
+        &self,
+    ) -> Option<&crate::meerkat_machine::dsl::AgentRuntimeId> {
+        self.owner_agent_runtime_id.as_ref()
+    }
+
+    pub(crate) fn owner_fence_token(&self) -> Option<crate::meerkat_machine::dsl::FenceToken> {
+        self.owner_fence_token
+    }
+
+    pub(crate) fn owner_runtime_generation(
+        &self,
+    ) -> Option<crate::meerkat_machine::dsl::Generation> {
+        self.owner_runtime_generation
+    }
+
+    pub(crate) fn owner_runtime_epoch_id(
+        &self,
+    ) -> Option<&crate::meerkat_machine::dsl::RuntimeEpochId> {
+        self.owner_runtime_epoch_id.as_ref()
+    }
+
+    pub(crate) fn observed_outcome(
+        &self,
+    ) -> crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome {
+        self.observed_outcome
+    }
+}
+
+/// Result carried on completion waiter plumbing after generated authority has
+/// selected both the public result class and cleanup observation.
+#[derive(Debug)]
+struct CompletionDelivery {
+    outcome: CompletionOutcome,
+    cleanup_observation: CompletionCleanupObservation,
+}
+
 /// Snapshot of one input's registered completion waiters.
 ///
 /// This is a diagnostic/supporting-carrier view only. Waiter counts are never
@@ -72,19 +171,43 @@ pub struct CompletionRegistrySnapshot {
 /// Handle for awaiting the completion of an accepted input.
 #[derive(Debug)]
 pub struct CompletionHandle {
-    rx: oneshot::Receiver<CompletionOutcome>,
+    rx: oneshot::Receiver<Result<CompletionDelivery, CompletionWaitError>>,
 }
 
 impl CompletionHandle {
-    /// Wait for the input to reach a terminal state.
-    pub async fn wait(self) -> CompletionOutcome {
-        match self.rx.await {
-            Ok(outcome) => outcome,
-            // Sender dropped without sending — runtime shut down unexpectedly
-            Err(_) => CompletionOutcome::RuntimeTerminated(
-                "completion channel closed without result".into(),
-            ),
-        }
+    async fn try_wait_delivery(self) -> Result<CompletionDelivery, CompletionWaitError> {
+        self.rx
+            .await
+            .unwrap_or(Err(CompletionWaitError::ChannelClosed))
+    }
+
+    /// Wait for the input to reach a terminal state or report mechanical waiter failure.
+    pub async fn try_wait(self) -> Result<CompletionOutcome, CompletionWaitError> {
+        self.try_wait_delivery()
+            .await
+            .map(|delivery| delivery.outcome)
+    }
+
+    /// Wait for completion and return the generated cleanup observation carried
+    /// with the authorized public outcome.
+    pub async fn try_wait_with_cleanup_observation(
+        self,
+    ) -> Result<(CompletionOutcome, CompletionCleanupObservation), CompletionWaitError> {
+        let delivery = self.try_wait_delivery().await?;
+        Ok((delivery.outcome, delivery.cleanup_observation))
+    }
+
+    /// Wait for the input to reach a terminal state or report mechanical waiter failure.
+    pub async fn wait(self) -> Result<CompletionOutcome, CompletionWaitError> {
+        self.try_wait().await
+    }
+
+    /// Wait for a test handle that is expected to resolve through generated authority.
+    #[cfg(test)]
+    pub(crate) async fn wait_authorized(self) -> CompletionOutcome {
+        self.wait()
+            .await
+            .expect("completion waiter closed without an authorized result")
     }
 
     /// Relay completion through a cleanup future before resolving the returned
@@ -97,7 +220,7 @@ impl CompletionHandle {
     {
         let (tx, rx) = oneshot::channel();
         crate::tokio::spawn(async move {
-            let outcome = self.wait().await;
+            let outcome = self.try_wait_delivery().await;
             cleanup().await;
             let _ = tx.send(outcome);
         });
@@ -106,30 +229,136 @@ impl CompletionHandle {
 
     /// Relay completion through a cleanup future that can inspect the outcome.
     ///
-    /// The cleanup future owns and returns the outcome so callers can run
-    /// outcome-specific teardown without losing the completion result.
+    /// The cleanup future receives a runtime-minted cleanup observation and
+    /// cannot replace the completion result.
     pub fn with_outcome_cleanup<F, Fut>(self, cleanup: F) -> Self
     where
-        F: FnOnce(CompletionOutcome) -> Fut + Send + 'static,
-        Fut: Future<Output = CompletionOutcome> + Send + 'static,
+        F: FnOnce(CompletionCleanupObservation) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
         crate::tokio::spawn(async move {
-            let outcome = self.wait().await;
-            let outcome = cleanup(outcome).await;
+            let outcome = match self.try_wait_delivery().await {
+                Ok(delivery) => {
+                    cleanup(delivery.cleanup_observation.clone()).await;
+                    Ok(delivery)
+                }
+                Err(error) => Err(error),
+            };
             let _ = tx.send(outcome);
         });
         Self { rx }
     }
 
-    /// Create a handle from a pre-resolved outcome.
-    ///
-    /// Used when the input is already terminal (e.g. dedup of completed input)
-    /// and no waiter registration is needed.
-    pub fn already_resolved(outcome: CompletionOutcome) -> Self {
+    /// Relay completion through cleanup that can observe either generated
+    /// completion-cleanup evidence or a typed waiter failure.
+    pub fn with_completion_cleanup<F, Fut>(self, cleanup: F) -> Self
+    where
+        F: FnOnce(Result<CompletionCleanupObservation, CompletionWaitError>) -> Fut
+            + Send
+            + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(outcome);
+        crate::tokio::spawn(async move {
+            let outcome = self.try_wait_delivery().await;
+            match &outcome {
+                Ok(delivery) => cleanup(Ok(delivery.cleanup_observation.clone())).await,
+                Err(error) => cleanup(Err(error.clone())).await,
+            }
+            let _ = tx.send(outcome);
+        });
         Self { rx }
+    }
+
+    #[cfg(test)]
+    fn already_resolved_internal(
+        outcome: CompletionOutcome,
+        authority: RuntimeCompletionResultAuthority,
+    ) -> Self {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Ok(CompletionDelivery {
+            outcome,
+            cleanup_observation: CompletionCleanupObservation::from_authority(authority),
+        }));
+        Self { rx }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn already_resolved_with_generated_class(
+        outcome: CompletionOutcome,
+        expected_class: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
+        terminal: crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation,
+        finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+    ) -> Result<Self, crate::RuntimeDriverError> {
+        let run_id = if terminal
+            == crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RuntimeTerminated
+        {
+            None
+        } else {
+            Some(RunId::new())
+        };
+        let authority =
+            crate::meerkat_machine::driver::machine_resolve_pre_resolved_runtime_completion_result(
+                run_id.as_ref(),
+                terminal,
+                finalization,
+            )?;
+        if !authority.allows(expected_class) {
+            return Err(crate::RuntimeDriverError::Internal(format!(
+                "generated runtime completion authority returned {:?}, expected {expected_class:?}",
+                authority.class()
+            )));
+        }
+        Ok(Self::already_resolved_internal(outcome, authority))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn already_completed_without_result() -> Result<Self, crate::RuntimeDriverError> {
+        Self::already_resolved_with_generated_class(
+            CompletionOutcome::CompletedWithoutResult,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CompletedWithoutResult,
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn already_runtime_apply_failed(
+        reason: String,
+        error: TurnErrorMetadata,
+    ) -> Result<Self, crate::RuntimeDriverError> {
+        Self::already_resolved_with_generated_class(
+            CompletionOutcome::AbandonedWithError { reason, error },
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError,
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn already_runtime_terminated(
+        reason: String,
+    ) -> Result<Self, crate::RuntimeDriverError> {
+        Self::already_resolved_with_generated_class(
+            CompletionOutcome::RuntimeTerminated(reason),
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::RuntimeTerminated,
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RuntimeTerminated,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn already_callback_pending(
+        tool_name: String,
+        args: Value,
+    ) -> Result<Self, crate::RuntimeDriverError> {
+        Self::already_resolved_with_generated_class(
+            CompletionOutcome::CallbackPending { tool_name, args },
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CallbackPending,
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+        )
     }
 }
 
@@ -156,7 +385,8 @@ impl CompletionOutcome {
 /// (e.g. dedup of in-flight input registers a second waiter for the same InputId).
 #[derive(Default)]
 pub(crate) struct CompletionRegistry {
-    waiters: HashMap<InputId, Vec<oneshot::Sender<CompletionOutcome>>>,
+    waiters:
+        HashMap<InputId, Vec<oneshot::Sender<Result<CompletionDelivery, CompletionWaitError>>>>,
 }
 
 impl CompletionRegistry {
@@ -167,8 +397,84 @@ impl CompletionRegistry {
     fn take_waiters(
         &mut self,
         input_id: &InputId,
-    ) -> Option<Vec<oneshot::Sender<CompletionOutcome>>> {
+    ) -> Option<Vec<oneshot::Sender<Result<CompletionDelivery, CompletionWaitError>>>> {
         self.waiters.remove(input_id)
+    }
+
+    fn send_outcome(
+        senders: Vec<oneshot::Sender<Result<CompletionDelivery, CompletionWaitError>>>,
+        outcome: CompletionOutcome,
+        cleanup_observation: CompletionCleanupObservation,
+    ) {
+        for tx in senders {
+            let outcome = match &outcome {
+                CompletionOutcome::Completed(result) => {
+                    CompletionOutcome::Completed(Box::new(result.as_ref().clone()))
+                }
+                CompletionOutcome::CompletedWithoutResult => {
+                    CompletionOutcome::CompletedWithoutResult
+                }
+                CompletionOutcome::CallbackPending { tool_name, args } => {
+                    CompletionOutcome::CallbackPending {
+                        tool_name: tool_name.clone(),
+                        args: args.clone(),
+                    }
+                }
+                CompletionOutcome::Cancelled => CompletionOutcome::Cancelled,
+                CompletionOutcome::Abandoned(reason) => {
+                    CompletionOutcome::Abandoned(reason.clone())
+                }
+                CompletionOutcome::AbandonedWithError { reason, error } => {
+                    CompletionOutcome::AbandonedWithError {
+                        reason: reason.clone(),
+                        error: error.clone(),
+                    }
+                }
+                CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
+                    CompletionOutcome::CompletedWithFinalizationFailure {
+                        result: Box::new(result.as_ref().clone()),
+                        error: error.clone(),
+                    }
+                }
+                CompletionOutcome::RuntimeTerminated(reason) => {
+                    CompletionOutcome::RuntimeTerminated(reason.clone())
+                }
+            };
+            let _ = tx.send(Ok(CompletionDelivery {
+                outcome,
+                cleanup_observation: cleanup_observation.clone(),
+            }));
+        }
+    }
+
+    fn send_error(
+        senders: Vec<oneshot::Sender<Result<CompletionDelivery, CompletionWaitError>>>,
+        error: CompletionWaitError,
+    ) {
+        for tx in senders {
+            let _ = tx.send(Err(error.clone()));
+        }
+    }
+
+    fn authority_mismatch_error(
+        authority: &RuntimeCompletionResultAuthority,
+        expected: RuntimeCompletionResultClass,
+    ) -> CompletionWaitError {
+        CompletionWaitError::AuthorityUnavailable(format!(
+            "generated runtime completion authority returned {:?}, expected {expected:?}",
+            authority.class()
+        ))
+    }
+
+    fn fail_input_authority_mismatch(
+        &mut self,
+        input_id: &InputId,
+        authority: &RuntimeCompletionResultAuthority,
+        expected: RuntimeCompletionResultClass,
+    ) {
+        if let Some(senders) = self.take_waiters(input_id) {
+            Self::send_error(senders, Self::authority_mismatch_error(authority, expected));
+        }
     }
 
     /// Register a waiter for an input. Returns the handle the caller will await.
@@ -182,118 +488,316 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for a completed input.
-    pub(crate) fn resolve_completed(&mut self, input_id: &InputId, result: RunResult) {
+    fn resolve_completed(
+        &mut self,
+        input_id: &InputId,
+        result: RunResult,
+        cleanup_observation: CompletionCleanupObservation,
+    ) {
         if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::Completed(Box::new(result.clone())));
-            }
+            Self::send_outcome(
+                senders,
+                CompletionOutcome::Completed(Box::new(result)),
+                cleanup_observation,
+            );
         }
+    }
+
+    pub(crate) fn resolve_completed_authorized(
+        &mut self,
+        input_id: &InputId,
+        result: RunResult,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::Completed;
+        if !authority.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, &authority, expected);
+            return;
+        }
+        self.resolve_completed(
+            input_id,
+            result,
+            CompletionCleanupObservation::from_authority(authority),
+        );
     }
 
     /// Resolve all waiters for an input that completed without producing a RunResult.
-    pub(crate) fn resolve_without_result(&mut self, input_id: &InputId) {
+    fn resolve_without_result(
+        &mut self,
+        input_id: &InputId,
+        cleanup_observation: CompletionCleanupObservation,
+    ) {
         if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::CompletedWithoutResult);
-            }
+            Self::send_outcome(
+                senders,
+                CompletionOutcome::CompletedWithoutResult,
+                cleanup_observation,
+            );
         }
     }
 
+    pub(crate) fn resolve_without_result_authorized(
+        &mut self,
+        input_id: &InputId,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::CompletedWithoutResult;
+        if !authority.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, &authority, expected);
+            return;
+        }
+        self.resolve_without_result(
+            input_id,
+            CompletionCleanupObservation::from_authority(authority),
+        );
+    }
+
     /// Resolve all waiters for an input that reached a callback boundary.
-    pub(crate) fn resolve_callback_pending(
+    fn resolve_callback_pending(
         &mut self,
         input_id: &InputId,
         tool_name: String,
         args: Value,
+        cleanup_observation: CompletionCleanupObservation,
     ) {
         if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::CallbackPending {
-                    tool_name: tool_name.clone(),
-                    args: args.clone(),
-                });
-            }
+            Self::send_outcome(
+                senders,
+                CompletionOutcome::CallbackPending { tool_name, args },
+                cleanup_observation,
+            );
         }
+    }
+
+    pub(crate) fn resolve_callback_pending_authorized(
+        &mut self,
+        input_id: &InputId,
+        tool_name: String,
+        args: Value,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::CallbackPending;
+        if !authority.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, &authority, expected);
+            return;
+        }
+        self.resolve_callback_pending(
+            input_id,
+            tool_name,
+            args,
+            CompletionCleanupObservation::from_authority(authority),
+        );
     }
 
     /// Resolve all waiters for an input that reached the cancellation terminal.
-    pub(crate) fn resolve_cancelled(&mut self, input_id: &InputId) {
+    fn resolve_cancelled(
+        &mut self,
+        input_id: &InputId,
+        cleanup_observation: CompletionCleanupObservation,
+    ) {
         if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::Cancelled);
-            }
+            Self::send_outcome(senders, CompletionOutcome::Cancelled, cleanup_observation);
         }
     }
 
-    /// Resolve all waiters for an abandoned input.
-    pub(crate) fn resolve_abandoned(&mut self, input_id: &InputId, reason: String) {
-        if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::Abandoned(reason.clone()));
-            }
+    pub(crate) fn resolve_cancelled_authorized(
+        &mut self,
+        input_id: &InputId,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::Cancelled;
+        if !authority.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, &authority, expected);
+            return;
         }
+        self.resolve_cancelled(
+            input_id,
+            CompletionCleanupObservation::from_authority(authority),
+        );
     }
 
     /// Resolve all waiters for an abandoned input with typed failure metadata.
-    pub(crate) fn resolve_abandoned_with_error(
+    fn resolve_abandoned_with_error(
         &mut self,
         input_id: &InputId,
         reason: String,
         error: TurnErrorMetadata,
+        cleanup_observation: CompletionCleanupObservation,
     ) {
         if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::AbandonedWithError {
-                    reason: reason.clone(),
-                    error: error.clone(),
-                });
-            }
+            Self::send_outcome(
+                senders,
+                CompletionOutcome::AbandonedWithError { reason, error },
+                cleanup_observation,
+            );
         }
+    }
+
+    pub(crate) fn resolve_abandoned_with_error_authorized(
+        &mut self,
+        input_id: &InputId,
+        reason: String,
+        error: TurnErrorMetadata,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::AbandonedWithError;
+        if !authority.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, &authority, expected);
+            return;
+        }
+        self.resolve_abandoned_with_error(
+            input_id,
+            reason,
+            error,
+            CompletionCleanupObservation::from_authority(authority),
+        );
     }
 
     /// Resolve all waiters for a turn whose output exists but finalization
     /// failed after output production.
-    pub(crate) fn resolve_completed_with_finalization_failure(
+    fn resolve_completed_with_finalization_failure(
         &mut self,
         input_id: &InputId,
         result: RunResult,
         error: TurnErrorMetadata,
+        cleanup_observation: CompletionCleanupObservation,
     ) {
         if let Some(senders) = self.take_waiters(input_id) {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::CompletedWithFinalizationFailure {
-                    result: Box::new(result.clone()),
-                    error: error.clone(),
-                });
-            }
+            Self::send_outcome(
+                senders,
+                CompletionOutcome::CompletedWithFinalizationFailure {
+                    result: Box::new(result),
+                    error,
+                },
+                cleanup_observation,
+            );
         }
+    }
+
+    pub(crate) fn resolve_completed_with_finalization_failure_authorized(
+        &mut self,
+        input_id: &InputId,
+        result: RunResult,
+        error: TurnErrorMetadata,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::CompletedWithFinalizationFailure;
+        if !authority.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, &authority, expected);
+            return;
+        }
+        self.resolve_completed_with_finalization_failure(
+            input_id,
+            result,
+            error,
+            CompletionCleanupObservation::from_authority(authority),
+        );
     }
 
     /// Resolve all pending waiters with a termination error.
     ///
-    /// Used when the runtime is stopped or destroyed.
-    pub(crate) fn resolve_all_terminated(&mut self, reason: &str) {
+    /// The public termination result class is supplied by generated
+    /// MeerkatMachine authority; this registry method only fans the authorized
+    /// class out to waiter channels.
+    pub(crate) fn resolve_all_runtime_terminated(
+        &mut self,
+        reason: &str,
+        authority: RuntimeCompletionResultAuthority,
+    ) {
+        let expected = RuntimeCompletionResultClass::RuntimeTerminated;
+        if !authority.allows(expected) {
+            let error = Self::authority_mismatch_error(&authority, expected);
+            self.fail_all_waiters(error);
+            return;
+        }
+        let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
         for (_, senders) in self.waiters.drain() {
-            for tx in senders {
-                let _ = tx.send(CompletionOutcome::RuntimeTerminated(reason.into()));
+            Self::send_outcome(
+                senders,
+                CompletionOutcome::RuntimeTerminated(reason.into()),
+                cleanup_observation.clone(),
+            );
+        }
+    }
+
+    pub(crate) fn resolve_inputs_runtime_terminated<I>(
+        &mut self,
+        input_ids: I,
+        reason: &str,
+        authority: RuntimeCompletionResultAuthority,
+    ) where
+        I: IntoIterator<Item = InputId>,
+    {
+        let input_ids: Vec<InputId> = input_ids.into_iter().collect();
+        let expected = RuntimeCompletionResultClass::RuntimeTerminated;
+        if !authority.allows(expected) {
+            let error = Self::authority_mismatch_error(&authority, expected);
+            self.fail_inputs(input_ids, error);
+            return;
+        }
+        let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+        for input_id in input_ids {
+            if let Some(senders) = self.take_waiters(&input_id) {
+                Self::send_outcome(
+                    senders,
+                    CompletionOutcome::RuntimeTerminated(reason.into()),
+                    cleanup_observation.clone(),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn fail_all_waiters(&mut self, error: CompletionWaitError) {
+        for (_, senders) in self.waiters.drain() {
+            Self::send_error(senders, error.clone());
+        }
+    }
+
+    pub(crate) fn fail_inputs<I>(&mut self, input_ids: I, error: CompletionWaitError)
+    where
+        I: IntoIterator<Item = InputId>,
+    {
+        for input_id in input_ids {
+            if let Some(senders) = self.take_waiters(&input_id) {
+                Self::send_error(senders, error.clone());
             }
         }
     }
 
     /// Resolve waiters whose input IDs are no longer pending after a
     /// lifecycle reconciliation (for example runtime recycle/recovery).
-    pub(crate) fn resolve_not_pending<F>(&mut self, mut is_still_pending: F, reason: &str)
-    where
+    pub(crate) fn resolve_not_pending_runtime_terminated<F>(
+        &mut self,
+        mut is_still_pending: F,
+        reason: &str,
+        authority: RuntimeCompletionResultAuthority,
+    ) where
         F: FnMut(&InputId) -> bool,
     {
+        let expected = RuntimeCompletionResultClass::RuntimeTerminated;
+        if !authority.allows(expected) {
+            let error = Self::authority_mismatch_error(&authority, expected);
+            self.waiters.retain(|input_id, senders| {
+                if is_still_pending(input_id) {
+                    return true;
+                }
+
+                Self::send_error(std::mem::take(senders), error.clone());
+                false
+            });
+            return;
+        }
+        let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
         self.waiters.retain(|input_id, senders| {
             if is_still_pending(input_id) {
                 return true;
             }
 
-            for tx in senders.drain(..) {
-                let _ = tx.send(CompletionOutcome::RuntimeTerminated(reason.into()));
-            }
+            Self::send_outcome(
+                std::mem::take(senders),
+                CompletionOutcome::RuntimeTerminated(reason.into()),
+                cleanup_observation.clone(),
+            );
             false
         });
     }
@@ -341,6 +845,9 @@ impl CompletionRegistry {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::meerkat_machine::dsl::{
+        RuntimeCompletionObservedOutcome, RuntimeCompletionResultClass,
+    };
     use meerkat_core::types::{SessionId, Usage};
 
     fn make_run_result() -> RunResult {
@@ -358,6 +865,16 @@ mod tests {
         }
     }
 
+    fn authority(
+        result_class: RuntimeCompletionResultClass,
+        cleanup_observation: RuntimeCompletionObservedOutcome,
+    ) -> RuntimeCompletionResultAuthority {
+        crate::meerkat_machine::driver::test_runtime_completion_authority(
+            result_class,
+            cleanup_observation,
+        )
+    }
+
     #[tokio::test]
     async fn register_and_complete() {
         let mut registry = CompletionRegistry::new();
@@ -368,58 +885,279 @@ mod tests {
         assert_eq!(registry.debug_waiter_count(), 1);
 
         let result = make_run_result();
-        registry.resolve_completed(&input_id, result);
+        registry.resolve_completed_authorized(
+            &input_id,
+            result,
+            authority(
+                RuntimeCompletionResultClass::Completed,
+                RuntimeCompletionObservedOutcome::Completed,
+            ),
+        );
 
-        match handle.wait().await {
+        match handle.wait_authorized().await {
             CompletionOutcome::Completed(r) => assert_eq!(r.text, "hello"),
             other => panic!("Expected Completed, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn register_and_abandon() {
+    async fn register_and_fail_waiter() {
         let mut registry = CompletionRegistry::new();
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        registry.resolve_abandoned(&input_id, "retired".into());
+        registry.fail_inputs(
+            [input_id],
+            CompletionWaitError::AuthorityUnavailable("retired".into()),
+        );
 
-        match handle.wait().await {
-            CompletionOutcome::Abandoned(reason) => assert_eq!(reason, "retired"),
-            other => panic!("Expected Abandoned, got {other:?}"),
+        match handle.try_wait().await {
+            Err(CompletionWaitError::AuthorityUnavailable(reason)) => assert_eq!(reason, "retired"),
+            other => panic!("Expected wait error, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn resolve_all_terminated() {
+    async fn mismatched_result_authority_fails_waiter_closed() {
+        let mut registry = CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+
+        registry.resolve_completed_authorized(
+            &input_id,
+            make_run_result(),
+            authority(
+                RuntimeCompletionResultClass::Cancelled,
+                RuntimeCompletionObservedOutcome::Cancelled,
+            ),
+        );
+
+        assert!(!registry.debug_has_waiters());
+        match handle.try_wait().await {
+            Err(CompletionWaitError::AuthorityUnavailable(reason)) => {
+                assert!(reason.contains("Cancelled"));
+                assert!(reason.contains("Completed"));
+            }
+            other => panic!("Expected authority mismatch wait error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_all_runtime_terminated() {
         let mut registry = CompletionRegistry::new();
         let h1 = registry.register(InputId::new());
         let h2 = registry.register(InputId::new());
 
-        registry.resolve_all_terminated("runtime stopped");
+        registry.resolve_all_runtime_terminated(
+            "runtime stopped",
+            authority(
+                RuntimeCompletionResultClass::RuntimeTerminated,
+                RuntimeCompletionObservedOutcome::RuntimeTerminated,
+            ),
+        );
 
         assert!(!registry.debug_has_waiters());
 
-        match h1.wait().await {
+        match h1.wait_authorized().await {
             CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
-        match h2.wait().await {
+        match h2.wait_authorized().await {
             CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mismatched_runtime_terminated_authority_fails_all_waiters_closed() {
+        let mut registry = CompletionRegistry::new();
+        let h1 = registry.register(InputId::new());
+        let h2 = registry.register(InputId::new());
+
+        registry.resolve_all_runtime_terminated(
+            "runtime stopped",
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
+
+        assert!(!registry.debug_has_waiters());
+        for handle in [h1, h2] {
+            match handle.try_wait().await {
+                Err(CompletionWaitError::AuthorityUnavailable(reason)) => {
+                    assert!(reason.contains("CompletedWithoutResult"));
+                    assert!(reason.contains("RuntimeTerminated"));
+                }
+                other => panic!("Expected authority mismatch wait error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_rejects_observation_from_another_session() {
+        let adapter = crate::meerkat_machine::MeerkatMachine::ephemeral();
+        let source_session_id = SessionId::new();
+        let target_session_id = SessionId::new();
+        adapter
+            .prepare_bindings(source_session_id.clone())
+            .await
+            .expect("source session should prepare runtime bindings");
+        adapter
+            .prepare_bindings(target_session_id.clone())
+            .await
+            .expect("target session should prepare runtime bindings");
+
+        let input = crate::Input::Prompt(crate::PromptInput::new(
+            "source session pending completion",
+            None,
+        ));
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(&source_session_id, input)
+            .await
+            .expect("source input should be accepted");
+        let handle = handle.expect("source input should have a completion waiter");
+        adapter
+            .stop_runtime_executor(&source_session_id, "source stopped")
+            .await
+            .expect("source stop should resolve waiter");
+        let (_outcome, observation) = handle
+            .try_wait_with_cleanup_observation()
+            .await
+            .expect("waiter should resolve with generated cleanup observation");
+
+        assert_eq!(observation.owner_session_id(), &source_session_id);
+        let err = adapter
+            .resolve_runtime_completion_cleanup(
+                &target_session_id,
+                observation,
+                false,
+                crate::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Absent,
+            )
+            .await
+            .expect_err("cleanup must reject an observation minted for another session");
+        assert!(
+            matches!(err, crate::RuntimeDriverError::ValidationFailed { .. }),
+            "expected generated cleanup validation failure, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_rejects_stale_same_session_observation_after_rebinding() {
+        let adapter = crate::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session should prepare initial runtime bindings");
+
+        let input = crate::Input::Prompt(crate::PromptInput::new(
+            "same session pending completion",
+            None,
+        ));
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("input should be accepted");
+        let handle = handle.expect("input should have a completion waiter");
+        adapter
+            .stop_runtime_executor(&session_id, "first runtime stopped")
+            .await
+            .expect("stop should resolve waiter");
+        let (_outcome, stale_observation) = handle
+            .try_wait_with_cleanup_observation()
+            .await
+            .expect("waiter should resolve with generated cleanup observation");
+
+        adapter.unregister_session(&session_id).await;
+        adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session should prepare replacement runtime bindings");
+
+        let err = adapter
+            .resolve_runtime_completion_cleanup(
+                &session_id,
+                stale_observation,
+                false,
+                crate::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Absent,
+            )
+            .await
+            .expect_err("cleanup must reject an observation minted for a prior runtime binding");
+        assert!(
+            matches!(err, crate::RuntimeDriverError::ValidationFailed { .. }),
+            "expected generated cleanup validation failure, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_failure_authority_releases_pre_admission_and_classifies_public_reason() {
+        let adapter = crate::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session should prepare runtime bindings");
+
+        let authority = adapter
+            .resolve_runtime_completion_wait_failure(
+                &session_id,
+                &CompletionWaitError::AuthorityUnavailable("missing generated result".into()),
+            )
+            .await
+            .expect("wait-failure authority should resolve");
+
+        assert!(authority.releases_pre_admission());
+        assert_eq!(
+            authority.public_error_class,
+            crate::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicErrorClass::InternalError
+        );
+        assert_eq!(
+            authority.public_reason,
+            crate::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason::CompletionAuthorityUnavailable
+        );
+        assert!(!authority.resumable);
+    }
+
+    #[tokio::test]
+    async fn wait_failure_authority_rejects_missing_session_authority() {
+        let adapter = crate::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        let err = adapter
+            .resolve_runtime_completion_wait_failure(
+                &session_id,
+                &CompletionWaitError::ChannelClosed,
+            )
+            .await
+            .expect_err("wait-failure authority must fail closed without a session authority");
+
+        assert!(
+            matches!(err, crate::RuntimeDriverError::ValidationFailed { .. }),
+            "expected generated wait-failure validation failure, got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn resolve_nonexistent_is_a_noop() {
         let mut registry = CompletionRegistry::new();
-        registry.resolve_completed(&InputId::new(), make_run_result());
-        registry.resolve_abandoned(&InputId::new(), "gone".into());
+        registry.resolve_completed_authorized(
+            &InputId::new(),
+            make_run_result(),
+            authority(
+                RuntimeCompletionResultClass::Completed,
+                RuntimeCompletionObservedOutcome::Completed,
+            ),
+        );
+        registry.fail_inputs(
+            [InputId::new()],
+            CompletionWaitError::AuthorityUnavailable("gone".into()),
+        );
         assert!(!registry.debug_has_waiters());
     }
 
     #[tokio::test]
-    async fn dropped_sender_gives_terminated() {
+    async fn dropped_sender_gives_wait_error() {
         let mut registry = CompletionRegistry::new();
         let input_id = InputId::new();
         let handle = registry.register(input_id);
@@ -427,10 +1165,10 @@ mod tests {
         // Drop the registry (and thus the sender)
         drop(registry);
 
-        match handle.wait().await {
-            CompletionOutcome::RuntimeTerminated(_) => {}
-            other => panic!("Expected RuntimeTerminated, got {other:?}"),
-        }
+        assert!(matches!(
+            handle.try_wait().await,
+            Err(CompletionWaitError::ChannelClosed)
+        ));
     }
 
     #[tokio::test]
@@ -445,12 +1183,19 @@ mod tests {
         assert_eq!(registry.debug_waiter_count(), 3);
 
         let result = make_run_result();
-        registry.resolve_completed(&input_id, result);
+        registry.resolve_completed_authorized(
+            &input_id,
+            result,
+            authority(
+                RuntimeCompletionResultClass::Completed,
+                RuntimeCompletionObservedOutcome::Completed,
+            ),
+        );
 
         assert!(!registry.debug_has_waiters());
 
         for handle in [h1, h2, h3] {
-            match handle.wait().await {
+            match handle.wait_authorized().await {
                 CompletionOutcome::Completed(r) => assert_eq!(r.text, "hello"),
                 other => panic!("Expected Completed, got {other:?}"),
             }
@@ -463,9 +1208,15 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        registry.resolve_without_result(&input_id);
+        registry.resolve_without_result_authorized(
+            &input_id,
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
 
-        match handle.wait().await {
+        match handle.wait_authorized().await {
             CompletionOutcome::CompletedWithoutResult => {}
             other => panic!("Expected CompletedWithoutResult, got {other:?}"),
         }
@@ -478,10 +1229,16 @@ mod tests {
         let h1 = registry.register(input_id.clone());
         let h2 = registry.register(input_id.clone());
 
-        registry.resolve_without_result(&input_id);
+        registry.resolve_without_result_authorized(
+            &input_id,
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
 
         for handle in [h1, h2] {
-            match handle.wait().await {
+            match handle.wait_authorized().await {
                 CompletionOutcome::CompletedWithoutResult => {}
                 other => panic!("Expected CompletedWithoutResult, got {other:?}"),
             }
@@ -494,13 +1251,17 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        registry.resolve_callback_pending(
+        registry.resolve_callback_pending_authorized(
             &input_id,
             "browser".to_string(),
             serde_json::json!({ "url": "https://example.com" }),
+            authority(
+                RuntimeCompletionResultClass::CallbackPending,
+                RuntimeCompletionObservedOutcome::CallbackPending,
+            ),
         );
 
-        match handle.wait().await {
+        match handle.wait_authorized().await {
             CompletionOutcome::CallbackPending { tool_name, args } => {
                 assert_eq!(tool_name, "browser");
                 assert_eq!(args, serde_json::json!({ "url": "https://example.com" }));
@@ -515,9 +1276,15 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        registry.resolve_cancelled(&input_id);
+        registry.resolve_cancelled_authorized(
+            &input_id,
+            authority(
+                RuntimeCompletionResultClass::Cancelled,
+                RuntimeCompletionObservedOutcome::Cancelled,
+            ),
+        );
 
-        match handle.wait().await {
+        match handle.wait_authorized().await {
             CompletionOutcome::Cancelled => {}
             other => panic!("Expected Cancelled, got {other:?}"),
         }
@@ -525,8 +1292,9 @@ mod tests {
 
     #[tokio::test]
     async fn already_resolved_handle() {
-        let handle = CompletionHandle::already_resolved(CompletionOutcome::CompletedWithoutResult);
-        match handle.wait().await {
+        let handle = CompletionHandle::already_completed_without_result()
+            .expect("generated completion authority should classify no-result completion");
+        match handle.wait_authorized().await {
             CompletionOutcome::CompletedWithoutResult => {}
             other => panic!("Expected CompletedWithoutResult, got {other:?}"),
         }
@@ -537,24 +1305,29 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        let mut registry = CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
         let observed = Arc::new(AtomicBool::new(false));
         let cleanup_observed = Arc::clone(&observed);
-        let handle = CompletionHandle::already_resolved(CompletionOutcome::Abandoned(
-            "apply failed: test".to_string(),
-        ))
-        .with_outcome_cleanup(move |outcome| async move {
-            if matches!(&outcome, CompletionOutcome::Abandoned(reason) if reason == "apply failed: test")
+        let handle = handle.with_outcome_cleanup(move |observation| async move {
+            if observation.observed_outcome()
+                == crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::CompletedWithoutResult
             {
                 cleanup_observed.store(true, Ordering::Release);
             }
-            outcome
         });
 
-        match handle.wait().await {
-            CompletionOutcome::Abandoned(reason) => {
-                assert_eq!(reason, "apply failed: test");
-            }
-            other => panic!("Expected Abandoned, got {other:?}"),
+        registry.resolve_without_result_authorized(
+            &input_id,
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
+        match handle.wait_authorized().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => panic!("Expected CompletedWithoutResult, got {other:?}"),
         }
         assert!(observed.load(Ordering::Acquire));
     }
@@ -566,10 +1339,16 @@ mod tests {
         let h1 = registry.register(input_id.clone());
         let h2 = registry.register(input_id);
 
-        registry.resolve_all_terminated("runtime reset");
+        registry.resolve_all_runtime_terminated(
+            "runtime reset",
+            authority(
+                RuntimeCompletionResultClass::RuntimeTerminated,
+                RuntimeCompletionObservedOutcome::RuntimeTerminated,
+            ),
+        );
 
         for handle in [h1, h2] {
-            match handle.wait().await {
+            match handle.wait_authorized().await {
                 CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime reset"),
                 other => panic!("Expected RuntimeTerminated, got {other:?}"),
             }
@@ -584,16 +1363,68 @@ mod tests {
 
         let keep_handle = registry.register(keep_id.clone());
         let drop_handle = registry.register(drop_id.clone());
-        registry.resolve_not_pending(|input_id| input_id == &keep_id, "runtime recycled");
+        registry.resolve_not_pending_runtime_terminated(
+            |input_id| input_id == &keep_id,
+            "runtime recycled",
+            authority(
+                RuntimeCompletionResultClass::RuntimeTerminated,
+                RuntimeCompletionObservedOutcome::RuntimeTerminated,
+            ),
+        );
         assert_eq!(registry.debug_waiter_count(), 1);
 
-        match drop_handle.wait().await {
+        match drop_handle.wait_authorized().await {
             CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime recycled"),
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
 
-        registry.resolve_without_result(&keep_id);
-        match keep_handle.wait().await {
+        registry.resolve_without_result_authorized(
+            &keep_id,
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
+        match keep_handle.wait_authorized().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => panic!("Expected CompletedWithoutResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_not_pending_runtime_terminated_authority_fails_selected_waiters_closed() {
+        let mut registry = CompletionRegistry::new();
+        let keep_id = InputId::new();
+        let drop_id = InputId::new();
+
+        let keep_handle = registry.register(keep_id.clone());
+        let drop_handle = registry.register(drop_id);
+        registry.resolve_not_pending_runtime_terminated(
+            |input_id| input_id == &keep_id,
+            "runtime recycled",
+            authority(
+                RuntimeCompletionResultClass::Completed,
+                RuntimeCompletionObservedOutcome::Completed,
+            ),
+        );
+
+        assert_eq!(registry.debug_waiter_count(), 1);
+        match drop_handle.try_wait().await {
+            Err(CompletionWaitError::AuthorityUnavailable(reason)) => {
+                assert!(reason.contains("Completed"));
+                assert!(reason.contains("RuntimeTerminated"));
+            }
+            other => panic!("Expected authority mismatch wait error, got {other:?}"),
+        }
+
+        registry.resolve_without_result_authorized(
+            &keep_id,
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
+        match keep_handle.wait_authorized().await {
             CompletionOutcome::CompletedWithoutResult => {}
             other => panic!("Expected CompletedWithoutResult, got {other:?}"),
         }
@@ -602,7 +1433,13 @@ mod tests {
     #[tokio::test]
     async fn resolve_without_result_nonexistent_is_a_noop() {
         let mut registry = CompletionRegistry::new();
-        registry.resolve_without_result(&InputId::new());
+        registry.resolve_without_result_authorized(
+            &InputId::new(),
+            authority(
+                RuntimeCompletionResultClass::CompletedWithoutResult,
+                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
+            ),
+        );
         assert!(!registry.debug_has_waiters());
     }
 }

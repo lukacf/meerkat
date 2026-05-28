@@ -5,7 +5,7 @@ use crate::mcp::tools::{
     handle_tools_call_with_context, tools_list,
 };
 use crate::runtime::CommsRuntime;
-use crate::{Router, TrustedPeers};
+use crate::{Router, TrustedPeersView};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ToolCallability;
@@ -16,7 +16,6 @@ use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
-use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -28,7 +27,7 @@ pub struct CommsToolDispatcher<T: AgentToolDispatcher = NoOpDispatcher> {
 }
 
 impl CommsToolDispatcher<NoOpDispatcher> {
-    pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
+    pub fn new(router: Arc<Router>, trusted_peers: TrustedPeersView) -> Self {
         let tool_context = ToolContext {
             router,
             trusted_peers,
@@ -44,7 +43,7 @@ impl CommsToolDispatcher<NoOpDispatcher> {
 
     pub fn new_with_runtime(
         router: Arc<Router>,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        trusted_peers: TrustedPeersView,
         runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Self {
         let tool_context = ToolContext {
@@ -62,11 +61,7 @@ impl CommsToolDispatcher<NoOpDispatcher> {
 }
 
 impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
-    pub fn with_inner(
-        router: Arc<Router>,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
-        inner: Arc<T>,
-    ) -> Self {
+    pub fn with_inner(router: Arc<Router>, trusted_peers: TrustedPeersView, inner: Arc<T>) -> Self {
         let tool_context = ToolContext {
             router,
             trusted_peers,
@@ -248,7 +243,7 @@ pub struct DynCommsToolDispatcher {
 impl DynCommsToolDispatcher {
     pub fn new(
         router: Arc<Router>,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        trusted_peers: TrustedPeersView,
         inner: Arc<dyn AgentToolDispatcher>,
     ) -> Self {
         let tool_context = ToolContext {
@@ -266,7 +261,7 @@ impl DynCommsToolDispatcher {
 
     pub fn new_with_runtime(
         router: Arc<Router>,
-        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        trusted_peers: TrustedPeersView,
         runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
         inner: Arc<dyn AgentToolDispatcher>,
     ) -> Self {
@@ -388,6 +383,7 @@ mod tests {
     use crate::inbox::Inbox;
     use crate::trust::TrustedPeers;
     use meerkat_core::ToolCatalogDeferredEligibility;
+    use parking_lot::RwLock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct ExactDeferredDispatcher {
@@ -488,7 +484,7 @@ mod tests {
         }
     }
 
-    fn test_router() -> (Arc<Router>, Arc<RwLock<TrustedPeers>>) {
+    fn test_router() -> (Arc<Router>, TrustedPeersView) {
         let (_inbox, inbox_sender) = Inbox::new();
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::default()));
         let router = Arc::new(Router::with_shared_peers(
@@ -498,7 +494,8 @@ mod tests {
             inbox_sender,
             false,
         ));
-        (router, trusted_peers)
+        let view = router.trusted_peers_view();
+        (router, view)
     }
 
     #[test]

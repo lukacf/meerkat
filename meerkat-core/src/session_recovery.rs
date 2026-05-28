@@ -95,9 +95,12 @@ impl SessionDefaults {
         let metadata = session.session_metadata().ok_or_else(|| {
             SurfaceSessionRecoveryError::MissingSessionMetadata(session.id().to_string())
         })?;
+        let build_state = session.build_state().ok_or_else(|| {
+            SurfaceSessionRecoveryError::MissingSessionBuildState(session.id().to_string())
+        })?;
         Ok(Self {
             metadata,
-            build_state: session.build_state().unwrap_or_default(),
+            build_state,
             allows_first_turn_build_overrides: session_allows_first_turn_build_overrides(session),
         })
     }
@@ -188,6 +191,8 @@ impl From<EffectiveTurnConfig> for RecoveredSessionBuild {
 pub enum SurfaceSessionRecoveryError {
     #[error("persisted session {0} is missing session metadata")]
     MissingSessionMetadata(String),
+    #[error("persisted session {0} is missing session build state")]
+    MissingSessionBuildState(String),
     #[error("{0}")]
     MissingRuntimeBuildMode(String),
     #[error("{0}")]
@@ -471,13 +476,16 @@ pub fn resolve_effective_turn_config(
             .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
         initial_turn_metadata: None,
     };
-    build.apply_persisted_mob_operator_access(
-        overrides
-            .override_mob
-            .map(ToolCategoryOverride::from_effective)
-            .unwrap_or(metadata.tooling.mob),
-        build_state.mob_tool_authority_context,
-    );
+    if let Some(override_mob) = overrides.override_mob {
+        build.apply_generated_create_only_mob_operator_access(
+            ToolCategoryOverride::from_effective(override_mob),
+        );
+    } else {
+        build.apply_persisted_mob_operator_access(
+            metadata.tooling.mob,
+            build_state.mob_tool_authority_context,
+        );
+    }
 
     Ok(EffectiveTurnConfig {
         model,
@@ -522,7 +530,7 @@ mod tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
-                schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
+                schema_version: crate::session_metadata_schema_version(),
                 model: "claude-sonnet-4-5".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 3,
@@ -588,11 +596,15 @@ mod tests {
                     "test".to_string(),
                 )])),
                 mob_tool_authority_context: Some(
-                    crate::service::MobToolAuthorityContext::new(
+                    crate::service::MobToolAuthorityContext::generated_for_test(
                         crate::service::OpaquePrincipalToken::new("persisted-authority"),
                         false,
-                    )
-                    .grant_manage_mob("mob-a"),
+                        false,
+                        std::collections::BTreeSet::from(["mob-a".to_string()]),
+                        std::collections::BTreeMap::new(),
+                        None,
+                        None,
+                    ),
                 ),
                 call_timeout_override: CallTimeoutOverride::Value(Duration::from_secs(42)),
             })
@@ -612,6 +624,7 @@ mod tests {
         let mut metadata = session.session_metadata().expect("session metadata");
         metadata.auth_binding = Some(persisted_ref.clone());
         metadata.keep_alive = true;
+        metadata.tooling.mob = ToolCategoryOverride::Enable;
         session
             .set_session_metadata(metadata.clone())
             .expect("updated session metadata");
@@ -645,10 +658,13 @@ mod tests {
         );
         assert_eq!(
             effective.build.override_mob,
-            ToolCategoryOverride::Enable,
-            "persisted mob authority is durable session state and rehydrates mob access"
+            ToolCategoryOverride::Inherit,
+            "metadata-only mob enablement must not become behavior authority"
         );
-        assert!(effective.build.mob_tool_authority_context.is_some());
+        assert!(
+            effective.build.mob_tool_authority_context.is_none(),
+            "projection-only mob authority must not restore behavior authority"
+        );
         assert_eq!(
             effective.build.preload_skills,
             metadata.tooling.active_skills
@@ -717,14 +733,11 @@ mod tests {
         assert!(build.keep_alive);
         assert_eq!(build.override_builtins, ToolCategoryOverride::Disable);
         assert_eq!(build.override_shell, ToolCategoryOverride::Enable);
-        assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
+        assert_eq!(build.override_mob, ToolCategoryOverride::Inherit);
         assert_eq!(build.override_memory, ToolCategoryOverride::Enable);
-        assert_eq!(
-            build
-                .mob_tool_authority_context
-                .as_ref()
-                .map(|authority| authority.managed_mob_scope().clone()),
-            Some(std::collections::BTreeSet::from([String::from("mob-a")]))
+        assert!(
+            build.mob_tool_authority_context.is_none(),
+            "core recovery must not forward projection-only mob authority as behavior authority"
         );
         assert_eq!(build.silent_comms_intents, vec!["peer-b".to_string()]);
         assert_eq!(build.max_inline_peer_notifications, Some(4));
@@ -1023,6 +1036,46 @@ mod tests {
                 SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
             ),
             "missing runtime bindings should be called out explicitly"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_rejects_missing_build_state() {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: crate::session_metadata_schema_version(),
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 3,
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+            })
+            .expect("session metadata");
+
+        let error = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect_err("recovery must fail closed without durable build state");
+
+        assert!(
+            matches!(
+                error,
+                SurfaceSessionRecoveryError::MissingSessionBuildState(_)
+            ),
+            "missing build state should be reported explicitly"
         );
     }
 

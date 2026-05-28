@@ -48,12 +48,13 @@ use meerkat_core::RuntimeBuildMode;
 use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
+#[cfg(test)]
+use meerkat_core::SessionToolVisibilityState;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentLlmClientDecorator, AgentSessionStore,
     AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides,
     ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
-    SessionLlmIdentity, SessionMetadata, SessionToolVisibilityState, SessionTooling,
-    ToolCategoryOverride,
+    SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride, ToolFilter,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
@@ -253,6 +254,24 @@ unsafe extern "Rust" {
         tools: Arc<dyn AgentToolDispatcher>,
         store: Arc<dyn AgentSessionStore>,
     ) -> CoreAgentFactoryBuildFuture;
+
+    #[link_name = concat!(
+        "__meerkat_agent_factory_parent_tool_composition_authority_new_v1_",
+        env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn core_agent_factory_parent_tool_composition_authority_new(
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
+    ) -> Result<meerkat_core::service::ParentToolCompositionAuthority, String>;
+
+    #[link_name = concat!(
+        "__meerkat_agent_factory_parent_tool_composition_authority_set_tool_scope_v1_",
+        env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn core_agent_factory_parent_tool_composition_authority_set_tool_scope(
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
+        authority: &meerkat_core::service::ParentToolCompositionAuthority,
+        tool_scope: &meerkat_core::ToolScope,
+    ) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -467,6 +486,12 @@ pub struct AgentBuildConfig {
     /// On resumed sessions, canonical tool visibility metadata is merged into
     /// the durable visibility state instead of replacing it.
     pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Typed initial visibility handoff to the generated visibility owner.
+    ///
+    /// This is intentionally not metadata: initial inherited visibility is a
+    /// semantic machine fact and must be applied through the core visibility
+    /// owner after tool authority catalogs are installed.
+    pub initial_tool_visibility_state: Option<meerkat_core::InheritedToolVisibilityAuthority>,
 }
 
 const INITIAL_TOOL_FILTER_METADATA_KEY: &str = "meerkat.initial_tool_filter_v1";
@@ -559,6 +584,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("additional_instructions", &self.additional_instructions)
             .field("wait_for_mcp", &self.wait_for_mcp)
             .field("runtime_build_mode", &self.runtime_build_mode)
+            .field(
+                "initial_tool_visibility_state",
+                &self.initial_tool_visibility_state.is_some(),
+            )
             .finish()
     }
 }
@@ -624,6 +653,7 @@ impl AgentBuildConfig {
             resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
             initial_metadata_entries: std::collections::BTreeMap::new(),
+            initial_tool_visibility_state: None,
         }
     }
 
@@ -666,10 +696,11 @@ impl AgentBuildConfig {
         enable_mob: ToolCategoryOverride,
         persisted_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
     ) {
-        let (override_mob, authority_context) = meerkat_core::service::resolve_mob_operator_access(
-            enable_mob,
-            persisted_authority_context,
-        );
+        let (override_mob, authority_context) =
+            meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
+                enable_mob,
+                persisted_authority_context,
+            );
         self.override_mob = override_mob;
         self.mob_tool_authority_context = authority_context;
     }
@@ -706,12 +737,17 @@ impl AgentBuildConfig {
         self.override_memory = build.override_memory;
         self.override_schedule = build.override_schedule;
         self.override_workgraph = build.override_workgraph;
-        self.override_mob = build.override_mob;
+        let (override_mob, mob_tool_authority_context) =
+            meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
+                build.override_mob,
+                build.mob_tool_authority_context.clone(),
+            );
+        self.override_mob = override_mob;
         self.override_image_generation = build.override_image_generation;
         self.override_web_search = build.override_web_search;
         self.schedule_tools = build.schedule_tools.clone();
         self.workgraph_tools = build.workgraph_tools.clone();
-        self.mob_tool_authority_context = build.mob_tool_authority_context.clone();
+        self.mob_tool_authority_context = mob_tool_authority_context;
         self.mob_tools = build.mob_tools.clone();
         self.preload_skills = build.preload_skills.clone();
         self.realm_id = build.realm_id.clone();
@@ -1300,47 +1336,6 @@ fn is_openai_realtime_capable(model: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.
-///
-/// Created before mob tool composition (so it can be passed into `MobToolsBuildArgs`),
-/// then updated with the final composed dispatcher after mob tools are added.
-/// This ensures the snapshot includes mob/profile tools the parent currently has.
-///
-/// Uses a `Weak` reference to avoid inflating the `Arc` strong count on the dispatcher,
-/// which would cause `bind_ops_lifecycle` to reject rebinding due to shared ownership.
-struct DeferredSnapshotProvider {
-    dispatcher: std::sync::RwLock<Option<std::sync::Weak<dyn AgentToolDispatcher>>>,
-}
-
-impl DeferredSnapshotProvider {
-    fn new() -> Self {
-        Self {
-            dispatcher: std::sync::RwLock::new(None),
-        }
-    }
-
-    fn set_dispatcher(&self, dispatcher: &Arc<dyn AgentToolDispatcher>) {
-        let mut guard = self
-            .dispatcher
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(Arc::downgrade(dispatcher));
-    }
-}
-
-impl meerkat_core::service::VisibleToolSnapshotProvider for DeferredSnapshotProvider {
-    fn snapshot_visible_tools(&self) -> Vec<Arc<meerkat_core::types::ToolDef>> {
-        let guard = self
-            .dispatcher
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.as_ref().and_then(std::sync::Weak::upgrade) {
-            Some(d) => d.tools().to_vec(),
-            None => Vec::new(),
-        }
-    }
-}
-
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
@@ -1809,7 +1804,7 @@ impl AgentFactory {
         if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
             && !auth_binding.is_env_default()
         {
-            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+            env = env.with_auth_lease_handle(bindings.auth_lease().clone());
         }
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -2295,11 +2290,26 @@ impl AgentFactory {
 
     fn apply_resumed_session_metadata(
         build_config: &mut AgentBuildConfig,
-    ) -> Option<SessionMetadata> {
-        let metadata = build_config
-            .resume_session
-            .as_ref()
-            .and_then(Session::session_metadata)?;
+    ) -> Result<Option<SessionMetadata>, BuildAgentError> {
+        let Some(session) = build_config.resume_session.as_ref() else {
+            return Ok(None);
+        };
+        let Some(metadata) = session.session_metadata() else {
+            if session.messages().is_empty()
+                && matches!(
+                    &build_config.runtime_build_mode,
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings)
+                        if bindings.session_id() == session.id()
+                            && meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings)
+                )
+            {
+                return Ok(None);
+            }
+            return Err(BuildAgentError::Config(format!(
+                "resumed session {} is missing durable session metadata",
+                session.id()
+            )));
+        };
 
         let mask = build_config.resume_override_mask;
 
@@ -2346,11 +2356,35 @@ impl AgentFactory {
             build_config.override_workgraph = metadata.tooling.workgraph;
         }
         if !mask.override_mob {
-            build_config.override_mob = metadata.tooling.mob;
-            build_config.mob_tool_authority_context = build_config
+            let persisted_mob_authority = build_config
                 .resume_session
                 .as_ref()
                 .and_then(Session::mob_tool_authority_context);
+            build_config.mob_tool_authority_context =
+                persisted_mob_authority.and_then(|authority_context| {
+                    match meerkat_runtime::mob_operator_authority::restore_mob_operator_authority(
+                        &authority_context,
+                    ) {
+                        Ok(restored) => Some(restored),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "generated mob operator authority rejected resumed context"
+                            );
+                            None
+                        }
+                    }
+                });
+            // Resumed metadata is a compatibility mirror, not authority. A
+            // persisted Disable can keep failing closed, but Enable must come
+            // from a restored generated context or an explicit fresh override.
+            build_config.override_mob = if build_config.mob_tool_authority_context.is_some() {
+                ToolCategoryOverride::Enable
+            } else if matches!(metadata.tooling.mob, ToolCategoryOverride::Disable) {
+                ToolCategoryOverride::Disable
+            } else {
+                ToolCategoryOverride::Inherit
+            };
         }
         if !mask.override_image_generation {
             build_config.override_image_generation = metadata.tooling.image_generation;
@@ -2371,70 +2405,21 @@ impl AgentFactory {
             build_config.peer_meta = metadata.peer_meta.clone();
         }
 
-        Some(metadata)
+        Ok(Some(metadata))
     }
 
     fn apply_initial_metadata_entries(
         session: &mut Session,
         entries: &BTreeMap<String, serde_json::Value>,
-        is_resumed: bool,
     ) -> Result<(), BuildAgentError> {
         for (key, value) in entries {
-            if is_resumed && key == meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY {
-                Self::merge_resumed_initial_visibility_state(session, value)?;
-            } else {
-                session.set_metadata(key, value.clone());
-            }
+            session
+                .try_set_metadata(key, value.clone())
+                .map_err(|err| {
+                    BuildAgentError::Config(format!("invalid initial metadata entry: {err}"))
+                })?;
         }
         Ok(())
-    }
-
-    fn merge_resumed_initial_visibility_state(
-        session: &mut Session,
-        value: &serde_json::Value,
-    ) -> Result<(), BuildAgentError> {
-        let incoming = serde_json::from_value::<SessionToolVisibilityState>(value.clone())
-            .map_err(|err| {
-                BuildAgentError::Config(format!(
-                    "invalid initial canonical tool visibility state: {err}"
-                ))
-            })?;
-        let inherited_base_filter = incoming.inherited_base_filter.clone();
-        let inherited_filter_witnesses = incoming.filter_witnesses.clone();
-        let inherited_only = SessionToolVisibilityState {
-            inherited_base_filter: inherited_base_filter.clone(),
-            filter_witnesses: inherited_filter_witnesses.clone(),
-            ..Default::default()
-        };
-        if incoming != inherited_only {
-            return Err(BuildAgentError::Config(
-                "resumed initial canonical tool visibility state may only carry inherited_base_filter and filter_witnesses"
-                    .to_string(),
-            ));
-        }
-        meerkat_core::tool_scope::validate_witnessed_filter_authority(
-            &inherited_base_filter,
-            &inherited_filter_witnesses,
-        )
-        .map_err(|err| {
-            BuildAgentError::Config(format!(
-                "invalid initial inherited tool visibility authority: {err}"
-            ))
-        })?;
-
-        let mut existing = session
-            .try_tool_visibility_state()
-            .map_err(|err| {
-                BuildAgentError::Config(format!(
-                    "invalid existing canonical tool visibility state: {err}"
-                ))
-            })?
-            .unwrap_or_default();
-        existing.inherited_base_filter = inherited_base_filter;
-        existing.filter_witnesses.extend(inherited_filter_witnesses);
-        session
-            .set_tool_visibility_state(existing)
-            .map_err(|err| BuildAgentError::Config(err.to_string()))
     }
 
     /// Build an LLM adapter for the provided client/model.
@@ -2483,7 +2468,7 @@ impl AgentFactory {
         &self,
         config: &Config,
         identity: &SessionLlmIdentity,
-        auth_lease_handle: Option<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
         let registry = config
             .model_registry()
@@ -2720,7 +2705,7 @@ impl AgentFactory {
         config: &Config,
         registry: &ModelRegistry,
         identity: &SessionLlmIdentity,
-        auth_lease_handle: Option<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
         preferred_realm: Option<&str>,
     ) -> Result<SelfHostedClientBuild, FactoryError> {
         #[cfg(not(feature = "openai"))]
@@ -2993,7 +2978,7 @@ impl AgentFactory {
     }
 
     fn publish_auth_lease(
-        handle: &Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        handle: &meerkat_core::handles::GeneratedAuthLeaseHandle,
         auth_binding: &AuthBindingRef,
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
     ) -> Result<(), FactoryError> {
@@ -3254,8 +3239,16 @@ impl AgentFactory {
             build_config.override_workgraph,
             ToolCategoryOverride::Inherit
         );
-        build_config.resume_override_mask.override_mob |=
-            !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
+        let has_explicit_mob_authority_context = build_config
+            .mob_tool_authority_context
+            .as_ref()
+            .is_some_and(
+                meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
+            );
+        // A live generated authority context is an explicit composition
+        // handoff. Resumed metadata must not overwrite it with a projection.
+        build_config.resume_override_mask.override_mob |= has_explicit_mob_authority_context
+            || !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_image_generation |= !matches!(
             build_config.override_image_generation,
             ToolCategoryOverride::Inherit
@@ -3267,7 +3260,48 @@ impl AgentFactory {
 
         let explicit_mob_override =
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
-        let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config);
+        let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        let mut session = build_config.resume_session.clone().unwrap_or_default();
+        if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode {
+            if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
+                return Err(BuildAgentError::Config(
+                    "SessionRuntimeBindings were not prepared by MeerkatMachine; \
+                     session-owned runtime builds must use MeerkatMachine-prepared bindings"
+                        .to_string(),
+                ));
+            }
+            if bindings.session_id() != session.id() {
+                return Err(BuildAgentError::Config(format!(
+                    "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
+                     bindings may have been prepared for a different session",
+                    bindings.session_id(),
+                    session.id(),
+                )));
+            }
+        }
+
+        if let Some(authority_context) = build_config.mob_tool_authority_context.take() {
+            build_config.mob_tool_authority_context =
+                match meerkat_runtime::mob_operator_authority::restore_mob_operator_authority(
+                    &authority_context,
+                ) {
+                    Ok(restored) => Some(restored),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "generated mob operator authority rejected build context"
+                        );
+                        None
+                    }
+                };
+        }
+        if build_config.mob_tool_authority_context.is_some()
+            && matches!(build_config.override_mob, ToolCategoryOverride::Inherit)
+        {
+            // Successful generated authority restore is the typed handoff that
+            // moves the visibility mirror to active mob operator intent.
+            build_config.override_mob = ToolCategoryOverride::Enable;
+        }
 
         // Explicit build-time mob enablement should surface the generated
         // create-only authority shape when no typed authority was already
@@ -3347,7 +3381,7 @@ impl AgentFactory {
                         let auth_lease_handle = if let RuntimeBuildMode::SessionOwned(bindings) =
                             &build_config.runtime_build_mode
                         {
-                            Some(Arc::clone(bindings.auth_lease()))
+                            Some(bindings.auth_lease().clone())
                         } else {
                             None
                         };
@@ -3414,7 +3448,7 @@ impl AgentFactory {
                                 && lease_auth_binding.is_some()
                             {
                                 candidate_env = candidate_env
-                                    .with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+                                    .with_auth_lease_handle(bindings.auth_lease().clone());
                             }
                             match provider_registry
                                 .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
@@ -3588,7 +3622,7 @@ impl AgentFactory {
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
                     && !auth_binding.is_env_default()
                 {
-                    env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+                    env = env.with_auth_lease_handle(bindings.auth_lease().clone());
                 }
                 for (handle, resolver) in &self.external_auth_resolvers {
                     env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -3624,6 +3658,16 @@ impl AgentFactory {
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
         let model_profile = registry.profile_for_provider(provider, &model);
+        let capability_base_filter_override = model_profile.as_ref().map(|profile| {
+            meerkat_core::capability_base_filter_for_image_tool_results(profile.image_tool_results)
+        });
+        let resolved_llm_identity = SessionLlmIdentity {
+            model: model.clone(),
+            provider,
+            self_hosted_server_id: self_hosted_server_id.clone(),
+            provider_params: build_config.provider_params.clone(),
+            auth_binding: build_config.auth_binding.clone(),
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let auto_web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = {
             let active_model_has_native_search = model_profile
@@ -3651,6 +3695,9 @@ impl AgentFactory {
         if let meerkat_core::RuntimeBuildMode::SessionOwned(bindings) =
             &build_config.runtime_build_mode
         {
+            let capability_base_filter_for_machine = capability_base_filter_override
+                .clone()
+                .unwrap_or(ToolFilter::All);
             bindings
                 .model_routing()
                 .set_baseline(
@@ -3660,6 +3707,16 @@ impl AgentFactory {
                         .is_some_and(|profile| profile.realtime),
                 )
                 .map_err(|err| BuildAgentError::Config(format!("model routing baseline: {err}")))?;
+            bindings
+                .model_routing()
+                .hydrate_llm_capability_surface(
+                    &resolved_llm_identity,
+                    model_profile.as_ref(),
+                    &capability_base_filter_for_machine,
+                )
+                .map_err(|err| {
+                    BuildAgentError::Config(format!("session LLM capability hydration: {err}"))
+                })?;
         }
         let event_tap = meerkat_core::new_event_tap();
         let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
@@ -3791,7 +3848,6 @@ impl AgentFactory {
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
-        let mut session = build_config.resume_session.clone().unwrap_or_default();
         let initial_tool_filter = match build_config
             .initial_metadata_entries
             .remove(INITIAL_TOOL_FILTER_METADATA_KEY)
@@ -3803,35 +3859,15 @@ impl AgentFactory {
             ),
             None => None,
         };
-        // Inject pre-resolved metadata entries before the builder reads metadata
-        // for early-stage recovery, such as canonical inherited visibility state.
-        let is_resumed_session = build_config.resume_session.is_some();
-        Self::apply_initial_metadata_entries(
-            &mut session,
-            &build_config.initial_metadata_entries,
-            is_resumed_session,
-        )?;
         let _session_id = session.id().to_string();
-        use meerkat_core::runtime_epoch::RuntimeBuildMode;
 
         let resolved_mode = &build_config.runtime_build_mode;
-        if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
-            if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
-                return Err(BuildAgentError::Config(
-                    "SessionRuntimeBindings were not prepared by MeerkatMachine; \
-                     session-owned runtime builds must use MeerkatMachine-prepared bindings"
-                        .to_string(),
-                ));
-            }
-            if bindings.session_id() != session.id() {
-                return Err(BuildAgentError::Config(format!(
-                    "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
-                     bindings may have been prepared for a different session",
-                    bindings.session_id(),
-                    session.id(),
-                )));
-            }
-        }
+        // Inject pre-resolved metadata entries after runtime binding
+        // validation and before the builder reads metadata for early-stage
+        // recovery. Canonical visibility facts are not accepted through this
+        // map; inherited visibility uses the typed authority handoff below.
+        Self::apply_initial_metadata_entries(&mut session, &build_config.initial_metadata_entries)?;
+        let initial_visibility_state = build_config.initial_tool_visibility_state.take();
 
         #[cfg(feature = "comms")]
         {
@@ -3952,36 +3988,18 @@ impl AgentFactory {
             // Close the runtime-backed ingress window before any later build
             // work can interleave with already-started shared listeners.
             runtime.require_peer_comms_machine_authority();
-            runtime.install_peer_comms_handle(Arc::clone(bindings.peer_comms()));
+            bindings
+                .install_peer_comms_on(runtime.as_ref())
+                .map_err(BuildAgentError::Comms)?;
         }
 
         // Resolve model profile for capability gating and runtime defaults.
         let _image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
 
-        if let Some(profile) = model_profile.as_ref() {
-            let has_canonical_visibility_state = session
-                .metadata()
-                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
-            let capability_base_filter =
-                meerkat_core::capability_base_filter_for_image_tool_results(
-                    profile.image_tool_results,
-                );
-            let mut visibility_state = session
-                .try_tool_visibility_state()
-                .map_err(|err| {
-                    BuildAgentError::Config(format!(
-                        "invalid canonical tool visibility state: {err}"
-                    ))
-                })?
-                .unwrap_or_default();
-            if visibility_state.capability_base_filter != capability_base_filter
-                || has_canonical_visibility_state
-            {
-                visibility_state.capability_base_filter = capability_base_filter;
-                session
-                    .set_tool_visibility_state(visibility_state)
-                    .map_err(|err| BuildAgentError::Config(err.to_string()))?;
-            }
+        if model_profile.is_some() {
+            session.try_tool_visibility_state().map_err(|err| {
+                BuildAgentError::Config(format!("invalid canonical tool visibility state: {err}"))
+            })?;
         }
         // Resolve ops lifecycle registry via RuntimeBuildMode.
         #[allow(unused_variables)]
@@ -4235,8 +4253,12 @@ impl AgentFactory {
 
         // 9d. Compose tools with mob surface (after comms/scheduler/WorkGraph, so mob
         // gateway wraps the already-composed base capability stack).
-        let effective_mob = build_config.override_mob.resolve(self.enable_mob)
-            || build_config.mob_tool_authority_context.is_some();
+        let effective_mob = build_config
+            .mob_tool_authority_context
+            .as_ref()
+            .is_some_and(
+                meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
+            );
         let mob_factory = build_config
             .mob_tools
             .take()
@@ -4246,8 +4268,11 @@ impl AgentFactory {
         let mut hoisted_mob_authority_handle: Option<
             Arc<std::sync::RwLock<meerkat_core::service::MobToolAuthorityContext>>,
         > = None;
-        // Hoisted so we can re-point the Weak reference after bind_ops_lifecycle.
-        let mut hoisted_deferred_provider: Option<Arc<DeferredSnapshotProvider>> = None;
+        // Hoisted so the final built ToolScope can become the parent
+        // composition authority's live generated visibility source.
+        let mut hoisted_parent_tool_authority: Option<
+            meerkat_core::service::ParentToolCompositionAuthority,
+        > = None;
         if effective_mob && let Some(mob_factory) = mob_factory {
             // Build comms runtime arg: clone from the comms phase if available.
             #[cfg(feature = "comms")]
@@ -4272,14 +4297,25 @@ impl AgentFactory {
                 .map(|ctx| Arc::new(std::sync::RwLock::new(ctx.clone())));
             hoisted_mob_authority_handle = mob_authority_handle.clone();
 
-            // Use a deferred snapshot provider: created before mob composition
-            // so it can be passed into MobToolsBuildArgs, then updated with the
-            // final composed dispatcher after mob tools are added. This ensures
-            // InheritParent snapshots include mob/profile tools.
-            let deferred_provider = Arc::new(DeferredSnapshotProvider::new());
-            let snapshot_provider: Arc<dyn meerkat_core::service::VisibleToolSnapshotProvider> =
-                Arc::clone(&deferred_provider)
-                    as Arc<dyn meerkat_core::service::VisibleToolSnapshotProvider>;
+            // Use an AgentFactory-minted parent composition authority: created
+            // before mob composition so it can be passed into MobToolsBuildArgs.
+            // The built agent's final ToolScope is installed after all tool
+            // composition and initial visibility staging, so InheritParent reads
+            // generated visibility authority rather than the raw dispatcher.
+            // SAFETY: this is the canonical facade AgentFactory composition
+            // after generated mob authority is present; core validates the
+            // facade bridge token before minting the parent authority.
+            #[allow(unsafe_code)]
+            let parent_tool_authority = unsafe {
+                core_agent_factory_parent_tool_composition_authority_new(
+                    agent_factory_policy_bridge_token(),
+                )
+            }
+            .map_err(|err| {
+                BuildAgentError::Config(format!(
+                    "Parent tool composition authority creation failed: {err}"
+                ))
+            })?;
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
@@ -4288,7 +4324,7 @@ impl AgentFactory {
                 comms_name: mob_comms_name,
                 comms_runtime: mob_comms,
                 snapshot_context: meerkat_core::service::MobToolSnapshotContext::ParentOwned(
-                    snapshot_provider,
+                    parent_tool_authority.clone(),
                 ),
             };
             let mob_dispatcher = mob_factory
@@ -4302,10 +4338,7 @@ impl AgentFactory {
                 tools,
                 mob_dispatcher,
             ]));
-            // Set the final composed dispatcher on the deferred provider so
-            // snapshots captured later include mob tools.
-            deferred_provider.set_dispatcher(&tools);
-            hoisted_deferred_provider = Some(deferred_provider);
+            hoisted_parent_tool_authority = Some(parent_tool_authority);
             if !mob_usage.is_empty() {
                 if !tool_usage_instructions.is_empty() {
                     tool_usage_instructions.push_str("\n\n");
@@ -4328,12 +4361,6 @@ impl AgentFactory {
                 })?;
             tools = outcome.into_dispatcher();
         }
-        // Re-point the deferred snapshot provider after binding may have replaced
-        // the dispatcher Arc (bind_ops_lifecycle can return a new Arc).
-        if let Some(ref provider) = hoisted_deferred_provider {
-            provider.set_dispatcher(&tools);
-        }
-
         tracing::debug!(
             final_tool_count = tools.tools().len(),
             tool_names = %tools.tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "),
@@ -4700,6 +4727,12 @@ impl AgentFactory {
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }
+        if let Some(capability_base_filter) = capability_base_filter_override.clone() {
+            builder = builder.with_capability_base_filter(capability_base_filter);
+        }
+        if let Some(state) = initial_visibility_state {
+            builder = builder.with_initial_tool_visibility_state(state);
+        }
         if let Some(system_prompt) = system_prompt {
             builder = builder.system_prompt(system_prompt);
         }
@@ -4708,7 +4741,6 @@ impl AgentFactory {
             builder = builder.output_schema(schema);
         }
         let _is_resumed = build_config.resume_session.is_some();
-        #[cfg(feature = "memory-store-session")]
         let session_id = session.id().clone();
         session
             .set_session_metadata(factory_metadata)
@@ -4811,20 +4843,35 @@ impl AgentFactory {
         match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => {
                 builder = builder.with_epoch_cursor_state(Arc::clone(bindings.cursor_state()));
-                builder = builder
-                    .with_tool_visibility_owner(Arc::clone(bindings.tool_visibility_owner()));
+                builder =
+                    builder.with_tool_visibility_owner(bindings.tool_visibility_owner().clone());
                 builder = builder.with_turn_state_handle(Arc::clone(bindings.turn_state()));
                 builder = builder.require_runtime_execution_kind_stamp();
                 builder = builder.with_external_tool_surface_handle(Arc::clone(
                     bindings.external_tool_surface(),
                 ));
-                builder = builder.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+                builder = builder.with_auth_lease_handle(bindings.auth_lease().clone());
                 builder = builder
                     .with_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             }
             RuntimeBuildMode::StandaloneEphemeral => {
                 builder =
                     builder.with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
+                let capability_base_filter_for_machine = capability_base_filter_override
+                    .clone()
+                    .unwrap_or(ToolFilter::All);
+                let visibility_owner = meerkat_runtime::standalone_tool_visibility_owner(
+                    &session_id,
+                    &resolved_llm_identity,
+                    model_profile.as_ref(),
+                    &capability_base_filter_for_machine,
+                )
+                .map_err(|err| {
+                    BuildAgentError::Config(format!(
+                        "Failed to prepare standalone tool visibility authority: {err}"
+                    ))
+                })?;
+                builder = builder.with_tool_visibility_owner(visibility_owner);
             }
         }
         // 12h. Wire completion feed + enrichment for cursor-based delivery
@@ -4890,6 +4937,25 @@ impl AgentFactory {
                 .map_err(|err| BuildAgentError::Config(err.to_string()))?;
         }
 
+        if let Some(ref authority) = hoisted_parent_tool_authority {
+            // SAFETY: same AgentFactory bridge token as creation; core validates
+            // the token before accepting the live ToolScope as the parent-owned
+            // generated visibility source.
+            #[allow(unsafe_code)]
+            unsafe {
+                core_agent_factory_parent_tool_composition_authority_set_tool_scope(
+                    agent_factory_policy_bridge_token(),
+                    authority,
+                    agent.tool_scope(),
+                )
+            }
+            .map_err(|err| {
+                BuildAgentError::Config(format!(
+                    "Parent tool composition authority update failed: {err}"
+                ))
+            })?;
+        }
+
         // Wire mob authority handle into agent for session-effect application.
         if let Some(handle) = hoisted_mob_authority_handle {
             agent.set_mob_authority_handle(handle);
@@ -4919,6 +4985,73 @@ mod tests {
     };
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    fn session_with_raw_metadata(
+        session: Session,
+        key: &'static str,
+        value: serde_json::Value,
+    ) -> Session {
+        let mut raw = serde_json::to_value(session).expect("session should serialize");
+        raw.get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("session metadata should be an object")
+            .insert(key.to_string(), value);
+        serde_json::from_value(raw).expect("session should deserialize with raw metadata")
+    }
+
+    fn visibility_tool(name: &str) -> Arc<meerkat_core::types::ToolDef> {
+        Arc::new(
+            meerkat_core::types::ToolDef::new(
+                name,
+                format!("test tool {name}"),
+                serde_json::json!({ "type": "object" }),
+            )
+            .with_provenance(meerkat_core::types::ToolProvenance {
+                kind: meerkat_core::types::ToolSourceKind::Callback,
+                source_id: name.into(),
+            }),
+        )
+    }
+
+    fn inherited_visibility_authority(
+        filter: meerkat_core::tool_scope::ToolFilter,
+        tool_names: &[&str],
+    ) -> (
+        meerkat_core::InheritedToolVisibilityAuthority,
+        BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    ) {
+        let tools = Arc::from(
+            tool_names
+                .iter()
+                .map(|name| visibility_tool(name))
+                .collect::<Vec<_>>(),
+        );
+        let tool_scope = meerkat_core::ToolScope::new(tools);
+        // SAFETY: factory tests use the same facade bridge token as production
+        // AgentFactory to exercise the sealed parent composition authority path.
+        #[allow(unsafe_code)]
+        let authority = unsafe {
+            core_agent_factory_parent_tool_composition_authority_new(
+                agent_factory_policy_bridge_token(),
+            )
+        }
+        .expect("test parent tool composition authority should mint through AgentFactory bridge");
+        // SAFETY: same sealed facade bridge token as authority creation.
+        #[allow(unsafe_code)]
+        unsafe {
+            core_agent_factory_parent_tool_composition_authority_set_tool_scope(
+                agent_factory_policy_bridge_token(),
+                &authority,
+                &tool_scope,
+            )
+        }
+        .expect("test parent tool composition authority should accept ToolScope");
+        let authority = authority
+            .authorize_inherited_tool_visibility(filter)
+            .expect("test visibility authority should mint from snapshot");
+        let witnesses = authority.witnesses().clone();
+        (authority, witnesses)
+    }
 
     struct NeverLlmClient;
 
@@ -5549,7 +5682,7 @@ mod tests {
             .build_llm_client_for_identity_with_auth_lease(
                 &Config::default(),
                 &identity,
-                Some(Arc::clone(bindings.auth_lease())),
+                Some(bindings.auth_lease().clone()),
             )
             .await
             .expect("env-default hot-swap client should still build");
@@ -5569,169 +5702,6 @@ mod tests {
         assert_eq!(
             snapshot.phase, None,
             "synthetic env-default hot-swap identity must not be admitted to AuthMachine lease truth"
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test]
-    async fn build_llm_client_for_identity_fails_when_auth_lease_publication_rejects() {
-        use meerkat_core::handles::{
-            AuthLeaseHandle, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError, LeaseKey,
-        };
-        use meerkat_llm_core::provider_runtime::{
-            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
-            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
-        };
-
-        struct PublishingOpenAiRuntime {
-            client_builds: Arc<std::sync::atomic::AtomicUsize>,
-        }
-
-        #[async_trait::async_trait]
-        impl ProviderRuntime for PublishingOpenAiRuntime {
-            fn provider_id(&self) -> Provider {
-                Provider::OpenAI
-            }
-
-            async fn resolve_binding(
-                &self,
-                binding: &ValidatedBinding,
-                _env: &ResolverEnvironment,
-            ) -> Result<ResolvedConnection, ProviderAuthError> {
-                Ok(ResolvedConnection {
-                    provider: Provider::OpenAI,
-                    backend: binding.backend(),
-                    backend_profile: Arc::clone(binding.backend_profile()),
-                    auth_lease: Arc::new(StaticLease::inline_secret(
-                        "sk-openai-test".to_string(),
-                        meerkat_core::AuthMetadata::default(),
-                        None,
-                        "test",
-                    )),
-                })
-            }
-
-            fn build_client(
-                &self,
-                _connection: ResolvedConnection,
-            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-                self.client_builds
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(Arc::new(meerkat_client::TestClient::default()))
-            }
-        }
-
-        struct RejectingAuthLeaseHandle;
-
-        impl AuthLeaseHandle for RejectingAuthLeaseHandle {
-            fn acquire_lease(
-                &self,
-                _lease_key: &LeaseKey,
-                _expires_at: u64,
-            ) -> Result<AuthLeaseTransition, DslTransitionError> {
-                Err(DslTransitionError::guard_rejected(
-                    "acquire_lease",
-                    "test rejected lifecycle publication",
-                ))
-            }
-
-            fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-                Ok(())
-            }
-
-            fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-                Ok(())
-            }
-
-            fn complete_refresh(
-                &self,
-                _lease_key: &LeaseKey,
-                _new_expires_at: u64,
-                _now: u64,
-            ) -> Result<AuthLeaseTransition, DslTransitionError> {
-                Ok(AuthLeaseTransition {
-                    generation: 0,
-                    credential_published_at_millis: None,
-                })
-            }
-
-            fn refresh_failed(
-                &self,
-                _lease_key: &LeaseKey,
-                _permanent: bool,
-            ) -> Result<(), DslTransitionError> {
-                Ok(())
-            }
-
-            fn mark_reauth_required(
-                &self,
-                _lease_key: &LeaseKey,
-            ) -> Result<(), DslTransitionError> {
-                Ok(())
-            }
-
-            fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-                Ok(())
-            }
-
-            fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-                AuthLeaseSnapshot {
-                    phase: None,
-                    expires_at: None,
-                    credential_present: false,
-                    generation: 0,
-                    credential_published_at_millis: None,
-                }
-            }
-        }
-
-        let temp = tempfile::tempdir().unwrap();
-        let client_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let provider_registry =
-            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(PublishingOpenAiRuntime {
-                client_builds: Arc::clone(&client_builds),
-            }));
-        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        factory.provider_registry = Arc::new(provider_registry);
-        let mut config = Config::default();
-        config.realm.insert(
-            "session_a".to_string(),
-            inline_realm_section(&[("openai", "text-openai-key")]),
-        );
-        let auth_binding = AuthBindingRef {
-            realm: RealmId::parse("session_a").unwrap(),
-            binding: BindingId::parse("default_openai").unwrap(),
-            profile: None,
-        };
-        let identity = SessionLlmIdentity {
-            model: "gpt-5.4".to_string(),
-            provider: Provider::OpenAI,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: Some(auth_binding),
-        };
-
-        let err = match factory
-            .build_llm_client_for_identity_with_auth_lease(
-                &config,
-                &identity,
-                Some(Arc::new(RejectingAuthLeaseHandle)),
-            )
-            .await
-        {
-            Ok(_) => panic!("client build must fail when AuthMachine rejects lease publication"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string()
-                .contains("AuthMachine lifecycle acquire failed"),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            client_builds.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "client construction must not run after rejected lifecycle publication"
         );
     }
 
@@ -6753,8 +6723,8 @@ mod tests {
     async fn factory_capability_filter_rejects_malformed_canonical_visibility_state() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        let mut session = Session::new();
-        session.set_metadata(
+        let session = session_with_raw_metadata(
+            Session::new(),
             meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
             serde_json::json!("not-a-visibility-state"),
         );
@@ -6789,10 +6759,50 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn factory_capability_filter_installs_through_runtime_visibility_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.provider = Some(Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+
+        let expected_filter = meerkat_core::tool_scope::ToolFilter::Deny(
+            [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let owner_state = bindings.tool_visibility_owner().visibility_state().unwrap();
+        assert_eq!(&owner_state.capability_base_filter, &expected_filter);
+        assert!(
+            agent
+                .session()
+                .try_tool_visibility_state()
+                .expect("parse visibility")
+                .is_none(),
+            "runtime-backed capability filtering must not be derived from session metadata"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn factory_resumed_initial_visibility_merge_preserves_canonical_state() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        let mut session = Session::new();
+        let session = Session::new();
         let original_state = SessionToolVisibilityState {
             inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
                 ["old_parent".to_string()].into_iter().collect(),
@@ -6803,6 +6813,9 @@ mod tests {
             staged_filter: meerkat_core::tool_scope::ToolFilter::Allow(
                 ["staged_visible".to_string()].into_iter().collect(),
             ),
+            active_requested_deferred_names: ["deferred_existing".to_string()]
+                .into_iter()
+                .collect(),
             active_revision: 11,
             staged_revision: 13,
             requested_witnesses: [(
@@ -6834,9 +6847,11 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        session
-            .set_tool_visibility_state(original_state.clone())
-            .expect("visibility state");
+        let session = session_with_raw_metadata(
+            session,
+            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
+            serde_json::to_value(original_state.clone()).expect("visibility state"),
+        );
         let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
         let bindings = runtime
             .prepare_bindings(session.id().clone())
@@ -6845,31 +6860,15 @@ mod tests {
         let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
             ["parent_shell".to_string()].into_iter().collect(),
         );
-        let inherited_filter_witnesses = [(
-            "parent_shell".to_string(),
-            meerkat_core::ToolVisibilityWitness {
-                stable_owner_key: Some("test-owner:parent_shell".to_string()),
-                last_seen_provenance: None,
-            },
-        )]
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
+        let (inherited_authority, inherited_filter_witnesses) =
+            inherited_visibility_authority(inherited_filter.clone(), &["parent_shell"]);
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
         build.provider = Some(Provider::Anthropic);
         build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
         build.resume_session = Some(session);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
-        build.initial_metadata_entries.insert(
-            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
-            serde_json::to_value(SessionToolVisibilityState {
-                inherited_base_filter: inherited_filter.clone(),
-                filter_witnesses: inherited_filter_witnesses.clone(),
-                ..Default::default()
-            })
-            .expect("initial visibility value"),
-        );
-
+        build.initial_tool_visibility_state = Some(inherited_authority);
         let agent = factory
             .build_agent(build, &Config::default())
             .await
@@ -6912,11 +6911,44 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn factory_initial_visibility_handoff_applies_for_fresh_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let inherited_filter = meerkat_core::tool_scope::ToolFilter::Deny(
+            ["parent_shell".to_string()].into_iter().collect(),
+        );
+        let (inherited_authority, inherited_filter_witnesses) =
+            inherited_visibility_authority(inherited_filter.clone(), &["parent_shell"]);
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.initial_tool_visibility_state = Some(inherited_authority);
+
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+
+        let visibility_state = agent
+            .session()
+            .try_tool_visibility_state()
+            .expect("parse visibility")
+            .expect("visibility state");
+        assert_eq!(visibility_state.inherited_base_filter, inherited_filter);
+        assert_eq!(
+            visibility_state.filter_witnesses,
+            inherited_filter_witnesses
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn factory_resumed_initial_visibility_rejects_malformed_canonical_state() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        let mut session = Session::new();
-        session.set_metadata(
+        let session = session_with_raw_metadata(
+            Session::new(),
             meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY,
             serde_json::json!("not-a-visibility-state"),
         );
@@ -6931,24 +6963,14 @@ mod tests {
         build.resume_session = Some(session);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
-        build.initial_metadata_entries.insert(
-            meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
-            serde_json::to_value(SessionToolVisibilityState {
-                inherited_base_filter: meerkat_core::tool_scope::ToolFilter::Deny(
+        build.initial_tool_visibility_state = Some(
+            inherited_visibility_authority(
+                meerkat_core::tool_scope::ToolFilter::Deny(
                     ["parent_shell".to_string()].into_iter().collect(),
                 ),
-                filter_witnesses: [(
-                    "parent_shell".to_string(),
-                    meerkat_core::ToolVisibilityWitness {
-                        stable_owner_key: Some("test-owner:parent_shell".to_string()),
-                        last_seen_provenance: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            })
-            .expect("initial visibility value"),
+                &["parent_shell"],
+            )
+            .0,
         );
 
         let err = match factory.build_agent(build, &Config::default()).await {
@@ -6958,7 +6980,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("invalid existing canonical tool visibility state"),
+                .contains("invalid canonical tool visibility state"),
             "unexpected error: {err}"
         );
         assert_eq!(
@@ -6970,7 +6992,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn factory_resumed_initial_visibility_rejects_non_inherited_authority_fields() {
+    async fn factory_initial_visibility_rejects_raw_canonical_metadata_handoff() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let session = Session::new();
@@ -6993,19 +7015,19 @@ mod tests {
                 ),
                 ..Default::default()
             })
-            .expect("initial visibility value"),
+            .expect("visibility state"),
         );
 
         let err = match factory.build_agent(build, &Config::default()).await {
             Ok(_) => {
-                panic!("resumed initial metadata must not install active visibility authority")
+                panic!("initial metadata must not install raw visibility authority")
             }
             Err(err) => err,
         };
 
         assert!(
             err.to_string()
-                .contains("may only carry inherited_base_filter"),
+                .contains("metadata key `session_tool_visibility_state_v1` is reserved"),
             "unexpected error: {err}"
         );
         assert_eq!(
@@ -8416,7 +8438,7 @@ mod tests {
 
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.resume_session = Some(resumed);
-        let _ = AgentFactory::apply_resumed_session_metadata(&mut build);
+        let _ = AgentFactory::apply_resumed_session_metadata(&mut build).expect("resume metadata");
 
         let registry = factory.model_registry(&config).expect("registry");
         let (provider, server_id) = factory
@@ -8425,6 +8447,40 @@ mod tests {
 
         assert_eq!(provider, Provider::SelfHosted);
         assert_eq!(server_id.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn resumed_session_without_metadata_fails_closed_when_not_precreated() {
+        let mut resumed = Session::new();
+        resumed.push(meerkat_core::Message::User(
+            meerkat_core::types::UserMessage::text("existing turn"),
+        ));
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.resume_session = Some(resumed);
+
+        let err = AgentFactory::apply_resumed_session_metadata(&mut build)
+            .expect_err("resumed sessions without durable metadata must fail closed");
+
+        assert!(
+            matches!(&err, BuildAgentError::Config(message) if message.contains("missing durable session metadata")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_session_without_metadata_requires_machine_precreated_bindings() {
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.resume_session = Some(Session::new());
+
+        let err = AgentFactory::apply_resumed_session_metadata(&mut build).expect_err(
+            "empty sessions without generated runtime bindings must not synthesize metadata",
+        );
+
+        assert!(
+            matches!(&err, BuildAgentError::Config(message) if message.contains("missing durable session metadata")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

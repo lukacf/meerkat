@@ -79,12 +79,28 @@ pub async fn handle_plain_connection<S>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::inbox::Inbox;
+    use crate::trust::TrustedPeers;
     use tokio::io::AsyncWriteExt;
+
+    fn classified_inbox() -> (Inbox, crate::InboxSender) {
+        Inbox::new_classified(test_support::classification_context(
+            TrustedPeers::new(),
+            false,
+        ))
+    }
+
+    fn classified_inbox_with_capacity(capacity: usize) -> (Inbox, crate::InboxSender) {
+        Inbox::new_classified_with_capacity_for_test(
+            test_support::classification_context(TrustedPeers::new(), false),
+            capacity,
+        )
+    }
 
     #[tokio::test]
     async fn test_plain_listener_json_line() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -100,9 +116,9 @@ mod tests {
         drop(client_write);
         handle.await.unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::PlainEvent { body, source, .. } => {
                 assert_eq!(body, "hello");
                 assert_eq!(*source, PlainEventSource::Tcp);
@@ -113,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_plain_listener_plain_text() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -125,9 +141,9 @@ mod tests {
         drop(client_write);
         handle.await.unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        match &items[0] {
+        match &items[0].item {
             InboxItem::PlainEvent { body, .. } => {
                 assert_eq!(body, "plain text");
             }
@@ -137,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_plain_listener_multiple_lines() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -152,13 +168,13 @@ mod tests {
         drop(client_write);
         handle.await.unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 3);
     }
 
     #[tokio::test]
     async fn test_plain_listener_oversized_line_does_not_crash() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -180,13 +196,13 @@ mod tests {
         // The oversized line is dropped. Whether "ok" arrives depends on
         // LinesCodec's internal recovery behavior after an error.
         // The key invariant: the handler doesn't crash.
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert!(items.len() <= 1, "At most the valid line should arrive");
     }
 
     #[tokio::test]
     async fn test_plain_listener_empty_lines_skipped() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -198,13 +214,13 @@ mod tests {
         drop(client_write);
         handle.await.unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1, "Empty lines should be skipped");
     }
 
     #[tokio::test]
     async fn test_plain_listener_inbox_full_drops() {
-        let (mut inbox, sender) = Inbox::new_with_capacity(1);
+        let (mut inbox, sender) = classified_inbox_with_capacity(1);
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -220,13 +236,13 @@ mod tests {
         drop(client_write);
         handle.await.unwrap();
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1, "Only first line should fit in inbox");
     }
 
     #[tokio::test]
     async fn test_plain_listener_source_preserved() {
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         let (client, server) = tokio::io::duplex(4096);
         let (_, mut client_write) = tokio::io::split(client);
 
@@ -238,8 +254,8 @@ mod tests {
         drop(client_write);
         handle.await.unwrap();
 
-        let items = inbox.try_drain();
-        match &items[0] {
+        let items = inbox.try_drain_classified();
+        match &items[0].item {
             InboxItem::PlainEvent { source, .. } => {
                 assert_eq!(*source, PlainEventSource::Stdin);
             }

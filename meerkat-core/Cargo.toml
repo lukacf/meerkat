@@ -48,8 +48,11 @@ default = ["schema", "jsonschema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
 __meerkat-facade-agent-factory-build = []
+__meerkat-generated-authority-bridge = []
 
 [dev-dependencies]
+meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
+meerkat-machine-schema = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 

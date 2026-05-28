@@ -18,10 +18,10 @@ use crate::error::MobError;
 use crate::event::{MemberRef, MobEventKind, NewMobEvent};
 use crate::ids::{
     AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, MobId, ProfileName, RunId,
-    StepId, WorkOrigin, WorkRef, WorkSpec,
+    WorkOrigin, WorkRef, WorkSpec,
 };
 use crate::roster::{Roster, RosterEntry};
-use crate::run::{FlowRunConfig, MobRun};
+use crate::run::{FLOW_RUN_PROVENANCE_AGENT_ID, FlowRunConfig, MobRun};
 use crate::storage::MobStorage;
 use crate::store::{MobEventStore, MobRunStore};
 #[cfg(target_arch = "wasm32")]
@@ -50,16 +50,10 @@ pub(crate) type RuntimeAdapterOption = Option<Arc<meerkat_runtime::MeerkatMachin
 #[cfg(not(feature = "runtime-adapter"))]
 pub(crate) type RuntimeAdapterOption = Option<()>;
 
-const FLOW_SYSTEM_STEP_ID_RAW: &str = "__flow__";
-const FLOW_SYSTEM_MEMBER_ID_RAW: &str = "__flow_system_member__";
 pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
 
-pub(crate) fn flow_system_step_id() -> StepId {
-    StepId::from(FLOW_SYSTEM_STEP_ID_RAW)
-}
-
 pub(crate) fn flow_system_member_id() -> MeerkatId {
-    MeerkatId::from(FLOW_SYSTEM_MEMBER_ID_RAW)
+    MeerkatId::from(FLOW_RUN_PROVENANCE_AGENT_ID)
 }
 
 pub(crate) mod actor;
@@ -91,6 +85,7 @@ pub mod recovery;
 mod roster_authority;
 mod session_service;
 mod spawn_policy;
+mod spawn_profile_authority;
 pub mod state;
 mod supervisor;
 mod supervisor_bridge;
@@ -127,10 +122,10 @@ pub use handle::{
     HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError,
     MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget,
-    PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
-    SupervisorRotationReport, WorkDeliveryReceipt,
+    MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
+    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
+    SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource,
+    SpawnSystemPromptOverride, SupervisorRotationReport, WorkDeliveryReceipt,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{
@@ -141,6 +136,10 @@ pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
+use spawn_profile_authority::{
+    AuthorizedSpawnProfileMaterial, authorize_spawn_profile_input,
+    authorize_spawn_profile_material, require_authorized_effect,
+};
 #[cfg(test)]
 pub(crate) use state::MobDslT2Snapshot;
 #[cfg(test)]

@@ -42,6 +42,9 @@ fn map_kernel_error(
         mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { .. } => {
             DslTransitionError::no_matching(context, reason)
         }
+        mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
+            DslTransitionError::recovered_state_invariant_rejected(context, reason)
+        }
     }
 }
 
@@ -98,19 +101,16 @@ impl HandleDslAuthority {
         Self { inner }
     }
 
-    /// Construct a handle with its own ephemeral DSL authority at the initial
-    /// state.
+    /// Construct a handle with its own ephemeral DSL authority at the
+    /// generated initial state.
     ///
     /// Legacy callers without access to a session-owned authority use this for
     /// compile-time correctness of `SessionRuntimeBindings`. Transitions fired
     /// through a handle backed by this authority are not visible to any other
     /// session state.
     pub fn ephemeral() -> Self {
-        let state = mm_dsl::MeerkatMachineState::default();
         Self {
-            inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
-                state,
-            ))),
+            inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new())),
         }
     }
 
@@ -148,6 +148,15 @@ impl HandleDslAuthority {
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        self.apply_input_with_transition(input, context)
+            .map(|transition| transition.into_effects())
+    }
+
+    pub fn apply_input_with_transition(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<mm_dsl::MeerkatMachineTransition, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
         let mut guard = self
@@ -155,7 +164,6 @@ impl HandleDslAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-            .map(|transition| transition.effects)
             .map_err(|err| map_kernel_error(err, context))
     }
 
@@ -201,7 +209,7 @@ impl HandleDslAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let effects = mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| map_kernel_error(err, context))?;
         Ok(sample(&effects))
     }
@@ -227,7 +235,7 @@ impl HandleDslAuthority {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .apply_signal(signal)
-            .map(|transition| transition.effects)
+            .map(|transition| transition.into_effects())
             .map_err(|err| map_kernel_error(err, context))
     }
 
@@ -245,7 +253,7 @@ impl HandleDslAuthority {
         guard
             .apply_signal(signal)
             .map_err(|err| map_kernel_error(err, context))?;
-        Ok(sample(&guard.state))
+        Ok(sample(guard.state()))
     }
 
     /// Clone the current DSL state under the shared authority's mutex.
@@ -254,7 +262,27 @@ impl HandleDslAuthority {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.state.clone()
+        guard.state().clone()
+    }
+
+    /// Generated comms-trust freshness authority for peer-projection
+    /// handoffs. The generated `comms_trust_reconcile` protocol uses this
+    /// handle to fail closed when an obligation no longer matches the current
+    /// MeerkatMachine peer-projection epoch.
+    pub fn peer_projection_freshness_authority(
+        &self,
+    ) -> crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority {
+        crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+            Arc::clone(&self.inner),
+        )
+    }
+
+    pub(crate) fn generated_authority_owner_token(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.generated_authority_owner_token()
     }
 
     /// Run `body` under the shared authority's mutex. The closure observes
@@ -268,7 +296,7 @@ impl HandleDslAuthority {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        body(&guard.state)
+        body(guard.state())
     }
 }
 

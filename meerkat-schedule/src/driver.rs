@@ -1,13 +1,14 @@
-use crate::error::ScheduleDomainError;
+use crate::error::{ScheduleDomainError, ScheduleStoreError};
 use crate::lifecycle::OccurrenceLifecycleInput;
 use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
-    DeliveryReceipt, DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrencePhase,
-    OverlapPolicy, RuntimeDeliveryOutcome, SchedulePhase,
+    DeliveryCompletionFailureReason, DeliveryFailureReason, DeliveryReceipt, Occurrence,
+    OccurrencePhase, OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome,
+    RuntimeDeliveryOutcome, SchedulePhase,
 };
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures::Future;
 use meerkat_core::SessionId;
 use std::fmt;
@@ -39,9 +40,9 @@ pub struct DeliveryTerminal {
     pub phase: OccurrencePhase,
     pub receipt: Option<DeliveryReceipt>,
     pub detail: Option<String>,
-    pub failure_class: Option<OccurrenceFailureClass>,
+    pub delivery_failure_reason: Option<DeliveryFailureReason>,
+    pub runtime_completion_outcome: Option<RuntimeCompletionOutcome>,
     pub runtime_outcome: Option<RuntimeDeliveryOutcome>,
-    pub materialized_session_id: Option<SessionId>,
 }
 
 impl DeliveryTerminal {
@@ -50,45 +51,35 @@ impl DeliveryTerminal {
             phase: OccurrencePhase::Completed,
             receipt,
             detail: None,
-            failure_class: None,
+            delivery_failure_reason: None,
+            runtime_completion_outcome: None,
             runtime_outcome: None,
-            materialized_session_id: None,
         }
     }
 
-    pub fn skipped(detail: impl Into<String>, failure_class: OccurrenceFailureClass) -> Self {
-        Self {
-            phase: OccurrencePhase::Skipped,
-            receipt: None,
-            detail: Some(detail.into()),
-            failure_class: Some(failure_class),
-            runtime_outcome: None,
-            materialized_session_id: None,
-        }
-    }
-
-    pub fn misfired(detail: impl Into<String>, failure_class: OccurrenceFailureClass) -> Self {
-        Self {
-            phase: OccurrencePhase::Misfired,
-            receipt: None,
-            detail: Some(detail.into()),
-            failure_class: Some(failure_class),
-            runtime_outcome: None,
-            materialized_session_id: None,
-        }
-    }
-
-    pub fn delivery_failed(
-        detail: impl Into<String>,
-        failure_class: OccurrenceFailureClass,
-    ) -> Self {
+    pub fn delivery_failed(detail: impl Into<String>, reason: DeliveryFailureReason) -> Self {
         Self {
             phase: OccurrencePhase::DeliveryFailed,
             receipt: None,
             detail: Some(detail.into()),
-            failure_class: Some(failure_class),
+            delivery_failure_reason: Some(reason),
+            runtime_completion_outcome: None,
             runtime_outcome: None,
-            materialized_session_id: None,
+        }
+    }
+
+    pub fn runtime_completion(
+        outcome: RuntimeCompletionOutcome,
+        detail: Option<String>,
+        runtime_outcome: Option<RuntimeDeliveryOutcome>,
+    ) -> Self {
+        Self {
+            phase: OccurrencePhase::AwaitingCompletion,
+            receipt: None,
+            detail,
+            delivery_failure_reason: None,
+            runtime_completion_outcome: Some(outcome),
+            runtime_outcome,
         }
     }
 }
@@ -145,6 +136,12 @@ enum ClaimedOccurrenceDispatchState {
         occurrence: Occurrence,
         superseded_by_revision: crate::ScheduleRevision,
     },
+}
+
+enum TargetProbeResolution {
+    Continue(Box<Occurrence>),
+    Terminalized,
+    StaleClaim,
 }
 
 pub struct ScheduleDriver {
@@ -214,7 +211,7 @@ impl ScheduleDriver {
         store_now_utc: chrono::DateTime<Utc>,
     ) -> Result<bool, ScheduleDomainError> {
         let frozen_occurrence = occurrence.clone();
-        let mut occurrence = match self
+        let occurrence = match self
             .reconcile_claimed_occurrence_before_dispatch(occurrence)
             .await?
         {
@@ -226,21 +223,15 @@ impl ScheduleDriver {
                         &frozen_occurrence.occurrence_id,
                         frozen_occurrence.attempt_count,
                         frozen_occurrence.claim_token(),
-                        OccurrenceLifecycleInput::LeaseExpired {
+                        OccurrenceLifecycleInput::ReleaseLeaseForPausedSchedule {
                             at_utc: store_now_utc,
                         },
                     )
                     .await?;
                 if let Some(released) = released {
-                    let mut receipt = DeliveryReceipt::new(
-                        released.occurrence_id.clone(),
-                        released.attempt_count,
-                        DeliveryReceiptStage::LeaseExpired,
-                    );
-                    receipt.failure_class = Some(OccurrenceFailureClass::LeaseLost);
-                    receipt.detail = Some(
-                        "lease released because schedule was paused before dispatch".to_string(),
-                    );
+                    let receipt = released
+                        .delivery_receipt_from_authority(None)
+                        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
                     self.store.append_receipt(receipt).await?;
                 }
                 return Ok(false);
@@ -255,7 +246,6 @@ impl ScheduleDriver {
                         superseded_by_revision,
                         at_utc: store_now_utc,
                     },
-                    DeliveryReceiptStage::Superseded,
                     None,
                 )
                 .await?;
@@ -263,52 +253,11 @@ impl ScheduleDriver {
             }
         };
 
-        match self.probe.probe_target(&occurrence).await? {
-            TargetProbeOutcome::Ready => {}
-            TargetProbeOutcome::Busy { detail } => {
-                if occurrence.overlap_policy == OverlapPolicy::AllowConcurrent {
-                    // Delivery continues for explicit concurrent schedules.
-                } else {
-                    self.terminalize_occurrence(
-                        occurrence,
-                        OccurrenceLifecycleInput::Skip {
-                            detail: detail.or_else(|| Some("target busy".to_string())),
-                            failure_class: Some(OccurrenceFailureClass::TargetBusy),
-                            at_utc: store_now_utc,
-                        },
-                        DeliveryReceiptStage::Skipped,
-                        None,
-                    )
-                    .await?;
-                    return Ok(true);
-                }
-            }
-            TargetProbeOutcome::Missing { detail } => {
-                let lifecycle = if matches!(
-                    occurrence.missing_target_policy,
-                    crate::types::MissingTargetPolicy::Skip
-                ) {
-                    OccurrenceLifecycleInput::Skip {
-                        detail: detail.or_else(|| Some("target missing".to_string())),
-                        failure_class: Some(OccurrenceFailureClass::TargetMissing),
-                        at_utc: store_now_utc,
-                    }
-                } else {
-                    OccurrenceLifecycleInput::Misfire {
-                        detail: detail.or_else(|| Some("target missing".to_string())),
-                        failure_class: Some(OccurrenceFailureClass::TargetMissing),
-                        at_utc: store_now_utc,
-                    }
-                };
-                let stage = match lifecycle {
-                    OccurrenceLifecycleInput::Skip { .. } => DeliveryReceiptStage::Skipped,
-                    _ => DeliveryReceiptStage::Misfired,
-                };
-                self.terminalize_occurrence(occurrence, lifecycle, stage, None)
-                    .await?;
-                return Ok(true);
-            }
-        }
+        let mut occurrence = match self.resolve_target_probe(occurrence, store_now_utc).await? {
+            TargetProbeResolution::Continue(occurrence) => *occurrence,
+            TargetProbeResolution::Terminalized => return Ok(true),
+            TargetProbeResolution::StaleClaim => return Ok(false),
+        };
 
         let dispatch = match self.delivery.deliver_occurrence(&occurrence).await {
             Ok(dispatch) => dispatch,
@@ -316,13 +265,11 @@ impl ScheduleDriver {
                 let detail = error.to_string();
                 self.terminalize_occurrence(
                     occurrence,
-                    OccurrenceLifecycleInput::DeliveryFailed {
-                        receipt: None,
-                        failure_class: OccurrenceFailureClass::TransportError,
+                    OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                        reason: DeliveryFailureReason::TransportError,
                         detail: Some(detail),
                         at_utc: store_now_utc,
                     },
-                    DeliveryReceiptStage::DeliveryFailed,
                     None,
                 )
                 .await?;
@@ -340,32 +287,39 @@ impl ScheduleDriver {
                 .await?;
         }
 
-        let mut dispatch_receipt = dispatch.receipt.clone();
-        if dispatch_receipt.correlation_id.is_none() {
-            dispatch_receipt.correlation_id = dispatch.correlation_id.clone();
-        }
-        if dispatch_receipt.materialized_session_id.is_none() {
-            dispatch_receipt.materialized_session_id = dispatch.materialized_session_id.clone();
-        }
-
-        let mut dispatching = occurrence
+        let dispatch_mutator = occurrence
             .apply(OccurrenceLifecycleInput::DispatchStarted {
                 correlation_id: dispatch.correlation_id.clone(),
                 at_utc: store_now_utc,
             })
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
-            .into_occurrence();
-        dispatching.last_receipt = Some(dispatch_receipt.clone());
-        self.store.put_occurrence(dispatching.clone()).await?;
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        let dispatching = dispatch_mutator.occurrence.clone();
+        // The delivery adapter's receipt is transport metadata; the recorded
+        // public receipt class is projected from OccurrenceLifecycleMachine.
+        let dispatch_receipt = dispatching
+            .delivery_receipt_from_authority(dispatch.receipt.runtime_outcome.clone())
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        self.store
+            .commit_occurrence_write(dispatch_mutator.into_authorized_write())
+            .await?;
         self.store.append_receipt(dispatch_receipt).await?;
 
-        dispatching = dispatching
+        let dispatching = self
+            .store
+            .get_occurrence(&dispatching.occurrence_id)
+            .await?
+            .ok_or_else(|| ScheduleStoreError::OccurrenceNotFound {
+                occurrence_id: dispatching.occurrence_id.clone(),
+            })?;
+        let await_mutator = dispatching
             .apply(OccurrenceLifecycleInput::AwaitCompletion {
                 at_utc: store_now_utc,
             })
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
-            .into_occurrence();
-        self.store.put_occurrence(dispatching.clone()).await?;
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        let dispatching = await_mutator.occurrence.clone();
+        self.store
+            .commit_occurrence_write(await_mutator.into_authorized_write())
+            .await?;
 
         self.spawn_completion_waiter(dispatching, dispatch.completion);
         Ok(false)
@@ -419,33 +373,67 @@ impl ScheduleDriver {
         &self,
         occurrence: Occurrence,
         lifecycle: OccurrenceLifecycleInput,
-        stage: DeliveryReceiptStage,
         receipt: Option<DeliveryReceipt>,
     ) -> Result<(), ScheduleDomainError> {
-        let _ = terminalize_occurrence_inner(
-            self.store.clone(),
-            occurrence,
-            lifecycle,
-            stage,
-            receipt,
-            None,
-            None,
-        )
-        .await?;
+        let _ =
+            terminalize_occurrence_inner(self.store.clone(), occurrence, lifecycle, receipt, None)
+                .await?;
         Ok(())
+    }
+
+    async fn resolve_target_probe(
+        &self,
+        occurrence: Occurrence,
+        store_now_utc: DateTime<Utc>,
+    ) -> Result<TargetProbeResolution, ScheduleDomainError> {
+        let (outcome, detail) = match self.probe.probe_target(&occurrence).await? {
+            TargetProbeOutcome::Ready => (OccurrenceTargetProbeOutcome::Ready, None),
+            TargetProbeOutcome::Busy { detail } => (
+                OccurrenceTargetProbeOutcome::Busy,
+                detail.or_else(|| Some("target busy".to_string())),
+            ),
+            TargetProbeOutcome::Missing { detail } => (
+                OccurrenceTargetProbeOutcome::Missing,
+                detail.or_else(|| Some("target missing".to_string())),
+            ),
+        };
+
+        let Some(updated) = self
+            .store
+            .transition_occurrence_if_current(
+                &occurrence.occurrence_id,
+                occurrence.attempt_count,
+                occurrence.claim_token(),
+                OccurrenceLifecycleInput::ResolveTargetProbe {
+                    outcome,
+                    detail,
+                    at_utc: store_now_utc,
+                },
+            )
+            .await?
+        else {
+            return Ok(TargetProbeResolution::StaleClaim);
+        };
+
+        match updated.phase {
+            OccurrencePhase::Claimed => Ok(TargetProbeResolution::Continue(Box::new(updated))),
+            OccurrencePhase::Skipped | OccurrencePhase::Misfired => {
+                let final_receipt = updated
+                    .delivery_receipt_from_authority(None)
+                    .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+                self.store.append_receipt(final_receipt).await?;
+                Ok(TargetProbeResolution::Terminalized)
+            }
+            other => Err(ScheduleDomainError::Internal(format!(
+                "generated occurrence authority resolved target probe to unsupported phase: {other:?}"
+            ))),
+        }
     }
 
     fn spawn_completion_waiter(&self, occurrence: Occurrence, completion: DeliveryCompletion) {
         let store = self.store.clone();
         crate::tokio::spawn(async move {
-            let terminal = match completion.await {
-                Ok(terminal) => terminal,
-                Err(error) => DeliveryTerminal::delivery_failed(
-                    error.to_string(),
-                    OccurrenceFailureClass::TransportError,
-                ),
-            };
-            let _ = complete_dispatched_occurrence(store, occurrence, terminal).await;
+            let _ = complete_dispatched_occurrence(store, occurrence, completion.await).await;
         });
     }
 }
@@ -453,7 +441,7 @@ impl ScheduleDriver {
 async fn complete_dispatched_occurrence(
     store: Arc<dyn ScheduleStore>,
     occurrence: Occurrence,
-    terminal: DeliveryTerminal,
+    completion: Result<DeliveryTerminal, ScheduleDomainError>,
 ) -> Result<(), ScheduleDomainError> {
     let store_now_utc = store.get_store_time_utc().await?;
     let current_schedule = store.get_schedule(&occurrence.schedule_id).await?;
@@ -468,93 +456,98 @@ async fn complete_dispatched_occurrence(
                 superseded_by_revision: schedule.revision,
                 at_utc: store_now_utc,
             },
-            DeliveryReceiptStage::Superseded,
             None,
-            terminal.materialized_session_id,
             None,
         )
         .await?;
         return Ok(());
     }
 
-    let completed_receipt = matches!(terminal.phase, OccurrencePhase::Completed).then(|| {
-        build_terminal_receipt(
-            &occurrence,
-            DeliveryReceiptStage::Completed,
-            terminal.receipt.clone(),
-            terminal.failure_class,
-            terminal.runtime_outcome.clone(),
-            terminal.detail.clone(),
-            terminal.materialized_session_id.clone(),
-        )
-    });
-    let lifecycle = match terminal.phase {
-        OccurrencePhase::Completed => {
-            let receipt = completed_receipt.clone().ok_or_else(|| {
-                ScheduleDomainError::Internal(
-                    "completed terminal must carry a completed receipt".to_string(),
-                )
-            })?;
-            OccurrenceLifecycleInput::Complete {
-                receipt,
-                at_utc: store_now_utc,
-            }
-        }
-        OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
-            detail: terminal.detail.clone(),
-            failure_class: terminal.failure_class,
-            at_utc: store_now_utc,
-        },
-        OccurrencePhase::Misfired => OccurrenceLifecycleInput::Misfire {
-            detail: terminal.detail.clone(),
-            failure_class: terminal.failure_class,
-            at_utc: store_now_utc,
-        },
-        OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::DeliveryFailed {
-            receipt: terminal.receipt.clone(),
-            failure_class: terminal
-                .failure_class
-                .unwrap_or(OccurrenceFailureClass::InternalError),
-            detail: terminal.detail.clone(),
-            at_utc: store_now_utc,
-        },
-        other => {
-            return Err(ScheduleDomainError::Internal(format!(
-                "delivery terminal returned non-terminal occurrence phase: {other:?}"
-            )));
+    let terminal = match completion {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            let (reason, detail) = delivery_completion_failure_evidence(error);
+            let _ = terminalize_occurrence_inner(
+                store,
+                occurrence,
+                OccurrenceLifecycleInput::ResolveDeliveryCompletionFailure {
+                    reason,
+                    detail,
+                    at_utc: store_now_utc,
+                },
+                None,
+                None,
+            )
+            .await?;
+            return Ok(());
         }
     };
-    let receipt_stage = match terminal.phase {
-        OccurrencePhase::Completed => DeliveryReceiptStage::Completed,
-        OccurrencePhase::Skipped => DeliveryReceiptStage::Skipped,
-        OccurrencePhase::Misfired => DeliveryReceiptStage::Misfired,
-        OccurrencePhase::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
-        _ => DeliveryReceiptStage::DeliveryFailed,
+
+    let lifecycle = if let Some(outcome) = terminal.runtime_completion_outcome {
+        OccurrenceLifecycleInput::ResolveRuntimeCompletion {
+            outcome,
+            detail: terminal.detail.clone(),
+            at_utc: store_now_utc,
+        }
+    } else {
+        match terminal.phase {
+            OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
+                at_utc: store_now_utc,
+            },
+            OccurrencePhase::Skipped | OccurrencePhase::Misfired => {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "delivery terminal returned unsupported adapter-selected occurrence phase: {:?}",
+                    terminal.phase
+                )));
+            }
+            OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::ResolveDeliveryFailure {
+                reason: terminal.delivery_failure_reason.ok_or_else(|| {
+                    ScheduleDomainError::Internal(
+                        "delivery failed terminal omitted generated failure reason".to_string(),
+                    )
+                })?,
+                detail: terminal.detail.clone(),
+                at_utc: store_now_utc,
+            },
+            other => {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "delivery terminal returned non-terminal occurrence phase: {other:?}"
+                )));
+            }
+        }
     };
 
     let _ = terminalize_occurrence_inner(
         store,
         occurrence,
         lifecycle,
-        receipt_stage,
-        completed_receipt.or(terminal.receipt),
-        terminal.materialized_session_id,
+        terminal.receipt,
         terminal.runtime_outcome,
     )
     .await?;
     Ok(())
 }
 
+fn delivery_completion_failure_evidence(
+    error: ScheduleDomainError,
+) -> (DeliveryCompletionFailureReason, Option<String>) {
+    match error {
+        ScheduleDomainError::DeliveryCompletionFailed { reason, detail } => (reason, Some(detail)),
+        other => (
+            DeliveryCompletionFailureReason::CompletionFutureFailed,
+            Some(other.to_string()),
+        ),
+    }
+}
+
 async fn terminalize_occurrence_inner(
     store: Arc<dyn ScheduleStore>,
     occurrence: Occurrence,
     lifecycle: OccurrenceLifecycleInput,
-    stage: DeliveryReceiptStage,
-    receipt: Option<DeliveryReceipt>,
-    materialized_session_id: Option<SessionId>,
+    _receipt: Option<DeliveryReceipt>,
     runtime_outcome: Option<RuntimeDeliveryOutcome>,
 ) -> Result<bool, ScheduleDomainError> {
-    let Some(mut updated) = store
+    let Some(updated) = store
         .transition_occurrence_if_current(
             &occurrence.occurrence_id,
             occurrence.attempt_count,
@@ -565,72 +558,25 @@ async fn terminalize_occurrence_inner(
     else {
         return Ok(false);
     };
-    let final_receipt = build_terminal_receipt(
-        &updated,
-        stage,
-        receipt,
-        updated.failure_class,
-        runtime_outcome.clone(),
-        updated.failure_detail.clone(),
-        materialized_session_id,
-    );
-    updated.runtime_outcome = runtime_outcome;
-    updated.last_receipt = Some(final_receipt.clone());
-    store.put_occurrence(updated).await?;
+    let final_receipt = updated
+        .delivery_receipt_from_authority(runtime_outcome.clone())
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
     store.append_receipt(final_receipt).await?;
     Ok(true)
 }
 
-fn build_terminal_receipt(
-    occurrence: &Occurrence,
-    stage: DeliveryReceiptStage,
-    receipt: Option<DeliveryReceipt>,
-    failure_class: Option<OccurrenceFailureClass>,
-    runtime_outcome: Option<RuntimeDeliveryOutcome>,
-    detail: Option<String>,
-    materialized_session_id: Option<SessionId>,
-) -> DeliveryReceipt {
-    let mut receipt = receipt.unwrap_or_else(|| {
-        DeliveryReceipt::new(
-            occurrence.occurrence_id.clone(),
-            occurrence.attempt_count,
-            stage,
-        )
-    });
-    receipt.stage = stage;
-    if receipt.correlation_id.is_none() {
-        receipt.correlation_id = occurrence.delivery_correlation_id.clone();
-    }
-    if receipt.failure_class.is_none() {
-        receipt.failure_class = failure_class;
-    }
-    if receipt.runtime_outcome.is_none() {
-        receipt.runtime_outcome = runtime_outcome;
-    }
-    if receipt.detail.is_none() {
-        receipt.detail = detail;
-    }
-    if receipt.materialized_session_id.is_none() {
-        receipt.materialized_session_id = materialized_session_id.or_else(|| {
-            occurrence
-                .last_receipt
-                .as_ref()
-                .and_then(|last_receipt| last_receipt.materialized_session_id.clone())
-        });
-    }
-    receipt
-}
-
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::large_futures, clippy::panic)]
+
     use super::*;
     use crate::types::{
-        CreateScheduleRequest, IntervalTriggerSpec, ScheduledSessionAction,
-        SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
+        CreateScheduleRequest, DeliveryReceiptStage, IntervalTriggerSpec, OccurrenceFailureClass,
+        ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
     };
     use crate::{
-        MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, TriggerSpec, UpdateScheduleRequest,
+        MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, OverlapPolicy, TriggerSpec,
+        UpdateScheduleRequest,
     };
     use chrono::Duration;
     use meerkat_core::ContentInput;
@@ -647,6 +593,18 @@ mod tests {
             _occurrence: &Occurrence,
         ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
             Ok(TargetProbeOutcome::Ready)
+        }
+    }
+
+    struct StaticProbe(TargetProbeOutcome);
+
+    #[async_trait]
+    impl ScheduleTargetProbe for StaticProbe {
+        async fn probe_target(
+            &self,
+            _occurrence: &Occurrence,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -672,9 +630,11 @@ mod tests {
                         phase: OccurrencePhase::DeliveryFailed,
                         receipt: None,
                         detail: Some("session creation failed".into()),
-                        failure_class: Some(OccurrenceFailureClass::TargetMaterializationFailed),
+                        delivery_failure_reason: Some(
+                            DeliveryFailureReason::TargetMaterializationFailed,
+                        ),
+                        runtime_completion_outcome: None,
                         runtime_outcome: None,
-                        materialized_session_id: None,
                     })
                 }),
             })
@@ -779,6 +739,150 @@ mod tests {
                 completion: Box::pin(async { Ok(DeliveryTerminal::completed(None)) }),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn target_probe_terminality_comes_from_occurrence_authority()
+    -> Result<(), ScheduleDomainError> {
+        let cases = [
+            (
+                TargetProbeOutcome::Busy {
+                    detail: Some("target already running".to_string()),
+                },
+                OverlapPolicy::SkipIfRunning,
+                MissingTargetPolicy::MarkMisfired,
+                OccurrencePhase::Skipped,
+                DeliveryReceiptStage::Skipped,
+                OccurrenceFailureClass::TargetBusy,
+            ),
+            (
+                TargetProbeOutcome::Missing {
+                    detail: Some("target disappeared".to_string()),
+                },
+                OverlapPolicy::AllowConcurrent,
+                MissingTargetPolicy::Skip,
+                OccurrencePhase::Skipped,
+                DeliveryReceiptStage::Skipped,
+                OccurrenceFailureClass::TargetMissing,
+            ),
+            (
+                TargetProbeOutcome::Missing {
+                    detail: Some("target disappeared".to_string()),
+                },
+                OverlapPolicy::AllowConcurrent,
+                MissingTargetPolicy::MarkMisfired,
+                OccurrencePhase::Misfired,
+                DeliveryReceiptStage::Misfired,
+                OccurrenceFailureClass::TargetMissing,
+            ),
+        ];
+
+        for (
+            probe_outcome,
+            overlap_policy,
+            missing_target_policy,
+            expected_phase,
+            expected_stage,
+            expected_failure_class,
+        ) in cases
+        {
+            let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+            let service = ScheduleService::new(store.clone());
+            let schedule = service
+                .create(CreateScheduleRequest {
+                    name: Some(format!("target-probe-{expected_phase:?}")),
+                    description: None,
+                    trigger: TriggerSpec::Once {
+                        due_at_utc: Utc::now() - Duration::seconds(1),
+                    },
+                    target: materialize_on_demand_target("scheduled prompt"),
+                    misfire_policy: MisfirePolicy::Skip,
+                    overlap_policy,
+                    missing_target_policy,
+                    labels: BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                })
+                .await?;
+            let delivery = Arc::new(CompletingDelivery::default());
+            let driver = ScheduleDriver::new(
+                service.clone(),
+                store.clone(),
+                Arc::new(StaticProbe(probe_outcome)),
+                delivery.clone(),
+                "driver-owner",
+                ScheduleDriverConfig {
+                    claim_limit: 8,
+                    lease_duration: Duration::seconds(30),
+                },
+            );
+
+            let report = driver.tick_once().await?;
+            assert_eq!(report.claimed_occurrences, 1);
+            assert_eq!(report.terminalized_occurrences, 1);
+            assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+
+            let occurrence =
+                wait_for_occurrence_phase(&service, &schedule.schedule_id, expected_phase).await?;
+            assert_eq!(occurrence.failure_class, Some(expected_failure_class));
+
+            let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+            let last_receipt = receipts.last().ok_or_else(|| {
+                ScheduleDomainError::Internal(
+                    "target probe terminality should emit a receipt".to_string(),
+                )
+            })?;
+            assert_eq!(last_receipt.stage, expected_stage);
+            assert_eq!(last_receipt.failure_class, Some(expected_failure_class));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn target_probe_busy_allow_concurrent_continues_to_delivery()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("target-busy-allowed".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::AllowConcurrent,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store,
+            Arc::new(StaticProbe(TargetProbeOutcome::Busy {
+                detail: Some("target already running".to_string()),
+            })),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        driver.tick_once().await?;
+
+        let occurrence =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
+        assert_eq!(occurrence.failure_class, None);
+        assert_eq!(delivery.dispatched_occurrences.lock().await.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1018,10 +1122,16 @@ mod tests {
             Some("session creation failed")
         );
 
-        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
-        let last_receipt = receipts.last().ok_or_else(|| {
-            ScheduleDomainError::Internal("delivery failure receipt should exist".to_string())
-        })?;
+        let last_receipt = loop {
+            let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+            if let Some(receipt) = receipts
+                .last()
+                .filter(|receipt| receipt.stage == DeliveryReceiptStage::DeliveryFailed)
+            {
+                break receipt.clone();
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        };
         assert_eq!(last_receipt.stage, DeliveryReceiptStage::DeliveryFailed);
         assert_eq!(
             last_receipt.failure_class,
@@ -1083,6 +1193,203 @@ mod tests {
         assert_eq!(
             last_receipt.correlation_id.as_deref(),
             Some("dispatch-attempt-1")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivery_failed_without_generated_failure_reason_fails_closed()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("missing-failure-class".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store,
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+
+        let occurrence = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+
+        let sender = delivery.senders.lock().await.remove(0);
+        sender
+            .send(DeliveryTerminal {
+                phase: OccurrencePhase::DeliveryFailed,
+                receipt: None,
+                detail: Some("missing generated failure reason".into()),
+                delivery_failure_reason: None,
+                runtime_completion_outcome: None,
+                runtime_outcome: None,
+            })
+            .expect("completion receiver should be open");
+        sleep(std::time::Duration::from_millis(30)).await;
+
+        let after = service
+            .list_occurrences(&schedule.schedule_id)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.occurrence_id == occurrence.occurrence_id)
+            .ok_or_else(|| ScheduleDomainError::Internal("occurrence should exist".to_string()))?;
+        assert_eq!(after.phase, OccurrencePhase::AwaitingCompletion);
+        assert_eq!(after.failure_class, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adapter_selected_terminal_skip_or_misfire_fails_closed()
+    -> Result<(), ScheduleDomainError> {
+        for phase in [OccurrencePhase::Skipped, OccurrencePhase::Misfired] {
+            let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+            let service = ScheduleService::new(store.clone());
+            let schedule = service
+                .create(CreateScheduleRequest {
+                    name: Some(format!("adapter-selected-{phase:?}")),
+                    description: None,
+                    trigger: TriggerSpec::Once {
+                        due_at_utc: Utc::now() - Duration::seconds(1),
+                    },
+                    target: materialize_on_demand_target("scheduled prompt"),
+                    misfire_policy: MisfirePolicy::Skip,
+                    overlap_policy: OverlapPolicy::SkipIfRunning,
+                    missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                    labels: BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                })
+                .await?;
+            let delivery = Arc::new(ControlledCompletionDelivery::default());
+            let driver = ScheduleDriver::new(
+                service.clone(),
+                store,
+                Arc::new(ReadyProbe),
+                delivery.clone(),
+                "driver-owner",
+                ScheduleDriverConfig {
+                    claim_limit: 8,
+                    lease_duration: Duration::seconds(30),
+                },
+            );
+
+            driver.tick_once().await?;
+            wait_for_sender_count(&delivery, 1).await;
+
+            let occurrence = wait_for_occurrence_phase(
+                &service,
+                &schedule.schedule_id,
+                OccurrencePhase::AwaitingCompletion,
+            )
+            .await?;
+
+            let sender = delivery.senders.lock().await.remove(0);
+            sender
+                .send(DeliveryTerminal {
+                    phase,
+                    receipt: None,
+                    detail: Some("adapter-selected terminality".into()),
+                    delivery_failure_reason: None,
+                    runtime_completion_outcome: None,
+                    runtime_outcome: None,
+                })
+                .expect("completion receiver should be open");
+            sleep(std::time::Duration::from_millis(30)).await;
+
+            let after = service
+                .list_occurrences(&schedule.schedule_id)
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.occurrence_id == occurrence.occurrence_id)
+                .ok_or_else(|| {
+                    ScheduleDomainError::Internal("occurrence should exist".to_string())
+                })?;
+            assert_eq!(after.phase, OccurrencePhase::AwaitingCompletion);
+            assert_eq!(after.failure_class, None);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completion_future_failure_classification_comes_from_occurrence_authority()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("completion-future-failure".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store,
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        drop(delivery.senders.lock().await.remove(0));
+
+        let after = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::DeliveryFailed,
+        )
+        .await?;
+        assert_eq!(
+            after.failure_class,
+            Some(OccurrenceFailureClass::TransportError)
+        );
+        assert!(
+            after
+                .failure_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("schedule driver stopped"))
         );
         Ok(())
     }

@@ -325,6 +325,7 @@ impl TypePathEnumStructuralVariant {
 pub enum TypePathStructFieldAtom {
     String,
     Named(NamedTypeId),
+    OptionalNamed(NamedTypeId),
 }
 
 /// One field in a structural record carried by the typed owner.
@@ -352,6 +353,17 @@ impl TypePathStructField {
             #[allow(clippy::expect_used)]
             name: FieldId::parse(name).expect("valid structural record field slug"),
             atom: TypePathStructFieldAtom::Named(type_name),
+        }
+    }
+
+    /// Construct a structural field whose value is an optional named type.
+    pub fn optional_named(name: &str, type_name: &str) -> Self {
+        #[allow(clippy::expect_used)]
+        let type_name = NamedTypeId::parse(type_name).expect("valid nested named-type slug");
+        Self {
+            #[allow(clippy::expect_used)]
+            name: FieldId::parse(name).expect("valid structural record field slug"),
+            atom: TypePathStructFieldAtom::OptionalNamed(type_name),
         }
     }
 }

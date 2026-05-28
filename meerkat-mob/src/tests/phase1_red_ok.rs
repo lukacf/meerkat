@@ -89,20 +89,22 @@ max_orphaned_turns = 8
 "#;
 use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
-    OperationStatus, OperationTerminalOutcome, OpsLifecycleRegistry,
+    OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSource,
+    OperationSpec, OperationStatus, OperationTerminalOutcome, OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 
 fn mob_spec(name: &str) -> OperationSpec {
+    let child_session_id = SessionId::new();
     OperationSpec {
         id: meerkat_core::ops_lifecycle::OperationId::new(),
         kind: OperationKind::MobMemberChild,
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "phase1-mob".into(),
-        child_session_id: Some(SessionId::new()),
+        operation_source: Some(OperationSource::session_child(child_session_id.clone())),
+        child_session_id: Some(child_session_id),
         expect_peer_channel: true,
     }
 }
@@ -114,6 +116,7 @@ fn background_spec(name: &str) -> OperationSpec {
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "phase1-tool".into(),
+        operation_source: None,
         child_session_id: None,
         expect_peer_channel: false,
     }
@@ -225,7 +228,9 @@ async fn ops_registry_integration_red_ok_tracks_mob_member_peer_ready_and_comple
         .expect("complete operation");
 
     assert_eq!(
-        watch.wait().await,
+        watch
+            .await
+            .expect("operation completion watch should resolve"),
         OperationTerminalOutcome::Completed(OperationResult {
             id: op_id.clone(),
             content: "member complete".into(),
@@ -235,7 +240,10 @@ async fn ops_registry_integration_red_ok_tracks_mob_member_peer_ready_and_comple
         })
     );
 
-    let snapshot = registry.snapshot(&op_id).expect("snapshot");
+    let snapshot = registry
+        .snapshot(&op_id)
+        .expect("snapshot projection")
+        .expect("snapshot");
     assert_eq!(snapshot.status, OperationStatus::Completed);
     assert!(snapshot.peer_ready);
     assert_eq!(snapshot.child_session_id, spec.child_session_id);
@@ -266,9 +274,18 @@ async fn ops_registry_integration_red_ok_background_ops_retire_without_peer_hand
     registry.request_retire(&op_id).expect("request retire");
     registry.mark_retired(&op_id).expect("mark retired");
 
-    assert_eq!(watch.wait().await, OperationTerminalOutcome::Retired);
     assert_eq!(
-        registry.snapshot(&op_id).expect("snapshot").status,
+        watch
+            .await
+            .expect("operation completion watch should resolve"),
+        OperationTerminalOutcome::Retired
+    );
+    assert_eq!(
+        registry
+            .snapshot(&op_id)
+            .expect("snapshot projection")
+            .expect("snapshot")
+            .status,
         OperationStatus::Retired
     );
 }

@@ -72,11 +72,14 @@ fn canonical_machine_slug_snapshot() {
     assert_eq!(
         slugs,
         vec![
+            "ApprovalLifecycleMachine".to_string(),
             "AuthMachine".to_string(),
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
             "OccurrenceLifecycleMachine".to_string(),
+            "PendingContinuationAdmissionMachine".to_string(),
             "ScheduleLifecycleMachine".to_string(),
+            "WorkAttentionLifecycleMachine".to_string(),
             "WorkGraphLifecycleMachine".to_string(),
         ],
         "canonical machine slug set — bump when intentionally adding/removing a kernel"
@@ -99,6 +102,7 @@ fn canonical_composition_slug_snapshot() {
             "schedule_bundle".to_string(),
             "schedule_mob_bundle".to_string(),
             "schedule_runtime_bundle".to_string(),
+            "workgraph_attention_bundle".to_string(),
         ],
         "canonical composition slug set — bump when intentionally adding/removing a bundle"
     );

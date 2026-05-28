@@ -41,6 +41,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -79,6 +80,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -134,6 +136,7 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -174,6 +177,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/buildbuddy_static_lanes.rs",
@@ -266,6 +270,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/ci_gate_requires_rmat.rs",
@@ -330,6 +335,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/machines_contracts.rs",
@@ -400,6 +406,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/protocol_codegen_drift.rs",
@@ -430,6 +437,7 @@ rust_test(
         "//meerkat-core:package_runfiles",
         "//meerkat-gemini:package_runfiles",
         "//meerkat-hooks:package_runfiles",
+        "//meerkat-live:cargo_manifest",
         "//meerkat-live:package_runfiles",
         "//meerkat-llm-core:package_runfiles",
         "//meerkat-machine-codegen:package_runfiles",
@@ -443,12 +451,14 @@ rust_test(
         "//meerkat-memory:package_runfiles",
         "//meerkat-mob-mcp:package_runfiles",
         "//meerkat-mob-pack:package_runfiles",
+        "//meerkat-mob:cargo_manifest",
         "//meerkat-mob:package_runfiles",
         "//meerkat-models:package_runfiles",
         "//meerkat-openai:package_runfiles",
         "//meerkat-providers:package_runfiles",
         "//meerkat-rest:package_runfiles",
         "//meerkat-rpc:package_runfiles",
+        "//meerkat-runtime:cargo_manifest",
         "//meerkat-runtime:package_runfiles",
         "//meerkat-schedule:package_runfiles",
         "//meerkat-session:package_runfiles",
@@ -462,6 +472,7 @@ rust_test(
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//tests/integration:package_runfiles",
+        "//xtask:cargo_manifest",
         "tests/rustfmt_host.sh",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
@@ -509,6 +520,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/rmat_audit.rs",
@@ -582,6 +594,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/rmat_strict.rs",
@@ -645,6 +658,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/seam_inventory_strict.rs",

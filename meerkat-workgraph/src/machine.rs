@@ -12,6 +12,17 @@ use crate::types::{
     WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkGraphPublicErrorClass {
+    NotFound,
+    Conflict,
+    InvalidTransition,
+    InvalidArguments,
+    CapabilityUnavailable,
+    StoreError,
+    InternalError,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkAttentionMachine;
 
@@ -78,6 +89,27 @@ pub struct WorkGraphMachine;
 impl WorkGraphMachine {
     pub fn validate_item_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
         validate_item_machine_projection(item)
+    }
+
+    pub fn public_error_class(
+        error: &WorkGraphError,
+    ) -> Result<WorkGraphPublicErrorClass, WorkGraphError> {
+        Ok(match error {
+            WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => {
+                WorkGraphPublicErrorClass::NotFound
+            }
+            WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => {
+                WorkGraphPublicErrorClass::Conflict
+            }
+            WorkGraphError::InvalidTransition(_) => WorkGraphPublicErrorClass::InvalidTransition,
+            WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
+                WorkGraphPublicErrorClass::InvalidArguments
+            }
+            WorkGraphError::UnsupportedBackend(_) => {
+                WorkGraphPublicErrorClass::CapabilityUnavailable
+            }
+            WorkGraphError::Store(_) => WorkGraphPublicErrorClass::StoreError,
+        })
     }
 
     pub fn create_item(
@@ -517,14 +549,15 @@ fn apply_new_item_dsl(
     let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
-    Ok(dsl_auth.state)
+    Ok(dsl_auth.state().clone())
 }
 
 fn apply_link_validation_dsl(
     state: WorkGraphMachineState,
     input: wg_dsl::WorkGraphLifecycleInput,
 ) -> Result<(), WorkGraphError> {
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(())
@@ -534,9 +567,15 @@ fn apply_attention_dsl(
     binding: &WorkAttentionBinding,
     input: attention_dsl::WorkAttentionLifecycleInput,
 ) -> Result<attention_dsl::WorkAttentionLifecycleMachineState, WorkGraphError> {
-    let mut dsl_auth = attention_dsl::WorkAttentionLifecycleMachineAuthority::from_state(
+    let mut dsl_auth = attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
         binding.machine_state.clone(),
-    );
+    )
+    .map_err(|error| {
+        WorkGraphError::InvalidTransition(format!(
+            "attention binding {} refused recovery: {error:?}",
+            binding.binding_id
+        ))
+    })?;
     attention_dsl::WorkAttentionLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(
         |error| {
             WorkGraphError::InvalidTransition(format!(
@@ -545,7 +584,7 @@ fn apply_attention_dsl(
             ))
         },
     )?;
-    Ok(dsl_auth.state)
+    Ok(dsl_auth.state().clone())
 }
 
 fn apply_item_dsl(
@@ -557,7 +596,8 @@ fn apply_item_dsl(
     validate_item_machine_projection(item)?;
     let mut state = item.machine_state.clone();
     state.unresolved_blocker_count = unresolved_blocker_count;
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(|error| {
         if let Some(expected) = expected_revision
             && item.revision != expected
@@ -570,7 +610,7 @@ fn apply_item_dsl(
         }
         WorkGraphError::InvalidTransition(format!("{error:?}"))
     })?;
-    Ok(dsl_auth.state)
+    Ok(dsl_auth.state().clone())
 }
 
 fn sync_attention_from_machine_state(binding: &mut WorkAttentionBinding) {

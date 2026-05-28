@@ -268,6 +268,32 @@ fn rewrite_phase_field_to_current(expr: &ExprDef, phase_field: &str) -> ExprDef 
             Box::new(rewrite_phase_field_to_current(l, phase_field)),
             Box::new(rewrite_phase_field_to_current(r, phase_field)),
         ),
+        ExprDef::FieldAccess { base, field } => ExprDef::FieldAccess {
+            base: Box::new(rewrite_phase_field_to_current(base, phase_field)),
+            field: field.clone(),
+        },
+        ExprDef::EnumVariantIs {
+            value,
+            enum_name,
+            variant,
+            tuple_variant,
+        } => ExprDef::EnumVariantIs {
+            value: Box::new(rewrite_phase_field_to_current(value, phase_field)),
+            enum_name: enum_name.clone(),
+            variant: variant.clone(),
+            tuple_variant: *tuple_variant,
+        },
+        ExprDef::EnumStringSetPayload {
+            value,
+            enum_name,
+            variant,
+            field,
+        } => ExprDef::EnumStringSetPayload {
+            value: Box::new(rewrite_phase_field_to_current(value, phase_field)),
+            enum_name: enum_name.clone(),
+            variant: variant.clone(),
+            field: field.clone(),
+        },
         ExprDef::IsSome(inner) => {
             ExprDef::IsSome(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
         }
@@ -299,6 +325,7 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
     match expr {
         ExprDef::Bool(v) => quote! { Expr::Bool(#v) },
         ExprDef::U64(v) => quote! { Expr::U64(#v) },
+        ExprDef::U64Max => quote! { Expr::U64Max },
         ExprDef::StringLit(s) => quote! { Expr::String(#s.into()) },
         ExprDef::None => quote! { Expr::None },
         ExprDef::Some(inner) => {
@@ -329,6 +356,39 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let e_id = typed_id("EnumTypeId", &e);
             let v_id = typed_id("EnumVariantId", &v);
             quote! { Expr::NamedVariant { enum_name: #e_id, variant: #v_id } }
+        }
+        ExprDef::FieldAccess { base, field } => {
+            let base_e = gen_schema_expr(base);
+            let field = field.to_string();
+            let field_id = typed_id("FieldId", &field);
+            quote! { Expr::FieldAccess { base: Box::new(#base_e), field: #field_id } }
+        }
+        ExprDef::EnumVariantIs {
+            value,
+            enum_name,
+            variant,
+            ..
+        } => {
+            let value_e = gen_schema_expr(value);
+            let e = enum_name.to_string();
+            let v = variant.to_string();
+            let e_id = typed_id("EnumTypeId", &e);
+            let v_id = typed_id("EnumVariantId", &v);
+            quote! { Expr::EnumVariantIs { value: Box::new(#value_e), enum_name: #e_id, variant: #v_id } }
+        }
+        ExprDef::EnumStringSetPayload {
+            value,
+            enum_name,
+            variant,
+            field,
+        } => {
+            let value_e = gen_schema_expr(value);
+            let e = enum_name.to_string();
+            let v = variant.to_string();
+            let e_id = typed_id("EnumTypeId", &e);
+            let v_id = typed_id("EnumVariantId", &v);
+            let field_id = typed_id("FieldId", field);
+            quote! { Expr::EnumStringSetPayload { value: Box::new(#value_e), enum_name: #e_id, variant: #v_id, field: #field_id } }
         }
         ExprDef::Not(inner) => {
             let inner_e = gen_schema_expr(inner);
@@ -395,6 +455,14 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
         ExprDef::Len(inner) => {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Len(Box::new(#inner_e)) }
+        }
+        ExprDef::Count { collection, value } => {
+            let collection_e = gen_schema_expr(collection);
+            let value_e = gen_schema_expr(value);
+            quote! { Expr::Count {
+                collection: Box::new(#collection_e),
+                value: Box::new(#value_e),
+            } }
         }
         ExprDef::MapGet { map, key } => {
             let map_e = gen_schema_expr(map);
@@ -995,6 +1063,10 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
         | ExprDef::Len(inner)
         | ExprDef::MapKeys(inner)
         | ExprDef::Some(inner) => references_phase_field(inner, phase_field_name),
+        ExprDef::FieldAccess { base, .. } => references_phase_field(base, phase_field_name),
+        ExprDef::EnumVariantIs { value, .. } | ExprDef::EnumStringSetPayload { value, .. } => {
+            references_phase_field(value, phase_field_name)
+        }
         ExprDef::And(exprs) | ExprDef::Or(exprs) => exprs
             .iter()
             .any(|e| references_phase_field(e, phase_field_name)),
@@ -1010,6 +1082,7 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
                 || references_phase_field(r, phase_field_name)
         }
         ExprDef::Contains { collection, value }
+        | ExprDef::Count { collection, value }
         | ExprDef::MapContainsKey {
             map: collection,
             key: value,

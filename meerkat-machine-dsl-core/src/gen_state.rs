@@ -91,6 +91,7 @@ fn gen_init_value(expr: &crate::ast::ExprDef) -> TokenStream {
     match expr {
         ExprDef::Bool(v) => quote! { #v },
         ExprDef::U64(v) => quote! { #v },
+        ExprDef::U64Max => quote! { u64::MAX },
         ExprDef::StringLit(s) => quote! { #s.into() },
         ExprDef::None => quote! { None },
         ExprDef::Some(inner) => {

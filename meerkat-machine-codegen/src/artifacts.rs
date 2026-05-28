@@ -36,6 +36,9 @@ macro_rules! writeln {
     }};
 }
 
+const TLA_RUST_U64_MAX_CONSTANT: &str = "RustU64Max";
+const TLC_SAFE_RUST_U64_MAX_VALUE: u64 = 2_147_483_647;
+
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
     CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, FeedbackFieldSource,
@@ -80,6 +83,7 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
     match expr {
         Expr::Bool(_)
         | Expr::U64(_)
+        | Expr::U64Max
         | Expr::String(_)
         | Expr::NamedVariant { .. }
         | Expr::EmptySet
@@ -109,7 +113,10 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
-        | Expr::Some(inner) => collect_helper_calls(inner, calls),
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => collect_helper_calls(inner, calls),
         Expr::Eq(left, right)
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
@@ -126,6 +133,10 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
             collect_helper_calls(right, calls);
         }
         Expr::Contains { collection, value } => {
+            collect_helper_calls(collection, calls);
+            collect_helper_calls(value, calls);
+        }
+        Expr::Count { collection, value } => {
             collect_helper_calls(collection, calls);
             collect_helper_calls(value, calls);
         }
@@ -148,6 +159,152 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
             collect_helper_calls(body, calls);
         }
     }
+}
+
+fn expr_uses_u64_max(expr: &Expr) -> bool {
+    match expr {
+        Expr::U64Max => true,
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            items.iter().any(expr_uses_u64_max)
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_u64_max(condition)
+                || expr_uses_u64_max(then_expr)
+                || expr_uses_u64_max(else_expr)
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => expr_uses_u64_max(inner),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => expr_uses_u64_max(left) || expr_uses_u64_max(right),
+        Expr::Contains { collection, value } | Expr::Count { collection, value } => {
+            expr_uses_u64_max(collection) || expr_uses_u64_max(value)
+        }
+        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
+            expr_uses_u64_max(map) || expr_uses_u64_max(key)
+        }
+        Expr::SeqStartsWith { seq, prefix } => expr_uses_u64_max(seq) || expr_uses_u64_max(prefix),
+        Expr::Call { args, .. } => args.iter().any(expr_uses_u64_max),
+        Expr::Quantified { over, body, .. } => expr_uses_u64_max(over) || expr_uses_u64_max(body),
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => false,
+    }
+}
+
+fn update_uses_u64_max(update: &Update) -> bool {
+    match update {
+        Update::Assign { expr, .. }
+        | Update::SetInsert { value: expr, .. }
+        | Update::SetRemove { value: expr, .. }
+        | Update::SeqAppend { value: expr, .. }
+        | Update::SeqPrepend { values: expr, .. }
+        | Update::SeqRemoveValue { value: expr, .. }
+        | Update::SeqRemoveAll { values: expr, .. } => expr_uses_u64_max(expr),
+        Update::MapInsert { key, value, .. } => expr_uses_u64_max(key) || expr_uses_u64_max(value),
+        Update::MapRemove { key, .. }
+        | Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. } => expr_uses_u64_max(key),
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            expr_uses_u64_max(condition)
+                || then_updates.iter().any(update_uses_u64_max)
+                || else_updates.iter().any(update_uses_u64_max)
+        }
+        Update::ForEach { over, updates, .. } => {
+            expr_uses_u64_max(over) || updates.iter().any(update_uses_u64_max)
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => false,
+    }
+}
+
+fn machine_uses_u64_max(schema: &MachineSchema) -> bool {
+    schema
+        .state
+        .init
+        .fields
+        .iter()
+        .any(|field| expr_uses_u64_max(&field.expr))
+        || schema
+            .helpers
+            .iter()
+            .any(|helper| expr_uses_u64_max(&helper.body))
+        || schema
+            .derived
+            .iter()
+            .any(|helper| expr_uses_u64_max(&helper.body))
+        || schema
+            .invariants
+            .iter()
+            .any(|invariant| expr_uses_u64_max(&invariant.expr))
+        || schema.transitions.iter().any(|transition| {
+            transition
+                .guards
+                .iter()
+                .any(|guard| expr_uses_u64_max(&guard.expr))
+                || transition.updates.iter().any(update_uses_u64_max)
+                || transition
+                    .emit
+                    .iter()
+                    .any(|effect| effect.fields.values().any(expr_uses_u64_max))
+        })
+}
+
+fn composition_uses_u64_max(
+    schema: &CompositionSchema,
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> bool {
+    machine_by_instance
+        .values()
+        .copied()
+        .any(machine_uses_u64_max)
+        || schema.routes.iter().any(|route| {
+            route.bindings.iter().any(|binding| match &binding.source {
+                RouteBindingSource::Literal(expr) => expr_uses_u64_max(expr),
+                RouteBindingSource::Field { .. } | RouteBindingSource::OwnerProvided => false,
+            })
+        })
+        || schema.witnesses.iter().any(|witness| {
+            witness.preload_inputs.iter().any(|input| {
+                input
+                    .fields
+                    .iter()
+                    .any(|field| expr_uses_u64_max(&field.expr))
+            }) || witness.expected_states.iter().any(|state| {
+                state
+                    .fields
+                    .iter()
+                    .any(|field| expr_uses_u64_max(&field.expr))
+            })
+        })
 }
 
 fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
@@ -506,10 +663,14 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let named_bindings = collect_machine_named_bindings(schema);
     let sample_cardinality = machine_cfg_sample_cardinality(schema, deep);
     let operator_suffix = if deep { "Deep" } else { "Ci" };
+    let uses_u64_max = machine_uses_u64_max(schema);
 
     pushln!(&mut out, "SPECIFICATION Spec");
-    if !domains.is_empty() {
+    if !domains.is_empty() || uses_u64_max {
         pushln!(&mut out, "CONSTANTS");
+        if uses_u64_max {
+            push_u64_max_cfg_assignment(&mut out);
+        }
         for (name, ty) in domains {
             if matches!(
                 ty,
@@ -585,6 +746,7 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     let named_bindings = collect_composition_named_bindings(machine_by_instance.values().copied());
     let operator_suffix = if deep { "Deep" } else { "Ci" };
     let mut instance_invariants = Vec::new();
+    let uses_u64_max = composition_uses_u64_max(schema, &machine_by_instance);
 
     for instance in &schema.machines {
         let Some(machine) = machine_by_instance
@@ -603,8 +765,11 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     }
 
     pushln!(&mut out, "SPECIFICATION Spec");
-    if !domains.is_empty() {
+    if !domains.is_empty() || uses_u64_max {
         pushln!(&mut out, "CONSTANTS");
+        if uses_u64_max {
+            push_u64_max_cfg_assignment(&mut out);
+        }
         for (name, ty) in domains {
             if matches!(
                 ty,
@@ -707,6 +872,7 @@ pub fn render_composition_witness_cfg(
         .max(max_named_sample_cardinality(&named_samples));
     let operator_suffix = witness_cfg_operator_suffix(witness);
     let mut instance_invariants = Vec::new();
+    let uses_u64_max = composition_uses_u64_max(schema, &machine_by_instance);
 
     for instance in &schema.machines {
         let Some(machine) = machine_by_instance
@@ -730,8 +896,11 @@ pub fn render_composition_witness_cfg(
         composition_witness_spec_name(&witness.name)
     )
     .expect("write to string");
-    if !domains.is_empty() {
+    if !domains.is_empty() || uses_u64_max {
         pushln!(&mut out, "CONSTANTS");
+        if uses_u64_max {
+            push_u64_max_cfg_assignment(&mut out);
+        }
         for (name, ty) in domains {
             if matches!(
                 ty,
@@ -867,6 +1036,19 @@ struct CfgAssignmentOperatorProfile<'a> {
 
 fn cfg_assignment_operator_name(domain_name: &str, suffix: impl AsRef<str>) -> String {
     format!("{}{}", tla_ident(domain_name), tla_ident(suffix))
+}
+
+fn push_u64_max_cfg_assignment(out: &mut String) {
+    pushln!(
+        out,
+        "  \\* Rust u64::MAX, supplied as a finite TLC model-checking value."
+    );
+    writeln!(
+        out,
+        "  {} = {}",
+        TLA_RUST_U64_MAX_CONSTANT, TLC_SAFE_RUST_U64_MAX_VALUE
+    )
+    .expect("write to string");
 }
 
 fn witness_cfg_operator_suffix(witness: &CompositionWitness) -> String {
@@ -1603,6 +1785,12 @@ fn collect_binding_domains(schema: &MachineSchema) -> BTreeMap<String, TypeRef> 
         }
     }
 
+    for variant in &schema.effects.variants {
+        for field in &variant.fields {
+            collect_type_domains(&field.ty, &mut domains);
+        }
+    }
+
     domains
 }
 
@@ -2318,7 +2506,10 @@ fn collect_named_literals_from_expr(
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
-        | Expr::Some(inner) => {
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => {
             let nested_ty = infer_expr_type(inner, field_types, helper_returns, binding_types);
             collect_named_literals_from_expr(
                 samples,
@@ -2381,6 +2572,31 @@ fn collect_named_literals_from_expr(
             );
         }
         Expr::Contains { collection, value } => {
+            let collection_ty =
+                infer_expr_type(collection, field_types, helper_returns, binding_types);
+            let value_ty = match collection_ty {
+                Some(TypeRef::Set(inner_ty) | TypeRef::Seq(inner_ty)) => Some(*inner_ty),
+                Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
+                _ => None,
+            };
+            collect_named_literals_from_expr(
+                samples,
+                collection,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                value,
+                value_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
+        Expr::Count { collection, value } => {
             let collection_ty =
                 infer_expr_type(collection, field_types, helper_returns, binding_types);
             let value_ty = match collection_ty {
@@ -2502,6 +2718,7 @@ fn collect_named_literals_from_expr(
         }
         Expr::Bool(_)
         | Expr::U64(_)
+        | Expr::U64Max
         | Expr::String(_)
         | Expr::NamedVariant { .. }
         | Expr::EmptySet
@@ -2523,11 +2740,14 @@ fn infer_expr_type(
 ) -> Option<TypeRef> {
     match expr {
         Expr::Bool(_) => Some(TypeRef::Bool),
-        Expr::U64(_) => Some(TypeRef::U64),
+        Expr::U64(_) | Expr::U64Max => Some(TypeRef::U64),
         Expr::String(_) | Expr::CurrentPhase | Expr::Phase(_) | Expr::Variant(_) => {
             Some(TypeRef::String)
         }
         Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Enum(enum_name.clone())),
+        Expr::FieldAccess { .. } => None,
+        Expr::EnumVariantIs { .. } => Some(TypeRef::Bool),
+        Expr::EnumStringSetPayload { .. } => Some(TypeRef::Set(Box::new(TypeRef::String))),
         Expr::Field(name) => field_types.get(name.as_str()).cloned(),
         Expr::Binding(name) => binding_types.get(name).cloned(),
         Expr::None => None,
@@ -2557,7 +2777,7 @@ fn infer_expr_type(
         | Expr::MapContainsKey { .. }
         | Expr::SeqStartsWith { .. }
         | Expr::Quantified { .. } => Some(TypeRef::Bool),
-        Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Len(_) => Some(TypeRef::U64),
+        Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Len(_) | Expr::Count { .. } => Some(TypeRef::U64),
         Expr::SeqElements(inner) => {
             match infer_expr_type(inner, field_types, helper_returns, binding_types) {
                 Some(TypeRef::Seq(inner_ty)) => Some(TypeRef::Set(inner_ty)),
@@ -2588,6 +2808,90 @@ fn infer_expr_type(
             meerkat_machine_schema::identity::EnumTypeId::parse("StepRunStatus")
                 .ok()
                 .map(TypeRef::Enum)
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_run_step_status_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Option(Box::new(TypeRef::Enum(
+                        meerkat_machine_schema::identity::EnumTypeId::parse("StepRunStatus")
+                            .ok()?,
+                    )))),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_run_step_bool_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Bool),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. }
+            if helper == "mob_machine_run_step_condition_result_after_set" =>
+        {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::Option(Box::new(TypeRef::Bool))),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. }
+            if helper == "mob_machine_run_step_u64_after_set"
+                || helper == "mob_machine_run_step_u64_after_increment" =>
+        {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("StepId").ok()?,
+                    )),
+                    Box::new(TypeRef::U64),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_run_retry_count_after_increment" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("RunId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::String),
+                    Box::new(TypeRef::U64),
+                )),
+            ))
+        }
+        Expr::Call { helper, .. } if helper == "mob_machine_frame_node_bool_after_set" => {
+            Some(TypeRef::Map(
+                Box::new(TypeRef::Named(
+                    meerkat_machine_schema::identity::NamedTypeId::parse("FrameId").ok()?,
+                )),
+                Box::new(TypeRef::Map(
+                    Box::new(TypeRef::Named(
+                        meerkat_machine_schema::identity::NamedTypeId::parse("FlowNodeId").ok()?,
+                    )),
+                    Box::new(TypeRef::Bool),
+                )),
+            ))
         }
         Expr::Call { helper, .. } => helper_returns.get(helper).cloned(),
         Expr::SeqLiteral(items) => items.first().and_then(|item| {
@@ -2769,6 +3073,12 @@ fn render_named_type_domain_assignment(
     use meerkat_machine_schema::RustTypeAtom;
 
     let name = name.as_ref();
+    if name == "OperationSource" {
+        return format!(
+            "{{{}}}",
+            operation_source_samples(sample_cardinality).join(", ")
+        );
+    }
     match require_named_binding(named_bindings, name) {
         RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8 => {
             if sample_cardinality > 1 {
@@ -2939,6 +3249,9 @@ fn sample_values_for_named_type(
 ) -> Vec<String> {
     use meerkat_machine_schema::RustTypeAtom;
 
+    if name == "OperationSource" {
+        return operation_source_samples(sample_cardinality);
+    }
     match require_named_binding(bindings, name) {
         RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8 => {
             if sample_cardinality > 1 {
@@ -3089,6 +3402,30 @@ fn field_presence_set_samples(
     samples
 }
 
+fn operation_source_samples(sample_cardinality: usize) -> Vec<String> {
+    let mut samples = vec![
+        format!(
+            "[kind |-> {}, session_id |-> Some({}), peer_id |-> None, address |-> None]",
+            tla_string("SessionChild"),
+            tla_string("sessionid_1")
+        ),
+        format!(
+            "[kind |-> {}, session_id |-> None, peer_id |-> Some({}), address |-> Some({})]",
+            tla_string("BackendPeer"),
+            tla_string("peerid_1"),
+            tla_string("peeraddress_1")
+        ),
+    ];
+    if sample_cardinality > 2 {
+        samples.push(format!(
+            "[kind |-> {}, session_id |-> Some({}), peer_id |-> None, address |-> None]",
+            tla_string("SessionChild"),
+            tla_string("sessionid_2")
+        ));
+    }
+    samples
+}
+
 fn type_path_struct_samples(
     fields: &[TypePathStructField],
     sample_cardinality: usize,
@@ -3146,6 +3483,20 @@ fn type_path_struct_field_samples(
         }
         TypePathStructFieldAtom::Named(name) => {
             sample_values_for_named_type(name.as_str(), sample_cardinality, named_samples, bindings)
+        }
+        TypePathStructFieldAtom::OptionalNamed(name) => {
+            let mut values = vec!["None".to_owned()];
+            values.extend(
+                sample_values_for_named_type(
+                    name.as_str(),
+                    sample_cardinality,
+                    named_samples,
+                    bindings,
+                )
+                .into_iter()
+                .map(|value| format!("Some({value})")),
+            );
+            values
         }
     }
 }
@@ -3541,7 +3892,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         .expect("write to string");
         pushln!(&mut out);
 
-        let model_constants = constants
+        let mut model_constants = constants
             .iter()
             .filter(|(_, ty)| {
                 !matches!(
@@ -3552,7 +3903,19 @@ impl<'a> CompositionTlaCompiler<'a> {
             .map(|(name, _)| name)
             .cloned()
             .collect::<Vec<_>>();
+        if composition_uses_u64_max(self.schema, &self.machine_by_instance) {
+            model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
+        }
         if !model_constants.is_empty() {
+            if model_constants
+                .iter()
+                .any(|constant| constant == TLA_RUST_U64_MAX_CONSTANT)
+            {
+                pushln!(
+                    &mut out,
+                    "\\* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX."
+                );
+            }
             writeln!(&mut out, "CONSTANTS {}", model_constants.join(", "))
                 .expect("write to string");
             pushln!(&mut out);
@@ -3659,6 +4022,11 @@ impl<'a> CompositionTlaCompiler<'a> {
         writeln!(
             &mut out,
             "SeqElements(seq) == {{seq[i] : i \\in 1..Len(seq)}}"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
+            "Count(seq, value) == Cardinality({{i \\in DOMAIN seq : seq[i] = value}})"
         )
         .expect("write to string");
         writeln!(
@@ -3816,6 +4184,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             if machine.machine.as_str() == "MobMachine" {
                 compiler.render_mob_machine_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
+            if machine.machine.as_str() == "MeerkatMachine" {
+                compiler.render_meerkat_machine_native_helpers(&mut out);
                 pushln!(&mut out);
             }
 
@@ -4913,6 +5285,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 compiler.render_helper(out, derived);
                 pushln!(out);
             }
+            if machine.machine.as_str() == "MobMachine" {
+                compiler.render_mob_machine_native_helpers(out);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "MeerkatMachine" {
+                compiler.render_meerkat_machine_native_helpers(out);
+                pushln!(out);
+            }
 
             let branches = machine
                 .transitions
@@ -5350,6 +5730,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 }
             }
             Expr::U64(value) => value.to_string(),
+            Expr::U64Max => TLA_RUST_U64_MAX_CONSTANT.to_owned(),
             Expr::String(value) => tla_string(value),
             Expr::NamedVariant { enum_name, variant } => render_named_variant_value(
                 enum_name.as_str(),
@@ -5541,6 +5922,8 @@ impl<'a> CompositionTlaCompiler<'a> {
             &transition.updates,
         );
         let effect_id_expr = "(model_step_count + 1)".to_string();
+        let current_phase_symbol = compiler.phase_symbol.clone();
+        compiler.phase_symbol = Some(tla_string(&transition.to));
         let effect_packets = transition
             .emit
             .iter()
@@ -5574,6 +5957,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        compiler.phase_symbol = current_phase_symbol;
 
         let mut queued_route_packets = Vec::new();
         let mut immediate_route_packets = Vec::new();
@@ -6010,7 +6394,7 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         pushln!(&mut out);
 
-        let model_constants = constants
+        let mut model_constants = constants
             .iter()
             .filter(|(_, ty)| {
                 !matches!(
@@ -6021,8 +6405,20 @@ impl<'a> MachineTlaCompiler<'a> {
             .map(|(name, _)| name)
             .cloned()
             .collect::<Vec<_>>();
+        if machine_uses_u64_max(self.schema) {
+            model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
+        }
         if !model_constants.is_empty() {
             let constant_list = model_constants.join(", ");
+            if model_constants
+                .iter()
+                .any(|constant| constant == TLA_RUST_U64_MAX_CONSTANT)
+            {
+                pushln!(
+                    &mut out,
+                    "\\* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX."
+                );
+            }
             writeln!(&mut out, "CONSTANTS {constant_list}");
             pushln!(&mut out);
         }
@@ -6109,6 +6505,11 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         writeln!(
             &mut out,
+            "Count(seq, value) == Cardinality({{i \\in DOMAIN seq : seq[i] = value}})"
+        )
+        .expect("write to string");
+        writeln!(
+            &mut out,
             "RECURSIVE SeqRemove(_, _)\nSeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \\o SeqRemove(Tail(seq), value)"
         )
         .expect("write to string");
@@ -6150,6 +6551,9 @@ impl<'a> MachineTlaCompiler<'a> {
         }
         if self.schema.machine.as_str() == "MobMachine" {
             self.render_mob_machine_native_helpers(&mut out);
+        }
+        if self.schema.machine.as_str() == "MeerkatMachine" {
+            self.render_meerkat_machine_native_helpers(&mut out);
         }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
             pushln!(&mut out);
@@ -6362,8 +6766,338 @@ impl<'a> MachineTlaCompiler<'a> {
         }
     }
 
+    fn render_meerkat_machine_native_helpers(&self, out: &mut String) {
+        let prefix = |name: &str| self.scoped_helper_name(name);
+        writeln!(
+            out,
+            "{}(endpoints, endpoint_count) ==",
+            prefix("meerkat_peer_endpoint_set_cardinality_matches")
+        )
+        .expect("write to string");
+        pushln!(out, "    Cardinality(endpoints) = endpoint_count");
+        writeln!(
+            out,
+            "{}(endpoints, peer_id) ==",
+            prefix("meerkat_peer_endpoint_set_contains_peer_id")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\E endpoint \\in endpoints: endpoint.peer_id = peer_id"
+        );
+        writeln!(
+            out,
+            "{}(endpoint, peer_id) ==",
+            prefix("meerkat_peer_endpoint_option_peer_id_matches")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    endpoint # None /\\ endpoint.value.peer_id = peer_id"
+        );
+        writeln!(
+            out,
+            "{}(endpoint, peer_id) ==",
+            prefix("meerkat_peer_endpoint_peer_id_matches")
+        )
+        .expect("write to string");
+        pushln!(out, "    endpoint.peer_id = peer_id");
+        writeln!(
+            out,
+            "{}(endpoints) ==",
+            prefix("meerkat_peer_endpoint_set_peer_ids_unique")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    Cardinality(endpoints) = Cardinality({{ endpoint.peer_id : endpoint \\in endpoints }})"
+        );
+    }
+
     fn render_mob_machine_native_helpers(&self, out: &mut String) {
         let prefix = |name: &str| self.scoped_helper_name(name);
+        let local = |name: &str| self.local_binding_name(name);
+        writeln!(
+            out,
+            "{}(edges_by_key, edge) ==",
+            prefix("mob_machine_external_peer_edge_has_matching_key")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET key == [local |-> edge.local, name |-> edge.endpoint.name]"
+        );
+        pushln!(out, "    IN /\\ key \\in DOMAIN edges_by_key");
+        pushln!(out, "       /\\ edges_by_key[key] = edge");
+        writeln!(
+            out,
+            "{}(edge) == edge.local",
+            prefix("mob_machine_external_peer_edge_local")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge) == edge.endpoint.peer_id",
+            prefix("mob_machine_external_peer_edge_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(key, edge) ==",
+            prefix("mob_machine_external_peer_key_matches_edge")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ key.local = edge.local");
+        pushln!(out, "    /\\ key.name = edge.endpoint.name");
+        writeln!(
+            out,
+            "{}(key, agent_identity) == key.local = agent_identity",
+            prefix("mob_machine_external_peer_key_matches_local")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edges, agent_identity) ==",
+            prefix("mob_machine_external_peer_identity_absent")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in edges : edge.endpoint.name /= agent_identity"
+        );
+        writeln!(
+            out,
+            "{}({}, agent_identity) ==",
+            prefix("mob_machine_identity_has_session_binding"),
+            local("member_session_bindings")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ agent_identity \\in DOMAIN {}",
+            local("member_session_bindings")
+        );
+        pushln!(
+            out,
+            "    /\\ {}[agent_identity] /= \"\"",
+            local("member_session_bindings")
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, expected_runtime_ids) ==",
+            prefix("mob_machine_session_bound_live_runtime_ids_match"),
+            local("identity_to_runtime"),
+            local("member_session_bindings"),
+            local("live_runtime_ids")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET eligible_ids == {{ candidate \\in DOMAIN {} : {}[candidate] /= \"\" /\\ candidate \\in DOMAIN {} /\\ {}[candidate] \\in {} }}",
+            local("member_session_bindings"),
+            local("member_session_bindings"),
+            local("identity_to_runtime"),
+            local("identity_to_runtime"),
+            local("live_runtime_ids")
+        );
+        pushln!(
+            out,
+            "    IN expected_runtime_ids = {{ {}[id] : id \\in eligible_ids }}",
+            local("identity_to_runtime")
+        );
+        writeln!(
+            out,
+            "{}(endpoint) == endpoint.peer_id",
+            prefix("mob_machine_member_peer_endpoint_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}({}, {}, agent_identity) ==",
+            prefix("mob_machine_member_peer_overlay_complete"),
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in {}: IF edge.a = agent_identity THEN edge.b \\in DOMAIN {} ELSE IF edge.b = agent_identity THEN edge.a \\in DOMAIN {} ELSE TRUE",
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("member_peer_endpoints")
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity) ==",
+            prefix("mob_machine_member_peer_overlay"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET outgoing_edges == {{ edge \\in {} : edge.a = agent_identity /\\ edge.b \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        incoming_edges == {{ edge \\in {} : edge.b = agent_identity /\\ edge.a \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        local_external_edges == {{ edge \\in {} : edge.local = agent_identity }}",
+            local("external_peer_edges")
+        );
+        pushln!(
+            out,
+            "    IN {{ {}[edge.b] : edge \\in outgoing_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ {}[edge.a] : edge \\in incoming_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity) ==",
+            prefix("mob_machine_member_peer_overlay_peer_ids_unique"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "    LET overlay == {}({}, {}, {}, agent_identity) IN Cardinality(overlay) = Cardinality({{endpoint.peer_id : endpoint \\in overlay}})",
+            prefix("mob_machine_member_peer_overlay"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge, a_identity, b_identity) ==",
+            prefix("mob_machine_wiring_edge_matches_members")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ edge.a = a_identity");
+        pushln!(out, "    /\\ edge.b = b_identity");
+        writeln!(
+            out,
+            "{}(all_statuses, run_id, step_id, status) ==",
+            prefix("mob_machine_run_step_status_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_statuses THEN all_statuses[run_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_statuses, run_id, MapSet(current, step_id, Some(status)))"
+        );
+        writeln!(
+            out,
+            "{}(all_values, run_id, step_id, value) ==",
+            prefix("mob_machine_run_step_bool_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_values THEN all_values[run_id] ELSE [x \\in {{}} |-> FALSE]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_values, run_id, MapSet(current, step_id, value))"
+        );
+        writeln!(
+            out,
+            "{}(all_results, run_id, step_id, result) ==",
+            prefix("mob_machine_run_step_condition_result_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_results THEN all_results[run_id] ELSE [x \\in {{}} |-> None]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_results, run_id, MapSet(current, step_id, Some(result)))"
+        );
+        writeln!(
+            out,
+            "{}(all_counts, run_id, step_id, value) ==",
+            prefix("mob_machine_run_step_u64_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_counts THEN all_counts[run_id] ELSE [x \\in {{}} |-> 0]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_counts, run_id, MapSet(current, step_id, value))"
+        );
+        writeln!(
+            out,
+            "{}(all_counts, run_id, step_id, delta) ==",
+            prefix("mob_machine_run_step_u64_after_increment")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_counts THEN all_counts[run_id] ELSE [x \\in {{}} |-> 0]"
+        );
+        pushln!(
+            out,
+            "        current_value == IF step_id \\in DOMAIN current THEN current[step_id] ELSE 0"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_counts, run_id, MapSet(current, step_id, current_value + delta))"
+        );
+        writeln!(
+            out,
+            "{}(all_counts, run_id, retry_key, delta) ==",
+            prefix("mob_machine_run_retry_count_after_increment")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF run_id \\in DOMAIN all_counts THEN all_counts[run_id] ELSE [x \\in {{}} |-> 0]"
+        );
+        pushln!(
+            out,
+            "        current_value == IF retry_key \\in DOMAIN current THEN current[retry_key] ELSE 0"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_counts, run_id, MapSet(current, retry_key, current_value + delta))"
+        );
+        writeln!(
+            out,
+            "{}(all_values, frame_id, node_id, value) ==",
+            prefix("mob_machine_frame_node_bool_after_set")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET current == IF frame_id \\in DOMAIN all_values THEN all_values[frame_id] ELSE [x \\in {{}} |-> FALSE]"
+        );
+        pushln!(
+            out,
+            "    IN MapSet(all_values, frame_id, MapSet(current, node_id, value))"
+        );
         writeln!(
             out,
             "{}(status) == status \\in {{\"Completed\", \"Failed\", \"Skipped\", \"Canceled\"}}",
@@ -7240,12 +7974,34 @@ impl<'a> MachineTlaCompiler<'a> {
                 }
             }
             Expr::U64(value) => value.to_string(),
+            Expr::U64Max => TLA_RUST_U64_MAX_CONSTANT.to_owned(),
             Expr::String(value) => tla_string(value),
             Expr::NamedVariant { enum_name, variant } => render_named_variant_value(
                 enum_name.as_str(),
                 variant.as_str(),
                 &self.named_bindings,
             ),
+            Expr::FieldAccess { base, field } => format!(
+                "{}.{}",
+                self.render_expr_with_types(base, env, binding_env, binding_types),
+                tla_ident(field.as_str())
+            ),
+            Expr::EnumVariantIs { value, variant, .. } => format!(
+                "({}.tag = {})",
+                self.render_expr_with_types(value, env, binding_env, binding_types),
+                tla_string(variant.as_str())
+            ),
+            Expr::EnumStringSetPayload {
+                value,
+                variant,
+                field,
+                ..
+            } => {
+                let rendered = self.render_expr_with_types(value, env, binding_env, binding_types);
+                let tag = tla_string(variant.as_str());
+                let field = tla_ident(field.as_str());
+                format!("(IF {rendered}.tag = {tag} THEN {rendered}.{field} ELSE {{}})")
+            }
             Expr::EmptySet => "{}".into(),
             Expr::EmptyMap => "[x \\in {} |-> None]".into(),
             Expr::SeqLiteral(items) => format!(
@@ -7363,6 +8119,11 @@ impl<'a> MachineTlaCompiler<'a> {
                     format!("Len({rendered})")
                 }
             }
+            Expr::Count { collection, value } => format!(
+                "Count({}, {})",
+                self.render_expr_with_types(collection, env, binding_env, binding_types),
+                self.render_expr_with_types(value, env, binding_env, binding_types)
+            ),
             Expr::Head(inner) => format!(
                 "Head({})",
                 self.render_expr_with_types(inner, env, binding_env, binding_types)
@@ -7515,6 +8276,7 @@ impl<'a> MachineTlaCompiler<'a> {
                 TypeRef::Seq(inner) | TypeRef::Set(inner) => Some((**inner).clone()),
                 _ => None,
             }),
+            Expr::EnumStringSetPayload { .. } => Some(TypeRef::String),
             Expr::SeqLiteral(items) => {
                 if let Some(first) = items.first() {
                     self.scalar_expr_type(first, binding_types)
@@ -7534,9 +8296,12 @@ impl<'a> MachineTlaCompiler<'a> {
     ) -> Option<TypeRef> {
         match expr {
             Expr::Bool(_) => Some(TypeRef::Bool),
-            Expr::U64(_) => Some(TypeRef::U64),
+            Expr::U64(_) | Expr::U64Max => Some(TypeRef::U64),
             Expr::String(_) | Expr::Phase(_) | Expr::Variant(_) => Some(TypeRef::String),
             Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Enum(enum_name.clone())),
+            Expr::FieldAccess { .. } => None,
+            Expr::EnumVariantIs { .. } => Some(TypeRef::Bool),
+            Expr::EnumStringSetPayload { .. } => Some(TypeRef::Set(Box::new(TypeRef::String))),
             Expr::MapGet { map, .. } => self.map_value_type(map, binding_types),
             Expr::Field(name) => self
                 .schema
@@ -7652,7 +8417,9 @@ fn infer_collection_kind(
                 _ => CollectionKind::Sequence,
             })
             .unwrap_or(CollectionKind::Sequence),
-        Expr::MapKeys(_) | Expr::EmptySet => CollectionKind::Set,
+        Expr::MapKeys(_) | Expr::EmptySet | Expr::EnumStringSetPayload { .. } => {
+            CollectionKind::Set
+        }
         _ => CollectionKind::Sequence,
     }
 }
@@ -7852,7 +8619,10 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
-        | Expr::Some(inner) => collect_expr_bindings(inner, bindings),
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => collect_expr_bindings(inner, bindings),
         Expr::Eq(left, right)
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
@@ -7865,6 +8635,10 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
             collect_expr_bindings(right, bindings);
         }
         Expr::Contains { collection, value } => {
+            collect_expr_bindings(collection, bindings);
+            collect_expr_bindings(value, bindings);
+        }
+        Expr::Count { collection, value } => {
             collect_expr_bindings(collection, bindings);
             collect_expr_bindings(value, bindings);
         }
@@ -7897,6 +8671,7 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
         }
         Expr::Bool(_)
         | Expr::U64(_)
+        | Expr::U64Max
         | Expr::String(_)
         | Expr::NamedVariant { .. }
         | Expr::EmptySet
@@ -7933,7 +8708,10 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
-        | Expr::Some(inner) => collect_expr_fields(inner, fields),
+        | Expr::Some(inner)
+        | Expr::FieldAccess { base: inner, .. }
+        | Expr::EnumVariantIs { value: inner, .. }
+        | Expr::EnumStringSetPayload { value: inner, .. } => collect_expr_fields(inner, fields),
         Expr::Eq(left, right)
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
@@ -7946,6 +8724,10 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
             collect_expr_fields(right, fields);
         }
         Expr::Contains { collection, value } => {
+            collect_expr_fields(collection, fields);
+            collect_expr_fields(value, fields);
+        }
+        Expr::Count { collection, value } => {
             collect_expr_fields(collection, fields);
             collect_expr_fields(value, fields);
         }
@@ -7972,6 +8754,7 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
         }
         Expr::Bool(_)
         | Expr::U64(_)
+        | Expr::U64Max
         | Expr::String(_)
         | Expr::NamedVariant { .. }
         | Expr::EmptySet

@@ -9,11 +9,10 @@ mod inner {
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::StoredInputState;
-    use crate::runtime_state::RuntimeState;
+    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, RuntimeStore, RuntimeStoreError,
-        SessionDelta,
+        AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, MachineLifecycleSnapshot,
+        MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError, SessionDelta,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -137,13 +136,12 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         Ok(())
     }
 
-    fn upsert_runtime_state(
+    fn upsert_machine_lifecycle_snapshot(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
-        runtime_state: &RuntimeState,
+        snapshot: &MachineLifecycleSnapshot,
     ) -> Result<(), RuntimeStoreError> {
-        let state_json = serde_json::to_vec(runtime_state)
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let state_json = MachineLifecycleStoreRecord::from_snapshot(snapshot).encode()?;
         tx.execute(
             r"
             INSERT INTO runtime_states (runtime_id, runtime_state_json)
@@ -325,11 +323,15 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<SessionDelta>,
             receipt: RunBoundaryReceipt,
-            input_updates: Vec<StoredInputState>,
+            input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored)
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let session_snapshot = session_delta
                     .as_ref()
@@ -568,11 +570,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &StoredInputState,
+            state: &InputStatePersistenceRecord,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let state = state.clone();
+            let state = state.clone_stored();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
@@ -616,10 +618,10 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
-        async fn load_runtime_state(
+        async fn load_machine_lifecycle_record(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
@@ -630,12 +632,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     |row| row.get::<_, Vec<u8>>(0),
                 )
                 .optional()
-                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                .map(|bytes| {
-                    serde_json::from_slice(&bytes)
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
-                })
-                .transpose()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -645,16 +642,19 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: MachineLifecycleCommit,
-            input_states: &[StoredInputState],
+            input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let runtime_state = commit.runtime_state();
-            let input_states = input_states.to_vec();
+            let snapshot = commit.into_snapshot();
+            let input_states = input_states
+                .iter()
+                .map(InputStatePersistenceRecord::clone_stored)
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
-                upsert_runtime_state(&tx, &runtime_id, &runtime_state)?;
+                upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &snapshot)?;
                 upsert_input_states(&tx, &runtime_id, &input_states)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -718,6 +718,28 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
+
+        async fn delete_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                tx.execute(
+                    "DELETE FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
     }
 
     #[cfg(test)]
@@ -727,7 +749,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
 
         use super::*;
         use crate::identifiers::LogicalRuntimeId;
-        use crate::input_state::StoredInputState;
+        use crate::runtime_state::RuntimeState;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
         use meerkat_core::session_store::SessionStore as _;
@@ -746,8 +768,11 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             LogicalRuntimeId("runtime-1".to_string())
         }
 
-        fn input_state() -> StoredInputState {
-            StoredInputState::new_accepted(InputId::new())
+        fn input_state() -> InputStatePersistenceRecord {
+            InputStatePersistenceRecord::from_machine_snapshot(StoredInputState::new_accepted(
+                InputId::new(),
+            ))
+            .expect("accepted test input state seed must be machine-authorized")
         }
 
         fn session_with_one_turn() -> Session {
@@ -1053,23 +1078,94 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let runtime_state = RuntimeState::Stopped;
+            let binding = crate::store::MachineLifecycleBindingFacts::new(
+                Some("rt:session:sqlite".to_string()),
+                Some(11),
+                None,
+                Some("epoch-sqlite".to_string()),
+            );
             store
                 .commit_machine_lifecycle(
                     &runtime_id,
-                    MachineLifecycleCommit::new(runtime_state),
+                    MachineLifecycleCommit::new_with_binding(runtime_state, binding.clone()),
                     &[input_state()],
                 )
                 .await
                 .unwrap();
 
             assert!(
-                store
-                    .load_runtime_state(&runtime_id)
+                crate::store::load_runtime_state(&store, &runtime_id)
                     .await
                     .unwrap()
                     .is_some()
             );
+            let lifecycle = crate::store::load_machine_lifecycle(&store, &runtime_id)
+                .await
+                .unwrap()
+                .expect("machine lifecycle snapshot");
+            assert_eq!(lifecycle.runtime_state(), runtime_state);
+            assert_eq!(lifecycle.binding(), &binding);
             assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn legacy_runtime_state_row_is_not_lifecycle_authority() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let legacy_state_json = serde_json::to_vec(&RuntimeState::Retired).unwrap();
+            let conn = open_runtime_connection(&store.path).unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_states (runtime_id, runtime_state_json)
+                VALUES (?1, ?2)
+                ",
+                params![runtime_id_text(&runtime_id), legacy_state_json],
+            )
+            .unwrap();
+
+            assert!(matches!(
+                crate::store::load_runtime_state(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
+            assert!(matches!(
+                crate::store::load_machine_lifecycle(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
+        }
+
+        #[tokio::test]
+        async fn legacy_machine_lifecycle_snapshot_row_is_not_lifecycle_authority() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let runtime_state = RuntimeState::Retired;
+            let legacy_snapshot_json = serde_json::to_vec(&serde_json::json!({
+                "runtime_state": runtime_state,
+                "binding": {
+                    "agent_runtime_id": "rt:session:legacy",
+                    "fence_token": 23,
+                    "runtime_generation": 7,
+                    "runtime_epoch_id": "epoch-legacy"
+                }
+            }))
+            .unwrap();
+            let conn = open_runtime_connection(&store.path).unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_states (runtime_id, runtime_state_json)
+                VALUES (?1, ?2)
+                ",
+                params![runtime_id_text(&runtime_id), legacy_snapshot_json],
+            )
+            .unwrap();
+
+            assert!(matches!(
+                crate::store::load_runtime_state(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
+            assert!(matches!(
+                crate::store::load_machine_lifecycle(&store, &runtime_id).await,
+                Err(RuntimeStoreError::ReadFailed(_))
+            ));
         }
     }
 }

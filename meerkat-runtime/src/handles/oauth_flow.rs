@@ -327,6 +327,7 @@ impl RuntimeOAuthFlowHandle {
                 redirect_uri: redirect_uri.to_string(),
                 expires_at_millis,
                 max_outstanding_flows: self.registry.max_outstanding() as u64,
+                observed_global_outstanding_flows: 0,
             },
             "admit_oauth_browser_flow",
             true,
@@ -398,6 +399,7 @@ impl RuntimeOAuthFlowHandle {
                 provider: provider.canonical_alias().to_string(),
                 expires_at_millis,
                 max_outstanding_flows: self.registry.max_outstanding() as u64,
+                observed_global_outstanding_flows: 0,
             },
             "admit_oauth_device_flow",
             true,
@@ -539,6 +541,7 @@ impl RuntimeOAuthFlowHandle {
     fn persist_registry_payloads_claiming_admission(
         &self,
         operation: &'static str,
+        target: &AuthBindingRef,
         removed_browser: &[BrowserSnapshotKey],
         removed_device: &[DeviceSnapshotKey],
         admitted_browser: &[BrowserSnapshotKey],
@@ -546,12 +549,16 @@ impl RuntimeOAuthFlowHandle {
     ) -> Result<(), OAuthFlowError> {
         persist_registry_payloads_claiming_admission(
             &self.registry,
+            &self.lifecycle,
             &self.store,
             operation,
             removed_browser,
             removed_device,
-            admitted_browser,
-            admitted_device,
+            SnapshotAdmissionClaim {
+                target,
+                admitted_browser,
+                admitted_device,
+            },
         )
     }
 
@@ -580,7 +587,7 @@ impl RuntimeOAuthFlowHandle {
             &record.redirect_uri,
             expires_at_millis,
         )?;
-        self.registry.insert_restored_browser_flow(
+        self.registry.insert_restored_browser_flow_without_capacity(
             state.to_string(),
             record.target.clone(),
             record.provider,
@@ -763,7 +770,7 @@ impl RuntimeOAuthFlowHandle {
         }
         if self
             .registry
-            .insert_restored_browser_flow(
+            .insert_restored_browser_flow_without_capacity(
                 persisted.state.clone(),
                 persisted.target.clone(),
                 provider,
@@ -806,7 +813,7 @@ impl RuntimeOAuthFlowHandle {
         }
         if self
             .registry
-            .insert_restored_device_flow(
+            .insert_restored_device_flow_without_capacity(
                 persisted.target.clone(),
                 provider,
                 persisted.device_code.clone(),
@@ -880,14 +887,21 @@ fn persist_registry_payloads_claiming_removal(
     )
 }
 
+#[derive(Clone, Copy)]
+struct SnapshotAdmissionClaim<'a> {
+    target: &'a AuthBindingRef,
+    admitted_browser: &'a [BrowserSnapshotKey],
+    admitted_device: &'a [DeviceSnapshotKey],
+}
+
 fn persist_registry_payloads_claiming_admission(
     registry: &OAuthFlowRegistry,
+    lifecycle: &RuntimeAuthLeaseHandle,
     store: &StoreSlot,
     operation: &'static str,
     removed_browser: &[BrowserSnapshotKey],
     removed_device: &[DeviceSnapshotKey],
-    admitted_browser: &[BrowserSnapshotKey],
-    admitted_device: &[DeviceSnapshotKey],
+    claim: SnapshotAdmissionClaim<'_>,
 ) -> Result<(), OAuthFlowError> {
     let now_millis = current_time_millis();
     let snapshot = registry.snapshot_for_persistence(now_millis);
@@ -900,8 +914,10 @@ fn persist_registry_payloads_claiming_admission(
         now_millis,
         SnapshotPersistPolicy::claim_admission(
             registry.max_outstanding(),
-            admitted_browser,
-            admitted_device,
+            lifecycle,
+            claim.target,
+            claim.admitted_browser,
+            claim.admitted_device,
         ),
     )
 }
@@ -912,10 +928,17 @@ enum SnapshotRemovalMode {
     Claim,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy)]
+struct SnapshotAdmissionConfirmation<'a> {
+    max_outstanding: usize,
+    lifecycle: &'a RuntimeAuthLeaseHandle,
+    target: &'a AuthBindingRef,
+}
+
+#[derive(Clone, Copy)]
 struct SnapshotPersistPolicy<'a> {
     removal_mode: SnapshotRemovalMode,
-    admission_capacity: Option<usize>,
+    admission_confirmation: Option<SnapshotAdmissionConfirmation<'a>>,
     admitted_browser: &'a [BrowserSnapshotKey],
     admitted_device: &'a [DeviceSnapshotKey],
 }
@@ -924,7 +947,7 @@ impl<'a> SnapshotPersistPolicy<'a> {
     fn merge() -> Self {
         Self {
             removal_mode: SnapshotRemovalMode::Merge,
-            admission_capacity: None,
+            admission_confirmation: None,
             admitted_browser: &[],
             admitted_device: &[],
         }
@@ -937,7 +960,7 @@ impl<'a> SnapshotPersistPolicy<'a> {
     fn claim_removal() -> Self {
         Self {
             removal_mode: SnapshotRemovalMode::Claim,
-            admission_capacity: None,
+            admission_confirmation: None,
             admitted_browser: &[],
             admitted_device: &[],
         }
@@ -945,12 +968,18 @@ impl<'a> SnapshotPersistPolicy<'a> {
 
     fn claim_admission(
         max_outstanding: usize,
+        lifecycle: &'a RuntimeAuthLeaseHandle,
+        target: &'a AuthBindingRef,
         admitted_browser: &'a [BrowserSnapshotKey],
         admitted_device: &'a [DeviceSnapshotKey],
     ) -> Self {
         Self {
             removal_mode: SnapshotRemovalMode::Merge,
-            admission_capacity: Some(max_outstanding),
+            admission_confirmation: Some(SnapshotAdmissionConfirmation {
+                max_outstanding,
+                lifecycle,
+                target,
+            }),
             admitted_browser,
             admitted_device,
         }
@@ -979,15 +1008,25 @@ fn persist_registry_snapshot(
             detail: "runtime store is no longer available".to_string(),
         });
     };
+    let mut durable_admission_rejection: Option<DslTransitionError> = None;
     let mut update = |current: Option<&[u8]>| -> Result<Vec<u8>, crate::store::RuntimeStoreError> {
-        let merged = merge_oauth_registry_snapshot(
+        let merged = match merge_oauth_registry_snapshot(
             current,
             snapshot,
             removed_browser,
             removed_device,
             now_millis,
             policy,
-        )?;
+        ) {
+            Ok(merged) => merged,
+            Err(OAuthSnapshotMergeError::Store(err)) => return Err(err),
+            Err(OAuthSnapshotMergeError::AdmissionRejected(err)) => {
+                durable_admission_rejection = Some(err);
+                return Err(crate::store::RuntimeStoreError::Internal(
+                    DURABLE_OAUTH_ADMISSION_REJECTED.to_string(),
+                ));
+            }
+        };
         serde_json::to_vec(&merged)
             .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))
     };
@@ -999,11 +1038,12 @@ fn persist_registry_snapshot(
             Err(OAuthFlowError::RegistryProjectionMissing { operation })
         }
         Err(crate::store::RuntimeStoreError::Internal(detail))
-            if policy.admission_capacity.is_some() && detail == DURABLE_OAUTH_CAPACITY_EXCEEDED =>
+            if detail == DURABLE_OAUTH_ADMISSION_REJECTED =>
         {
-            Err(OAuthFlowError::CapacityExceeded {
-                max_outstanding: policy.admission_capacity.unwrap_or(0),
-            })
+            let detail = durable_admission_rejection
+                .take()
+                .map_or_else(|| detail.clone(), |err| err.to_string());
+            Err(OAuthFlowError::LifecycleRejected { operation, detail })
         }
         Err(err) => Err(OAuthFlowError::PersistenceFailed {
             operation,
@@ -1014,7 +1054,8 @@ fn persist_registry_snapshot(
 
 type BrowserSnapshotKey = (String, String, Option<String>, String);
 type DeviceSnapshotKey = (String, String, Option<String>, String);
-const DURABLE_OAUTH_CAPACITY_EXCEEDED: &str = "oauth durable capacity exceeded";
+const DURABLE_OAUTH_ADMISSION_REJECTED: &str =
+    "oauth durable admission rejected by generated authority";
 
 fn target_snapshot_key(target: &AuthBindingRef) -> (String, String, Option<String>) {
     (
@@ -1078,16 +1119,15 @@ fn ensure_removed_flows_are_active(
     Ok(())
 }
 
-fn ensure_merged_snapshot_within_capacity(
-    merged: &OAuthFlowRegistrySnapshot,
-    max_outstanding: usize,
-) -> Result<(), crate::store::RuntimeStoreError> {
-    if merged.browser.len().saturating_add(merged.device.len()) > max_outstanding {
-        return Err(crate::store::RuntimeStoreError::Internal(
-            DURABLE_OAUTH_CAPACITY_EXCEEDED.to_string(),
-        ));
+enum OAuthSnapshotMergeError {
+    Store(crate::store::RuntimeStoreError),
+    AdmissionRejected(DslTransitionError),
+}
+
+impl From<crate::store::RuntimeStoreError> for OAuthSnapshotMergeError {
+    fn from(err: crate::store::RuntimeStoreError) -> Self {
+        Self::Store(err)
     }
-    Ok(())
 }
 
 fn merge_oauth_registry_snapshot(
@@ -1097,7 +1137,7 @@ fn merge_oauth_registry_snapshot(
     removed_device: &[DeviceSnapshotKey],
     now_millis: u64,
     policy: SnapshotPersistPolicy<'_>,
-) -> Result<OAuthFlowRegistrySnapshot, crate::store::RuntimeStoreError> {
+) -> Result<OAuthFlowRegistrySnapshot, OAuthSnapshotMergeError> {
     let mut merged = match current {
         Some(bytes) => serde_json::from_slice::<OAuthFlowRegistrySnapshot>(bytes)
             .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))?,
@@ -1130,6 +1170,28 @@ fn merge_oauth_registry_snapshot(
         .filter(|flow| flow.expires_at_millis > now_millis)
         .map(persisted_device_snapshot_key)
         .collect::<BTreeSet<_>>();
+    if let Some(confirmation) = policy.admission_confirmation {
+        let observed_browser = current_browser
+            .iter()
+            .filter(|key| !admitted_browser.contains(*key))
+            .count();
+        let observed_device = current_device
+            .iter()
+            .filter(|key| !admitted_device.contains(*key))
+            .count();
+        let observed_global_outstanding_flows =
+            u64::try_from(observed_browser.saturating_add(observed_device)).unwrap_or(u64::MAX);
+        let max_outstanding_flows = u64::try_from(confirmation.max_outstanding).unwrap_or(u64::MAX);
+        confirmation
+            .lifecycle
+            .confirm_oauth_durable_admission(
+                confirmation.target,
+                observed_global_outstanding_flows,
+                max_outstanding_flows,
+                "confirm_oauth_durable_admission",
+            )
+            .map_err(OAuthSnapshotMergeError::AdmissionRejected)?;
+    }
     let local_browser = local
         .browser
         .iter()
@@ -1177,9 +1239,6 @@ fn merge_oauth_registry_snapshot(
     );
     merged.browser.sort_by_key(persisted_browser_snapshot_key);
     merged.device.sort_by_key(persisted_device_snapshot_key);
-    if let Some(max_outstanding) = policy.admission_capacity {
-        ensure_merged_snapshot_within_capacity(&merged, max_outstanding)?;
-    }
     Ok(merged)
 }
 
@@ -1273,6 +1332,7 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
                 provider: record.provider.canonical_alias().to_string(),
                 expires_at_millis,
                 max_outstanding_flows: u64::MAX,
+                observed_global_outstanding_flows: 0,
             },
             "restore_oauth_device_flow",
             true,
@@ -1329,6 +1389,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
                     provider: record.provider.canonical_alias().to_string(),
                     expires_at_millis,
                     max_outstanding_flows: self.registry.max_outstanding() as u64,
+                    observed_global_outstanding_flows: 0,
                 },
                 "restore_oauth_device_flow",
                 true,
@@ -1383,27 +1444,17 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         let state = OAuthFlowRegistry::new_state()?;
         let expires_at = expires_at_millis(self.registry.ttl())?;
         self.admit_browser(&target, &state, provider, &redirect_uri, expires_at)?;
-        let mut inserted = self.registry.insert_browser_flow_with_pruned(
-            state.clone(),
-            target.clone(),
-            provider,
-            redirect_uri.clone(),
-            pkce_verifier.clone(),
-        );
-        let mut lifecycle_pruned = OAuthPrunedFlows::default();
-        let mut lifecycle_pruned_snapshot = None;
-        if matches!(inserted, Err(OAuthFlowError::CapacityExceeded { .. })) {
-            let (pruned, snapshot) = self.retain_registry_payloads_with_lifecycle();
-            lifecycle_pruned = pruned;
-            lifecycle_pruned_snapshot = Some(snapshot);
-            inserted = self.registry.insert_browser_flow_with_pruned(
+        let (lifecycle_pruned, lifecycle_pruned_snapshot) =
+            self.retain_registry_payloads_with_lifecycle();
+        let inserted = self
+            .registry
+            .insert_browser_flow_with_pruned_without_capacity(
                 state.clone(),
                 target.clone(),
                 provider,
                 redirect_uri.clone(),
                 pkce_verifier,
             );
-        }
         let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {
@@ -1412,15 +1463,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             }
         };
         let (removed_browser, removed_device) =
-            if let Some(snapshot) = lifecycle_pruned_snapshot.as_ref() {
-                Self::removed_snapshot_keys_from_pruned(snapshot, &lifecycle_pruned)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+            Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned_snapshot, &lifecycle_pruned);
         self.expire_collected_flows(pruned);
         let admitted_browser = [browser_snapshot_key(&target, &state)];
         if let Err(err) = self.persist_registry_payloads_claiming_admission(
             "admit_oauth_browser_flow",
+            &target,
             &removed_browser,
             &removed_device,
             &admitted_browser,
@@ -1524,25 +1572,16 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         self.expire_pruned_flows();
         let machine_expires_at = expires_at_millis(expires_in)?;
         self.admit_device(&target, &device_code, provider, machine_expires_at)?;
-        let mut inserted = self.registry.admit_device_code_with_pruned(
-            target.clone(),
-            provider,
-            device_code.clone(),
-            expires_in,
-        );
-        let mut lifecycle_pruned = OAuthPrunedFlows::default();
-        let mut lifecycle_pruned_snapshot = None;
-        if matches!(inserted, Err(OAuthFlowError::CapacityExceeded { .. })) {
-            let (pruned, snapshot) = self.retain_registry_payloads_with_lifecycle();
-            lifecycle_pruned = pruned;
-            lifecycle_pruned_snapshot = Some(snapshot);
-            inserted = self.registry.admit_device_code_with_pruned(
+        let (lifecycle_pruned, lifecycle_pruned_snapshot) =
+            self.retain_registry_payloads_with_lifecycle();
+        let inserted = self
+            .registry
+            .admit_device_code_with_pruned_without_capacity(
                 target.clone(),
                 provider,
                 device_code.clone(),
                 expires_in,
             );
-        }
         let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {
@@ -1551,15 +1590,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             }
         };
         let (removed_browser, removed_device) =
-            if let Some(snapshot) = lifecycle_pruned_snapshot.as_ref() {
-                Self::removed_snapshot_keys_from_pruned(snapshot, &lifecycle_pruned)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+            Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned_snapshot, &lifecycle_pruned);
         self.expire_collected_flows(pruned);
         let admitted_device = [device_snapshot_key(&target, &device_code)];
         if let Err(err) = self.persist_registry_payloads_claiming_admission(
             "admit_oauth_device_flow",
+            &target,
             &removed_browser,
             &removed_device,
             &[],
@@ -1654,7 +1690,7 @@ mod tests {
 
     use super::*;
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::StoredInputState;
+    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::runtime_state::RuntimeState;
     use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
 
@@ -1816,7 +1852,7 @@ mod tests {
             _runtime_id: &LogicalRuntimeId,
             _session_delta: Option<SessionDelta>,
             _receipt: RunBoundaryReceipt,
-            _input_updates: Vec<StoredInputState>,
+            _input_updates: Vec<InputStatePersistenceRecord>,
             _session_store_key: Option<SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported("atomic_apply".to_string()))
@@ -1884,7 +1920,7 @@ mod tests {
         async fn persist_input_state(
             &self,
             _runtime_id: &LogicalRuntimeId,
-            _state: &StoredInputState,
+            _state: &InputStatePersistenceRecord,
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "persist_input_state".to_string(),
@@ -1901,12 +1937,12 @@ mod tests {
             ))
         }
 
-        async fn load_runtime_state(
+        async fn load_machine_lifecycle_record(
             &self,
             _runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
-                "load_runtime_state".to_string(),
+                "load_machine_lifecycle_record".to_string(),
             ))
         }
 
@@ -1914,7 +1950,7 @@ mod tests {
             &self,
             _runtime_id: &LogicalRuntimeId,
             _commit: crate::store::MachineLifecycleCommit,
-            _input_states: &[StoredInputState],
+            _input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "commit_machine_lifecycle".to_string(),
@@ -2782,7 +2818,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_persistent_browser_admits_require_fresh_durable_capacity() {
+    fn concurrent_persistent_browser_admits_confirm_fresh_generated_capacity() {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let first_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let second_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
@@ -2834,12 +2870,15 @@ mod tests {
             first_admit
                 .join()
                 .expect("first browser admit thread should not panic"),
-            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 1 })
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                ..
+            })
         ));
     }
 
     #[test]
-    fn concurrent_persistent_device_admits_require_fresh_durable_capacity() {
+    fn concurrent_persistent_device_admits_confirm_fresh_generated_capacity() {
         let store = Arc::new(FailingOAuthSnapshotStore::default());
         let first_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
         let second_store = Arc::clone(&store) as Arc<dyn RuntimeStore>;
@@ -2889,7 +2928,10 @@ mod tests {
             first_admit
                 .join()
                 .expect("first device admit thread should not panic"),
-            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 1 })
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_device_flow",
+                ..
+            })
         ));
     }
 
@@ -3259,10 +3301,10 @@ mod tests {
             .expect("browser flow consumes");
 
         let snapshot = lifecycle.snapshot(&lease_key);
-        assert_eq!(snapshot.generation, transition.generation);
+        assert_eq!(snapshot.generation, transition.generation());
         assert_eq!(
             snapshot.credential_published_at_millis,
-            transition.credential_published_at_millis
+            transition.credential_published_at_millis()
         );
     }
 
@@ -3446,7 +3488,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_capacity_still_bounds_payloads_after_lifecycle_release() {
+    fn stale_registry_payloads_do_not_block_authmachine_admission_after_lifecycle_release() {
         let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
         let authority = RuntimeOAuthFlowHandle::new_with_capacity_and_auth_lease(
             Duration::from_secs(60),

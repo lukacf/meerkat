@@ -40,7 +40,15 @@ struct MockAgent {
     callback_pending: bool,
     fail_overlay_clear: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    durable_identity: Option<meerkat_core::SessionLlmIdentity>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
+}
+
+fn system_context_handle_for_test(
+    state: meerkat_core::SessionSystemContextState,
+) -> meerkat_core::SystemContextStateHandle {
+    meerkat_core::SystemContextStateHandle::new(state)
+        .expect("test system-context state should restore")
 }
 
 #[async_trait]
@@ -145,14 +153,21 @@ impl SessionAgent for MockAgent {
     fn session_clone(&self) -> meerkat_core::Session {
         let mut session = meerkat_core::Session::with_id(self.session_id.clone());
         session
-            .set_system_context_state(
-                self.system_context_state
-                    .lock()
-                    .expect("system-context lock poisoned")
-                    .clone(),
-            )
+            .set_system_context_state(self.system_context_state.snapshot())
             .expect("serialize system-context state");
         session
+    }
+
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        self.durable_identity.clone()
+    }
+
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(
+            self.session_clone().messages(),
+        )
     }
 
     fn apply_runtime_system_context(
@@ -162,12 +177,13 @@ impl SessionAgent for MockAgent {
         let mut session = self.session_clone();
         session.append_system_context_blocks(appends);
         self.message_count = session.messages().len();
+        self.system_context_state
+            .replace_from_generated_restore(session.system_context_state().unwrap_or_default())
+            .expect("test system-context state should restore");
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
     }
 }
 
@@ -177,6 +193,7 @@ struct MockAgentBuilder {
     callback_pending: bool,
     fail_overlay_clear: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
+    durable_identity: Option<meerkat_core::SessionLlmIdentity>,
 }
 
 impl MockAgentBuilder {
@@ -187,6 +204,7 @@ impl MockAgentBuilder {
             callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
+            durable_identity: Some(test_llm_identity("mock")),
         }
     }
 
@@ -197,6 +215,7 @@ impl MockAgentBuilder {
             callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
+            durable_identity: Some(test_llm_identity("mock")),
         }
     }
 
@@ -207,6 +226,7 @@ impl MockAgentBuilder {
             callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
+            durable_identity: Some(test_llm_identity("mock")),
         }
     }
 
@@ -217,6 +237,7 @@ impl MockAgentBuilder {
             callback_pending: true,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
+            durable_identity: Some(test_llm_identity("mock")),
         }
     }
 
@@ -227,6 +248,14 @@ impl MockAgentBuilder {
             callback_pending: false,
             fail_overlay_clear: true,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
+            durable_identity: Some(test_llm_identity("mock")),
+        }
+    }
+
+    fn without_durable_identity() -> Self {
+        Self {
+            durable_identity: None,
+            ..Self::new()
         }
     }
 }
@@ -250,7 +279,8 @@ impl SessionAgentBuilder for MockAgentBuilder {
             callback_pending: self.callback_pending,
             fail_overlay_clear: self.fail_overlay_clear,
             overlay_updates: self.overlay_updates.clone(),
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            durable_identity: self.durable_identity.clone(),
+            system_context_state: system_context_handle_for_test(Default::default()),
         })
     }
 }
@@ -318,6 +348,16 @@ fn session_for_request(req: &CreateSessionRequest) -> Session {
     session
 }
 
+fn test_llm_identity(model: &str) -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: model.to_string(),
+        provider: meerkat_core::Provider::Other,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    }
+}
+
 fn session_snapshot(session: &Session) -> SessionSnapshot {
     SessionSnapshot {
         created_at: session.created_at(),
@@ -331,39 +371,29 @@ fn session_snapshot(session: &Session) -> SessionSnapshot {
 
 fn session_clone_with_system_context(
     session: &Session,
-    state: &Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    state: &meerkat_core::SystemContextStateHandle,
 ) -> Session {
     let mut clone = session.clone();
     clone
-        .set_system_context_state(
-            state
-                .lock()
-                .expect("system-context state lock poisoned")
-                .clone(),
-        )
+        .set_system_context_state(state.snapshot())
         .expect("serialize system-context state");
     clone
 }
 
-fn sync_session_context_state(
-    session: &Session,
-    state: &Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
-) {
+fn sync_session_context_state(session: &Session, state: &meerkat_core::SystemContextStateHandle) {
     if let Some(session_state) = session.system_context_state() {
-        *state.lock().expect("system-context state lock poisoned") = session_state;
+        state
+            .replace_from_generated_restore(session_state)
+            .expect("test system-context state should restore");
     }
 }
 
 fn sync_shared_system_context_to_session(
     session: &mut Session,
-    state: &Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    state: &meerkat_core::SystemContextStateHandle,
 ) {
-    let state = state
-        .lock()
-        .expect("system-context state lock poisoned")
-        .clone();
     session
-        .set_system_context_state(state)
+        .set_system_context_state(state.snapshot())
         .expect("serialize system-context state");
 }
 
@@ -418,7 +448,7 @@ struct RealSessionAgent {
     delay_ms: Option<u64>,
     hook_engine: Option<Arc<dyn HookEngine>>,
     flow_tool_overlay: Option<TurnToolOverlay>,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
     cancel_after_boundary_requested: Arc<AtomicBool>,
 }
 
@@ -427,15 +457,15 @@ impl RealSessionAgent {
         &mut self,
     ) -> Vec<meerkat_core::PendingSystemContextAppend> {
         let pending = {
-            let mut state = self
-                .system_context_state
-                .lock()
-                .expect("system-context state lock poisoned");
-            if state.pending.is_empty() {
+            let mut state = self.system_context_state.snapshot();
+            if state.pending().is_empty() {
                 return Vec::new();
             }
-            let pending = state.pending.clone();
+            let pending = state.pending().to_vec();
             state.mark_pending_applied();
+            self.system_context_state
+                .replace_from_generated_restore(state)
+                .expect("test system-context state should restore");
             pending
         };
 
@@ -556,6 +586,16 @@ impl SessionAgent for RealSessionAgent {
         session_clone_with_system_context(&self.session, &self.system_context_state)
     }
 
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        Some(test_llm_identity("mock"))
+    }
+
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(self.session.messages())
+    }
+
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
@@ -564,10 +604,8 @@ impl SessionAgent for RealSessionAgent {
         sync_session_context_state(&self.session, &self.system_context_state);
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
     }
 
     fn sync_system_context_state(&mut self) {
@@ -580,7 +618,7 @@ struct CompactionSessionAgent {
     seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
     compactor: Arc<TrackingCompactor>,
     boundary_index: u64,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
     cancel_after_boundary_requested: Arc<AtomicBool>,
 }
 
@@ -665,6 +703,16 @@ impl SessionAgent for CompactionSessionAgent {
         session_clone_with_system_context(&self.session, &self.system_context_state)
     }
 
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        Some(test_llm_identity("mock"))
+    }
+
+    fn observed_session_tail(
+        &self,
+    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
+        meerkat_core::pending_continuation_admission::observe_session_tail(self.session.messages())
+    }
+
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],
@@ -673,10 +721,8 @@ impl SessionAgent for CompactionSessionAgent {
         sync_session_context_state(&self.session, &self.system_context_state);
     }
 
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
     }
 
     fn sync_system_context_state(&mut self) {
@@ -762,7 +808,7 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
             seen_last_user_messages: Arc::clone(&self.seen_last_user_messages),
             compactor: Arc::clone(&self.compactor),
             boundary_index: 0,
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
             cancel_after_boundary_requested: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -784,7 +830,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
             delay_ms: self.llm_delay_ms,
             hook_engine: self.hook_engine.as_ref().map(Arc::clone),
             flow_tool_overlay: None,
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            system_context_state: system_context_handle_for_test(Default::default()),
             cancel_after_boundary_requested: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -881,6 +927,26 @@ async fn test_create_session_can_defer_initial_turn() {
         .await
         .expect("start_turn should run after deferred create");
     assert!(started.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
+async fn test_create_session_rejects_without_durable_llm_identity() {
+    let service = make_service(MockAgentBuilder::without_durable_identity());
+    let result = service
+        .create_session(create_req_deferred("missing identity"))
+        .await;
+
+    let message = match result {
+        Err(SessionError::Agent(meerkat_core::error::AgentError::ConfigError(message))) => {
+            Some(message)
+        }
+        _ => None,
+    };
+    assert!(
+        message
+            .as_deref()
+            .is_some_and(|message| message.contains("durable LLM identity"))
+    );
 }
 
 #[tokio::test]
@@ -1276,6 +1342,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
             callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: overlay_updates.clone(),
+            durable_identity: Some(test_llm_identity("mock")),
         },
         10,
     ));
@@ -1631,12 +1698,12 @@ async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
         .system_context_state(&session_id)
         .await
         .expect("shared system-context state");
-    let state = state.lock().expect("system-context state lock poisoned");
-    assert_eq!(state.pending.len(), 1, "duplicate must not enqueue twice");
-    assert_eq!(state.pending[0].text, "Observe the orchestrator handoff.");
-    assert_eq!(state.pending[0].source.as_deref(), Some("mob"));
+    let state = state.snapshot();
+    assert_eq!(state.pending_len(), 1, "duplicate must not enqueue twice");
+    assert_eq!(state.pending()[0].text, "Observe the orchestrator handoff.");
+    assert_eq!(state.pending()[0].source.as_deref(), Some("mob"));
     let seen = state
-        .seen
+        .seen()
         .get("ctx-1")
         .expect("idempotency key should be tracked");
     assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Pending);
@@ -1688,11 +1755,7 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
         .await
         .expect("shared system-context state");
     assert_eq!(
-        state
-            .lock()
-            .expect("system-context state lock poisoned")
-            .pending
-            .len(),
+        state.snapshot().pending_len(),
         1,
         "append should remain pending until the next LLM boundary"
     );
@@ -1726,13 +1789,13 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
         .system_context_state(&session_id)
         .await
         .expect("shared system-context state");
-    let state = state.lock().expect("system-context state lock poisoned");
+    let state = state.snapshot();
     assert!(
-        state.pending.is_empty(),
+        state.pending().is_empty(),
         "boundary application should clear the pending queue"
     );
     let seen = state
-        .seen
+        .seen()
         .get("ctx-boundary")
         .expect("idempotency key should remain tracked");
     assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Applied);

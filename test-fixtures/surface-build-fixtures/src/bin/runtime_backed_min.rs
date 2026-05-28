@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Input::Prompt(PromptInput::new("Say ok", None)),
         )
         .await?;
-    let completion = handle.ok_or("missing completion handle")?.wait().await;
+    let completion = handle.ok_or("missing completion handle")?.wait().await?;
 
     println!(
         "{}",

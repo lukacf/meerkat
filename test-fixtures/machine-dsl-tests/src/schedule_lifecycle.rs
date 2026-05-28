@@ -231,9 +231,9 @@ mod tests {
     #[test]
     fn initial_state_is_active() {
         let auth = ScheduleLifecycleMachineAuthority::new();
-        assert_eq!(auth.state.phase(), ScheduleLifecycleState::Active);
-        assert_eq!(auth.state.revision, 1);
-        assert_eq!(auth.state.misfire_policy, MisfirePolicy::Skip);
+        assert_eq!(auth.state().phase(), ScheduleLifecycleState::Active);
+        assert_eq!(auth.state().revision, 1);
+        assert_eq!(auth.state().misfire_policy, MisfirePolicy::Skip);
     }
 
     #[test]
@@ -250,9 +250,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(auth.state.revision, 2);
-        assert_eq!(auth.state.misfire_policy, MisfirePolicy::Execute);
-        assert_eq!(auth.state.planning_cursor_utc_ms, None); // cleared on revise
+        assert_eq!(auth.state().revision, 2);
+        assert_eq!(auth.state().misfire_policy, MisfirePolicy::Execute);
+        assert_eq!(auth.state().planning_cursor_utc_ms, None); // cleared on revise
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.to_phase, ScheduleLifecycleState::Deleted);
-        assert_eq!(auth.state.revision, 2); // bumped on delete
+        assert_eq!(auth.state().revision, 2); // bumped on delete
 
         // Cannot act after delete
         let r = ScheduleLifecycleMachineMutator::apply(
@@ -302,7 +302,7 @@ mod tests {
             ScheduleLifecycleInput::Pause { at_utc_ms: 100 },
         )
         .unwrap();
-        assert_eq!(auth.state.phase(), ScheduleLifecycleState::Paused);
+        assert_eq!(auth.state().phase(), ScheduleLifecycleState::Paused);
 
         let r = ScheduleLifecycleMachineMutator::apply(
             &mut auth,
@@ -315,7 +315,7 @@ mod tests {
             r.is_err(),
             "RecordPlanningWindow must be rejected while the schedule is Paused",
         );
-        assert_eq!(auth.state.planning_cursor_utc_ms, None);
+        assert_eq!(auth.state().planning_cursor_utc_ms, None);
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
             },
         );
         assert!(r.is_ok());
-        assert_eq!(auth.state.planning_cursor_utc_ms, Some(500));
+        assert_eq!(auth.state().planning_cursor_utc_ms, Some(500));
 
         // ordinal == 0 should fail (guard)
         let r = ScheduleLifecycleMachineMutator::apply(

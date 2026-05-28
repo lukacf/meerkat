@@ -1391,7 +1391,7 @@ mod tests {
                 },
             ],
         };
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(history)?,
         );
@@ -1420,7 +1420,7 @@ mod tests {
             "unrelated poisoned history".to_string(),
         ))];
         let poisoned_revision = transcript_messages_digest(&poisoned_messages)?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: poisoned_revision.clone(),
@@ -1498,7 +1498,7 @@ mod tests {
         )?;
         let incoming_revision = incoming.transcript_revision()?;
         let commit_parent_revision = commit.parent_revision.clone();
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1561,7 +1561,7 @@ mod tests {
         poisoned_state.head = first_commit.revision.clone();
 
         let mut poisoned = first_snapshot;
-        poisoned.set_metadata(
+        poisoned.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(poisoned_state)?,
         );
@@ -1632,7 +1632,7 @@ mod tests {
         let mut incoming = Session::new();
         incoming.push(Message::User(UserMessage::text("persisted".to_string())));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1670,7 +1670,7 @@ mod tests {
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1718,7 +1718,7 @@ mod tests {
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -1770,7 +1770,7 @@ mod tests {
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(TranscriptHistoryState {
                 head: incoming_revision.clone(),
@@ -2088,7 +2088,7 @@ mod tests {
             .transcript_history_state()?
             .ok_or_else(|| std::io::Error::other("incoming rewrite should retain history"))?;
         state.commits = vec![new_commit];
-        incoming.set_metadata(
+        incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::to_value(state)?,
         );

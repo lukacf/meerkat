@@ -2,21 +2,137 @@ use super::*;
 
 impl MeerkatMachine {
     fn classify_ingress_dsl_rejection(state: RuntimeState, reason: String) -> RuntimeDriverError {
-        match state {
-            RuntimeState::Destroyed => RuntimeDriverError::Destroyed,
-            RuntimeState::Retired | RuntimeState::Stopped => RuntimeDriverError::NotReady { state },
-            _ => RuntimeDriverError::ValidationFailed { reason },
+        match crate::meerkat_machine::classify_runtime_lifecycle_state(state) {
+            Ok(facts) => match facts.ingress_admission {
+                crate::meerkat_machine::dsl::RuntimeIngressAdmission::Destroyed => {
+                    RuntimeDriverError::Destroyed
+                }
+                crate::meerkat_machine::dsl::RuntimeIngressAdmission::NotReady => {
+                    RuntimeDriverError::NotReady { state }
+                }
+                crate::meerkat_machine::dsl::RuntimeIngressAdmission::Open => {
+                    RuntimeDriverError::ValidationFailed { reason }
+                }
+            },
+            Err(error) => RuntimeDriverError::Internal(error),
         }
     }
 
     fn reject_visible_terminal_ingress(state: RuntimeState) -> Result<(), RuntimeDriverError> {
-        match state {
-            RuntimeState::Destroyed => Err(RuntimeDriverError::Destroyed),
-            RuntimeState::Retired | RuntimeState::Stopped => {
+        let facts =
+            crate::meerkat_machine::classify_runtime_lifecycle_state(state).map_err(|reason| {
+                RuntimeDriverError::Internal(format!(
+                    "generated runtime ingress admission classification failed for {state}: {reason}"
+                ))
+            })?;
+        match facts.ingress_admission {
+            crate::meerkat_machine::dsl::RuntimeIngressAdmission::Destroyed => {
+                Err(RuntimeDriverError::Destroyed)
+            }
+            crate::meerkat_machine::dsl::RuntimeIngressAdmission::NotReady => {
                 Err(RuntimeDriverError::NotReady { state })
             }
-            _ => Ok(()),
+            crate::meerkat_machine::dsl::RuntimeIngressAdmission::Open => Ok(()),
         }
+    }
+
+    pub(super) async fn observe_active_turn_boundary_available(
+        session_id: &SessionId,
+        boundary_handle: Option<
+            &std::sync::Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>,
+        >,
+    ) -> Result<bool, RuntimeDriverError> {
+        if let Some(boundary_handle) = boundary_handle {
+            boundary_handle
+                .active_turn_boundary_available()
+                .await
+                .map_err(|error| {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        error = %error,
+                        "active turn boundary availability check failed"
+                    );
+                    RuntimeDriverError::Internal(format!(
+                        "active turn boundary availability check failed: {error}"
+                    ))
+                })
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Preview generated admission feedback for shell capacity mechanics.
+    ///
+    /// The caller does not classify policy/defaults itself; it only observes
+    /// whether generated `ResolveAdmissionPlan` would ask the runtime to wake,
+    /// interrupt, or process immediately.
+    pub async fn input_requires_active_pre_admission(
+        &self,
+        session_id: &SessionId,
+        input: &Input,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.input_requires_active_pre_admission_with_wake_policy(session_id, input, false)
+            .await
+    }
+
+    /// Preview generated admission feedback for no-wake shell capacity mechanics.
+    ///
+    /// This mirrors `accept_input_without_wake`: the shell supplies only the
+    /// command mode, while generated `ResolveAdmissionPlan` owns the semantic
+    /// pre-admission answer.
+    pub async fn input_requires_active_pre_admission_without_wake(
+        &self,
+        session_id: &SessionId,
+        input: &Input,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.input_requires_active_pre_admission_with_wake_policy(session_id, input, true)
+            .await
+    }
+
+    async fn input_requires_active_pre_admission_with_wake_policy(
+        &self,
+        session_id: &SessionId,
+        input: &Input,
+        without_wake: bool,
+    ) -> Result<bool, RuntimeDriverError> {
+        let (driver, boundary_handle) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.boundary_handle())
+        };
+
+        let gate = self.session_mutation_gate(session_id).await;
+        let _gate_guard = match gate {
+            Some(ref g) => Some(g.lock().await),
+            None => None,
+        };
+
+        let visible_state = self
+            .existing_session_visible_runtime_state(session_id)
+            .await
+            .unwrap_or(RuntimeState::Destroyed);
+        Self::reject_visible_terminal_ingress(visible_state)?;
+        let active_turn_boundary_available =
+            Self::observe_active_turn_boundary_available(session_id, boundary_handle.as_ref())
+                .await?;
+
+        let driver = driver.lock().await;
+        let resolved = if without_wake {
+            driver.resolve_admission_without_wake_with_active_turn_boundary(
+                input,
+                active_turn_boundary_available,
+            )?
+        } else {
+            driver.resolve_admission_with_active_turn_boundary(
+                input,
+                active_turn_boundary_available,
+            )?
+        };
+        Ok(resolved.requires_active_runtime_pre_admission())
     }
 
     pub(super) async fn execute_meerkat_machine_ingress_command(
@@ -24,7 +140,11 @@ impl MeerkatMachine {
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
-            MeerkatMachineCommand::AcceptWithCompletion { session_id, input } => {
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id,
+                input,
+                register_completion,
+            } => {
                 let (driver, completions, wake_tx, effect_tx, boundary_handle) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
@@ -57,22 +177,11 @@ impl MeerkatMachine {
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
-                let active_turn_boundary_available =
-                    if let Some(boundary_handle) = boundary_handle.as_ref() {
-                        boundary_handle
-                            .active_turn_boundary_available()
-                            .await
-                            .unwrap_or_else(|error| {
-                                tracing::debug!(
-                                    session_id = %session_id,
-                                    error = %error,
-                                    "active turn boundary availability check failed"
-                                );
-                                false
-                            })
-                    } else {
-                        false
-                    };
+                let active_turn_boundary_available = Self::observe_active_turn_boundary_available(
+                    &session_id,
+                    boundary_handle.as_ref(),
+                )
+                .await?;
                 if active_turn_boundary_available {
                     tracing::debug!(
                         session_id = %session_id,
@@ -83,34 +192,20 @@ impl MeerkatMachine {
 
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
-                    let input_kind = input.kind();
-                    let runtime_idle =
-                        state.is_idle_or_attached() && !active_turn_boundary_available;
-                    let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
-                    tracing::debug!(
-                        session_id = %session_id,
-                        input_kind = ?input_kind,
-                        runtime_state = ?state,
-                        visible_state = ?visible_state,
-                        runtime_idle,
+                    let resolved = driver.resolve_admission_with_active_turn_boundary(
+                        &input,
                         active_turn_boundary_available,
-                        immediate = resolved.coarse_flags.request_immediate_processing,
-                        interrupt_yielding = resolved.coarse_flags.interrupt_yielding,
-                        wake_if_idle = resolved.coarse_flags.wake_if_idle,
-                        apply_mode = ?resolved.policy.apply_mode,
-                        "resolved runtime ingress admission"
-                    );
+                    )?;
+                    let flags = resolved.coarse_flags();
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
                             input_id: crate::meerkat_machine::dsl::InputId::from_domain(
                                 &InputId::new(),
                             ),
-                            request_immediate_processing: resolved
-                                .coarse_flags
-                                .request_immediate_processing,
-                            interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
-                            wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                            request_immediate_processing: flags.request_immediate_processing,
+                            interrupt_yielding: flags.interrupt_yielding,
+                            wake_if_idle: flags.wake_if_idle,
                         },
                         "AcceptWithCompletion",
                     )
@@ -119,9 +214,9 @@ impl MeerkatMachine {
                         let reason = format!(
                             "{reason}; input_kind={}; immediate={}; interrupt_yielding={}; wake_if_idle={}",
                             input.kind(),
-                            resolved.coarse_flags.request_immediate_processing,
-                            resolved.coarse_flags.interrupt_yielding,
-                            resolved.coarse_flags.wake_if_idle,
+                            flags.request_immediate_processing,
+                            flags.interrupt_yielding,
+                            flags.wake_if_idle,
                         );
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
@@ -137,12 +232,9 @@ impl MeerkatMachine {
                     match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
                             let accepted_input_id = input_id.clone();
-                            let is_terminal = driver
-                                .as_driver()
-                                .input_phase(&accepted_input_id)
-                                .map(|phase| phase.is_terminal())
-                                .unwrap_or(true);
-                            let handle = if is_terminal {
+                            let is_terminal =
+                                driver.input_is_terminal_by_authority(&accepted_input_id)?;
+                            let handle = if is_terminal || !register_completion {
                                 None
                             } else {
                                 Some({
@@ -159,13 +251,9 @@ impl MeerkatMachine {
                             )
                         }
                         AcceptOutcome::Deduplicated { existing_id, .. } => {
-                            let is_terminal = driver
-                                .as_driver()
-                                .input_phase(existing_id)
-                                .map(|phase| phase.is_terminal())
-                                .unwrap_or(true);
+                            let is_terminal = driver.input_is_terminal_by_authority(existing_id)?;
 
-                            if is_terminal {
+                            if is_terminal || !register_completion {
                                 (
                                     resolved,
                                     result,
@@ -198,6 +286,7 @@ impl MeerkatMachine {
                 let (signal, runtime_effect, effect_previous_dsl_state) = if let Some(input_id) =
                     accepted_input_id.clone()
                 {
+                    let flags = resolved.coarse_flags();
                     let (previous_dsl_state, effects) = self
                         .apply_session_dsl_input(
                             &session_id,
@@ -205,11 +294,9 @@ impl MeerkatMachine {
                                 input_id: crate::meerkat_machine::dsl::InputId::from_domain(
                                     &input_id,
                                 ),
-                                request_immediate_processing: resolved
-                                    .coarse_flags
-                                    .request_immediate_processing,
-                                interrupt_yielding: resolved.coarse_flags.interrupt_yielding,
-                                wake_if_idle: resolved.coarse_flags.wake_if_idle,
+                                request_immediate_processing: flags.request_immediate_processing,
+                                interrupt_yielding: flags.interrupt_yielding,
+                                wake_if_idle: flags.wake_if_idle,
                             },
                             "AcceptWithCompletion",
                         )
@@ -265,7 +352,7 @@ impl MeerkatMachine {
                 let has_boundary_handle = boundary_handle.is_some();
                 if active_turn_boundary_available
                     && signal.should_interrupt_yielding()
-                    && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
+                    && resolved.stages_run_boundary()
                     && let (Some(input_id), Some(boundary_handle)) =
                         (accepted_input_id_for_live_boundary, boundary_handle)
                 {
@@ -283,12 +370,11 @@ impl MeerkatMachine {
                             if appends.is_empty() {
                                 return None;
                             }
-                            let sequence = driver.next_live_boundary_context_sequence(&run_id);
-                            Some((run_id, appends, sequence))
+                            Some((run_id, appends))
                         })
                     };
 
-                    if let Some((run_id, appends, sequence)) = live_boundary_plan {
+                    if let Some((run_id, appends)) = live_boundary_plan {
                         let rollback_keys = appends
                             .iter()
                             .filter_map(|append| append.idempotency_key.clone())
@@ -304,23 +390,14 @@ impl MeerkatMachine {
                             .stage_system_context_at_boundary(&run_id, appends)
                             .await
                         {
-                            Ok(session_snapshot) => {
-                                let receipt = meerkat_core::lifecycle::RunBoundaryReceipt {
-                                    run_id: run_id.clone(),
-                                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
-                                    contributing_input_ids: vec![input_id.clone()],
-                                    conversation_digest: None,
-                                    message_count: 0,
-                                    sequence,
-                                };
+                            Ok(stage_output) => {
                                 let commit_result = {
                                     let mut driver = driver.lock().await;
                                     driver
                                         .machine_realize_live_boundary_context_injected(
                                             &run_id,
                                             std::slice::from_ref(&input_id),
-                                            &receipt,
-                                            session_snapshot,
+                                            stage_output.session_snapshot,
                                         )
                                         .await
                                 };
@@ -358,8 +435,15 @@ impl MeerkatMachine {
                                     }
                                     return Err(error);
                                 }
+                                let result_class =
+                                    crate::meerkat_machine::driver::machine_resolve_runtime_completed_without_result(
+                                        &driver,
+                                        &run_id,
+                                    )
+                                    .await?;
                                 let mut completions = completions.lock().await;
-                                completions.resolve_without_result(&input_id);
+                                completions
+                                    .resolve_without_result_authorized(&input_id, result_class);
                             }
                             Err(error) => {
                                 tracing::warn!(
@@ -380,9 +464,7 @@ impl MeerkatMachine {
                             "accepted steer input had no live boundary plan; leaving input queued for ordinary post-turn drain"
                         );
                     }
-                } else if signal.should_interrupt_yielding()
-                    && resolved.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
-                {
+                } else if signal.should_interrupt_yielding() && resolved.stages_run_boundary() {
                     tracing::debug!(
                         session_id = %session_id,
                         runtime_state = ?state,
@@ -400,14 +482,14 @@ impl MeerkatMachine {
                 })
             }
             MeerkatMachineCommand::AcceptWithoutWake { session_id, input } => {
-                let driver = {
+                let (driver, boundary_handle) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
                         .get(&session_id)
                         .ok_or(RuntimeDriverError::NotReady {
                             state: RuntimeState::Destroyed,
                         })?;
-                    entry.driver.clone()
+                    (entry.driver.clone(), entry.boundary_handle())
                 };
 
                 let gate = self.session_mutation_gate(&session_id).await;
@@ -425,11 +507,19 @@ impl MeerkatMachine {
                     .await
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
+                let active_turn_boundary_available = Self::observe_active_turn_boundary_available(
+                    &session_id,
+                    boundary_handle.as_ref(),
+                )
+                .await?;
 
                 let (outcome, accepted_input_id) = {
                     let mut driver = driver.lock().await;
-                    let runtime_idle = state.is_idle_or_attached();
-                    let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
+                    let resolved = driver
+                        .resolve_admission_without_wake_with_active_turn_boundary(
+                            &input,
+                            active_turn_boundary_available,
+                        )?;
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
@@ -441,8 +531,6 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| Self::classify_ingress_dsl_rejection(state, reason))?;
-                    let mut resolved = resolved;
-                    resolved.policy.wake_mode = crate::policy::WakeMode::None;
                     let result = match driver
                         .accept_resolved_input(input, resolved)
                         .await
@@ -529,29 +617,25 @@ impl MeerkatMachine {
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
                 let prepare_precheck_error = {
-                    let driver = driver.lock().await;
-                    let state = driver.runtime_state();
-                    if !driver.is_idle_or_attached() {
-                        Some(Self::normalize_destroyed_error(
-                            RuntimeDriverError::NotReady { state },
-                        ))
-                    } else if !driver.as_driver().active_input_ids().is_empty() {
-                        let duplicate_active_input = input
-                            .header()
-                            .idempotency_key
-                            .as_ref()
-                            .and_then(|key| driver.input_id_for_idempotency_key(key));
-                        if let Some(existing_id) = duplicate_active_input {
-                            Some(RuntimeDriverError::ValidationFailed {
-                                reason: format!(
-                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
-                                ),
-                            })
-                        } else {
-                            Some(RuntimeDriverError::NotReady { state })
-                        }
+                    let mut driver = driver.lock().await;
+                    if let Some(existing_id) = driver.resolve_admission_idempotency(&input)? {
+                        Some(RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                            ),
+                        })
                     } else {
-                        None
+                        let state = driver.runtime_state();
+                        let facts = driver.runtime_lifecycle_facts()?;
+                        if !facts.can_prepare_run() {
+                            Some(Self::normalize_destroyed_error(
+                                RuntimeDriverError::NotReady { state },
+                            ))
+                        } else if !driver.as_driver().active_input_ids().is_empty() {
+                            Some(RuntimeDriverError::NotReady { state })
+                        } else {
+                            None
+                        }
                     }
                 };
                 if let Some(err) = prepare_precheck_error {
@@ -612,14 +696,10 @@ impl MeerkatMachine {
                     }
                     if let Err(err) = driver.stage_input(&dequeued_id, &run_id) {
                         let _ = driver.rollback_staged(std::slice::from_ref(&dequeued_id));
-                        let next_phase = crate::runtime_state::run_return_phase_from_pre_run_phase(
-                            driver.pre_run_phase(),
-                        );
                         if let Err(rollback_err) = machine_apply_run_return_projection(
                             &mut driver,
                             &run_id,
                             crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
-                            next_phase,
                         ) {
                             return Err(RuntimeDriverError::Internal(format!(
                                 "failed to roll back runtime run after staging failure: {rollback_err}; staging failure: {err}"
@@ -662,15 +742,10 @@ impl MeerkatMachine {
                         Ok(primitive) => primitive,
                         Err(err) => {
                             let _ = driver.rollback_staged(std::slice::from_ref(&dequeued_id));
-                            let next_phase =
-                                crate::runtime_state::run_return_phase_from_pre_run_phase(
-                                    driver.pre_run_phase(),
-                                );
                             if let Err(rollback_err) = machine_apply_run_return_projection(
                                 &mut driver,
                                 &run_id,
                                 crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
-                                next_phase,
                             ) {
                                 return Err(RuntimeDriverError::Internal(format!(
                                     "failed to roll back runtime run after primitive build failure: {rollback_err}; primitive build failure: {err}"
@@ -697,22 +772,9 @@ impl MeerkatMachine {
                 run_id,
                 output,
             } => {
-                let driver = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?
-                        .driver
-                        .clone()
-                };
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let (driver, _gate_guard) = self
+                    .current_session_driver_with_authority(&session_id)
+                    .await?;
 
                 if let Err(err) = commit_runtime_loop_run(
                     &driver,
@@ -738,6 +800,7 @@ impl MeerkatMachine {
                         None
                     };
                     if should_unregister {
+                        drop(_gate_guard);
                         self.unregister_session_inner(&session_id).await;
                     }
                     let message = match rollback_err {
@@ -756,27 +819,15 @@ impl MeerkatMachine {
                 run_id,
                 failure,
             } => {
-                let driver = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?
-                        .driver
-                        .clone()
-                };
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let (driver, _gate_guard) = self
+                    .current_session_driver_with_authority(&session_id)
+                    .await?;
 
                 if let Err(run_err) = fail_machine_run(&driver, run_id, failure).await {
                     let should_unregister = run_err.should_unregister_session();
                     let run_err = run_err.into_driver_error();
                     if should_unregister {
+                        drop(_gate_guard);
                         self.unregister_session_inner(&session_id).await;
                     }
                     return Err(RuntimeDriverError::Internal(format!(

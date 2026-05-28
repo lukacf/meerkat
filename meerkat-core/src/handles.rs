@@ -21,13 +21,18 @@
 //! phase/field reads happen elsewhere (direct DSL state accessors, not via
 //! these traits).
 
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+use std::any::Any;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::LoopState;
+use crate::auth::RefreshFailureObservation;
 use crate::comms::InputSource;
 use crate::interaction::{
-    PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
+    PeerIngressAdmission, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
+    PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts, PeerIngressReceiveAuthority,
+    PeerIngressReceiveFacts,
 };
 use crate::lifecycle::run_primitive::ModelId;
 use crate::lifecycle::{InputId, RunId};
@@ -42,10 +47,10 @@ use crate::tool_scope::{
     ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
-    ContentShape, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
-    TurnTerminalOutcome,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnFailureReason, TurnFailureSource,
+    TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
-use crate::types::SessionId;
+use crate::types::{HandlingMode, SessionId};
 
 // ---------------------------------------------------------------------------
 // Typed cross-crate enums for DSL-owned discriminants.
@@ -81,14 +86,25 @@ pub enum DrainExitReason {
 ///
 /// Runtime-backed surfaces create sessions before the factory has resolved the
 /// final LLM identity. The factory uses this handle after resolution so the DSL
-/// owns the canonical baseline model before tools such as `generate_image`
-/// resolve `Auto` provider targets.
+/// owns the canonical baseline model and capability surface before tools or
+/// visibility projections observe those facts.
 pub trait ModelRoutingHandle: Send + Sync {
     /// Set the session's canonical model-routing baseline.
     fn set_baseline(
         &self,
         baseline_model: ModelId,
         realtime_capable: bool,
+    ) -> Result<(), DslTransitionError>;
+
+    /// Hydrate the session's canonical LLM capability surface.
+    ///
+    /// `profile` is a typed catalog observation. The generated machine decides
+    /// whether the paired capability-base filter is legal for that surface.
+    fn hydrate_llm_capability_surface(
+        &self,
+        identity: &crate::SessionLlmIdentity,
+        profile: Option<&crate::model_profile::ModelProfile>,
+        capability_base_filter: &crate::ToolFilter,
     ) -> Result<(), DslTransitionError>;
 }
 
@@ -111,6 +127,7 @@ impl DrainExitReason {
 pub enum AuthLeasePhase {
     Valid,
     Expiring,
+    Expired,
     Refreshing,
     ReauthRequired,
     Released,
@@ -135,6 +152,9 @@ pub enum DslRejectionKind {
     /// firing idempotently treat this as a no-op; callers firing
     /// unconditionally treat it as a user-visible error.
     GuardRejected,
+    /// Generated authority rejected recovered state before any transition
+    /// was attempted. This is not an idempotent transition guard no-op.
+    RecoveredStateInvariantRejected,
 }
 
 /// Error surfaced when a DSL transition is rejected.
@@ -183,6 +203,18 @@ impl DslTransitionError {
         }
     }
 
+    /// Construct an error with `kind = RecoveredStateInvariantRejected`.
+    pub fn recovered_state_invariant_rejected(
+        context: &'static str,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            context,
+            kind: DslRejectionKind::RecoveredStateInvariantRejected,
+            reason: reason.into(),
+        }
+    }
+
     /// True iff this rejection came from a guard evaluating false.
     pub fn is_guard_rejected(&self) -> bool {
         self.kind == DslRejectionKind::GuardRejected
@@ -220,7 +252,7 @@ pub enum PeerResponseTerminalProjectionStatus {
 }
 
 impl PeerResponseTerminalProjectionStatus {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -589,6 +621,13 @@ pub struct TurnStateSnapshot {
 
 /// Turn-execution DSL handle.
 pub trait TurnStateHandle: Send + Sync {
+    /// Apply one typed turn-execution input and return the generated
+    /// turn-authority effects emitted by that transition.
+    fn apply_turn_input(
+        &self,
+        input: TurnExecutionInput,
+    ) -> Result<Vec<TurnExecutionEffect>, DslTransitionError>;
+
     fn start_conversation_run(
         &self,
         run_id: RunId,
@@ -603,58 +642,76 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn primitive_applied(&self) -> Result<(), DslTransitionError>;
+    fn primitive_applied(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn llm_returned_tool_calls(&self, tool_count: u64) -> Result<(), DslTransitionError>;
+    fn llm_returned_tool_calls(
+        &self,
+        run_id: RunId,
+        tool_count: u64,
+    ) -> Result<(), DslTransitionError>;
 
-    fn llm_returned_terminal(&self) -> Result<(), DslTransitionError>;
+    fn llm_returned_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
     fn register_pending_ops(
         &self,
+        run_id: RunId,
         op_refs: BTreeSet<AsyncOpRef>,
         barrier_operation_ids: BTreeSet<OperationId>,
     ) -> Result<(), DslTransitionError>;
 
-    fn tool_calls_resolved(&self) -> Result<(), DslTransitionError>;
+    fn tool_calls_resolved(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
     fn ops_barrier_satisfied(
         &self,
+        run_id: RunId,
         operation_ids: BTreeSet<OperationId>,
     ) -> Result<(), DslTransitionError>;
 
-    fn boundary_continue(&self) -> Result<(), DslTransitionError>;
+    fn boundary_continue(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn boundary_complete(&self) -> Result<(), DslTransitionError>;
+    fn boundary_complete(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError>;
+    fn enter_extraction(&self, run_id: RunId, max_retries: u32) -> Result<(), DslTransitionError>;
 
-    fn extraction_start(&self) -> Result<(), DslTransitionError>;
+    fn extraction_start(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn extraction_validation_passed(&self) -> Result<(), DslTransitionError>;
+    fn extraction_validation_passed(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
+    fn extraction_validation_failed(
+        &self,
+        run_id: RunId,
+        error: String,
+    ) -> Result<(), DslTransitionError>;
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError>;
+    fn extraction_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError>;
 
-    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
+    fn recoverable_failure(
+        &self,
+        run_id: RunId,
+        retry: LlmRetrySchedule,
+    ) -> Result<(), DslTransitionError>;
 
-    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError>;
+    fn fatal_failure(
+        &self,
+        run_id: RunId,
+        failure: TurnFailureSource,
+    ) -> Result<(), DslTransitionError>;
 
-    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError>;
+    fn retry_requested(&self, run_id: RunId, retry_attempt: u32) -> Result<(), DslTransitionError>;
 
-    fn cancel_now(&self) -> Result<(), DslTransitionError>;
+    fn cancel_now(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError>;
+    fn request_cancel_after_boundary(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn cancellation_observed(&self) -> Result<(), DslTransitionError>;
+    fn cancellation_observed(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn acknowledge_terminal(&self, outcome: TurnTerminalOutcome) -> Result<(), DslTransitionError>;
+    fn acknowledge_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn turn_limit_reached(&self) -> Result<(), DslTransitionError>;
+    fn turn_limit_reached(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn budget_exhausted(&self) -> Result<(), DslTransitionError>;
+    fn budget_exhausted(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn time_budget_exceeded(&self) -> Result<(), DslTransitionError>;
+    fn time_budget_exceeded(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
     fn force_cancel_no_run(&self) -> Result<(), DslTransitionError>;
 
@@ -678,7 +735,8 @@ pub trait TurnStateHandle: Send + Sync {
 /// Comms drain lifecycle DSL handle.
 ///
 /// Covers the `drain_phase`/`drain_mode` DSL substate: ensure/spawn/stop the
-/// comms drain task and observe clean vs respawnable exits.
+/// comms drain task and report typed exit reasons. The machine classifies the
+/// resulting stopped vs respawnable state.
 pub trait CommsDrainHandle: Send + Sync {
     /// Fire the `EnsureDrainRunning` signal — lazy spawn path.
     fn ensure_drain_running(&self) -> Result<(), DslTransitionError>;
@@ -689,10 +747,11 @@ pub trait CommsDrainHandle: Send + Sync {
     /// Fire the `StopDrain` input.
     fn stop_drain(&self) -> Result<(), DslTransitionError>;
 
-    /// Fire the `DrainExitedClean` input (drain stopped without failure).
+    /// Compatibility alias for reporting a non-failed drain exit.
     fn drain_exited_clean(&self) -> Result<(), DslTransitionError>;
 
-    /// Fire the `DrainExitedRespawnable` input (drain exited and can be respawned).
+    /// Compatibility alias for reporting a failed drain exit; generated
+    /// authority decides whether the current mode is respawnable.
     fn drain_exited_respawnable(&self) -> Result<(), DslTransitionError>;
 
     /// Fire the `NotifyDrainExited { reason }` input with a typed reason.
@@ -737,6 +796,9 @@ pub struct SurfaceDiagnosticSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalToolSurfaceInput {
+    SetRemovalTimeout {
+        timeout_ms: u64,
+    },
     StageAdd {
         surface_id: String,
         now_ms: u64,
@@ -890,13 +952,13 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 
 /// Peer comms ingress classification DSL handle.
 ///
-/// Covers the peer-envelope classification signals on the MeerkatMachine DSL.
-/// Runtime-backed comms ingress hands parsed transport facts to this handle
-/// and receives the complete typed admission/classification facts back. A
-/// rejection is authoritative and callers fail closed. Standalone comms
-/// runtimes may have no session DSL handle; those retain a local
-/// `PeerIngressMachinePolicy` adapter for wire-compatible operation without a
-/// session authority.
+/// Covers the peer-envelope classification and receive/dequeue authority
+/// signals on the MeerkatMachine DSL. Runtime-backed comms ingress hands
+/// parsed transport facts and queue observations to this handle and receives
+/// the complete typed classification/admission/phase facts back. A rejection
+/// is authoritative and callers fail closed. Classified comms ingress without
+/// this session DSL handle fails closed rather than deriving machine facts in
+/// the transport shell.
 pub trait PeerCommsHandle: Send + Sync {
     /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
     /// admission facts for the parsed envelope.
@@ -912,8 +974,188 @@ pub trait PeerCommsHandle: Send + Sync {
         facts: PeerIngressPlainEventFacts,
     ) -> Result<PeerIngressAdmission, DslTransitionError>;
 
+    /// Fire `ResolvePeerIngressReceive` and return the machine-owned
+    /// admission outcome plus authority phase for a classified peer envelope.
+    fn resolve_peer_ingress_receive(
+        &self,
+        facts: PeerIngressReceiveFacts,
+    ) -> Result<PeerIngressReceiveAuthority, DslTransitionError>;
+
+    /// Fire `ResolvePeerIngressDequeue` and return the machine-owned
+    /// authority phase for a classified queue dequeue observation.
+    fn resolve_peer_ingress_dequeue(
+        &self,
+        facts: PeerIngressDequeueFacts,
+    ) -> Result<PeerIngressDequeueAuthority, DslTransitionError>;
+
     /// Fire the `SetPeerIngressContext { keep_alive }` input.
     fn set_peer_ingress_context(&self, keep_alive: bool) -> Result<(), DslTransitionError>;
+
+    /// Route a local-runtime endpoint observation through generated machine
+    /// authority and install the accepted generated authority package on the
+    /// target.
+    fn install_generated_peer_comms_on_target(
+        &self,
+        _expected_owner: &crate::comms::GeneratedPeerCommsOwnerToken,
+        _target: &(dyn PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        Err("peer-comms handle does not expose generated install target authority".to_string())
+    }
+}
+
+#[derive(Clone)]
+pub struct GeneratedPeerCommsInstallFactory {
+    handle: std::sync::Arc<dyn PeerCommsHandle>,
+    owner_token: crate::comms::GeneratedPeerCommsOwnerToken,
+}
+
+impl std::fmt::Debug for GeneratedPeerCommsInstallFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedPeerCommsInstallFactory")
+            .field("handle", &"<dyn PeerCommsHandle>")
+            .field("owner_token", &self.owner_token)
+            .finish()
+    }
+}
+
+impl GeneratedPeerCommsInstallFactory {
+    #[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+    #[doc(hidden)]
+    pub fn __from_runtime_generated_authority(
+        token: &'static (dyn Any + Send + Sync),
+        handle: std::sync::Arc<dyn PeerCommsHandle>,
+        owner_token: std::sync::Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self, String> {
+        validate_peer_comms_install_bridge_token(token)?;
+        Ok(Self {
+            handle,
+            owner_token: crate::comms::GeneratedPeerCommsOwnerToken::from_generated_owner_token(
+                owner_token,
+            ),
+        })
+    }
+
+    pub fn peer_comms_handle(&self) -> &std::sync::Arc<dyn PeerCommsHandle> {
+        &self.handle
+    }
+
+    pub fn install_on_target(
+        &self,
+        target: &(dyn PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        self.handle
+            .install_generated_peer_comms_on_target(&self.owner_token, target)
+    }
+}
+
+#[derive(Clone)]
+pub struct GeneratedPeerCommsInstall {
+    handle: std::sync::Arc<dyn PeerCommsHandle>,
+    owner_token: crate::comms::GeneratedPeerCommsOwnerToken,
+    target_peer_id: crate::comms::PeerId,
+}
+
+impl std::fmt::Debug for GeneratedPeerCommsInstall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedPeerCommsInstall")
+            .field("handle", &"<dyn PeerCommsHandle>")
+            .field("owner_token", &self.owner_token)
+            .field("target_peer_id", &self.target_peer_id)
+            .finish()
+    }
+}
+
+impl GeneratedPeerCommsInstall {
+    #[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+    #[doc(hidden)]
+    pub fn __from_runtime_generated_authority(
+        token: &'static (dyn Any + Send + Sync),
+        handle: std::sync::Arc<dyn PeerCommsHandle>,
+        owner_token: std::sync::Arc<dyn Any + Send + Sync>,
+        target_peer_id: crate::comms::PeerId,
+    ) -> Result<Self, String> {
+        validate_peer_comms_install_bridge_token(token)?;
+        Ok(Self {
+            handle,
+            owner_token: crate::comms::GeneratedPeerCommsOwnerToken::from_generated_owner_token(
+                owner_token,
+            ),
+            target_peer_id,
+        })
+    }
+
+    pub fn peer_comms_handle(&self) -> &std::sync::Arc<dyn PeerCommsHandle> {
+        &self.handle
+    }
+
+    pub fn owner_token(&self) -> crate::comms::GeneratedPeerCommsOwnerToken {
+        self.owner_token.clone()
+    }
+
+    pub fn target_peer_id(&self) -> crate::comms::PeerId {
+        self.target_peer_id
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_comms_trust_reconcile_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_peer_comms_install_generated_authority_bridge_token_is_valid(
+        token: &(dyn Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+fn validate_peer_comms_install_bridge_token(token: &(dyn Any + Send + Sync)) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid =
+        unsafe { runtime_peer_comms_install_generated_authority_bridge_token_is_valid(token) };
+    if valid {
+        Ok(())
+    } else {
+        Err("generated peer-comms install requires the matching generated runtime protocol bridge token".into())
+    }
+}
+
+/// Target that can bind a peer-comms handle to its generated trust owner.
+///
+/// Generic [`PeerCommsHandle`] implementations classify ingress only. This
+/// path accepts an opaque generated install package rather than a raw owner
+/// token, so handwritten code cannot bind machine trust facts by copying a
+/// token into a fake handle.
+pub trait PeerCommsInstallTarget: crate::agent::CommsRuntime {
+    fn generated_peer_comms_target_endpoint(
+        &self,
+    ) -> Result<crate::comms::TrustedPeerDescriptor, String> {
+        let peer_id = self
+            .peer_id()
+            .ok_or_else(|| "runtime peer_id unavailable".to_string())?;
+        let name = self
+            .comms_name()
+            .ok_or_else(|| "runtime comms_name unavailable".to_string())?;
+        let address = self
+            .advertised_address()
+            .ok_or_else(|| "runtime advertised_address unavailable".to_string())?;
+        let pubkey = self
+            .public_key_bytes()
+            .ok_or_else(|| "runtime public_key_bytes unavailable".to_string())?;
+        crate::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            peer_id.to_string(),
+            pubkey,
+            address,
+        )
+        .map_err(|error| format!("runtime peer-comms install target endpoint invalid: {error}"))
+    }
+
+    fn install_generated_peer_comms_handle(
+        &self,
+        install: GeneratedPeerCommsInstall,
+    ) -> Result<(), String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,6 +1281,54 @@ pub struct AuthLeaseSnapshot {
     pub credential_published_at_millis: Option<u64>,
 }
 
+/// Opaque token for restoring a previously captured auth lease snapshot.
+///
+/// This is intentionally not constructible from public snapshot fields. A
+/// rollback caller must first capture it from an [`AuthLeaseHandle`], then hand
+/// that exact token back to the same authority boundary if a later durable
+/// write fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLeaseRestoreSnapshot {
+    lease_key: LeaseKey,
+    snapshot: AuthLeaseSnapshot,
+    captured_by: std::any::TypeId,
+    captured_by_instance: usize,
+}
+
+impl AuthLeaseRestoreSnapshot {
+    fn capture(
+        lease_key: LeaseKey,
+        snapshot: AuthLeaseSnapshot,
+        captured_by: std::any::TypeId,
+        captured_by_instance: usize,
+    ) -> Self {
+        Self {
+            lease_key,
+            snapshot,
+            captured_by,
+            captured_by_instance,
+        }
+    }
+
+    pub fn lease_key(&self) -> &LeaseKey {
+        &self.lease_key
+    }
+
+    pub fn snapshot(&self) -> &AuthLeaseSnapshot {
+        &self.snapshot
+    }
+
+    #[doc(hidden)]
+    pub fn captured_by_type_id(&self) -> std::any::TypeId {
+        self.captured_by
+    }
+
+    #[doc(hidden)]
+    pub fn captured_by_instance_id(&self) -> usize {
+        self.captured_by_instance
+    }
+}
+
 /// Result of an accepted auth lease lifecycle transition.
 ///
 /// `generation` is the projection version assigned while the transition is
@@ -1046,18 +1336,176 @@ pub struct AuthLeaseSnapshot {
 /// that published it without taking a later snapshot.
 /// `credential_published_at_millis` is the durable credential publication
 /// timestamp attached to acquired/refreshed credential material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
-    pub generation: u64,
-    pub credential_published_at_millis: Option<u64>,
+    lease_key: LeaseKey,
+    phase: AuthLeasePhase,
+    expires_at: u64,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
 }
 
 impl AuthLeaseTransition {
-    pub fn new(generation: u64, credential_published_at_millis: Option<u64>) -> Self {
+    pub fn lease_key(&self) -> &LeaseKey {
+        &self.lease_key
+    }
+
+    pub fn phase(&self) -> AuthLeasePhase {
+        self.phase
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn credential_published_at_millis(&self) -> Option<u64> {
+        self.credential_published_at_millis
+    }
+
+    #[cfg_attr(
+        any(not(meerkat_internal_generated_authority_bridge), test),
+        allow(dead_code)
+    )]
+    fn from_generated_auth_lease_publication_parts(
+        lease_key: LeaseKey,
+        phase: AuthLeasePhase,
+        expires_at: u64,
+        generation: u64,
+        credential_published_at_millis: Option<u64>,
+    ) -> Self {
         Self {
+            lease_key,
+            phase,
+            expires_at,
             generation,
             credential_published_at_millis,
         }
+    }
+}
+
+/// Auth lease lifecycle handle certified by the generated AuthMachine
+/// publication authority.
+///
+/// The wrapped trait object remains the mechanical dispatch surface, but
+/// production resolver/factory seams accept this type so callers cannot install
+/// an arbitrary handwritten reducer as lifecycle authority.
+#[derive(Clone)]
+pub struct GeneratedAuthLeaseHandle {
+    inner: Arc<dyn AuthLeaseHandle>,
+}
+
+impl GeneratedAuthLeaseHandle {
+    pub fn as_handle(&self) -> &dyn AuthLeaseHandle {
+        self.inner.as_ref()
+    }
+
+    pub fn clone_handle(&self) -> Arc<dyn AuthLeaseHandle> {
+        Arc::clone(&self.inner)
+    }
+
+    #[cfg_attr(
+        any(not(meerkat_internal_generated_authority_bridge), test),
+        allow(dead_code)
+    )]
+    fn from_generated_authority(inner: Arc<dyn AuthLeaseHandle>) -> Self {
+        Self { inner }
+    }
+}
+
+impl std::fmt::Debug for GeneratedAuthLeaseHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedAuthLeaseHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for GeneratedAuthLeaseHandle {
+    type Target = dyn AuthLeaseHandle;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref()
+    }
+}
+
+impl AsRef<dyn AuthLeaseHandle> for GeneratedAuthLeaseHandle {
+    fn as_ref(&self) -> &dyn AuthLeaseHandle {
+        self.inner.as_ref()
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_auth_lease_lifecycle_publication_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_auth_lease_lifecycle_publication_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_auth_lease_transition_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    lease_key: LeaseKey,
+    phase: AuthLeasePhase,
+    expires_at: u64,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+) -> Result<AuthLeaseTransition, String> {
+    validate_runtime_generated_authority_bridge_token(token)?;
+    Ok(
+        AuthLeaseTransition::from_generated_auth_lease_publication_parts(
+            lease_key,
+            phase,
+            expires_at,
+            generation,
+            credential_published_at_millis,
+        ),
+    )
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_auth_lease_handle_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_auth_lease_handle_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    handle: Arc<dyn AuthLeaseHandle>,
+) -> Result<GeneratedAuthLeaseHandle, String> {
+    validate_runtime_generated_authority_bridge_token(token)?;
+    Ok(GeneratedAuthLeaseHandle::from_generated_authority(handle))
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+fn validate_runtime_generated_authority_bridge_token(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe {
+        runtime_auth_lease_lifecycle_publication_generated_authority_bridge_token_is_valid(token)
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(
+            "generated auth lease transition requires the generated AuthMachine protocol bridge token"
+                .into(),
+        )
     }
 }
 
@@ -1089,8 +1537,19 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
+    /// Fire `ObserveCredentialFreshness { lease_key, now, refresh_window }`.
+    ///
+    /// AuthMachine owns whether the credential remains valid, becomes
+    /// expiring, or becomes expired from its observed expiry facts.
+    fn observe_credential_freshness(
+        &self,
+        lease_key: &LeaseKey,
+        now: u64,
+        refresh_window_secs: u64,
+    ) -> Result<(), DslTransitionError>;
+
     /// Fire `BeginAuthRefresh { lease_key }` — legal from `valid` or
-    /// `expiring`.
+    /// `expiring` or `expired`.
     ///
     /// Provides the DSL-level refresh dedup: once the binding is in
     /// `auth_refreshing_leases`, no concurrent `BeginAuthRefresh` is
@@ -1108,13 +1567,13 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
-    /// Fire `AuthRefreshFailed { lease_key, permanent }` — only legal from
-    /// `refreshing`. `permanent=true` routes to `reauth_required` and emits a
-    /// reauth notice; `permanent=false` routes back to `expiring`.
+    /// Fire the typed refresh-failure observation input — only legal from
+    /// `refreshing`. AuthMachine decides the permanent/transient lifecycle
+    /// result from the observation.
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,
-        permanent: bool,
+        observation: RefreshFailureObservation,
     ) -> Result<(), DslTransitionError>;
 
     /// Fire `MarkReauthRequired { lease_key }` — any known state → reauth.
@@ -1134,38 +1593,61 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         self.release_lease(lease_key)
     }
 
-    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    /// Capture the current lifecycle snapshot for possible rollback.
     ///
-    /// The default implementation can reconstruct credential-present snapshots
-    /// through public lease transitions. Runtime-backed handles override this to
-    /// preserve machine-owned metadata such as credential publication time and to
-    /// restore empty snapshots without leaving an unretryable generation behind.
-    fn restore_auth_lifecycle_snapshot(
+    /// The returned token is an opaque handoff for `restore_auth_lifecycle_snapshot`;
+    /// callers may inspect the read-only snapshot but cannot fabricate a restore
+    /// request from token-store or projection metadata.
+    fn capture_auth_lifecycle_restore_snapshot(
         &self,
         lease_key: &LeaseKey,
-        snapshot: &AuthLeaseSnapshot,
-        expires_at: Option<u64>,
-    ) -> Result<(), DslTransitionError> {
-        if !snapshot.credential_present {
-            return Ok(());
-        }
-        let Some(phase) = snapshot.phase else {
-            return Ok(());
-        };
-        if phase == AuthLeasePhase::Released {
-            return Ok(());
-        }
-        let Some(expires_at) = expires_at else {
-            return Ok(());
-        };
-        self.acquire_lease(lease_key, expires_at)?;
-        match phase {
-            AuthLeasePhase::Valid => Ok(()),
-            AuthLeasePhase::Expiring => self.mark_expiring(lease_key),
-            AuthLeasePhase::Refreshing => self.begin_refresh(lease_key),
-            AuthLeasePhase::ReauthRequired => self.mark_reauth_required(lease_key),
-            AuthLeasePhase::Released => Ok(()),
-        }
+    ) -> AuthLeaseRestoreSnapshot {
+        AuthLeaseRestoreSnapshot::capture(
+            lease_key.clone(),
+            self.snapshot(lease_key),
+            self.type_id(),
+            self.auth_lifecycle_restore_instance_id(),
+        )
+    }
+
+    #[doc(hidden)]
+    fn auth_lifecycle_restore_instance_id(&self) -> usize {
+        std::ptr::from_ref(self).cast::<()>() as usize
+    }
+
+    /// Restore a captured lifecycle snapshot after a later durable write failed.
+    ///
+    /// Production handles must implement this through generated machine
+    /// authority. The default fails closed so a handwritten handle cannot become
+    /// a lifecycle reducer by replaying public snapshot fields.
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        snapshot: &AuthLeaseRestoreSnapshot,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        let _ = snapshot;
+        Err(DslTransitionError::new(
+            "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
+            "restoring auth lifecycle snapshots requires generated AuthMachine authority",
+        ))
+    }
+
+    /// Restore a durable credential lifecycle publication through generated
+    /// AuthMachine authority.
+    ///
+    /// The default fails closed so token stores cannot become handwritten
+    /// lifecycle reducers. Production handles must route this through the
+    /// generated `RestoreAuthoritySnapshot` input before exposing a restored
+    /// lease transition.
+    fn restore_published_credential_lifecycle(
+        &self,
+        lease_key: &LeaseKey,
+        publication: &crate::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        let _ = (lease_key, publication);
+        Err(DslTransitionError::new(
+            "AuthLeaseHandle::restore_published_credential_lifecycle",
+            "restoring durable auth lifecycle publications requires generated AuthMachine authority",
+        ))
     }
 
     /// Observe the current DSL-level state of a binding.
@@ -1276,6 +1758,15 @@ pub trait PeerInteractionHandle: Send + Sync {
         disposition: PeerTerminalDisposition,
     ) -> Result<(), DslTransitionError>;
 
+    /// Fire `PeerResponseRejected { corr_id }`.
+    ///
+    /// Guard: `corr_id` is in `pending_peer_requests`. This is used when
+    /// peer ingress produced a response observation that cannot be admitted
+    /// as progress or terminal because the generated terminality feedback is
+    /// missing or inconsistent. The DSL owns the terminal cleanup; callers do
+    /// not substitute a response disposition.
+    fn response_rejected(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
     /// Fire `PeerRequestTimedOut { corr_id }`.
     ///
     /// Guard: `corr_id` is in `pending_peer_requests`. Like `response_terminal`,
@@ -1283,10 +1774,21 @@ pub trait PeerInteractionHandle: Send + Sync {
     /// effect is emitted; subsequent fires fail the guard.
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
-    /// Fire `PeerRequestReceived { corr_id }` (inbound).
+    /// Fire `PeerRequestReceived { corr_id, handling_mode }` (inbound).
     ///
     /// Guard: `corr_id` is not already in `inbound_peer_requests`.
-    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+    fn request_received(
+        &self,
+        corr_id: PeerCorrelationId,
+        handling_mode: HandlingMode,
+    ) -> Result<(), DslTransitionError>;
+
+    /// Ask the generated machine authority to classify a typed outbound reply
+    /// status before shell transport send/cleanup code consumes terminality.
+    fn classify_response_reply(
+        &self,
+        status: crate::ResponseStatus,
+    ) -> Result<crate::TerminalityClass, DslTransitionError>;
 
     /// Fire `PeerResponseReplied { corr_id }` (inbound reply sent).
     ///
@@ -1300,6 +1802,9 @@ pub trait PeerInteractionHandle: Send + Sync {
 
     /// Observe the DSL-owned state of an inbound peer request.
     fn inbound_state(&self, corr_id: PeerCorrelationId) -> Option<InboundPeerRequestState>;
+
+    /// Observe the DSL-owned handling-mode default for an inbound peer request.
+    fn inbound_handling_mode(&self, corr_id: PeerCorrelationId) -> Option<HandlingMode>;
 
     /// Install a projection-cleanup observer for the peer-interaction
     /// lifecycle. The runtime handle invokes the observer whenever a DSL
@@ -1630,15 +2135,24 @@ pub trait InteractionStreamCleanupObserver: Send + Sync {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::{
-        ExternalToolSurfaceEffect, ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput,
-        PeerConversationProjection, PeerResponseProgressProjectionPhase,
-        PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
-        PeerResponseTerminalFact, PeerResponseTerminalFactError,
-        PeerResponseTerminalProjectionStatus, PeerResponseTerminalRenderPayload,
-        PeerResponseTerminalRouteIdentity, PeerResponseTerminalSource,
-        PeerResponseTerminalTransportIdentity, peer_response_terminal_context_key,
+        DslRejectionKind, DslTransitionError, ExternalToolSurfaceEffect,
+        ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput, PeerConversationProjection,
+        PeerResponseProgressProjectionPhase, PeerResponseTerminalCorrelationId,
+        PeerResponseTerminalDisplayIdentity, PeerResponseTerminalFact,
+        PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
+        PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
+        PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
+        peer_response_terminal_context_key,
     };
     use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
+
+    #[test]
+    fn recovered_state_rejection_is_not_guard_noop() {
+        let err =
+            DslTransitionError::recovered_state_invariant_rejected("recover", "bad invariant");
+        assert_eq!(err.kind, DslRejectionKind::RecoveredStateInvariantRejected);
+        assert!(!err.is_guard_rejected());
+    }
 
     #[test]
     fn external_tool_surface_pending_failure_cause_projects_external_code() {
@@ -1712,6 +2226,33 @@ mod tests {
         assert_eq!(
             projection.prompt_text(),
             "Peer terminal response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"request_subject\": \"alpha beta gamma\",\n  \"token\": \"birch seventeen\"\n}."
+        );
+    }
+
+    #[test]
+    fn peer_terminal_fact_is_structural_projection_only() {
+        let route_id = "550e8400-e29b-41d4-a716-446655440000";
+        let route_identity =
+            PeerResponseTerminalRouteIdentity::parse(route_id).expect("route identity");
+        let correlation_id =
+            PeerResponseTerminalCorrelationId::parse("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
+                .expect("correlation id");
+
+        let fact = PeerResponseTerminalFact::new(
+            PeerResponseTerminalSource::new(
+                None,
+                route_identity,
+                PeerResponseTerminalDisplayIdentity::parse("Analyst").expect("display identity"),
+            ),
+            correlation_id,
+            PeerResponseTerminalProjectionStatus::Cancelled,
+            PeerResponseTerminalRenderPayload::new(None),
+        );
+
+        assert_eq!(
+            fact.status,
+            PeerResponseTerminalProjectionStatus::Cancelled,
+            "status support is decided by generated admission authority, not fact construction"
         );
     }
 

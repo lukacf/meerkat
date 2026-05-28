@@ -37,7 +37,7 @@ path = "tests/live_rest_matrix.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule", "workgraph"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
@@ -82,6 +82,7 @@ hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 http-body-util = { workspace = true }
+meerkat-mob = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 ignored = [

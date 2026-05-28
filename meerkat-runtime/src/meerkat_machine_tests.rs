@@ -17,7 +17,8 @@ use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunId};
 use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
+    CompletionCursorConsumer, OperationKind, OperationProgressUpdate, OperationSpec,
+    OpsLifecycleRegistry,
 };
 use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
 use meerkat_machine_kernels::test_oracle::{
@@ -41,7 +42,8 @@ use crate::identifiers::IdempotencyKey;
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::meerkat_machine_types::{
     ImageOperationRoutingRequest, ImageOperationRoutingResult, MeerkatMachineRunFailure,
-    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, SwitchTurnRequest,
+    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, SessionLlmCapabilitySurfaceStatus,
+    SwitchTurnRequest,
 };
 
 fn uuid(n: u128) -> uuid::Uuid {
@@ -141,6 +143,10 @@ fn peer_endpoint_schema_structural_fields(
                 "PeerEndpoint.{} must be a typed named field, got String",
                 field.name
             )),
+            meerkat_machine_schema::TypePathStructFieldAtom::OptionalNamed(name) => Err(format!(
+                "PeerEndpoint.{} must be a required named field, got Option<{name}>",
+                field.name
+            )),
         })
         .collect()
 }
@@ -233,91 +239,6 @@ fn persistent_auth_authority_test_guard() -> std::sync::MutexGuard<'static, ()> 
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct DelegatingCustomAuthLeaseHandle(crate::handles::RuntimeAuthLeaseHandle);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle {
-    fn acquire_lease(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        expires_at: u64,
-    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
-    {
-        self.0.acquire_lease(lease_key, expires_at)
-    }
-
-    fn mark_expiring(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.mark_expiring(lease_key)
-    }
-
-    fn begin_refresh(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.begin_refresh(lease_key)
-    }
-
-    fn complete_refresh(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        new_expires_at: u64,
-        now: u64,
-    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
-    {
-        self.0.complete_refresh(lease_key, new_expires_at, now)
-    }
-
-    fn refresh_failed(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        permanent: bool,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.refresh_failed(lease_key, permanent)
-    }
-
-    fn mark_reauth_required(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.mark_reauth_required(lease_key)
-    }
-
-    fn release_lease(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.release_lease(lease_key)
-    }
-
-    fn release_credential_lifecycle(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0.release_credential_lifecycle(lease_key)
-    }
-
-    fn restore_auth_lifecycle_snapshot(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
-        expires_at: Option<u64>,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.0
-            .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
-    }
-
-    fn snapshot(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> meerkat_core::handles::AuthLeaseSnapshot {
-        self.0.snapshot(lease_key)
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -755,10 +676,9 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
+fn oauth_lifecycle_release_stays_paired_after_runtime_auth_handle_install() {
     let machine = MeerkatMachine::ephemeral();
-    let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())
-        as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
+    let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     machine.set_auth_lease_handle(external_auth);
     let target = oauth_target();
     let redirect_uri = "http://127.0.0.1/callback";
@@ -775,7 +695,7 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
     machine
         .auth_lease_handle()
         .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
-        .expect("custom auth handle release clears paired OAuth lifecycle");
+        .expect("runtime auth handle release clears paired OAuth lifecycle");
 
     assert!(matches!(
         machine.oauth_flow_authority().consume(
@@ -790,31 +710,6 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
                 ..
             }
         )
-    ));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn custom_auth_handle_install_does_not_create_separate_oauth_lifecycle_authority() {
-    let machine = MeerkatMachine::ephemeral();
-    let custom_auth = Arc::new(DelegatingCustomAuthLeaseHandle(
-        crate::handles::RuntimeAuthLeaseHandle::new(),
-    )) as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
-    machine.set_auth_lease_handle(custom_auth);
-
-    let err = machine
-        .oauth_flow_authority()
-        .start(
-            oauth_target(),
-            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-            "http://127.0.0.1/callback".to_string(),
-            "verifier".to_string(),
-        )
-        .expect_err("custom auth handles without an OAuth lifecycle seam must not get a hidden runtime flow authority");
-
-    assert!(matches!(
-        err,
-        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. }
     ));
 }
 
@@ -888,7 +783,8 @@ fn prepare_bindings_input(
     dsl::MeerkatMachineInput::PrepareBindings {
         agent_runtime_id: dsl::AgentRuntimeId::from(runtime_id.to_string()),
         fence_token: dsl::FenceToken(fence_token),
-        generation: dsl::Generation(0),
+        generation: Some(dsl::Generation(0)),
+        runtime_epoch_id: None,
         session_id: dsl::SessionId::from_domain(session_id),
     }
 }
@@ -990,7 +886,7 @@ async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_a
     machine.register_session(session_id.clone()).await;
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
-    let previous_state = machine
+    let previous_snapshot = machine
         .stage_session_dsl_input(
             &session_id,
             prepare_bindings_input(&session_id, "rt-provisional", 7),
@@ -1005,7 +901,7 @@ async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_a
     );
 
     machine
-        .restore_session_dsl_state(&session_id, previous_state)
+        .restore_session_dsl_state(&session_id, previous_snapshot)
         .await;
 
     let (_, effects) = machine
@@ -1038,7 +934,7 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
     machine.register_session(session_id.clone()).await;
     let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
 
-    let previous_state = machine
+    let previous_snapshot = machine
         .stage_session_dsl_input(
             &session_id,
             prepare_bindings_input(&session_id, "rt-rolled-back", 17),
@@ -1047,7 +943,7 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
         .await
         .expect("provisional stage");
     machine
-        .restore_session_dsl_state(&session_id, previous_state)
+        .restore_session_dsl_state(&session_id, previous_snapshot)
         .await;
 
     assert!(
@@ -1058,7 +954,7 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
 }
 
 #[tokio::test]
-async fn authoritative_dsl_apply_rolls_back_state_when_effect_dispatch_fails() {
+async fn authoritative_dsl_apply_preserves_committed_state_when_effect_dispatch_fails() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
     machine.register_session(session_id.clone()).await;
@@ -1076,7 +972,19 @@ async fn authoritative_dsl_apply_rolls_back_state_when_effect_dispatch_fails() {
         Err(err) => err,
     };
     assert!(err.contains("injected signal commit failure"), "{err}");
-    assert_no_runtime_binding(&machine, &session_id).await;
+    let state = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("session DSL state");
+    assert!(
+        matches!(&state.active_runtime_id, Some(value) if value.0 == "rt-dispatch-fails"),
+        "committed generated binding must remain authoritative after handoff failure: {:?}",
+        state.active_runtime_id
+    );
+    assert!(matches!(
+        state.active_fence_token,
+        Some(dsl::FenceToken(23))
+    ));
 }
 
 #[tokio::test]
@@ -1140,9 +1048,15 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
     );
     let session_id = SessionId::new();
     machine.register_session(session_id.clone()).await;
+    let bindings = machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime binding before retire");
     install_rejecting_meerkat_signal_dispatcher(&machine);
 
     let runtime_id = runtime_id_for_session(&session_id);
+    let expected_runtime_id = runtime_id.to_string();
+    let expected_epoch_id = bindings.epoch_id().to_string();
     let err = crate::traits::RuntimeControlPlane::retire(&machine, &runtime_id)
         .await
         .expect_err("signal dispatch failure should surface");
@@ -1156,11 +1070,26 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
         "durably committed retire must not roll live DSL authority back to an earlier phase"
     );
     assert_eq!(
-        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .expect("load persisted runtime state"),
         Some(RuntimeState::Retired),
         "persistent retire shell commit remains authoritative after routed-effect failure"
+    );
+    let lifecycle = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+        .await
+        .expect("load persisted lifecycle snapshot")
+        .expect("persisted lifecycle snapshot");
+    assert_eq!(lifecycle.runtime_state(), RuntimeState::Retired);
+    assert_eq!(
+        lifecycle.binding().agent_runtime_id(),
+        Some(expected_runtime_id.as_str()),
+        "durable lifecycle snapshot must keep generated runtime binding identity"
+    );
+    assert_eq!(lifecycle.binding().fence_token(), Some(0));
+    assert_eq!(
+        lifecycle.binding().runtime_epoch_id(),
+        Some(expected_epoch_id.as_str())
     );
 
     let recovered = MeerkatMachine::persistent(
@@ -1168,13 +1097,37 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
         memory_blob_store(),
     );
     recovered.register_session(session_id.clone()).await;
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&recovered);
+    crate::traits::RuntimeControlPlane::retire(&recovered, &runtime_id)
+        .await
+        .expect("cold-restart retry should replay generated RuntimeRetired effect");
+    let log = signal_surface.log.lock().await;
+    let (_, fields) = log
+        .iter()
+        .find(|(variant, _)| variant.as_str() == "ObserveRuntimeRetired")
+        .expect("cold-restart retry must deliver generated RuntimeRetired");
+    assert!(
+        fields.iter().any(|(field, value)| {
+            field.as_str() == "agent_runtime_id"
+                && matches!(value, crate::composition::OwnedFieldValue::Str(value) if value == &expected_runtime_id)
+        }),
+        "RuntimeRetired replay must carry the recovered generated runtime id"
+    );
+    assert!(
+        fields.iter().any(|(field, value)| {
+            field.as_str() == "fence_token"
+                && matches!(value, crate::composition::OwnedFieldValue::U64(0))
+        }),
+        "RuntimeRetired replay must carry the recovered generated fence token"
+    );
+    drop(log);
     assert_eq!(
         recovered.existing_session_runtime_state(&session_id).await,
         Some(RuntimeState::Retired),
         "cold restart must preserve the durable machine-owned terminal state"
     );
     assert_eq!(
-        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .expect("load persisted runtime state after recovery"),
         Some(RuntimeState::Retired),
@@ -1347,7 +1300,8 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(TypedFailingExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     adapter
         .accept_input(&session_id, make_prompt("typed apply failure"))
@@ -1364,12 +1318,12 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 authority
-                    .state
+                    .state()
                     .last_runtime_apply_failure_cause
                     .map(|cause| {
                         (
                             cause,
-                            authority.state.last_runtime_apply_failure_message.clone(),
+                            authority.state().last_runtime_apply_failure_message.clone(),
                         )
                     })
             };
@@ -1390,7 +1344,7 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
 }
 
 #[tokio::test]
-async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
+async fn machine_terminal_failure_without_generated_state_fails_closed_through_runtime_loop() {
     struct TypedMachineFailureExecutor;
 
     #[async_trait::async_trait]
@@ -1426,7 +1380,8 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(TypedMachineFailureExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(&session_id, make_prompt("typed machine failure"))
@@ -1441,28 +1396,13 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
             .wait(),
     )
     .await
-    .expect("completion waiter should resolve");
+    .expect("completion waiter should resolve")
+    .expect("runtime stop authority should resolve the waiter");
     match completion {
-        CompletionOutcome::AbandonedWithError { reason, error } => {
-            assert!(
-                reason.contains("apply failed: Terminal failure: Failed (LlmFailure)"),
-                "operator reason should remain available: {reason}"
-            );
-            assert_eq!(error.kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
-            assert!(error.terminal);
-            assert_eq!(
-                error.outcome,
-                Some(meerkat_core::TurnTerminalOutcome::Failed)
-            );
-            assert!(
-                error
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("provider auth denied")),
-                "typed metadata should preserve original diagnostic detail: {error:?}"
-            );
+        CompletionOutcome::RuntimeTerminated(reason) => {
+            assert_eq!(reason, "runtime stopped");
         }
-        other => panic!("expected typed abandoned completion, got {other:?}"),
+        other => panic!("expected runtime-terminated completion, got {other:?}"),
     }
 
     let (
@@ -1470,42 +1410,30 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
         terminal_cause_kind,
         runtime_apply_failure_cause,
         runtime_apply_failure_message,
-    ) = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let observed = {
-                let sessions = adapter.sessions.read().await;
-                let entry = sessions.get(&session_id).expect("session should exist");
-                let authority = entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (
-                    authority.state.terminal_outcome,
-                    authority.state.terminal_cause_kind,
-                    authority.state.last_runtime_apply_failure_cause,
-                    authority.state.last_runtime_apply_failure_message.clone(),
-                )
-            };
-            if observed.1.is_some() {
-                break observed;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("runtime loop should terminalize the typed machine failure");
+    ) = {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            authority.state().terminal_outcome,
+            authority.state().terminal_cause_kind,
+            authority.state().last_runtime_apply_failure_cause,
+            authority.state().last_runtime_apply_failure_message.clone(),
+        )
+    };
 
-    assert_eq!(terminal_outcome, Some(mm_dsl::TurnTerminalOutcome::Failed));
-    assert_eq!(
-        terminal_cause_kind,
-        Some(mm_dsl::TurnTerminalCauseKind::LlmFailure)
-    );
+    assert_eq!(terminal_outcome, None);
+    assert_eq!(terminal_cause_kind, None);
     assert_eq!(runtime_apply_failure_cause, None);
     assert_eq!(runtime_apply_failure_message, None);
 }
 
 #[tokio::test]
-async fn machine_terminal_failure_preserves_typed_outcome_through_runtime_loop() {
+async fn machine_terminal_failure_without_generated_outcome_does_not_mint_terminal_facts_through_runtime_loop()
+ {
     struct TypedOutcomeFailureExecutor;
 
     #[async_trait::async_trait]
@@ -1541,12 +1469,100 @@ async fn machine_terminal_failure_preserves_typed_outcome_through_runtime_loop()
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(TypedOutcomeFailureExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
-    adapter
-        .accept_input(&session_id, make_prompt("typed outcome machine failure"))
+    let (accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("typed outcome machine failure"))
         .await
         .expect("input should be accepted");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve")
+    .expect("runtime stop authority should resolve the waiter");
+    assert!(matches!(
+        completion,
+        CompletionOutcome::RuntimeTerminated(reason) if reason == "runtime stopped"
+    ));
+
+    let (terminal_outcome, terminal_cause_kind) = {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            authority.state().terminal_outcome,
+            authority.state().terminal_cause_kind,
+        )
+    };
+
+    assert_eq!(terminal_outcome, None);
+    assert_eq!(terminal_cause_kind, None);
+}
+
+#[tokio::test]
+async fn machine_terminal_cancellation_drives_completion_result_through_runtime_loop() {
+    struct CancelledExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CancelledExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::Cancelled)
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(CancelledExecutor))
+        .await
+        .expect("runtime executor registration should succeed");
+
+    let (accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("cancel through machine"))
+        .await
+        .expect("input should be accepted");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait_authorized(),
+    )
+    .await
+    .expect("completion waiter should resolve");
+    assert!(
+        matches!(completion, CompletionOutcome::Cancelled),
+        "cancelled completion should be projected from machine terminal state, got {completion:?}"
+    );
 
     let (terminal_outcome, terminal_cause_kind) =
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1559,27 +1575,24 @@ async fn machine_terminal_failure_preserves_typed_outcome_through_runtime_loop()
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     (
-                        authority.state.terminal_outcome,
-                        authority.state.terminal_cause_kind,
+                        authority.state().terminal_outcome,
+                        authority.state().terminal_cause_kind,
                     )
                 };
-                if observed.1.is_some() {
+                if observed.0.is_some() {
                     break observed;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("runtime loop should terminalize the typed machine failure");
+        .expect("runtime loop should terminalize the cancellation");
 
     assert_eq!(
         terminal_outcome,
-        Some(mm_dsl::TurnTerminalOutcome::StructuredOutputValidationFailed)
+        Some(mm_dsl::TurnTerminalOutcome::Cancelled)
     );
-    assert_eq!(
-        terminal_cause_kind,
-        Some(mm_dsl::TurnTerminalCauseKind::StructuredOutputValidationFailed)
-    );
+    assert_eq!(terminal_cause_kind, None);
 }
 
 #[tokio::test]
@@ -1649,7 +1662,8 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
                 session_id: session_id.clone(),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(
@@ -1664,7 +1678,7 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
         Duration::from_secs(1),
         completion_handle
             .expect("accepted input should register a completion waiter")
-            .wait(),
+            .wait_authorized(),
     )
     .await
     .expect("completion waiter should resolve after finalization failure");
@@ -1794,7 +1808,8 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
                 observed_committed_snapshot: observed_committed_snapshot.clone(),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (_accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(&session_id, make_prompt("checkpoint after commit"))
@@ -1804,7 +1819,7 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
         Duration::from_secs(1),
         completion_handle
             .expect("accepted input should register a completion waiter")
-            .wait(),
+            .wait_authorized(),
     )
     .await
     .expect("completion waiter should resolve");
@@ -1895,7 +1910,8 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
                 session_id: session_id.clone(),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let (_accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(&session_id, make_prompt("checkpoint failure"))
@@ -1905,7 +1921,7 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
         Duration::from_secs(1),
         completion_handle
             .expect("accepted input should register a completion waiter")
-            .wait(),
+            .wait_authorized(),
     )
     .await
     .expect("completion waiter should resolve");
@@ -1962,7 +1978,8 @@ async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(HookDeniedExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     adapter
         .accept_input(&session_id, make_prompt("typed hook denial"))
@@ -1979,12 +1996,12 @@ async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 authority
-                    .state
+                    .state()
                     .last_runtime_apply_failure_cause
                     .map(|cause| {
                         (
                             cause,
-                            authority.state.last_runtime_apply_failure_message.clone(),
+                            authority.state().last_runtime_apply_failure_message.clone(),
                         )
                     })
             };
@@ -2029,9 +2046,9 @@ async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (
-            authority.state.terminal_cause_kind,
-            authority.state.last_runtime_apply_failure_cause,
-            authority.state.last_runtime_apply_failure_message.clone(),
+            authority.state().terminal_cause_kind,
+            authority.state().last_runtime_apply_failure_cause,
+            authority.state().last_runtime_apply_failure_message.clone(),
         )
     };
 
@@ -2104,16 +2121,26 @@ async fn spawn_test_comms_drain(
     let entry = sessions
         .get_mut(&session_id)
         .expect("register_session must have created the entry");
-    let slot = &mut entry.drain_slot;
-    slot.mode = Some(mode);
-    slot.phase = CommsDrainPhase::Starting;
-    slot.handle = Some(crate::comms_drain::spawn_comms_drain(
+    {
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
+                mode: crate::meerkat_machine::dsl::DrainMode::from(mode),
+            },
+        )
+        .expect("test drain spawn authority should accept");
+    }
+    let handle = crate::comms_drain::spawn_comms_drain(
         Arc::clone(adapter),
         session_id.clone(),
-        comms_runtime,
+        Arc::clone(&comms_runtime),
         Some(idle_timeout),
-    ));
-    slot.phase = CommsDrainPhase::Running;
+    );
+    entry.drain_slot.install_task(comms_runtime, handle);
 }
 
 async fn current_phase(
@@ -2121,15 +2148,20 @@ async fn current_phase(
     session_id: &SessionId,
 ) -> Option<CommsDrainPhase> {
     let sessions = adapter.sessions.read().await;
-    sessions.get(session_id).map(|entry| entry.drain_slot.phase)
+    sessions.get(session_id).map(|entry| {
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        CommsDrainPhase::from(authority.state().drain_phase)
+    })
 }
 
 async fn handle_present(adapter: &Arc<MeerkatMachine>, session_id: &SessionId) -> bool {
     let sessions = adapter.sessions.read().await;
     sessions
         .get(session_id)
-        .and_then(|entry| entry.drain_slot.handle.as_ref())
-        .is_some()
+        .is_some_and(|entry| entry.drain_slot.handle_present())
 }
 
 async fn wait_for_phase(
@@ -2235,6 +2267,82 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
     assert!(
         !sessions.contains_key(&session_id),
         "unregister must remove the session entry (which owns the comms drain slot)"
+    );
+}
+
+#[tokio::test]
+async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    let stale_epoch = meerkat_core::RuntimeEpochId::new();
+    let stale_cursor = meerkat_core::EpochCursorState::new();
+    let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+        .capture_persistence_snapshot(stale_epoch.clone(), &stale_cursor)
+        .unwrap();
+
+    crate::store::RuntimeStore::persist_ops_lifecycle(store.as_ref(), &runtime_id, &stale_snapshot)
+        .await
+        .expect("test snapshot should persist");
+
+    adapter.register_session(session_id.clone()).await;
+    adapter.unregister_session(&session_id).await;
+
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(store.as_ref(), &runtime_id)
+            .await
+            .expect("store should load")
+            .is_none(),
+        "unregister ends the runtime epoch and must remove its durable ops snapshot"
+    );
+
+    adapter.register_session(session_id.clone()).await;
+    let sessions = adapter.sessions.read().await;
+    let rebound_epoch = sessions
+        .get(&session_id)
+        .expect("session should re-register")
+        .epoch_id
+        .clone();
+    assert_ne!(
+        rebound_epoch, stale_epoch,
+        "durable rebind must mint a fresh epoch after unregister"
+    );
+}
+
+#[tokio::test]
+async fn unregister_session_retains_terminal_machine_lifecycle_snapshot() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+
+    adapter.register_session(session_id.clone()).await;
+    crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire should persist generated terminal lifecycle");
+    assert_eq!(
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load retired runtime state"),
+        Some(RuntimeState::Retired)
+    );
+
+    adapter.unregister_session(&session_id).await;
+
+    assert!(!adapter.contains_session(&session_id).await);
+    assert_eq!(
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after unregister"),
+        Some(RuntimeState::Retired),
+        "unregister cleanup must not overwrite generated terminal lifecycle truth with its post-cleanup Idle projection"
     );
 }
 
@@ -2389,13 +2497,25 @@ async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
         "operation override takes precedence over the active turn override"
     );
 
-    let empty_terminal = meerkat_core::image_generation::ImageOperationTerminalClass::EmptyResult {
-        provider_text: meerkat_core::image_generation::ProviderTextDisposition::Captured {
-            text_artifact_ref: meerkat_core::image_generation::TextArtifactRef::new(
-                "provider-text-artifact",
-            ),
-        },
+    let provider_text = meerkat_core::image_generation::ProviderTextDisposition::Captured {
+        text_artifact_ref: meerkat_core::image_generation::TextArtifactRef::new(
+            "provider-text-artifact",
+        ),
     };
+    let empty_terminal =
+        <MeerkatMachine as SessionServiceRuntimeExt>::classify_image_operation_terminal(
+            &adapter,
+            &session_id,
+            operation_id,
+            meerkat_core::image_generation::ImageProviderTerminalObservation::EmptyResult,
+            provider_text,
+        )
+        .await
+        .expect("image terminal should classify through machine authority");
+    assert!(matches!(
+        empty_terminal,
+        meerkat_core::image_generation::ImageOperationTerminalClass::EmptyResult { .. }
+    ));
     <MeerkatMachine as SessionServiceRuntimeExt>::complete_image_operation(
         &adapter,
         &session_id,
@@ -2476,7 +2596,10 @@ async fn model_routing_denials_cover_approval_and_scoped_nesting_guards() {
     assert!(matches!(
         denied,
         meerkat_core::image_generation::SwitchTurnControlResult::Denied {
-            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval { .. },
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval {
+                approvable:
+                    meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold
+            },
             ..
         }
     ));
@@ -2524,7 +2647,32 @@ async fn model_routing_denials_cover_approval_and_scoped_nesting_guards() {
     assert!(matches!(
         denied_by_user,
         meerkat_core::image_generation::SwitchTurnControlResult::Denied {
-            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval { .. },
+            reason: meerkat_core::image_generation::SwitchTurnDenialReason::DeniedDuringApproval {
+                approvable: meerkat_core::image_generation::SwitchTurnApprovalReason::UntilChangedFromModelOrigin
+            },
+            ..
+        }
+    ));
+
+    let mut denied_image = image_request(400, "image-denied-target");
+    denied_image.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_image.approval_reason =
+        Some(meerkat_core::image_generation::ImageOperationApprovalReason::SafetyHold);
+    let denied_image_result = <MeerkatMachine as SessionServiceRuntimeExt>::begin_image_operation(
+        &adapter,
+        &session_id,
+        denied_image,
+    )
+    .await
+    .expect("image user denial should terminalize");
+    assert!(matches!(
+        denied_image_result,
+        ImageOperationRoutingResult::Denied {
+            reason:
+                meerkat_core::image_generation::ImageOperationDenialReason::DeniedDuringApproval {
+                    approvable:
+                        meerkat_core::image_generation::ImageOperationApprovalReason::SafetyHold
+                },
             ..
         }
     ));
@@ -2653,7 +2801,8 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "baseline".to_string(),
         provider: meerkat_core::Provider::OpenAI,
@@ -2906,7 +3055,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -2989,7 +3138,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
         1
     );
 
-    match stale_handle.wait().await {
+    match stale_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "recycled input no longer pending");
         }
@@ -2999,7 +3148,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
-    match active_handle.wait().await {
+    match active_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -3103,7 +3252,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -3129,6 +3278,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: first,
+                register_completion: true,
             },
         )
         .await
@@ -3157,6 +3307,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: duplicate,
+                register_completion: true,
             },
         )
         .await
@@ -3261,7 +3412,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
         1
     );
 
-    match stale_handle.wait().await {
+    match stale_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "recovered input no longer pending");
         }
@@ -3271,7 +3422,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
-    match active_handle.wait().await {
+    match active_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -3337,7 +3488,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
         "destroy should clear the completion waiter carrier immediately"
     );
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -3417,7 +3568,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<crate::store::SessionDelta>,
             receipt: RunBoundaryReceipt,
-            input_updates: Vec<crate::input_state::StoredInputState>,
+            input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
             session_store_key: Option<SessionId>,
         ) -> Result<(), crate::store::RuntimeStoreError> {
             self.inner
@@ -3488,7 +3639,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &crate::input_state::StoredInputState,
+            state: &crate::input_state::InputStatePersistenceRecord,
         ) -> Result<(), crate::store::RuntimeStoreError> {
             self.inner.persist_input_state(runtime_id, state).await
         }
@@ -3502,27 +3653,53 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             self.inner.load_input_state(runtime_id, input_id).await
         }
 
-        async fn load_runtime_state(
+        async fn load_machine_lifecycle_record(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<RuntimeState>, crate::store::RuntimeStoreError> {
-            self.inner.load_runtime_state(runtime_id).await
+        ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
         }
 
         async fn commit_machine_lifecycle(
             &self,
             runtime_id: &LogicalRuntimeId,
             commit: crate::store::MachineLifecycleCommit,
-            input_states: &[crate::input_state::StoredInputState],
+            input_states: &[crate::input_state::InputStatePersistenceRecord],
         ) -> Result<(), crate::store::RuntimeStoreError> {
+            let runtime_state = commit.runtime_state();
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
                 .await?;
-            if commit.runtime_state() == RuntimeState::Destroyed {
+            if runtime_state == RuntimeState::Destroyed {
                 self.destroy_commit_started.notify_one();
                 self.release_destroy_commit.notified().await;
             }
             Ok(())
+        }
+
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            snapshot: &crate::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Option<crate::ops_lifecycle::PersistedOpsSnapshot>,
+            crate::store::RuntimeStoreError,
+        > {
+            self.inner.load_ops_lifecycle(runtime_id).await
+        }
+
+        async fn delete_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.delete_ops_lifecycle(runtime_id).await
         }
     }
 
@@ -3577,7 +3754,9 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         .expect("destroy should succeed");
     assert_eq!(report.inputs_abandoned, 0);
     assert_eq!(
-        store.inner.load_runtime_state(&runtime_id).await.unwrap(),
+        crate::store::load_runtime_state(store.inner.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Destroyed),
         "test probe should observe the durable destroyed commit after ack",
     );
@@ -3632,6 +3811,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
             owner_session_id: session_id.clone(),
             display_name: "destroy steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -3679,7 +3859,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
         .expect("destroy should clear the steered completion waiter while preserving wait_all");
     assert_eq!(report.inputs_abandoned, 1);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -3815,7 +3995,8 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("destroy-with-loop");
     let input_id = input.id().clone();
@@ -3897,7 +4078,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
         "destroy currently bypasses the executor control seam and does not deliver an out-of-band control command"
     );
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -3977,7 +4158,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered prompt",
@@ -4049,7 +4231,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
         .await
         .expect("attached steered prompt should finish after the executor is released");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected attached steered prompt to complete through the live loop, got {other:?}"
@@ -4152,7 +4334,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -4167,6 +4350,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
             owner_session_id: session_id.clone(),
             display_name: "attached steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -4249,7 +4433,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
         .await
         .expect("attached steered prompt should finish after the executor is released");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected attached steered prompt to complete while wait_all remains live, got {other:?}"
@@ -4409,7 +4593,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -4426,6 +4611,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
             owner_session_id: session_id.clone(),
             display_name: "attached steered wait-first child".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: true,
         })
@@ -4560,7 +4746,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
         .await
         .expect("attached steered prompt should finish after the executor is released");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected attached steered prompt to complete after wait_all settled first, got {other:?}"
@@ -4677,7 +4863,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -4692,6 +4879,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
             owner_session_id: session_id.clone(),
             display_name: "attached steered destroy wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: true,
         })
@@ -4766,7 +4954,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         .await
         .expect("destroy should split attached steered completion and wait_all lifetimes");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -5081,7 +5269,8 @@ async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_app
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered live interrupt",
@@ -5174,7 +5363,7 @@ async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_app
         .await
         .expect("apply should finish after the executor is released");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected attached queued prompt to complete normally before queued cancel drains, got {other:?}"
@@ -5309,7 +5498,8 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered deferred boundary cancel",
@@ -5359,7 +5549,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
         .await
         .expect("apply should finish after the executor is released");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected attached queued prompt to complete normally before queued boundary cancel drains, got {other:?}"
@@ -5397,7 +5587,7 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
         live_boundary_cancel_calls: Arc<AtomicUsize>,
         queued_boundary_cancel_calls: Arc<AtomicUsize>,
         apply_started: Arc<Notify>,
-        allow_finish: Arc<Notify>,
+        allow_finish: Option<tokio::sync::oneshot::Receiver<()>>,
     }
 
     struct BoundaryHandle {
@@ -5427,7 +5617,11 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
+            self.allow_finish
+                .take()
+                .expect("blocking executor should only apply once")
+                .await
+                .expect("test release sender should stay alive until apply is released");
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceipt {
@@ -5465,7 +5659,7 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
     let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let apply_started = Arc::new(Notify::new());
-    let allow_finish = Arc::new(Notify::new());
+    let (allow_finish_tx, allow_finish_rx) = tokio::sync::oneshot::channel();
 
     adapter
         .register_session_with_executor(
@@ -5474,10 +5668,11 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
                 live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
                 queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
                 apply_started: Arc::clone(&apply_started),
-                allow_finish: Arc::clone(&allow_finish),
+                allow_finish: Some(allow_finish_rx),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered saturated boundary cancel",
@@ -5543,12 +5738,14 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
         "saturated effect channel backpressures after attempting the live cooperative wake"
     );
 
-    allow_finish.notify_waiters();
+    allow_finish_tx
+        .send(())
+        .expect("blocking executor should still be awaiting release");
     saturated_cancel
         .await
         .expect("saturated cancel task should not panic")
         .expect("saturated cancel should complete once runtime effect capacity opens");
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
     }
@@ -5643,7 +5840,8 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
                 allow_first_finish: Arc::clone(&allow_first_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let first_input = Input::Prompt(crate::input::PromptInput::new(
         "attached running peer interrupt",
@@ -5807,7 +6005,7 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
         "queued peer input should run after the first apply finishes"
     );
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected first attached steered prompt to complete before queued peer input runs, got {other:?}"
@@ -5902,7 +6100,8 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let first_input = Input::Prompt(crate::input::PromptInput::new(
         "attached service ext running turn",
@@ -6046,7 +6245,7 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
         &self,
         _expected_run_id: &meerkat_core::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
-    ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+    ) -> Result<meerkat_core::lifecycle::CoreBoundaryStageOutput, CoreExecutorError> {
         self.probe
             .live_boundary_stage_calls
             .fetch_add(1, Ordering::SeqCst);
@@ -6061,7 +6260,7 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
             .lock()
             .expect("staged text mutex poisoned");
         staged.extend(appends.into_iter().map(|append| append.text));
-        Ok(None)
+        Ok(meerkat_core::lifecycle::CoreBoundaryStageOutput::new(None))
     }
 
     async fn discard_staged_system_context_at_boundary(
@@ -6175,7 +6374,8 @@ impl InterruptYieldingTestRig {
                     probe: probe.clone(),
                 }),
             )
-            .await;
+            .await
+            .expect("runtime executor registration should succeed");
 
         Self {
             adapter,
@@ -6305,14 +6505,14 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
             &self,
             _expected_run_id: &meerkat_core::RunId,
             appends: Vec<meerkat_core::PendingSystemContextAppend>,
-        ) -> Result<Option<Vec<u8>>, CoreExecutorError> {
+        ) -> Result<meerkat_core::lifecycle::CoreBoundaryStageOutput, CoreExecutorError> {
             self.stage_calls.fetch_add(1, Ordering::SeqCst);
             let mut staged = self
                 .staged_texts
                 .lock()
                 .expect("staged text mutex poisoned");
             staged.extend(appends.into_iter().map(|append| append.text));
-            Ok(None)
+            Ok(meerkat_core::lifecycle::CoreBoundaryStageOutput::new(None))
         }
     }
 
@@ -6398,7 +6598,8 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let first_input = Input::Prompt(crate::input::PromptInput::new(
         "first turn keeps the runtime busy",
@@ -6452,9 +6653,10 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
         .expect("running explicit steer should be accepted");
     assert!(outcome.is_accepted());
     let completion_handle = completion_handle.expect("steered input should register completion");
-    let completion = tokio::time::timeout(Duration::from_secs(1), completion_handle.wait())
-        .await
-        .expect("live-injected steer input should resolve without waiting for outer turn");
+    let completion =
+        tokio::time::timeout(Duration::from_secs(1), completion_handle.wait_authorized())
+            .await
+            .expect("live-injected steer input should resolve without waiting for outer turn");
     assert!(
         matches!(completion, CompletionOutcome::CompletedWithoutResult),
         "live-injected steer input should complete without producing a separate run result, got {completion:?}"
@@ -6568,13 +6770,13 @@ async fn interrupt_yielding_multiple_steers_are_injected_and_consumed_without_re
     let first_completion = first_completion.expect("first steer should register completion");
     let second_completion = second_completion.expect("second steer should register completion");
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), first_completion.wait())
+        tokio::time::timeout(Duration::from_secs(1), first_completion.wait_authorized())
             .await
             .expect("first live steer should complete immediately"),
         CompletionOutcome::CompletedWithoutResult
     ));
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), second_completion.wait())
+        tokio::time::timeout(Duration::from_secs(1), second_completion.wait_authorized())
             .await
             .expect("second live steer should complete immediately"),
         CompletionOutcome::CompletedWithoutResult
@@ -6674,7 +6876,7 @@ async fn interrupt_yielding_deduplicated_steer_does_not_stage_twice() {
             Duration::from_secs(1),
             first_completion
                 .expect("first steer should register completion")
-                .wait()
+                .wait_authorized()
         )
         .await
         .expect("first live steer should complete immediately"),
@@ -6878,7 +7080,7 @@ async fn running_steered_operator_prompt_with_live_boundary_injects_live_context
         completion_handle.expect("operator steer should register a completion waiter");
 
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), completion_handle.wait())
+        tokio::time::timeout(Duration::from_secs(1), completion_handle.wait_authorized())
             .await
             .expect("operator steer completion should resolve through live injection"),
         CompletionOutcome::CompletedWithoutResult
@@ -7144,7 +7346,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -7159,6 +7362,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
             owner_session_id: session_id.clone(),
             display_name: "attached steered deferred stop wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: true,
         })
@@ -7363,7 +7567,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
         .await
         .expect("attached steered prompt should finish after the executor is released");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected attached steered completion to finish normally before queued stop drains, got {other:?}"
@@ -7471,7 +7675,8 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("reset-with-loop");
     let input_id = input.id().clone();
@@ -7544,7 +7749,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
         "reset currently bypasses the executor control seam and does not deliver an out-of-band control command"
     );
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -7605,7 +7810,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
         "stop should clear the completion waiter carrier immediately"
     );
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime stopped");
         }
@@ -7672,7 +7877,8 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
                 stop_calls: Arc::clone(&stop_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("stop-with-loop");
     let input_id = input.id().clone();
@@ -7718,7 +7924,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
         .await
         .expect("stop should terminate queued completion waiters through the live control seam");
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime stopped");
         }
@@ -7804,7 +8010,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_w
         "retire without a live runtime loop should clear the completion waiter carrier immediately"
     );
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "retired without runtime loop");
         }
@@ -7876,7 +8082,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("retire-with-loop");
     let input_id = input.id().clone();
@@ -7940,7 +8147,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
 
     allow_finish.notify_waiters();
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected retire+drain to complete queued work, got {other:?}"),
     }
@@ -8031,7 +8238,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("recover-with-loop-completion");
     let input_id = input.id().clone();
@@ -8117,7 +8325,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         .await
         .expect("attached loop should finish replaying the recovered queued work");
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected recover+replay to complete queued work, got {other:?}"),
     }
@@ -8222,7 +8430,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("recycle-with-loop-completion");
     let input_id = input.id().clone();
@@ -8308,7 +8517,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         .await
         .expect("attached loop should finish replaying the preserved queued work");
 
-    match handle.wait().await {
+    match handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected recycle+replay to complete queued work, got {other:?}"),
     }
@@ -8351,15 +8560,36 @@ async fn meerkat_machine_spine_snapshot_tracks_epoch_cursor_state() {
                 .cursor_state,
         )
     };
-    cursor_state
-        .agent_applied_cursor
-        .store(7, Ordering::Release);
-    cursor_state
-        .runtime_observed_seq
-        .store(11, Ordering::Release);
-    cursor_state
-        .runtime_last_injected_seq
-        .store(13, Ordering::Release);
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("registered session should exist");
+        entry
+            .ops_lifecycle
+            .advance_completion_cursor(
+                CompletionCursorConsumer::AgentApplied,
+                7,
+                Some(&cursor_state),
+            )
+            .expect("agent cursor should advance through generated authority");
+        entry
+            .ops_lifecycle
+            .advance_completion_cursor(
+                CompletionCursorConsumer::RuntimeObserved,
+                11,
+                Some(&cursor_state),
+            )
+            .expect("observed cursor should advance through generated authority");
+        entry
+            .ops_lifecycle
+            .advance_completion_cursor(
+                CompletionCursorConsumer::RuntimeInjected,
+                13,
+                Some(&cursor_state),
+            )
+            .expect("injected cursor should advance through generated authority");
+    }
 
     let snapshot = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -8390,6 +8620,7 @@ async fn meerkat_machine_spine_snapshot_tracks_runtime_ops_state() {
             owner_session_id: session_id.clone(),
             display_name: "background test op".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -8454,6 +8685,7 @@ async fn meerkat_machine_spine_snapshot_tracks_wait_all_state() {
             owner_session_id: session_id.clone(),
             display_name: "wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -8523,6 +8755,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
             owner_session_id: session_id.clone(),
             display_name: "recover wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -8649,6 +8882,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
             owner_session_id: session_id.clone(),
             display_name: "recover split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -8773,7 +9007,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -8817,6 +9051,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
             owner_session_id: session_id.clone(),
             display_name: "recover steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -8937,7 +9172,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -8981,6 +9216,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
             owner_session_id: session_id.clone(),
             display_name: "recycle steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -9101,7 +9337,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -9128,6 +9364,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
             owner_session_id: session_id.clone(),
             display_name: "recycle wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -9246,6 +9483,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
             owner_session_id: session_id.clone(),
             display_name: "recycle split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -9362,7 +9600,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
     SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -9442,7 +9680,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(
@@ -9466,6 +9705,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
             owner_session_id: session_id.clone(),
             display_name: "recover wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -9722,7 +9962,8 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("recover-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -9747,6 +9988,7 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
             owner_session_id: session_id.clone(),
             display_name: "recover split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -9854,7 +10096,7 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
         .await
         .expect("attached loop should finish replaying the recovered queued work");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected recover+replay to complete queued work, got {other:?}"),
     }
@@ -10011,7 +10253,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(
@@ -10035,6 +10278,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
             owner_session_id: session_id.clone(),
             display_name: "recycle wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -10262,7 +10506,8 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("recycle-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -10287,6 +10532,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
             owner_session_id: session_id.clone(),
             display_name: "recycle split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -10394,7 +10640,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
         .await
         .expect("attached loop should finish replaying the preserved queued work");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected recycle+replay to complete queued work, got {other:?}"),
     }
@@ -10501,6 +10747,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
             owner_session_id: session_id.clone(),
             display_name: "reset wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -10627,6 +10874,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
             owner_session_id: session_id.clone(),
             display_name: "reset steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -10673,7 +10921,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
         .expect("reset should clear steered completion waiters while preserving wait_all");
     assert_eq!(report.inputs_abandoned, 1);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -10780,6 +11028,7 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
             owner_session_id: session_id.clone(),
             display_name: "reset split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -10824,7 +11073,7 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
         .expect("reset should split completion and wait_all lifetimes");
     assert_eq!(report.inputs_abandoned, 1);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -10972,7 +11221,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(&session_id, make_progress_input("reset-wait-all-with-loop"))
@@ -10993,6 +11243,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
             owner_session_id: session_id.clone(),
             display_name: "reset wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -11189,7 +11440,8 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("reset-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -11214,6 +11466,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
             owner_session_id: session_id.clone(),
             display_name: "reset split-lifetime wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -11305,7 +11558,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
         "reset currently bypasses the executor control seam and does not deliver an out-of-band control command"
     );
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime reset");
         }
@@ -11363,6 +11616,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
             owner_session_id: session_id.clone(),
             display_name: "destroy wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -11492,6 +11746,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
             owner_session_id: session_id.clone(),
             display_name: "destroy split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -11537,7 +11792,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
         .expect("destroy should split completion and wait_all lifetimes");
     assert_eq!(report.inputs_abandoned, 1);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -11669,7 +11924,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(
@@ -11693,6 +11949,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
             owner_session_id: session_id.clone(),
             display_name: "destroy wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -11866,7 +12123,8 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("destroy-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -11902,6 +12160,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
             owner_session_id: session_id.clone(),
             display_name: "destroy split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -11947,7 +12206,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
         .expect("destroy should split completion and wait_all lifetimes on attached runtimes");
     assert_eq!(report.inputs_abandoned, 1);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -12041,6 +12300,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
             owner_session_id: session_id.clone(),
             display_name: "stop wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -12187,6 +12447,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
             owner_session_id: session_id.clone(),
             display_name: "stop steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -12233,7 +12494,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
         .await
         .expect("stop should clear steered completion waiters while preserving wait_all");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime stopped");
         }
@@ -12341,6 +12602,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
             owner_session_id: session_id.clone(),
             display_name: "stop split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -12385,7 +12647,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
         .await
         .expect("stop should split completion and wait_all lifetimes");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime stopped");
         }
@@ -12533,7 +12795,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
                 stop_calls: Arc::clone(&stop_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(&session_id, make_progress_input("stop-wait-all-with-loop"))
@@ -12554,6 +12817,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
             owner_session_id: session_id.clone(),
             display_name: "stop wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -12726,7 +12990,8 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
                 stop_calls: Arc::clone(&stop_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("stop-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -12762,6 +13027,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
             owner_session_id: session_id.clone(),
             display_name: "stop split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -12806,7 +13072,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
         .await
         .expect("stop should split completion and wait_all lifetimes on attached runtimes");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime stopped");
         }
@@ -12925,6 +13191,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
             owner_session_id: session_id.clone(),
             display_name: "retire wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -13047,6 +13314,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
             owner_session_id: session_id.clone(),
             display_name: "retire split wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -13093,7 +13361,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
     assert_eq!(report.inputs_abandoned, 1);
     assert_eq!(report.inputs_pending_drain, 0);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "retired without runtime loop");
         }
@@ -13203,6 +13471,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
             owner_session_id: session_id.clone(),
             display_name: "retire steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -13251,7 +13520,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
     assert_eq!(report.inputs_abandoned, 1);
     assert_eq!(report.inputs_pending_drain, 0);
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "retired without runtime loop");
         }
@@ -13390,7 +13659,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("retire-wait-all-with-loop");
     let outcome = adapter
@@ -13412,6 +13682,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
             owner_session_id: session_id.clone(),
             display_name: "retire wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -13655,7 +13926,8 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let input = make_progress_input("retire-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -13680,6 +13952,7 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
             owner_session_id: session_id.clone(),
             display_name: "retire split-lifetime wait target".into(),
             source_label: "meerkat_machine_test".into(),
+            operation_source: None,
             child_session_id: None,
             expect_peer_channel: false,
         })
@@ -13787,7 +14060,7 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
         .await
         .expect("attached loop should finish draining the preserved queued work");
 
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!(
             "expected retire+drain to complete queued work while wait_all remains live, got {other:?}"
@@ -14186,6 +14459,10 @@ async fn ingest_rejects_stopped_session() {
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
+    let _bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime binding before stop");
 
     // Stop the session by driving it through retire → stop.
     let runtime_id = runtime_id_for_session(&session_id);
@@ -14481,10 +14758,7 @@ async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::new(
-                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
-                    "unwind malformed commit",
-                ),
+                failure: MeerkatMachineRunFailure::new("unwind malformed commit"),
             },
         )
         .await
@@ -14509,10 +14783,7 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: RunId::new(),
-                failure: MeerkatMachineRunFailure::new(
-                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
-                    "reject the wrong run",
-                ),
+                failure: MeerkatMachineRunFailure::new("reject the wrong run"),
             },
         )
         .await;
@@ -14543,47 +14814,44 @@ async fn legacy_run_fail_rejection_preserves_registered_running_session() {
 }
 
 #[tokio::test]
-async fn legacy_run_fail_unknown_terminal_cause_rejects_before_machine_apply() {
+async fn legacy_run_fail_display_text_does_not_classify_terminal_cause() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
     let prepared =
-        prepare_legacy_run_for_authority_test(&adapter, &session_id, "unknown fail cause").await;
-    let err = adapter
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "display fail cause").await;
+    adapter
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
                 failure: MeerkatMachineRunFailure::new(
-                    meerkat_core::TurnTerminalCauseKind::Unknown,
-                    "display text must not classify runtime failure",
+                    "Unknown terminal cause text must stay display-only",
                 ),
             },
         )
         .await
-        .expect_err("Unknown machine run failure cause should reject");
-
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("unknown machine-owned terminal_cause_kind"),
-        "unexpected rejection: {rendered}"
-    );
+        .expect("machine should resolve the terminal cause");
     assert_eq!(
         adapter.runtime_state(&session_id).await.unwrap(),
-        RuntimeState::Running,
-        "unknown failure cause must not mutate the active run"
+        RuntimeState::Idle,
+        "machine-resolved fail should clear the active run"
     );
-    let input_state = adapter
-        .input_state(&session_id, &prepared.input_id)
-        .await
-        .expect("input state read should succeed")
-        .expect("prepared input should remain visible");
+
+    let terminal_cause_kind = {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        authority.state().terminal_cause_kind
+    };
     assert_eq!(
-        input_state.seed.phase,
-        crate::input_state::InputLifecycleState::Staged,
-        "unknown failure cause must not roll back the active input"
+        terminal_cause_kind,
+        Some(mm_dsl::TurnTerminalCauseKind::FatalFailure)
     );
 }
 
@@ -14644,10 +14912,7 @@ async fn legacy_run_fail_terminalizes_through_machine_authority() {
             MeerkatMachineCommand::Fail {
                 session_id: session_id.clone(),
                 run_id: prepared.run_id.clone(),
-                failure: MeerkatMachineRunFailure::new(
-                    meerkat_core::TurnTerminalCauseKind::FatalFailure,
-                    "executor failed",
-                ),
+                failure: MeerkatMachineRunFailure::new("executor failed"),
             },
         )
         .await
@@ -14779,7 +15044,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<crate::store::SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<crate::input_state::StoredInputState>,
+        input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<SessionId>,
     ) -> Result<(), crate::store::RuntimeStoreError> {
         if self.fail_atomic_apply.swap(false, Ordering::SeqCst) {
@@ -14854,7 +15119,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &crate::input_state::StoredInputState,
+        state: &crate::input_state::InputStatePersistenceRecord,
     ) -> Result<(), crate::store::RuntimeStoreError> {
         self.inner.persist_input_state(runtime_id, state).await
     }
@@ -14867,18 +15132,18 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
-    async fn load_runtime_state(
+    async fn load_machine_lifecycle_record(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<RuntimeState>, crate::store::RuntimeStoreError> {
-        self.inner.load_runtime_state(runtime_id).await
+    ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+        self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: crate::store::MachineLifecycleCommit,
-        input_states: &[crate::input_state::StoredInputState],
+        input_states: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<(), crate::store::RuntimeStoreError> {
         self.commit_machine_lifecycle_calls
             .fetch_add(1, Ordering::SeqCst);
@@ -14893,6 +15158,29 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
             .await
+    }
+
+    async fn persist_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &crate::ops_lifecycle::PersistedOpsSnapshot,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+    }
+
+    async fn load_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, crate::store::RuntimeStoreError>
+    {
+        self.inner.load_ops_lifecycle(runtime_id).await
+    }
+
+    async fn delete_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner.delete_ops_lifecycle(runtime_id).await
     }
 }
 
@@ -14909,11 +15197,9 @@ async fn persistent_staged_run_driver(
         .expect("persistent input should be accepted");
 
     let run_id = RunId::new();
-    driver.contract_force_runtime_authority(
-        RuntimeState::Running,
-        Some(run_id.clone()),
-        Some(RuntimeState::Idle),
-    );
+    driver
+        .contract_begin_run_authority(run_id.clone())
+        .expect("runtime run authority should begin through generated DSL");
     driver
         .stage_input(&input_id, &run_id)
         .expect("input should stage for the run");
@@ -14924,6 +15210,51 @@ async fn persistent_staged_run_driver(
         run_id,
         input_id,
     )
+}
+
+#[tokio::test]
+async fn persistent_driver_recover_preserves_durable_runtime_authority() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let runtime_id = LogicalRuntimeId::new("persistent-recover-authority");
+    crate::store::RuntimeStore::commit_machine_lifecycle(
+        store.as_ref(),
+        &runtime_id,
+        crate::store::MachineLifecycleCommit::new_with_binding(
+            RuntimeState::Retired,
+            crate::store::MachineLifecycleBindingFacts::default(),
+        ),
+        &[],
+    )
+    .await
+    .expect("seed retired runtime state");
+
+    let mut driver = PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    );
+    driver
+        .recover()
+        .await
+        .expect("public persistent recover should use generated runtime authority");
+
+    assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+    assert_eq!(
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after recovery"),
+        Some(RuntimeState::Retired),
+        "recovery must not rewrite durable lifecycle truth from the default shell"
+    );
+
+    let authority = driver.inner_ref().shared_dsl_authority();
+    let authority = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm_dsl::MeerkatPhase::Retired
+    );
 }
 
 fn assert_live_run_remains_staged(
@@ -14958,26 +15289,27 @@ fn assert_live_run_remains_staged(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        auth.state.lifecycle_phase,
+        auth.state().lifecycle_phase,
         mm_dsl::MeerkatPhase::Running,
         "{context}: DSL lifecycle must remain Running"
     );
     assert_eq!(
-        auth.state.current_run_id.as_ref().map(|id| id.0.as_str()),
+        auth.state().current_run_id.as_ref().map(|id| id.0.as_str()),
         Some(run_id.to_string().as_str()),
         "{context}: DSL current_run_id must remain bound"
     );
     assert_eq!(
-        auth.state.turn_phase,
+        auth.state().turn_phase,
         mm_dsl::TurnPhase::Ready,
         "{context}: DSL turn_phase must not become terminal"
     );
     assert_eq!(
-        auth.state.terminal_outcome, None,
+        auth.state().terminal_outcome,
+        None,
         "{context}: DSL terminal_outcome must not be set"
     );
     assert_eq!(
-        auth.state.input_phases.get(&input_id.to_string()),
+        auth.state().input_phases.get(&input_id.to_string()),
         Some(&mm_dsl::InputPhase::Staged),
         "{context}: DSL input phase must remain staged"
     );
@@ -15153,15 +15485,15 @@ async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
     let auth = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(auth.state.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
-    assert_eq!(auth.state.current_run_id, None);
-    assert_eq!(auth.state.turn_phase, mm_dsl::TurnPhase::Completed);
+    assert_eq!(auth.state().lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(auth.state().current_run_id, None);
+    assert_eq!(auth.state().turn_phase, mm_dsl::TurnPhase::Completed);
     assert_eq!(
-        auth.state.terminal_outcome,
+        auth.state().terminal_outcome,
         Some(mm_dsl::TurnTerminalOutcome::Completed)
     );
     assert_eq!(
-        auth.state.input_phases.get(&input_id.to_string()),
+        auth.state().input_phases.get(&input_id.to_string()),
         Some(&mm_dsl::InputPhase::Consumed)
     );
 }
@@ -15241,7 +15573,9 @@ async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_s
     drop(entry);
 
     assert_ne!(
-        inner.load_runtime_state(&runtime_id).await.unwrap(),
+        crate::store::load_runtime_state(inner.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
         Some(RuntimeState::Idle),
         "failed run persist must not durably commit the returned runtime state"
     );
@@ -15465,12 +15799,14 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
         .prepare_bindings(session_id.clone())
         .await
         .expect("bindings should prepare");
+    let catalog_tool = runtime_deferred_tool("secret", "test");
+    seed_deferred_tool_authority_catalog(&bindings, vec![Arc::clone(&catalog_tool)], &[]);
     let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
     let witnesses = [(
         "secret".to_string(),
         meerkat_core::ToolVisibilityWitness {
             stable_owner_key: Some("callback:test".to_string()),
-            last_seen_provenance: None,
+            last_seen_provenance: catalog_tool.provenance.clone(),
         },
     )]
     .into_iter()
@@ -15505,8 +15841,8 @@ async fn stage_persistent_filter_rejects_missing_filter_witnesses() {
         .expect_err("runtime-backed staging must reject name-only persistent filters");
 
     assert!(
-        err.to_string().contains("secret"),
-        "missing-witness rejection should name the filter tool: {err}"
+        err.to_string().contains("StageVisibilityFilter"),
+        "missing-witness rejection should come from generated filter authority: {err}"
     );
     assert_eq!(
         bindings
@@ -15524,7 +15860,7 @@ async fn stage_persistent_filter_rejects_missing_filter_witnesses() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        authority.state.staged_filter,
+        authority.state().staged_filter,
         mm_dsl::ToolFilter::All,
         "failed filter staging must not mutate DSL staged filter authority"
     );
@@ -15588,8 +15924,9 @@ fn seed_deferred_tool_authority_catalog(
             .iter()
             .map(|name| (*name).to_string())
             .collect(),
-        Arc::clone(bindings.tool_visibility_owner()),
-    );
+        bindings.tool_visibility_owner().clone(),
+    )
+    .expect("test catalog seeding should pass generated authority");
 }
 
 #[tokio::test]
@@ -15619,8 +15956,8 @@ async fn stage_persistent_filter_rejects_filter_authority_mismatched_with_visibl
         .expect_err("runtime-backed staging must reject forged filter authority");
 
     assert!(
-        err.to_string().contains("secret"),
-        "mismatch rejection should name the filter tool: {err}"
+        err.to_string().contains("StageVisibilityFilter"),
+        "mismatch rejection should come from generated filter authority: {err}"
     );
     assert_eq!(
         bindings
@@ -15705,8 +16042,8 @@ async fn machine_requested_deferred_names_rejects_name_only_staging() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
-        authority.state.staged_deferred_names.is_empty()
-            && authority.state.staged_deferred_authorities.is_empty(),
+        authority.state().staged_deferred_names.is_empty()
+            && authority.state().staged_deferred_authorities.is_empty(),
         "failed name-only staging must not mutate DSL deferred authority"
     );
 }
@@ -15746,7 +16083,7 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         authority
-            .state
+            .state()
             .staged_deferred_authorities
             .get("deferred_tool"),
         Some(&crate::meerkat_machine::dsl::ToolVisibilityWitness::from(
@@ -15755,7 +16092,7 @@ async fn request_deferred_tools_records_typed_authority_in_dsl_state() {
         "the DSL authority must carry stable owner and provenance, not only the staged name"
     );
     assert_eq!(
-        authority.state.staged_deferred_names,
+        authority.state().staged_deferred_names,
         ["deferred_tool".to_string()].into_iter().collect(),
         "staged names are retained only as the routing projection"
     );
@@ -15814,7 +16151,7 @@ async fn request_deferred_tools_scopes_dsl_authority_to_requested_names() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        authority.state.staged_deferred_authorities,
+        authority.state().staged_deferred_authorities,
         [(
             "second_tool".to_string(),
             crate::meerkat_machine::dsl::ToolVisibilityWitness::from(&second_witness),
@@ -15850,8 +16187,8 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
         .expect_err("missing deferred-tool provenance authority should fail");
 
     assert!(
-        err.to_string().contains("deferred_tool"),
-        "missing-witness error should name the requested tool: {err}"
+        err.to_string().contains("RequestDeferredTools"),
+        "missing-witness rejection should come from generated deferred authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner()
@@ -15874,8 +16211,8 @@ async fn request_deferred_tools_requires_machine_visible_provenance_authority() 
         .expect_err("empty deferred-tool witnesses should fail");
 
     assert!(
-        err.to_string().contains("deferred_tool"),
-        "empty-witness error should name the requested tool: {err}"
+        err.to_string().contains("RequestDeferredTools"),
+        "empty-witness rejection should come from generated deferred authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner()
@@ -15913,8 +16250,8 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
         .await
         .expect_err("unknown deferred authority must not stage through public request path");
     assert!(
-        unknown_err.to_string().contains("unknown_deferred_tool"),
-        "unknown-key rejection should name the requested tool: {unknown_err}"
+        unknown_err.to_string().contains("RequestDeferredTools"),
+        "unknown-key rejection should come from generated deferred authority: {unknown_err}"
     );
 
     let forged_err = adapter
@@ -15934,8 +16271,8 @@ async fn request_deferred_tools_rejects_public_authority_mismatched_with_visible
         .await
         .expect_err("mismatched deferred authority must not stage through public request path");
     assert!(
-        forged_err.to_string().contains("deferred_tool"),
-        "mismatch rejection should name the requested tool: {forged_err}"
+        forged_err.to_string().contains("RequestDeferredTools"),
+        "mismatch rejection should come from generated deferred authority: {forged_err}"
     );
 
     let state = bindings
@@ -15963,19 +16300,1367 @@ fn registered_dsl_authority_for_visibility_tests() -> mm_dsl::MeerkatMachineAuth
     authority
 }
 
+fn dsl_live_identity(model: &str) -> mm_dsl::SessionLlmIdentity {
+    mm_dsl::SessionLlmIdentity {
+        model: model.to_string(),
+        provider: mm_dsl::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params_repr: None,
+        auth_binding: None,
+    }
+}
+
+fn domain_live_identity(model: &str) -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: model.to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    }
+}
+
+#[test]
+fn live_open_admission_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+    let identity = dsl_live_identity("gpt-realtime-2");
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            llm_identity: identity.clone(),
+        },
+    )
+    .expect("machine authority should admit first live channel open");
+
+    assert_eq!(
+        authority
+            .state()
+            .live_active_channel_by_session
+            .get("session-live-1"),
+        Some(&"live-channel-1".to_string()),
+        "machine state should own the active session/channel binding"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_identity_by_channel
+            .get("live-channel-1"),
+        Some(&identity),
+        "machine state should own the bound live channel identity"
+    );
+    assert!(transition.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveOpenAdmissionResolved {
+            session_id,
+            channel_id,
+            bound_llm_identity: Some(bound_identity),
+            admitted: true,
+            rejection: None,
+            sequence: 1,
+        } if session_id == "session-live-1"
+            && channel_id == "live-channel-1"
+            && bound_identity == &identity
+    )));
+
+    let duplicate = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-2".to_string(),
+            llm_identity: dsl_live_identity("gpt-realtime-2"),
+        },
+    )
+    .expect("machine authority should classify duplicate live open");
+    assert!(duplicate.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveOpenAdmissionResolved {
+            session_id,
+            channel_id,
+            bound_llm_identity: None,
+            admitted: false,
+            rejection: Some(mm_dsl::LiveOpenAdmissionRejection::AlreadyBound),
+            sequence: 2,
+        } if session_id == "session-live-1" && channel_id == "live-channel-2"
+    )));
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+        },
+    )
+    .expect("machine authority should own abandoned open cleanup");
+    assert!(
+        !authority
+            .state()
+            .live_active_channel_by_session
+            .contains_key("session-live-1"),
+        "abandoned generated live-open admission should clear active binding"
+    );
+    assert!(
+        !authority
+            .state()
+            .live_channel_identity_by_channel
+            .contains_key("live-channel-1"),
+        "abandoned generated live-open admission should clear bound identity"
+    );
+}
+
+#[test]
+fn live_refresh_queued_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
+            channel_id: "live-channel-1".to_string(),
+            queue_acceptance_sequence: 7,
+        },
+    )
+    .expect("machine authority should accept queued live-refresh observation");
+
+    assert_eq!(
+        authority.state().live_refresh_result_sequence,
+        1,
+        "machine authority should assign the public result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_refresh_queue_acceptance_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&7),
+        "machine state should retain the host queue-acceptance evidence sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_refresh_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveRefreshPublicStatus::Queued),
+        "machine state should retain the public result class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveRefreshResultResolved {
+                channel_id,
+                status: mm_dsl::LiveRefreshPublicStatus::Queued,
+                refresh_enqueued: true,
+                sequence: 1,
+                queue_acceptance_sequence: 7,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public result effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveRefreshQueued {
+            channel_id: "live-channel-1".to_string(),
+            queue_acceptance_sequence: 7,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host queue-acceptance evidence"
+    );
+}
+
+#[test]
+fn live_close_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            close_observation_sequence: 5,
+        },
+    )
+    .expect("machine authority should accept live-close observation");
+
+    assert_eq!(
+        authority.state().live_close_result_sequence,
+        1,
+        "machine authority should assign the public close result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_close_observation_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&5),
+        "machine state should retain the host close-observation sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_close_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveClosePublicStatus::Closed),
+        "machine state should retain the public close result class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveCloseResultResolved {
+                channel_id,
+                status: mm_dsl::LiveClosePublicStatus::Closed,
+                closed: true,
+                sequence: 1,
+                close_observation_sequence: 5,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public close result effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            close_observation_sequence: 5,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host close-observation evidence"
+    );
+}
+
+#[test]
+fn live_command_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCommandAccepted {
+            channel_id: "live-channel-1".to_string(),
+            command: mm_dsl::LiveCommandPublicKind::CommitInput,
+            command_acceptance_sequence: 9,
+        },
+    )
+    .expect("machine authority should accept live command queue evidence");
+
+    assert_eq!(
+        authority.state().live_command_result_sequence,
+        1,
+        "machine authority should assign the public command result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_command_acceptance_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&9),
+        "machine state should retain the host command-acceptance sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_command_kind_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveCommandPublicKind::CommitInput),
+        "machine state should retain the public command result class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveCommandResultResolved {
+                channel_id,
+                command: mm_dsl::LiveCommandPublicKind::CommitInput,
+                accepted: true,
+                sequence: 1,
+                command_acceptance_sequence: 9,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public command result effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCommandAccepted {
+            channel_id: "live-channel-1".to_string(),
+            command: mm_dsl::LiveCommandPublicKind::CommitInput,
+            command_acceptance_sequence: 9,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host command-acceptance evidence"
+    );
+}
+
+#[test]
+fn live_command_rejection_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCommandRejected {
+            channel_id: "live-channel-1".to_string(),
+            command: mm_dsl::LiveCommandPublicKind::SendInput,
+            rejection: mm_dsl::LiveCommandRejectionReason::NoAdapter,
+        },
+    )
+    .expect("machine authority should accept live command rejection evidence");
+
+    assert_eq!(
+        authority.state().live_command_rejection_sequence,
+        1,
+        "machine authority should assign the public command rejection sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_command_rejection_reason_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveCommandRejectionReason::NoAdapter),
+        "machine state should retain the typed command rejection reason"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_command_rejection_public_error_class_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveCommandRejectionPublicErrorClass::InvalidParams),
+        "machine state should retain the generated public error class"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveCommandRejectionResolved {
+                channel_id,
+                command: mm_dsl::LiveCommandPublicKind::SendInput,
+                rejection: mm_dsl::LiveCommandRejectionReason::NoAdapter,
+                public_error_class: mm_dsl::LiveCommandRejectionPublicErrorClass::InvalidParams,
+                sequence: 1,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public command rejection effect"
+    );
+
+    let internal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveCommandRejected {
+            channel_id: "live-channel-1".to_string(),
+            command: mm_dsl::LiveCommandPublicKind::Interrupt,
+            rejection: mm_dsl::LiveCommandRejectionReason::ChannelNotReady,
+        },
+    )
+    .expect("machine authority should classify internal command rejections");
+    assert!(internal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveCommandRejectionResolved {
+            channel_id,
+            command: mm_dsl::LiveCommandPublicKind::Interrupt,
+            rejection: mm_dsl::LiveCommandRejectionReason::ChannelNotReady,
+            public_error_class: mm_dsl::LiveCommandRejectionPublicErrorClass::InternalError,
+            sequence: 2,
+        } if channel_id == "live-channel-1"
+    )));
+}
+
+#[test]
+fn live_channel_request_rejection_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelRequestRejected {
+            channel_id: "live-channel-1".to_string(),
+            request: mm_dsl::LiveChannelRequestPublicKind::Refresh,
+            rejection: mm_dsl::LiveChannelRequestRejectionReason::NoAdapter,
+        },
+    )
+    .expect("machine authority should accept live channel request rejection evidence");
+
+    assert_eq!(
+        authority.state().live_channel_request_rejection_sequence,
+        1,
+        "machine authority should assign the public channel request rejection sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_request_rejection_reason_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveChannelRequestRejectionReason::NoAdapter),
+        "machine state should retain the typed channel request rejection reason"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_request_rejection_public_error_class_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams),
+        "machine state should retain the generated public error class"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveChannelRequestRejectionResolved {
+                channel_id,
+                request: mm_dsl::LiveChannelRequestPublicKind::Refresh,
+                rejection: mm_dsl::LiveChannelRequestRejectionReason::NoAdapter,
+                public_error_class: mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams,
+                sequence: 1,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public channel request rejection effect"
+    );
+
+    let webrtc = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelRequestRejected {
+            channel_id: "live-channel-1".to_string(),
+            request: mm_dsl::LiveChannelRequestPublicKind::WebrtcAnswer,
+            rejection: mm_dsl::LiveChannelRequestRejectionReason::InvalidToken,
+        },
+    )
+    .expect("machine authority should classify WebRTC answer token rejections");
+    assert!(
+        webrtc.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveChannelRequestRejectionResolved {
+                channel_id,
+                request: mm_dsl::LiveChannelRequestPublicKind::WebrtcAnswer,
+                rejection: mm_dsl::LiveChannelRequestRejectionReason::InvalidToken,
+                public_error_class: mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams,
+                sequence: 2,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must own WebRTC answer public rejection class"
+    );
+}
+
+#[test]
+fn live_webrtc_answer_admission_and_result_are_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            llm_identity: dsl_live_identity("gpt-realtime-2"),
+        },
+    )
+    .expect("machine authority should own live channel binding before WebRTC token issue");
+
+    let issued = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveWebrtcTokenIssued {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-1".to_string(),
+            issued_at_ms: 1_000,
+            ttl_ms: 60_000,
+        },
+    )
+    .expect("machine authority should record WebRTC token issue");
+    assert_eq!(
+        authority
+            .state()
+            .live_webrtc_token_channel_by_token
+            .get("token-1"),
+        Some(&"live-channel-1".to_string()),
+        "machine state should own WebRTC token channel binding"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_webrtc_token_expires_at_ms_by_token
+            .get("token-1"),
+        Some(&61_000),
+        "machine state should own WebRTC token expiry"
+    );
+    assert!(issued.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcTokenIssued {
+            session_id,
+            channel_id,
+            token,
+            expires_at_ms: 61_000,
+            sequence: 1,
+        } if session_id == "session-live-1"
+            && channel_id == "live-channel-1"
+            && token == "token-1"
+    )));
+
+    let admitted = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebrtcAnswerAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-1".to_string(),
+            observed_at_ms: 2_000,
+        },
+    )
+    .expect("machine authority should admit an unexpired matching WebRTC token");
+    assert!(
+        authority
+            .state()
+            .live_webrtc_consumed_tokens
+            .contains("token-1"),
+        "machine state should own WebRTC token single-use consumption"
+    );
+    assert!(admitted.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcAnswerAdmissionResolved {
+            session_id,
+            channel_id,
+            token,
+            admitted: true,
+            rejection: None,
+            public_error_class: None,
+            sequence: 1,
+        } if session_id == "session-live-1"
+            && channel_id == "live-channel-1"
+            && token == "token-1"
+    )));
+
+    let duplicate = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebrtcAnswerAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-1".to_string(),
+            observed_at_ms: 2_100,
+        },
+    )
+    .expect("machine authority should reject a consumed WebRTC token");
+    assert!(duplicate.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcAnswerAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebrtcAnswerAdmissionRejection::TokenAlreadyConsumed),
+            public_error_class: Some(
+                mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams
+            ),
+            sequence: 2,
+            ..
+        }
+    )));
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveWebrtcTokenIssued {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-2".to_string(),
+            issued_at_ms: 1_000,
+            ttl_ms: 10,
+        },
+    )
+    .expect("machine authority should record a second WebRTC token");
+    let expired = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebrtcAnswerAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-2".to_string(),
+            observed_at_ms: 2_000,
+        },
+    )
+    .expect("machine authority should reject expired WebRTC tokens");
+    assert!(expired.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcAnswerAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebrtcAnswerAdmissionRejection::TokenExpired),
+            public_error_class: Some(
+                mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams
+            ),
+            sequence: 3,
+            ..
+        }
+    )));
+
+    let unknown = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebrtcAnswerAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-missing".to_string(),
+            observed_at_ms: 2_200,
+        },
+    )
+    .expect("machine authority should reject missing WebRTC tokens");
+    assert!(unknown.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcAnswerAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebrtcAnswerAdmissionRejection::TokenNotFound),
+            public_error_class: Some(
+                mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams
+            ),
+            sequence: 4,
+            ..
+        }
+    )));
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveWebrtcTokenIssued {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "token-3".to_string(),
+            issued_at_ms: 3_000,
+            ttl_ms: 60_000,
+        },
+    )
+    .expect("machine authority should record a third WebRTC token");
+    let mismatch = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebrtcAnswerAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-mismatch".to_string(),
+            token: "token-3".to_string(),
+            observed_at_ms: 3_100,
+        },
+    )
+    .expect("machine authority should reject wrong-channel WebRTC token use");
+    assert!(
+        authority
+            .state()
+            .live_webrtc_consumed_tokens
+            .contains("token-3"),
+        "machine state should consume wrong-channel WebRTC tokens"
+    );
+    assert!(mismatch.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcAnswerAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebrtcAnswerAdmissionRejection::TokenChannelMismatch),
+            public_error_class: Some(
+                mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams
+            ),
+            sequence: 5,
+            ..
+        }
+    )));
+
+    let answered = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveWebrtcAnswerAccepted {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            answer_observation_sequence: 7,
+        },
+    )
+    .expect("machine authority should own WebRTC answer public success result");
+    assert_eq!(
+        authority
+            .state()
+            .live_webrtc_answer_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveWebrtcAnswerPublicStatus::Answered),
+        "machine state should retain WebRTC answer public success status"
+    );
+    assert!(answered.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebrtcAnswerResultResolved {
+            channel_id,
+            status: mm_dsl::LiveWebrtcAnswerPublicStatus::Answered,
+            answered: true,
+            sequence: 1,
+            answer_observation_sequence: 7,
+        } if channel_id == "live-channel-1"
+    )));
+}
+
+#[test]
+fn live_websocket_token_admission_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            llm_identity: dsl_live_identity("gpt-realtime-2"),
+        },
+    )
+    .expect("machine authority should own live channel binding before WS token issue");
+
+    let issued = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveWebsocketTokenIssued {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "ws-token-1".to_string(),
+            issued_at_ms: 1_000,
+            ttl_ms: 60_000,
+        },
+    )
+    .expect("machine authority should record WebSocket token issue");
+    assert_eq!(
+        authority
+            .state()
+            .live_websocket_token_channel_by_token
+            .get("ws-token-1"),
+        Some(&"live-channel-1".to_string()),
+        "machine state should own WebSocket token channel binding"
+    );
+    assert!(issued.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebsocketTokenIssued {
+            session_id,
+            channel_id,
+            token,
+            expires_at_ms: 61_000,
+            sequence: 1,
+        } if session_id == "session-live-1"
+            && channel_id == "live-channel-1"
+            && token == "ws-token-1"
+    )));
+
+    let admitted = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebsocketTokenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "ws-token-1".to_string(),
+            observed_at_ms: 2_000,
+        },
+    )
+    .expect("machine authority should admit an unexpired matching WebSocket token");
+    assert!(
+        authority
+            .state()
+            .live_websocket_consumed_tokens
+            .contains("ws-token-1"),
+        "machine state should own WebSocket token single-use consumption"
+    );
+    assert!(admitted.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebsocketTokenAdmissionResolved {
+            session_id,
+            channel_id,
+            token,
+            admitted: true,
+            rejection: None,
+            public_error_class: None,
+            sequence: 1,
+        } if session_id == "session-live-1"
+            && channel_id == "live-channel-1"
+            && token == "ws-token-1"
+    )));
+
+    let duplicate = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebsocketTokenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "ws-token-1".to_string(),
+            observed_at_ms: 2_100,
+        },
+    )
+    .expect("machine authority should reject consumed WebSocket tokens");
+    assert!(duplicate.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebsocketTokenAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebsocketTokenAdmissionRejection::TokenAlreadyConsumed),
+            public_error_class: Some(
+                mm_dsl::LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken
+            ),
+            sequence: 2,
+            ..
+        }
+    )));
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveWebsocketTokenIssued {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-1".to_string(),
+            token: "ws-token-2".to_string(),
+            issued_at_ms: 3_000,
+            ttl_ms: 60_000,
+        },
+    )
+    .expect("machine authority should record a second WebSocket token");
+    let mismatch = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebsocketTokenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-mismatch".to_string(),
+            token: "ws-token-2".to_string(),
+            observed_at_ms: 3_100,
+        },
+    )
+    .expect("machine authority should reject wrong-channel WebSocket token use");
+    assert!(
+        authority
+            .state()
+            .live_websocket_consumed_tokens
+            .contains("ws-token-2"),
+        "machine state should consume wrong-channel WebSocket tokens"
+    );
+    assert!(mismatch.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebsocketTokenAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebsocketTokenAdmissionRejection::TokenChannelMismatch),
+            public_error_class: Some(
+                mm_dsl::LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken
+            ),
+            sequence: 3,
+            ..
+        }
+    )));
+
+    let unbound = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveLiveWebsocketTokenAdmission {
+            session_id: "session-live-1".to_string(),
+            channel_id: "live-channel-missing".to_string(),
+            token: "ws-token-missing".to_string(),
+            observed_at_ms: 2_200,
+        },
+    )
+    .expect("machine authority should reject unbound WebSocket channels");
+    assert!(unbound.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::LiveWebsocketTokenAdmissionResolved {
+            admitted: false,
+            rejection: Some(mm_dsl::LiveWebsocketTokenAdmissionRejection::ChannelNotBound),
+            public_error_class: Some(
+                mm_dsl::LiveWebsocketTokenAdmissionPublicErrorClass::InvalidToken
+            ),
+            sequence: 4,
+            ..
+        }
+    )));
+}
+
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn unbound_live_command_rejection_result_is_machine_owned() {
+    let machine = MeerkatMachine::ephemeral();
+    let channel_id = meerkat_live::LiveChannelId::new("live-channel-missing");
+
+    let authority = machine
+        .resolve_unbound_live_command_rejection_result(
+            &channel_id,
+            mm_dsl::LiveCommandPublicKind::SendInput,
+        )
+        .await
+        .expect("unbound live command rejection must route through generated authority");
+
+    assert_eq!(authority.command, mm_dsl::LiveCommandPublicKind::SendInput);
+    assert_eq!(
+        authority.rejection,
+        mm_dsl::LiveCommandRejectionReason::ChannelNotFound
+    );
+    assert_eq!(
+        authority.public_error_class,
+        mm_dsl::LiveCommandRejectionPublicErrorClass::InvalidParams
+    );
+    assert_eq!(authority.sequence, 1);
+}
+
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn unbound_live_channel_request_rejection_result_is_machine_owned() {
+    let machine = MeerkatMachine::ephemeral();
+    let channel_id = meerkat_live::LiveChannelId::new("live-channel-missing");
+
+    let authority = machine
+        .resolve_unbound_live_channel_request_rejection_result(
+            &channel_id,
+            mm_dsl::LiveChannelRequestPublicKind::Status,
+        )
+        .await
+        .expect("unbound live request rejection must route through generated authority");
+
+    assert_eq!(
+        authority.request,
+        mm_dsl::LiveChannelRequestPublicKind::Status
+    );
+    assert_eq!(
+        authority.rejection,
+        mm_dsl::LiveChannelRequestRejectionReason::ChannelNotFound
+    );
+    assert_eq!(
+        authority.public_error_class,
+        mm_dsl::LiveChannelRequestRejectionPublicErrorClass::InvalidParams
+    );
+    assert_eq!(authority.sequence, 1);
+}
+
+#[cfg(feature = "live")]
+#[tokio::test]
+async fn live_status_session_lookup_uses_generated_close_history() {
+    let machine = MeerkatMachine::ephemeral();
+    let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    let channel_id = meerkat_live::LiveChannelId::new("live-status-close-history");
+
+    let identity = domain_live_identity("gpt-realtime-2");
+    let open_authority = machine
+        .resolve_live_open_admission(&session_id, &channel_id, &identity)
+        .await
+        .expect("generated live open admission");
+    host.open_channel_with_authority(
+        open_authority
+            .channel_open_authority()
+            .expect("generated open handoff"),
+    )
+    .await
+    .expect("host open should consume generated open handoff");
+    assert_eq!(
+        machine.live_session_for_status_channel(&channel_id).await,
+        Some(session_id.clone()),
+        "active live status lookup should route through generated open binding"
+    );
+
+    let close_observation = host
+        .reserve_channel_close_observation(&channel_id)
+        .await
+        .expect("host should mint typed close observation");
+    let close_authority = machine
+        .resolve_live_close_result(&session_id, &close_observation)
+        .await
+        .expect("generated live close result");
+    assert_eq!(
+        machine.live_session_for_active_channel(&channel_id).await,
+        None,
+        "generated close authority should remove active channel routing"
+    );
+    assert_eq!(
+        machine
+            .live_channel_bound_llm_identity(&session_id, &channel_id)
+            .await
+            .expect("generated identity lookup after close"),
+        None,
+        "generated close authority should remove bound identity routing"
+    );
+    assert_eq!(
+        machine.live_session_for_status_channel(&channel_id).await,
+        Some(session_id.clone()),
+        "post-close live status lookup should route through generated close history"
+    );
+
+    host.commit_channel_close_observation(
+        &close_observation,
+        close_authority
+            .channel_close_commit_authority()
+            .expect("generated close handoff"),
+    )
+    .await
+    .expect("host close commit should require generated close handoff");
+    let status_observation = host
+        .channel_status_observation(&channel_id)
+        .await
+        .expect("host status observation");
+    let status_authority = machine
+        .resolve_live_channel_status_result(&session_id, &status_observation)
+        .await
+        .expect("generated live status result");
+    assert_eq!(
+        status_authority.status,
+        mm_dsl::LiveChannelPublicStatus::Closed
+    );
+}
+
+#[test]
+fn session_event_stream_close_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let open = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordSessionEventStreamOpened {
+            stream_id: "session-stream-1".to_string(),
+            session_id: "session-1".to_string(),
+        },
+    )
+    .expect("machine authority should accept session stream open");
+    assert!(
+        authority
+            .state()
+            .active_session_event_streams
+            .contains("session-stream-1")
+    );
+    assert!(open.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamOpenResolved {
+            stream_id,
+            session_id,
+            opened: true,
+            sequence: 1,
+        } if stream_id == "session-stream-1" && session_id == "session-1"
+    )));
+
+    let close = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should close an active session stream");
+    assert!(
+        !authority
+            .state()
+            .active_session_event_streams
+            .contains("session-stream-1")
+    );
+    assert!(
+        authority
+            .state()
+            .closed_session_event_streams
+            .contains("session-stream-1")
+    );
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: false,
+            sequence: 1,
+        } if stream_id == "session-stream-1"
+    )));
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved {
+            stream_id,
+            session_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::ExplicitClose,
+            error_code: None,
+            detail: None,
+            sequence: 1,
+        } if stream_id == "session-stream-1" && session_id == "session-1"
+    )));
+
+    let close_again = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should classify an already closed stream");
+    assert!(close_again.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            sequence: 2,
+        } if stream_id == "session-stream-1"
+    )));
+    assert!(
+        !close_again.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved { .. }
+        )),
+        "idempotent close should not emit another terminal notification"
+    );
+
+    let terminal_open = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordSessionEventStreamOpened {
+            stream_id: "session-stream-2".to_string(),
+            session_id: "session-1".to_string(),
+        },
+    );
+    assert!(terminal_open.is_ok());
+    let terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordSessionEventStreamTerminated {
+            stream_id: "session-stream-2".to_string(),
+            observation: mm_dsl::RpcEventStreamTerminalObservationKind::TransportEnded,
+            detail: None,
+        },
+    )
+    .expect("machine authority should accept remote terminal observation");
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamTerminalResolved {
+            stream_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::RemoteEnd,
+            ..
+        } if stream_id == "session-stream-2"
+    )));
+    let close_after_terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-2".to_string(),
+        },
+    )
+    .expect("terminal stream close should be machine-classified as already closed");
+    assert!(close_after_terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::SessionEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            ..
+        } if stream_id == "session-stream-2"
+    )));
+
+    let unknown = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveSessionEventStreamClose {
+            stream_id: "session-stream-missing".to_string(),
+        },
+    );
+    assert!(
+        unknown.is_err(),
+        "machine authority must reject close result classification without a stream witness"
+    );
+}
+
+#[test]
+fn mob_event_stream_close_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let open = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordMobEventStreamOpened {
+            stream_id: "mob-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should accept mob stream open");
+    assert!(
+        authority
+            .state()
+            .active_mob_event_streams
+            .contains("mob-stream-1")
+    );
+    assert!(open.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamOpenResolved {
+            stream_id,
+            opened: true,
+            sequence: 1,
+        } if stream_id == "mob-stream-1"
+    )));
+
+    let close = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should close an active mob stream");
+    assert!(
+        !authority
+            .state()
+            .active_mob_event_streams
+            .contains("mob-stream-1")
+    );
+    assert!(
+        authority
+            .state()
+            .closed_mob_event_streams
+            .contains("mob-stream-1")
+    );
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: false,
+            sequence: 1,
+        } if stream_id == "mob-stream-1"
+    )));
+    assert!(close.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
+            stream_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::ExplicitClose,
+            error_code: None,
+            detail: None,
+            sequence: 1,
+        } if stream_id == "mob-stream-1"
+    )));
+
+    let close_again = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-1".to_string(),
+        },
+    )
+    .expect("machine authority should classify an already closed mob stream");
+    assert!(close_again.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            sequence: 2,
+        } if stream_id == "mob-stream-1"
+    )));
+    assert!(
+        !close_again.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved { .. }
+        )),
+        "idempotent mob close should not emit another terminal notification"
+    );
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordMobEventStreamOpened {
+            stream_id: "mob-stream-2".to_string(),
+        },
+    )
+    .expect("machine authority should accept second mob stream open");
+    let terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordMobEventStreamTerminated {
+            stream_id: "mob-stream-2".to_string(),
+            observation: mm_dsl::RpcEventStreamTerminalObservationKind::NotificationQueueOverflow,
+            detail: Some("queue overflow".to_string()),
+        },
+    )
+    .expect("machine authority should accept mob terminal observation");
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamTerminalResolved {
+            stream_id,
+            reason: mm_dsl::RpcEventStreamTerminalReason::TerminalError,
+            error_code: Some(mm_dsl::RpcEventStreamTerminalErrorCode::StreamQueueOverflow),
+            detail: Some(detail),
+            ..
+        } if stream_id == "mob-stream-2" && detail == "queue overflow"
+    )));
+    let close_after_terminal = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-2".to_string(),
+        },
+    )
+    .expect("terminal mob stream close should be already closed");
+    assert!(close_after_terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm_dsl::MeerkatMachineEffect::MobEventStreamCloseResolved {
+            stream_id,
+            closed: true,
+            already_closed: true,
+            ..
+        } if stream_id == "mob-stream-2"
+    )));
+
+    let unknown = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ResolveMobEventStreamClose {
+            stream_id: "mob-stream-missing".to_string(),
+        },
+    );
+    assert!(
+        unknown.is_err(),
+        "machine authority must reject mob close result classification without a stream witness"
+    );
+}
+
+#[test]
+fn live_channel_status_result_is_machine_owned() {
+    let mut authority = registered_dsl_authority_for_visibility_tests();
+
+    let transition = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: "live-channel-1".to_string(),
+            status: mm_dsl::LiveChannelPublicStatus::Degraded,
+            status_observation_sequence: 11,
+            degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::NetworkUnstable),
+            degradation_detail: None,
+        },
+    )
+    .expect("machine authority should accept live-status observation");
+
+    assert_eq!(
+        authority.state().live_channel_status_result_sequence,
+        1,
+        "machine authority should assign the public status result sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_status_observation_sequence_by_channel
+            .get("live-channel-1"),
+        Some(&11),
+        "machine state should retain the host status-observation sequence"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_status_by_channel
+            .get("live-channel-1"),
+        Some(&mm_dsl::LiveChannelPublicStatus::Degraded),
+        "machine state should retain the public status class by channel"
+    );
+    assert!(
+        transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveChannelStatusResolved {
+                channel_id,
+                status: mm_dsl::LiveChannelPublicStatus::Degraded,
+                sequence: 1,
+                status_observation_sequence: 11,
+                degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::NetworkUnstable),
+                degradation_detail: None,
+            } if channel_id == "live-channel-1"
+        )),
+        "machine authority must emit the typed public status effect"
+    );
+
+    let stale = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: "live-channel-1".to_string(),
+            status: mm_dsl::LiveChannelPublicStatus::Ready,
+            status_observation_sequence: 11,
+            degradation_reason: None,
+            degradation_detail: None,
+        },
+    );
+    assert!(
+        stale.is_err(),
+        "machine authority must reject reused host status-observation evidence"
+    );
+
+    let incoherent = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RecordLiveChannelStatus {
+            channel_id: "live-channel-1".to_string(),
+            status: mm_dsl::LiveChannelPublicStatus::Ready,
+            status_observation_sequence: 12,
+            degradation_reason: Some(mm_dsl::LiveChannelDegradationReason::Other),
+            degradation_detail: Some("detail belongs only to degraded status".to_string()),
+        },
+    );
+    assert!(
+        incoherent.is_err(),
+        "machine authority must reject degradation facts on non-degraded public status"
+    );
+}
+
 #[test]
 fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
     let mut authority = registered_dsl_authority_for_visibility_tests();
-    let witnesses = [(
-        "deferred_tool".to_string(),
-        mm_dsl::ToolVisibilityWitness::from(&meerkat_core::ToolVisibilityWitness::default()),
-    )]
-    .into_iter()
-    .collect();
     let err = mm_dsl::MeerkatMachineMutator::apply(
         &mut authority,
         mm_dsl::MeerkatMachineInput::RequestDeferredTools {
-            authorities: witnesses,
+            authorities:
+                [(
+                    "deferred_tool".to_string(),
+                    mm_dsl::ToolVisibilityWitness::from(
+                        &meerkat_core::ToolVisibilityWitness::default(),
+                    ),
+                )]
+                .into_iter()
+                .collect(),
         },
     )
     .expect_err("machine authority must reject empty/default deferred-tool witness");
@@ -15988,7 +17673,7 @@ fn request_deferred_tools_rejects_empty_dsl_authority_witness() {
         "empty witness should be rejected by a DSL guard: {err:?}"
     );
     assert!(
-        authority.state.staged_deferred_names.is_empty(),
+        authority.state().staged_deferred_names.is_empty(),
         "failed DSL admission must not stage routing names"
     );
 }
@@ -16003,10 +17688,17 @@ fn request_deferred_tools_accepts_provenance_only_dsl_authority_witness() {
             source_id: "test".into(),
         }),
     });
-    let witnesses = [("deferred_tool".to_string(), witness.clone())]
-        .into_iter()
-        .collect();
-
+    let witnesses: BTreeMap<String, mm_dsl::ToolVisibilityWitness> =
+        [("deferred_tool".to_string(), witness.clone())]
+            .into_iter()
+            .collect();
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ReplaceDeferredToolAuthorityCatalog {
+            catalog: witnesses.clone(),
+        },
+    )
+    .expect("catalog witness should hydrate machine authority");
     mm_dsl::MeerkatMachineMutator::apply(
         &mut authority,
         mm_dsl::MeerkatMachineInput::RequestDeferredTools {
@@ -16017,7 +17709,7 @@ fn request_deferred_tools_accepts_provenance_only_dsl_authority_witness() {
 
     assert_eq!(
         authority
-            .state
+            .state()
             .staged_deferred_authorities
             .get("deferred_tool"),
         Some(&witness),
@@ -16033,12 +17725,14 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
         .prepare_bindings(session_id.clone())
         .await
         .expect("bindings should prepare");
+    let catalog_tool = runtime_deferred_tool("secret", "test");
+    seed_deferred_tool_authority_catalog(&bindings, vec![Arc::clone(&catalog_tool)], &[]);
     let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
     let witnesses = [(
         "secret".to_string(),
         meerkat_core::ToolVisibilityWitness {
             stable_owner_key: Some("callback:test".to_string()),
-            last_seen_provenance: None,
+            last_seen_provenance: catalog_tool.provenance.clone(),
         },
     )]
     .into_iter()
@@ -16055,6 +17749,22 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
     assert_eq!(promoted.active_filter, filter);
     assert_eq!(promoted.active_filter, promoted.staged_filter);
     assert_eq!(promoted.active_revision, promoted.staged_revision);
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions.get(&session_id).expect("session should exist");
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        authority.state().active_filter,
+        crate::meerkat_machine::dsl::ToolFilter::from(&filter),
+        "active filter promotion must be committed through generated authority"
+    );
+    assert_eq!(
+        authority.state().active_visibility_revision,
+        promoted.active_revision,
+        "active visibility revision must be committed through generated authority"
+    );
 }
 
 #[tokio::test]
@@ -16102,13 +17812,79 @@ async fn machine_owned_visibility_owner_promotes_deferred_authority_at_boundary(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         authority
-            .state
+            .state()
             .active_deferred_authorities
             .get("deferred_tool"),
         Some(&crate::meerkat_machine::dsl::ToolVisibilityWitness::from(
             &witness
         )),
         "deferred visibility admission should promote the same typed authority as the owner state"
+    );
+}
+
+#[tokio::test]
+async fn machine_owned_turn_overlay_routes_through_generated_authority() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let visible_tool = runtime_deferred_tool("visible", "test");
+    seed_deferred_tool_authority_catalog(&bindings, vec![Arc::clone(&visible_tool)], &[]);
+
+    let accepted = bindings
+        .tool_visibility_owner()
+        .set_turn_overlay(
+            Some(BTreeSet::from(["visible".to_string()])),
+            BTreeSet::new(),
+        )
+        .expect("catalog-backed turn overlay should be accepted");
+    assert!(
+        accepted
+            .allow
+            .as_ref()
+            .is_some_and(|names| names.contains("visible")),
+        "owner projection should mirror generated accepted allow overlay"
+    );
+
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(authority.state().turn_tool_overlay_allow_active);
+        assert!(
+            authority
+                .state()
+                .turn_tool_overlay_allow_names
+                .contains("visible"),
+            "generated state should own the active turn overlay allow fact"
+        );
+    }
+
+    let err = bindings
+        .tool_visibility_owner()
+        .replace_filter_tool_authority_catalog(BTreeMap::new())
+        .expect_err("catalog replacement must not orphan generated turn overlay names");
+    assert!(
+        err.to_string()
+            .contains("ReplaceFilterToolAuthorityCatalog"),
+        "turn overlay catalog replacement rejection should come from generated authority: {err}"
+    );
+
+    let err = bindings
+        .tool_visibility_owner()
+        .set_turn_overlay(
+            Some(BTreeSet::from(["missing".to_string()])),
+            BTreeSet::new(),
+        )
+        .expect_err("unknown overlay tool must be rejected by generated authority");
+    assert!(
+        err.to_string().contains("SetTurnToolOverlay"),
+        "turn overlay rejection should come from generated authority: {err}"
     );
 }
 
@@ -16132,8 +17908,8 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
         .expect_err("replacement must not install deferred names without typed authority");
 
     assert!(
-        err.to_string().contains("deferred_tool"),
-        "rejection should name the missing deferred authority: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "replacement rejection should come from generated visibility authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner()
@@ -16143,6 +17919,104 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
         state.staged_requested_deferred_names.is_empty(),
         "failed authority sync must not install staged routing names"
     );
+}
+
+#[tokio::test]
+async fn replace_visibility_state_installs_full_state_in_generated_authority() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let filter_tool = runtime_deferred_tool("secret", "filter");
+    let deferred_tool = runtime_deferred_tool("deferred_tool", "deferred");
+    seed_deferred_tool_authority_catalog(
+        &bindings,
+        vec![Arc::clone(&filter_tool), Arc::clone(&deferred_tool)],
+        &["deferred_tool"],
+    );
+    let filter_witness = meerkat_core::ToolVisibilityWitness {
+        stable_owner_key: Some("callback:filter".to_string()),
+        last_seen_provenance: filter_tool.provenance.clone(),
+    };
+    let deferred_witness = meerkat_core::ToolVisibilityWitness {
+        stable_owner_key: Some("callback:deferred".to_string()),
+        last_seen_provenance: deferred_tool.provenance.clone(),
+    };
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        inherited_base_filter: meerkat_core::ToolFilter::Allow(
+            ["secret".to_string()].into_iter().collect(),
+        ),
+        active_filter: meerkat_core::ToolFilter::Allow(
+            ["secret".to_string()].into_iter().collect(),
+        ),
+        staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        active_revision: 7,
+        staged_revision: 9,
+        requested_witnesses: [("deferred_tool".to_string(), deferred_witness.clone())]
+            .into_iter()
+            .collect(),
+        filter_witnesses: [("secret".to_string(), filter_witness.clone())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+
+    bindings
+        .tool_visibility_owner()
+        .replace_visibility_state(replacement.clone())
+        .expect("generated authority should admit the full replacement state");
+
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("owner state should be readable"),
+        replacement,
+        "owner visibility state is only the projection of the admitted generated state"
+    );
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions.get(&session_id).expect("session should exist");
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = authority.state();
+    assert_eq!(
+        state.inherited_base_filter,
+        mm_dsl::ToolFilter::from(&replacement.inherited_base_filter)
+    );
+    assert_eq!(
+        state.active_filter,
+        mm_dsl::ToolFilter::from(&replacement.active_filter)
+    );
+    assert_eq!(
+        state.staged_filter,
+        mm_dsl::ToolFilter::from(&replacement.staged_filter)
+    );
+    assert_eq!(
+        state.filter_visibility_witnesses.get("secret").cloned(),
+        Some(mm_dsl::ToolVisibilityWitness::from(&filter_witness))
+    );
+    assert_eq!(
+        state
+            .requested_visibility_witnesses
+            .get("deferred_tool")
+            .cloned(),
+        Some(mm_dsl::ToolVisibilityWitness::from(&deferred_witness))
+    );
+    assert_eq!(
+        state
+            .staged_deferred_authorities
+            .get("deferred_tool")
+            .cloned(),
+        Some(mm_dsl::ToolVisibilityWitness::from(&deferred_witness))
+    );
+    assert_eq!(state.active_visibility_revision, 7);
+    assert_eq!(state.staged_visibility_revision, 9);
+    assert_eq!(state.next_staged_visibility_revision, 9);
 }
 
 #[tokio::test]
@@ -16166,8 +18040,8 @@ async fn replace_visibility_state_rejects_name_only_inherited_filter_authority()
         .expect_err("replacement must not install inherited names without witnesses");
 
     assert!(
-        err.to_string().contains("secret"),
-        "rejection should name the missing inherited filter witness: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "inherited filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
         bindings
@@ -16199,8 +18073,8 @@ async fn replace_visibility_state_rejects_active_filter_without_witnesses() {
         .expect_err("replacement must not install active filter names without witnesses");
 
     assert!(
-        err.to_string().contains("secret"),
-        "rejection should name the missing active filter witness: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "active filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
         bindings
@@ -16238,8 +18112,8 @@ async fn replace_visibility_state_rejects_staged_filter_with_empty_witness() {
         .expect_err("replacement must not install staged filter names with empty witnesses");
 
     assert!(
-        err.to_string().contains("secret"),
-        "rejection should name the empty staged filter witness: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "staged filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
         bindings
@@ -16284,8 +18158,8 @@ async fn replace_visibility_state_rejects_filter_authority_mismatched_with_visib
         .expect_err("replacement must reject forged active/staged filter authority");
 
     assert!(
-        err.to_string().contains("secret"),
-        "rejection should name the mismatched active/staged filter witness: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "mismatched filter rejection should come from generated visibility authority: {err}"
     );
     assert_eq!(
         bindings
@@ -16323,8 +18197,8 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
         .expect_err("replacement must not install deferred names with empty typed authority");
 
     assert!(
-        err.to_string().contains("deferred_tool"),
-        "rejection should name the empty deferred authority: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "empty deferred-authority rejection should come from generated visibility authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner()
@@ -16369,8 +18243,8 @@ async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_vis
         .expect_err("replacement must reject forged deferred provenance authority");
 
     assert!(
-        err.to_string().contains("deferred_tool"),
-        "rejection should name the mismatched deferred authority: {err}"
+        err.to_string().contains("SyncVisibilityRevisions"),
+        "mismatched deferred-authority rejection should come from generated visibility authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner()
@@ -16545,8 +18419,8 @@ async fn publish_committed_visible_set_rejects_deferred_authority_mismatched_wit
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
-        authority.state.active_deferred_authorities.is_empty()
-            && authority.state.staged_deferred_authorities.is_empty(),
+        authority.state().active_deferred_authorities.is_empty()
+            && authority.state().staged_deferred_authorities.is_empty(),
         "failed publish must not leave forged deferred authority in the DSL state"
     );
 }
@@ -16600,6 +18474,14 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
     )
     .await
     .expect("reconfigure should succeed for attached fixture");
+
+    let bindings = fixture
+        .adapter
+        .prepare_bindings(fixture.session_id.clone())
+        .await
+        .expect("bindings should prepare for stage-filter parity");
+    let probe_tool = runtime_deferred_tool("probe_tool", "runtime-parity");
+    seed_deferred_tool_authority_catalog(&bindings, vec![probe_tool], &[]);
 
     let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
         .await
@@ -16858,7 +18740,7 @@ fn test_llm_capability_surface_realtime() -> SessionLlmCapabilitySurface {
 }
 
 #[tokio::test]
-async fn reconfigure_session_llm_identity_rejects_idle_session() {
+async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
@@ -16886,7 +18768,7 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
         fail_persist: false,
     }));
 
-    let err = adapter
+    let report = adapter
         .reconfigure_session_llm_identity(
             &session_id,
             SessionLlmReconfigureRequest {
@@ -16899,16 +18781,255 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
             },
         )
         .await
-        .expect_err("idle session should reject live reconfiguration");
-    assert!(
-        matches!(
-            err,
-            RuntimeDriverError::NotReady {
-                state: RuntimeState::Idle
-            }
-        ),
-        "expected Idle rejection, got {err:?}"
+        .expect("idle session should reconfigure through generated authority");
+    assert_eq!(report.previous_identity.model, "claude-sonnet-4-5");
+    assert_eq!(report.new_identity.model, "gpt-5.2");
+    assert_eq!(
+        report.tool_visibility_delta.current_capability_base_filter,
+        meerkat_core::capability_base_filter_for_image_tool_results(false)
     );
+}
+
+#[tokio::test]
+async fn session_has_executor_follows_generated_registration_phase() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    assert!(
+        !adapter.session_has_executor(&session_id).await,
+        "registered idle sessions start without generated executor registration"
+    );
+
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect("runtime executor registration should succeed");
+    assert!(
+        adapter.session_has_executor(&session_id).await,
+        "EnsureSessionWithExecutor must publish generated active registration"
+    );
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("session DSL state should exist")
+            .registration_phase,
+        mm_dsl::RegistrationPhase::Active
+    );
+
+    adapter
+        .stop_runtime_executor(&session_id, "test stop")
+        .await
+        .expect("stop should terminalize executor");
+    assert!(
+        !adapter.session_has_executor(&session_id).await,
+        "RuntimeExecutorExited must clear generated executor registration"
+    );
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("session DSL state should exist")
+            .registration_phase,
+        mm_dsl::RegistrationPhase::Queuing
+    );
+}
+
+#[tokio::test]
+async fn rejected_cold_executor_attach_rolls_back_recovered_session_entry() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::store::RuntimeStore::commit_machine_lifecycle(
+        store.as_ref(),
+        &runtime_id,
+        crate::store::MachineLifecycleCommit::new_with_binding(
+            RuntimeState::Retired,
+            crate::store::MachineLifecycleBindingFacts::new(
+                Some(runtime_id.to_string()),
+                None,
+                Some(1),
+                None,
+            ),
+        ),
+        &[],
+    )
+    .await
+    .expect("seed retired generated lifecycle authority");
+
+    let rejected = adapter
+        .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect_err("retired generated lifecycle authority must reject executor attach");
+    assert!(
+        rejected.to_string().contains("executor registration")
+            || rejected.to_string().contains("active"),
+        "unexpected rejection: {rejected}"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "failed generated executor attach claim must not leave a runtime session entry"
+    );
+}
+
+#[tokio::test]
+async fn runtime_loop_driver_authority_rejects_detached_driver_after_unregister() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect("runtime executor registration should succeed");
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .expect("executor registration should create session entry")
+            .driver
+            .clone()
+    };
+
+    let guard = adapter
+        .lock_current_runtime_loop_driver_authority(&session_id, &driver)
+        .await
+        .expect("current runtime loop driver should be authoritative");
+    drop(guard);
+
+    adapter.unregister_session(&session_id).await;
+
+    match adapter
+        .lock_current_runtime_loop_driver_authority(&session_id, &driver)
+        .await
+    {
+        Ok(_) => panic!("detached runtime loop driver must not remain authoritative"),
+        Err(err) => assert!(
+            matches!(
+                err,
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed
+                }
+            ),
+            "expected detached driver to fail closed as destroyed, got {err:?}"
+        ),
+    }
 }
 
 #[tokio::test]
@@ -16959,7 +19080,8 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "claude-sonnet-4-5".to_string(),
@@ -17021,6 +19143,14 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
     assert_eq!(
         owner_state.active_revision, 1,
         "committed visibility revision should advance when the visible set changes"
+    );
+    let resolved_capabilities = adapter
+        .resolved_session_llm_capabilities(&session_id)
+        .await
+        .expect("resolved capabilities should read from generated authority");
+    assert_eq!(
+        resolved_capabilities,
+        Some(test_llm_capability_surface(false))
     );
 }
 
@@ -17085,7 +19215,8 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "claude-sonnet-4-5".to_string(),
@@ -17177,7 +19308,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
     );
 
     allow_finish.notify_waiters();
-    let completion = completion_handle.wait().await;
+    let completion = completion_handle.wait_authorized().await;
     assert!(
         matches!(completion, CompletionOutcome::CompletedWithoutResult),
         "running turn should still complete normally after reconfigure: {completion:?}"
@@ -17232,7 +19363,8 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "claude-sonnet-4-5".to_string(),
@@ -17445,7 +19577,8 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let host = Arc::new(RollbackFailingHost {
         current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
@@ -17826,7 +19959,8 @@ impl RuntimeParityFixture {
             release.notify_waiters();
         }
         if let Some(handle) = self.running_completion.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(250), handle.wait()).await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(250), handle.wait_authorized()).await;
         }
         let _ = self
             .adapter
@@ -18066,6 +20200,22 @@ fn runtime_parity_formal_identity_field(
     }
 }
 
+fn runtime_modeled_normalize_kind_string(value: &str) -> Option<&'static str> {
+    match value {
+        "builtin" => Some("Builtin"),
+        "shell" => Some("Shell"),
+        "comms" => Some("Comms"),
+        "memory" => Some("Memory"),
+        "schedule" => Some("Schedule"),
+        "work_graph" => Some("WorkGraph"),
+        "mob" => Some("Mob"),
+        "callback" => Some("Callback"),
+        "mcp" => Some("Mcp"),
+        "rust_bundle" => Some("RustBundle"),
+        _ => None,
+    }
+}
+
 fn runtime_modeled_normalize_json_value(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(items) => serde_json::Value::Array(
@@ -18079,7 +20229,20 @@ fn runtime_modeled_normalize_json_value(value: serde_json::Value) -> serde_json:
             let mut keys: Vec<_> = entries.into_iter().collect();
             keys.sort_by(|(left, _), (right, _)| left.cmp(right));
             for (key, value) in keys {
-                normalized.insert(key, runtime_modeled_normalize_json_value(value));
+                let normalized_value = runtime_modeled_normalize_json_value(value);
+                let normalized_value = if key == "kind" {
+                    match normalized_value {
+                        serde_json::Value::String(raw) => {
+                            runtime_modeled_normalize_kind_string(&raw)
+                                .map(|kind| serde_json::Value::String(kind.to_string()))
+                                .unwrap_or(serde_json::Value::String(raw))
+                        }
+                        other => other,
+                    }
+                } else {
+                    normalized_value
+                };
+                normalized.insert(key, normalized_value);
             }
             serde_json::Value::Object(normalized)
         }
@@ -18665,6 +20828,22 @@ fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -
     }
 }
 
+fn runtime_modeled_tool_source_kind_from_label(raw: &str) -> Option<meerkat_core::ToolSourceKind> {
+    match raw {
+        "Builtin" | "builtin" => Some(meerkat_core::ToolSourceKind::Builtin),
+        "Shell" | "shell" => Some(meerkat_core::ToolSourceKind::Shell),
+        "Comms" | "comms" => Some(meerkat_core::ToolSourceKind::Comms),
+        "Memory" | "memory" => Some(meerkat_core::ToolSourceKind::Memory),
+        "Schedule" | "schedule" => Some(meerkat_core::ToolSourceKind::Schedule),
+        "WorkGraph" | "work_graph" => Some(meerkat_core::ToolSourceKind::WorkGraph),
+        "Mob" | "mob" => Some(meerkat_core::ToolSourceKind::Mob),
+        "Callback" | "callback" => Some(meerkat_core::ToolSourceKind::Callback),
+        "Mcp" | "mcp" => Some(meerkat_core::ToolSourceKind::Mcp),
+        "RustBundle" | "rust_bundle" => Some(meerkat_core::ToolSourceKind::RustBundle),
+        _ => None,
+    }
+}
+
 fn runtime_modeled_tool_provenance_inner(provenance: &meerkat_core::ToolProvenance) -> KernelValue {
     let tool_source_kind = meerkat_machine_schema::identity::NamedTypeId::parse("ToolSourceKind")
         .expect("ToolSourceKind named type");
@@ -18709,7 +20888,37 @@ fn runtime_modeled_tool_visibility_witness_inner_from_json(
 ) -> KernelValue {
     serde_json::from_value::<meerkat_core::ToolVisibilityWitness>(value.clone())
         .map(|witness| runtime_modeled_tool_visibility_witness_inner_from_domain(&witness))
-        .unwrap_or_else(|_| KernelValue::Map(BTreeMap::new()))
+        .unwrap_or_else(|_| {
+            let Some(object) = value.as_object() else {
+                return KernelValue::Map(BTreeMap::new());
+            };
+            let stable_owner_key = object
+                .get("stable_owner_key")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
+            let last_seen_provenance = object
+                .get("last_seen_provenance")
+                .and_then(|value| value.as_object())
+                .and_then(|provenance| {
+                    let kind = provenance
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .and_then(runtime_modeled_tool_source_kind_from_label)?;
+                    let source_id = provenance
+                        .get("source_id")
+                        .and_then(|value| value.as_str())?;
+                    Some(meerkat_core::ToolProvenance {
+                        kind,
+                        source_id: source_id.to_string().into(),
+                    })
+                });
+            runtime_modeled_tool_visibility_witness_inner_from_domain(
+                &meerkat_core::ToolVisibilityWitness {
+                    stable_owner_key,
+                    last_seen_provenance,
+                },
+            )
+        })
 }
 
 fn runtime_modeled_tool_visibility_witness_inner(value: KernelValue) -> KernelValue {
@@ -19338,7 +21547,8 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
     wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
 
     let before = runtime_parity_snapshot_summary(&adapter, &session_id)
@@ -19350,6 +21560,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled attached steer"),
+                register_completion: true,
             },
         )
         .await
@@ -19420,7 +21631,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
     );
 
     allow_finish.notify_waiters();
-    let _ = tokio::time::timeout(Duration::from_secs(1), completion_handle.wait()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), completion_handle.wait_authorized()).await;
 }
 
 #[tokio::test]
@@ -19440,6 +21651,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: runtime_parity_prompt("modeled idle queued admission"),
+                register_completion: true,
             },
         )
         .await
@@ -19483,7 +21695,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
     )
     .await
     .expect("idle queue test should destroy runtime cleanly");
-    match completion_handle.wait().await {
+    match completion_handle.wait_authorized().await {
         CompletionOutcome::RuntimeTerminated(reason) => {
             assert_eq!(reason, "runtime destroyed");
         }
@@ -19510,7 +21722,8 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
     wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
 
     let driver = {
@@ -19720,6 +21933,7 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled running steer admission"),
+                register_completion: true,
             },
         )
         .await
@@ -19818,7 +22032,7 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
 }
 
 #[tokio::test]
-async fn modeled_meerkat_accept_with_completion_running_peer_wake_signal_matches_runtime() {
+async fn modeled_meerkat_accept_with_completion_running_peer_interrupt_signal_matches_runtime() {
     let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
     let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
         .await
@@ -19831,6 +22045,7 @@ async fn modeled_meerkat_accept_with_completion_running_peer_wake_signal_matches
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_peer_message("modeled running peer wake admission"),
+                register_completion: true,
             },
         )
         .await
@@ -19856,8 +22071,8 @@ async fn modeled_meerkat_accept_with_completion_running_peer_wake_signal_matches
         [
             ("input_id", runtime_modeled_input_id_value()),
             ("request_immediate_processing", KernelValue::Bool(false)),
-            ("interrupt_yielding", KernelValue::Bool(false)),
-            ("wake_if_idle", KernelValue::Bool(true)),
+            ("interrupt_yielding", KernelValue::Bool(true)),
+            ("wake_if_idle", KernelValue::Bool(false)),
         ],
     );
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
@@ -20002,7 +22217,8 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                     session_id.clone(),
                     Box::new(RuntimeParityNoopExecutor),
                 )
-                .await;
+                .await
+                .expect("runtime executor registration should succeed");
             wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
             RuntimeParityFixture {
                 adapter,
@@ -20029,7 +22245,8 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                         allow_finish: Arc::clone(&allow_finish),
                     }),
                 )
-                .await;
+                .await
+                .expect("runtime executor registration should succeed");
             let (outcome, completion) = adapter
                 .accept_input_with_completion(
                     &session_id,
@@ -20130,15 +22347,25 @@ async fn prepare_runtime_parity_probe(
         }
     }
 
-    if matches!(probe, RuntimeParityProbeInput::RequestDeferredTools) {
+    if matches!(
+        probe,
+        RuntimeParityProbeInput::RequestDeferredTools
+            | RuntimeParityProbeInput::StagePersistentFilter
+    ) {
         let bindings = fixture
             .adapter
             .prepare_bindings(fixture.session_id.clone())
             .await
-            .expect("bindings should prepare for request-deferred parity probe");
+            .expect("bindings should prepare for visibility parity probe");
         let probe_tool = runtime_deferred_tool("probe_tool", "runtime-parity");
-        seed_deferred_tool_authority_catalog(&bindings, vec![probe_tool], &["probe_tool"]);
-        setup_tags.push("deferred_authority_catalog".to_string());
+        let deferred_names: &[&str] =
+            if matches!(probe, RuntimeParityProbeInput::RequestDeferredTools) {
+                &["probe_tool"]
+            } else {
+                &[]
+            };
+        seed_deferred_tool_authority_catalog(&bindings, vec![probe_tool], deferred_names);
+        setup_tags.push("visibility_authority_catalog".to_string());
     }
 
     if phase == RuntimeParityPhase::Running
@@ -20298,6 +22525,7 @@ fn runtime_parity_probe_command(
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_prompt("runtime parity accept with completion"),
+                register_completion: true,
             }
         }
         RuntimeParityProbeInput::AcceptWithoutWake => MeerkatMachineCommand::AcceptWithoutWake {
@@ -20332,10 +22560,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::Fail => MeerkatMachineCommand::Fail {
             session_id: fixture.session_id.clone(),
             run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
-            failure: MeerkatMachineRunFailure::new(
-                meerkat_core::TurnTerminalCauseKind::FatalFailure,
-                "runtime parity failure",
-            ),
+            failure: MeerkatMachineRunFailure::new("runtime parity failure"),
         },
         RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
             runtime_id: fixture.runtime_id.clone(),
@@ -20434,6 +22659,9 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         }
         MeerkatMachineCommandResult::ImageOperationPhase(phase) => {
             format!("image_operation_phase:{phase:?}")
+        }
+        MeerkatMachineCommandResult::ImageOperationTerminalClass(terminal) => {
+            format!("image_operation_terminal_class:{terminal:?}")
         }
         MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }

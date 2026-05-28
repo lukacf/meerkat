@@ -10,6 +10,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Code Anchors
 - `mob_handle_surface`: `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
 - `mob_actor_authority`: `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
+- `mob_owner_bridge_cleanup_authority`: `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 
 ### Scenarios
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
@@ -18,13 +19,518 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
+- `owner-bridge-cleanup` — bind owner bridge session, owner bridge cleanup requires owner, implicit delegation requires owner, and recover owner bridge session authority for archive cleanup
 - `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs
 
 ### Transitions
+- `ClassifyFlowRunTerminalityTerminalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowRunTerminalityNonTerminalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowStepTerminalityTerminalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowStepTerminalityNonTerminalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusFailedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusFailedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusFailedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusCanceledRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusCanceledStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusCanceledCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusCompletedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusCompletedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusCompletedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusUnavailableRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusUnavailableStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowFrameTerminalStatusUnavailableCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowRunPublicResultSuccessRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyFlowRunPublicResultFailureRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifyMemberWaitRuntimeMaterialPresentRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitRuntimeMaterialPresentStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitRuntimeMaterialPresentCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifyMemberWaitRuntimeMaterialPresentDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifySpawnManyFailureProfileNotFoundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureProfileNotFoundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureProfileNotFoundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureProfileNotFoundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureMemberNotFoundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureMemberNotFoundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureMemberNotFoundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureMemberNotFoundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureMemberAlreadyExistsRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureMemberAlreadyExistsStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureMemberAlreadyExistsCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureMemberAlreadyExistsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureNotExternallyAddressableRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureNotExternallyAddressableStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureNotExternallyAddressableCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureNotExternallyAddressableDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureInvalidTransitionRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureInvalidTransitionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureInvalidTransitionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureInvalidTransitionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureWiringErrorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureWiringErrorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureWiringErrorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureWiringErrorDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureBridgeCommandRejectedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureBridgeCommandRejectedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureBridgeCommandRejectedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureBridgeCommandRejectedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureMemberRestoreFailedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureMemberRestoreFailedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureMemberRestoreFailedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureMemberRestoreFailedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureKickoffWaitTimedOutRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureKickoffWaitTimedOutStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureKickoffWaitTimedOutCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureKickoffWaitTimedOutDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureReadyWaitTimedOutRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifySpawnManyFailureReadyWaitTimedOutStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifySpawnManyFailureReadyWaitTimedOutCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifySpawnManyFailureReadyWaitTimedOutDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifySpawnManyFailureDefinitionErrorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureDefinitionErrorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureDefinitionErrorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureDefinitionErrorDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureFlowNotFoundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ClassifySpawnManyFailureFlowNotFoundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `ClassifySpawnManyFailureFlowNotFoundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ClassifySpawnManyFailureFlowNotFoundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `ClassifySpawnManyFailureFlowFailedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFlowFailedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFlowFailedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFlowFailedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureRunNotFoundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureRunNotFoundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureRunNotFoundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ClassifySpawnManyFailureRunNotFoundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `ClassifySpawnManyFailureRunCanceledRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureRunCanceledStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureRunCanceledCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureRunCanceledDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ClassifySpawnManyFailureFlowTurnTimedOutRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFlowTurnTimedOutStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureFlowTurnTimedOutCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFlowTurnTimedOutDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureFrameDepthLimitExceededRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFrameDepthLimitExceededStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureFrameDepthLimitExceededCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFrameDepthLimitExceededDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSpecRevisionConflictRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureSpecRevisionConflictStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureSpecRevisionConflictCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSpecRevisionConflictDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSchemaValidationRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureSchemaValidationStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureSchemaValidationCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSchemaValidationDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureInsufficientTargetsRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureInsufficientTargetsStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureInsufficientTargetsCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureInsufficientTargetsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureTopologyViolationRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureTopologyViolationStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureTopologyViolationCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureTopologyViolationDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureBridgeDeliveryRejectedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureBridgeDeliveryRejectedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSupervisorEscalationRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureSupervisorEscalationStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureSupervisorEscalationCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSupervisorEscalationDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureUnsupportedForModeRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureUnsupportedForModeStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureUnsupportedForModeCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureUnsupportedForModeDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureMissingMemberCapabilityRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureMissingMemberCapabilityStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureMissingMemberCapabilityCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureMissingMemberCapabilityDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureResetBarrierRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureResetBarrierStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureResetBarrierCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureResetBarrierDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStorageErrorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStorageErrorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStorageErrorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureStorageErrorDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureSessionErrorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureSessionErrorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureSessionErrorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureSessionErrorDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureCommsErrorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureCommsErrorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureCommsErrorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureCommsErrorDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureCallbackPendingRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureCallbackPendingStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureCallbackPendingCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureCallbackPendingDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `ClassifySpawnManyFailureStaleFenceTokenRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStaleFenceTokenStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStaleFenceTokenCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureStaleFenceTokenDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureStaleEventCursorRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStaleEventCursorStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureStaleEventCursorCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureStaleEventCursorDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureWorkNotFoundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureWorkNotFoundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureWorkNotFoundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ClassifySpawnManyFailureWorkNotFoundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`
+- `ClassifySpawnManyFailureInternalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureInternalStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifySpawnManyFailureInternalCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `ClassifySpawnManyFailureInternalDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `SpawnRunningFresh`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `SpawnRunningFreshPeerOnly`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `SpawnRunningReplacing`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AuthorizeSpawnProfileRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `EnsureMemberRunningExisting`
@@ -33,6 +539,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EnsureMemberRunningMissing`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecoverRosterMemberRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberAddressabilityRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RecoverMemberSessionBindingFreshRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberSessionBindingReplacingRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberSessionBindingAlreadyCurrentRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverRosterMemberResetRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberRetiredRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RecoverRosterMemberRetiredAlreadyAbsent`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `RecoverMemberKickoffPending`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberKickoffStarting`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `RecoverMemberKickoffCallbackPending`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverMemberKickoffStarted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `RecoverMemberKickoffFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `RecoverMemberKickoffCancelled`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
 - `ReconcileRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
@@ -120,21 +668,126 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubmitWorkRunningExternal`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `SubmitWorkRunningExternalPeerOnly`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `SubmitWorkRunningInternal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `SubmitWorkRunningInternalPeerOnly`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionMemberNotFound`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionStaleFenceToken`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionNotExternallyAddressable`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `RetireMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RetireMemberPeerOnly`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AdmitDestroyMemberRetireLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetirePeerOnlyRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetirePeerOnlyStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireAlreadyRetiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `AdmitDestroyMemberRetireAlreadyRetiringStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ObserveRuntimeRetired`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedLive`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedRetired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedRetiredStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedStaleRuntime`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedStaleRuntimeStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveMemberRetirementArchivedAlreadyCleared`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ObserveMemberRetirementArchivedAlreadyClearedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedRetiredRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ObserveDestroyMemberRetirementArchivedRetiredStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ResetMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RespawnMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `ResolveRespawnTopologyRestoreCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveRespawnTopologyRestoreFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `RecoverMemberRestoreFailureRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AdmitDestroyCleanup`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`
+- `AdmitDestroyStorageFinalizing`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `MarkCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -168,6 +821,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetSpawnPolicyDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnPolicyAdmitted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ResolveSpawnPolicyNoMatch`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `BindOwnerBridgeSessionRunning`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `RecoverOwnerBridgeSessionRunning`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `RecoverOwnerBridgeSessionAlreadyCurrent`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
 - `StopRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -183,15 +851,138 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `WireMembersWithTrustRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+- `WireMembersWithTrustAlreadyWired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `WireMembersAlreadyWired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RecoverRosterWiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`
+- `RecoverRosterWiringAlreadyRecovered`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`
+- `RecoverRosterUnwireRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+- `RecoverRosterUnwireAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`
 - `UnwireMembersRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `UnwireMembersAlreadyAbsent`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
 - `WireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `WireExternalPeerAlreadyWired`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `RegisterMemberPeerRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberPeerRebindRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberPeerOverlayRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustWiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustUnwiringRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustCleanupRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeMemberTrustCleanupObservedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `AuthorizeExternalPeerReciprocalTrustRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `RecoverExternalPeerWiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerWiringAlreadyRecovered`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerUnwireRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerUnwireAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
 - `UnwireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `UnwireExternalPeerAlreadyAbsent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `ProvisionSupervisorAuthorityRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `ProvisionSupervisorAuthorityStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `ProvisionSupervisorAuthorityCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `ProvisionSupervisorAuthorityDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `RecoverSupervisorAuthorityRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `RecoverSupervisorAuthorityStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `RecoverSupervisorAuthorityCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `RecoverSupervisorAuthorityDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `ClearSupervisorPendingRotationRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ClearSupervisorPendingRotationStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `ClearSupervisorPendingRotationCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `RecordSupervisorPendingRotationRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+- `RecordSupervisorPendingRotationStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+- `RecordSupervisorPendingRotationCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+- `CommitSupervisorRotationRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `CommitSupervisorRotationStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`
+- `CommitSupervisorRotationCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `ClearSupervisorAuthorityForDestroy`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `RestoreSupervisorAuthorityAfterDestroyRollback`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`
 - `ForceCancelRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -207,6 +998,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubscribeAgentEventsDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingMemberDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsMissingSessionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAgentEventsRuntimeNotLiveDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 - `SubscribeAllAgentEventsRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -219,6 +1046,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubscribeAllAgentEventsDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeAllAgentEventsNoSessionBindingsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 - `SubscribeMobEventsRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -229,6 +1068,102 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `SubscribeMobEventsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `SubscribeStructuralEventsStaleDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `PollEventsStrictRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`
+- `PollEventsStrictCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `PollEventsStrictStaleRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictStaleStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`
+- `PollEventsStrictStaleCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `PollEventsStrictStaleDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscriptionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalMissingDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalUnboundDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `ShutdownRunning`
@@ -354,10 +1289,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeFlowRunReducerCommandFailStep`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowRunReducerCommandFailStepEscalating`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandSkipStep`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `AuthorizeFlowRunReducerCommandProjectFrameStepStatus`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeFlowRunReducerCommandCancelStep`
@@ -429,7 +1373,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeFlowFrameReducerCommandCancelNode`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
-- `AuthorizeFlowFrameReducerCommandSealFrame`
+- `AuthorizeFlowFrameReducerCommandSealFrameRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowFrameReducerCommandSealFrameStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `AuthorizeFlowFrameReducerCommandSealFrameCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `AuthorizeLoopIterationReducerCommandBodyFrameStarted`
@@ -483,22 +1433,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireStoppedReleasing`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RequestPendingSessionIngressDetachForMobDestroyRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
+- `RequestPendingSessionIngressDetachForMobDestroyStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`
 - `SessionIngressDetachedForMobDestroyRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
 - `SessionIngressDetachedForMobDestroyStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`
 - `SessionIngressDetachFailedForMobDestroyRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `SessionIngressDetachFailedForMobDestroyStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
 - `RetireStoppedPreservingBinding`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireStoppedNoBinding`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RetireAbsentRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `RetireAbsentStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RetireAllRunning`
@@ -507,6 +1469,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireAllStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RetireAllCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `CompleteSpawnRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
@@ -519,23 +1484,62 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelAllWorkRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionMemberNotFound`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveCancelAllWorkRejectionCurrentRuntimeNotLive`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCancelAllWorkRejectionStaleFenceToken`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 
 ### Effects
 - `RequestRuntimeBinding`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `SpawnProfileAuthorized`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `RequestRuntimeIngress`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RequestPeerRuntimeIngress`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `SubmitWorkRejected`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+- `CancelAllWorkRejected`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `RequestRuntimeRetire`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `RequestRuntimeDestroy`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
-- `RequestSessionIngressDetachForMobDestroy`
+- `PendingSpawnOperationOwnerAuthorized`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `RequestSessionIngressDetachForMobDestroy`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `owner-bridge-cleanup`
+- `AppendLifecycleJournal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `AppendOperatorActionProvenance`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `EmitMemberLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
@@ -551,6 +1555,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FlowTerminalized`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `FlowRunTerminal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `FlowRunNonTerminal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `FlowStepTerminal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `FlowStepNonTerminal`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `FlowFrameTerminalStatusClassified`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `FlowFrameTerminalStatusUnavailable`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `FlowRunPublicResultClassified`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `EscalateSupervisor`
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`
@@ -578,23 +1603,137 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitKickoffLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `SpawnPolicyResolutionRecorded`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `OwnerBridgeSessionBound`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `RespawnTopologyRestoreResolved`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `SpawnManyFailureClassified`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+- `MemberWaitClassified`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
 - `MemberSessionBindingChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `SessionProvisionOperationOwnerAuthorized`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `MemberTrustWiringRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `MemberTrustUnwiringRequested`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `WiringTrustRepairRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ExternalPeerTrustWiringRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ExternalPeerTrustUnwiringRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ExternalPeerTrustRepairRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `MemberPeerRegistered`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `MemberPeerRebindAuthorized`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `MemberPeerOverlayAuthorized`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ExternalPeerReciprocalTrustRequested`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `PersistSupervisorAuthority`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `DeleteSupervisorAuthority`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
 - `EmitWiringLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
 - `EmitExternalPeerWiringLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
+- `AuthorizeAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeAllAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectAllAgentEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouter`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeMobEventRouterMemberRemoval`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeStructuralEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectStructuralEventSubscription`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `AuthorizeStrictEventPoll`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
+- `RejectStrictEventPoll`
+  - anchors: `mob_actor_authority`
+  - scenarios: `event-subscriptions-and-notices`
 
 ### Invariants
 - `bindings_require_known_identity`
-  - anchors: `mob_handle_surface`
+  - anchors: `mob_handle_surface`, `mob_owner_bridge_cleanup_authority`
   - scenarios: `wiring-and-session-binding`
+- `identity_runtime_material_matches_runtime_binding`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `member_spawn_material_matches_runtime_binding`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `external_peer_edges_are_keyed_coherently`
+  - anchors: `mob_actor_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `supervisor_authority_tuple_consistent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `supervisor_pending_authority_tuple_consistent`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+- `supervisor_pending_authority_requires_current`
+  - anchors: `mob_actor_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `owner_bridge_cleanup_requires_owner`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `implicit_delegation_requires_owner`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `implicit_delegation_requires_cleanup`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
 
 
 <!-- GENERATED_COVERAGE_END -->

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use meerkat::{
     AttentionListRequest, GoalStatusRequest, ReadyWorkFilter, WorkGraphError, WorkGraphEventFilter,
-    WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkGraphPublicErrorClass, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -24,25 +24,38 @@ pub struct WorkGraphIdParams {
 }
 
 fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse {
-    match error {
-        WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => {
-            RpcResponse::error(id, error::INVALID_PARAMS, error.to_string())
+    let message = error.to_string();
+    match meerkat::WorkGraphMachine::public_error_class(&error) {
+        Ok(public_class) => map_workgraph_public_error_class(id, public_class, message),
+        Err(classification_error) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!(
+                "generated WorkGraph error classification failed: {classification_error}; original error: {message}"
+            ),
+        ),
+    }
+}
+
+fn map_workgraph_public_error_class(
+    id: Option<RpcId>,
+    public_class: WorkGraphPublicErrorClass,
+    message: String,
+) -> RpcResponse {
+    match public_class {
+        WorkGraphPublicErrorClass::NotFound
+        | WorkGraphPublicErrorClass::Conflict
+        | WorkGraphPublicErrorClass::InvalidTransition
+        | WorkGraphPublicErrorClass::InvalidArguments => {
+            RpcResponse::error(id, error::INVALID_PARAMS, message)
         }
-        WorkGraphError::StaleRevision { .. }
-        | WorkGraphError::Conflict(_)
-        | WorkGraphError::InvalidTransition(_) => {
-            RpcResponse::error(id, error::INVALID_PARAMS, error.to_string())
-        }
-        WorkGraphError::InvalidInput(_) => {
-            RpcResponse::error(id, error::INVALID_PARAMS, error.to_string())
-        }
-        WorkGraphError::UnsupportedBackend(_) => RpcResponse::error(
+        WorkGraphPublicErrorClass::CapabilityUnavailable => RpcResponse::error(
             id,
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
-            error.to_string(),
+            message,
         ),
-        WorkGraphError::Store(_) => {
-            RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string())
+        WorkGraphPublicErrorClass::StoreError | WorkGraphPublicErrorClass::InternalError => {
+            RpcResponse::error(id, error::INTERNAL_ERROR, message)
         }
     }
 }

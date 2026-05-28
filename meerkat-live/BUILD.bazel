@@ -33,8 +33,13 @@ rust_library(
     aliases = aliases(package_name = "meerkat-live"),
     crate_name = "meerkat_live",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "__meerkat-generated-authority-bridge",
+    ],
     edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
     compile_data = [
         "Cargo.toml",
     ],
@@ -43,6 +48,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.6.27",
         "CARGO_MANIFEST_DIR": "./meerkat-live",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-live",
@@ -62,8 +68,13 @@ rust_library(
     aliases = aliases(package_name = "meerkat-live"),
     crate_name = "meerkat_live",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "__meerkat-generated-authority-bridge",
+    ],
     edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
     compile_data = [
         "Cargo.toml",
     ],
@@ -74,6 +85,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.6.27",
         "CARGO_MANIFEST_DIR": "./meerkat-live",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-live",
@@ -99,8 +111,13 @@ rust_test(
     ),
     crate_name = "meerkat_live",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "__meerkat-generated-authority-bridge",
+    ],
     edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
     compile_data = [
         "Cargo.toml",
     ],
@@ -109,6 +126,7 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.6.27",
         "CARGO_MANIFEST_DIR": "./meerkat-live",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -131,6 +149,7 @@ rust_test(
     deps = [
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
         package_name = "meerkat-live",
         normal = True,

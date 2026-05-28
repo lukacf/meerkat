@@ -36,6 +36,7 @@ pub use token_exchange::{
     exchange_authorization_code, exchange_authorization_code_with_state, exchange_refresh_token,
 };
 
+use meerkat_core::auth::{RefreshError, RefreshFailureObservation};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -173,6 +174,50 @@ pub enum OAuthError {
     AccessDenied,
     #[error("device flow expired")]
     ExpiredToken,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthTokenEndpointErrorBody {
+    error: Option<String>,
+}
+
+pub fn oauth_token_endpoint_error_code(body: &str) -> Option<String> {
+    let parsed: OAuthTokenEndpointErrorBody = serde_json::from_str(body).ok()?;
+    parsed.error.map(|value| value.to_ascii_lowercase())
+}
+
+pub fn oauth_refresh_observation(error: &OAuthError) -> RefreshFailureObservation {
+    match error {
+        OAuthError::TokenEndpoint { status, body } => {
+            RefreshFailureObservation::oauth_token_endpoint(
+                *status,
+                oauth_token_endpoint_error_code(body),
+            )
+        }
+        OAuthError::UserDenied | OAuthError::AccessDenied => {
+            RefreshFailureObservation::oauth_error_code("access_denied")
+        }
+        OAuthError::ExpiredToken => RefreshFailureObservation::oauth_error_code("expired_token"),
+        OAuthError::StateMismatch => RefreshFailureObservation::local_credential_unusable(),
+        OAuthError::CallbackParse(_)
+        | OAuthError::TokenExpiryOutOfRange { .. }
+        | OAuthError::Network(_)
+        | OAuthError::Timeout
+        | OAuthError::InvalidConfig(_) => RefreshFailureObservation::transient(),
+        OAuthError::AuthorizationPending => {
+            RefreshFailureObservation::oauth_error_code("authorization_pending")
+        }
+        OAuthError::SlowDown => RefreshFailureObservation::oauth_error_code("slow_down"),
+    }
+}
+
+pub fn oauth_refresh_error(error: OAuthError) -> RefreshError {
+    let message = error.to_string();
+    let observation = oauth_refresh_observation(&error);
+    RefreshError::Observed {
+        message,
+        observation,
+    }
 }
 
 #[cfg(feature = "oauth")]

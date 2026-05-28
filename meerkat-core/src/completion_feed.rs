@@ -4,8 +4,8 @@
 //! over operation terminal events. The runtime registry is the sole writer;
 //! consumers (agent boundary, idle wake) are read-only.
 //!
-//! This replaces the prior parallel-truth paths (shell job projection,
-//! detached wake booleans, poll_external_updates background_completions).
+//! This replaces the prior parallel-truth paths (shell job projection and
+//! detached wake booleans).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -41,9 +41,11 @@ pub struct CompletionBatch {
 
 /// Read-only handle to the canonical completion feed.
 ///
-/// Consumers call [`list_since`](CompletionFeed::list_since) to drain entries
-/// past a local cursor, and [`wait_for_advance`](CompletionFeed::wait_for_advance)
-/// to block until the watermark advances past a given sequence.
+/// Consumers call [`list_since`](CompletionFeed::list_since) with a
+/// machine-authorized cursor, and
+/// [`wait_for_advance`](CompletionFeed::wait_for_advance) to block until the
+/// watermark advances past a given sequence. The feed watermark is not cursor
+/// authority for delivery consumers.
 pub trait CompletionFeed: Send + Sync + std::fmt::Debug {
     /// Current feed watermark (highest seq written).
     fn watermark(&self) -> CompletionSeq;

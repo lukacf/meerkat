@@ -7,13 +7,11 @@ use std::time::Duration;
 #[cfg(feature = "comms")]
 use meerkat_comms::agent::DynCommsToolDispatcher;
 #[cfg(feature = "comms")]
-use meerkat_comms::{Router, TrustedPeers};
+use meerkat_comms::{Router, TrustedPeersView};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
-#[cfg(feature = "comms")]
-use parking_lot::RwLock;
 
 use crate::builtin::shell::ShellConfig;
 use crate::builtin::{BuiltinToolConfig, CompositeDispatcher, CompositeDispatcherError, TaskStore};
@@ -55,7 +53,7 @@ pub struct BuiltinDispatcherConfig {
 #[cfg(feature = "comms")]
 pub struct CommsDispatcherConfig {
     pub router: Arc<Router>,
-    pub trusted_peers: Arc<RwLock<TrustedPeers>>,
+    pub trusted_peers: TrustedPeersView,
 }
 
 /// Top-level configuration for building a ToolDispatcher

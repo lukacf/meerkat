@@ -239,7 +239,10 @@ mod tests {
                 payload: ToolConfigChangedPayload::new(
                     ToolConfigChangeOperation::Remove,
                     "filesystem",
-                    meerkat_core::ToolConfigChangeStatus::legacy_status("staged"),
+                    meerkat_core::ToolConfigChangeStatus::external_tool_delta(
+                        meerkat_core::ExternalToolDeltaPhase::Pending,
+                        None,
+                    ),
                     false,
                 )
                 .with_applied_at_turn(Some(3)),
@@ -253,7 +256,7 @@ mod tests {
             AgentEvent::ToolConfigChanged { payload } => {
                 assert_eq!(payload.operation, ToolConfigChangeOperation::Remove);
                 assert_eq!(payload.target, "filesystem");
-                assert_eq!(payload.status_text(), "staged");
+                assert_eq!(payload.status_text(), "pending");
                 assert!(!payload.persisted);
                 assert_eq!(payload.applied_at_turn, Some(3));
             }

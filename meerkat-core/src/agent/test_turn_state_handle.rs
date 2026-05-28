@@ -1,700 +1,583 @@
-//! Test-only in-process `TurnStateHandle` implementation for `meerkat-core`
-//! tests.
+//! Crate-private `TurnStateHandle` implementation for `meerkat-core` unit tests.
 //!
-//! ## Why this exists
-//!
-//! Wave-A deleted the standalone in-core turn-state fallback
-//! (`LocalTurnExecutionState`) that previously backed every agent loop when
-//! no runtime handle was attached. All production surfaces now obtain a real
-//! DSL-backed [`RuntimeTurnStateHandle`] through
-//! `MeerkatMachine::prepare_bindings`, so the `turn_state_handle` slot on
-//! `Agent` is always `Some` in production.
-//!
-//! Tests inside `meerkat-core` cannot reach for the production
-//! `RuntimeTurnStateHandle` because `meerkat-runtime` depends on
-//! `meerkat-core` (circular dev-dependency instantiates a second copy of
-//! `meerkat-core` and the trait impls do not unify across the two copies).
-//!
-//! This module ports the deleted `LocalTurnExecutionState` phase logic and
-//! wraps it in a [`TurnStateHandle`] so core tests can exercise the full
-//! agent loop against a phase-tracking handle. The adapter shape mirrors
-//! `apply_turn_input_via_runtime_handle` in `agent::state`: each trait
-//! method builds the corresponding `TurnExecutionInput` and drives the
-//! internal state machine via `apply`.
-//!
-//! See #32 Class W1.
-//!
-//! The transition logic here is a literal port of the pre-wave-a
-//! `meerkat-core/src/agent/turn_state.rs` (deleted in `fdb569aaf`); the
-//! DSL-backed `meerkat-runtime` handle is the real authority in every
-//! live surface.
+//! The handle is a thin adapter over the generated MeerkatMachine kernel from
+//! `meerkat-machine-kernels`. It exists because core unit tests cannot use
+//! `meerkat-runtime::RuntimeTurnStateHandle` without compiling a second copy of
+//! `meerkat-core`; lifecycle and terminal facts still change only by applying
+//! generated MeerkatMachine inputs.
 
-use std::collections::{BTreeSet, HashSet};
+#![allow(clippy::expect_used)]
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::{
     Mutex, MutexGuard,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
-use crate::BudgetDimension;
+use meerkat_machine_kernels::generated::meerkat;
+use meerkat_machine_kernels::test_oracle::{
+    GeneratedMachineKernel, KernelEffect, KernelInput, KernelState, KernelValue, TransitionRefusal,
+};
+use meerkat_machine_schema::identity::{
+    EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, NamedTypeId,
+};
+
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
-use crate::ops::OperationId;
-use crate::retry::LlmRetrySchedule;
+use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
+use crate::retry::{LlmRetryFailureKind, LlmRetrySchedule};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionInput, TurnFailureReason, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnFailureReason, TurnFailureSource,
+    TurnFailureSourceKind, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
+    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
-#[derive(Debug, Clone)]
-struct LocalState {
-    phase: TurnPhase,
-    fields: LocalFields,
+fn field_id(slug: &str) -> FieldId {
+    FieldId::parse(slug).expect("generated MeerkatMachine field id")
 }
 
-#[derive(Debug, Clone)]
-struct LocalFields {
-    active_run: Option<RunId>,
-    primitive_kind: TurnPrimitiveKind,
-    admitted_content_shape: Option<ContentShape>,
-    vision_enabled: bool,
-    image_tool_results_enabled: bool,
-    tool_calls_pending: u32,
-    pending_op_ids: Vec<OperationId>,
-    barrier_operation_ids: Vec<OperationId>,
-    has_barrier_ops: bool,
-    barrier_satisfied: bool,
-    boundary_count: u32,
-    cancel_after_boundary: bool,
-    terminal_outcome: TurnTerminalOutcome,
-    terminal_cause_kind: Option<TurnTerminalCauseKind>,
-    extraction_attempts: u32,
-    max_extraction_retries: u32,
-    llm_retry_attempt: u32,
-    llm_retry_max_retries: u32,
-    llm_retry_selected_delay_ms: u64,
-    force_next_llm_terminal_failed_cause_kind: Option<ForcedTerminalCauseKind>,
+fn input_id(slug: &str) -> InputVariantId {
+    InputVariantId::parse(slug).expect("generated MeerkatMachine input id")
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ForcedTerminalCauseKind {
-    Present(TurnTerminalCauseKind),
-    Missing,
+fn effect_id(slug: &str) -> EffectVariantId {
+    EffectVariantId::parse(slug).expect("generated MeerkatMachine effect id")
 }
 
-impl ForcedTerminalCauseKind {
-    fn from_optional(cause_kind: Option<TurnTerminalCauseKind>) -> Self {
-        match cause_kind {
-            Some(cause_kind) => Self::Present(cause_kind),
-            None => Self::Missing,
+fn named_type_id(slug: &str) -> NamedTypeId {
+    NamedTypeId::parse(slug).expect("generated MeerkatMachine named type id")
+}
+
+fn enum_type_id(slug: &str) -> EnumTypeId {
+    EnumTypeId::parse(slug).expect("generated MeerkatMachine enum type id")
+}
+
+fn enum_variant_id(slug: &str) -> EnumVariantId {
+    EnumVariantId::parse(slug).expect("generated MeerkatMachine enum variant id")
+}
+
+fn named_string(type_name: &str, value: String) -> KernelValue {
+    KernelValue::Named {
+        type_name: named_type_id(type_name),
+        value: Box::new(KernelValue::String(value)),
+    }
+}
+
+fn enum_value(enum_name: &str, variant: &str) -> KernelValue {
+    KernelValue::NamedVariant {
+        enum_name: enum_type_id(enum_name),
+        variant: enum_variant_id(variant),
+    }
+}
+
+fn option_value(value: KernelValue) -> KernelValue {
+    KernelValue::Map(BTreeMap::from([(
+        KernelValue::String("value".to_string()),
+        value,
+    )]))
+}
+
+fn input(
+    variant: &str,
+    fields: impl IntoIterator<Item = (&'static str, KernelValue)>,
+) -> KernelInput {
+    KernelInput {
+        variant: input_id(variant),
+        fields: fields
+            .into_iter()
+            .map(|(name, value)| (field_id(name), value))
+            .collect(),
+    }
+}
+
+fn run_id_value(run_id: &RunId) -> KernelValue {
+    named_string("RunId", run_id.to_string())
+}
+
+fn primitive_kind_variant(kind: TurnPrimitiveKind) -> &'static str {
+    match kind {
+        TurnPrimitiveKind::None => "None",
+        TurnPrimitiveKind::ConversationTurn => "ConversationTurn",
+        TurnPrimitiveKind::ImmediateAppend => "ImmediateAppend",
+        TurnPrimitiveKind::ImmediateContextAppend => "ImmediateContextAppend",
+    }
+}
+
+fn content_shape_variant(shape: ContentShape) -> &'static str {
+    match shape {
+        ContentShape::Conversation => "Conversation",
+        ContentShape::ConversationAndContext => "ConversationAndContext",
+        ContentShape::Context => "Context",
+        ContentShape::Empty => "Empty",
+        ContentShape::ImmediateAppend => "ImmediateAppend",
+        ContentShape::ImmediateContext => "ImmediateContext",
+    }
+}
+
+fn failure_source_variant(source: TurnFailureSourceKind) -> &'static str {
+    match source {
+        TurnFailureSourceKind::Unknown => "Unknown",
+        TurnFailureSourceKind::Llm => "Llm",
+        TurnFailureSourceKind::StoreError => "StoreError",
+        TurnFailureSourceKind::ToolError => "ToolError",
+        TurnFailureSourceKind::McpError => "McpError",
+        TurnFailureSourceKind::SessionNotFound => "SessionNotFound",
+        TurnFailureSourceKind::TokenBudgetExceeded => "TokenBudgetExceeded",
+        TurnFailureSourceKind::TimeBudgetExceeded => "TimeBudgetExceeded",
+        TurnFailureSourceKind::ToolCallBudgetExceeded => "ToolCallBudgetExceeded",
+        TurnFailureSourceKind::MaxTokensReached => "MaxTokensReached",
+        TurnFailureSourceKind::ContentFiltered => "ContentFiltered",
+        TurnFailureSourceKind::MaxTurnsReached => "MaxTurnsReached",
+        TurnFailureSourceKind::Cancelled => "Cancelled",
+        TurnFailureSourceKind::InvalidStateTransition => "InvalidStateTransition",
+        TurnFailureSourceKind::OperationNotFound => "OperationNotFound",
+        TurnFailureSourceKind::DepthLimitExceeded => "DepthLimitExceeded",
+        TurnFailureSourceKind::ConcurrencyLimitExceeded => "ConcurrencyLimitExceeded",
+        TurnFailureSourceKind::ConfigError => "ConfigError",
+        TurnFailureSourceKind::InvalidToolAccess => "InvalidToolAccess",
+        TurnFailureSourceKind::InternalError => "InternalError",
+        TurnFailureSourceKind::BuildError => "BuildError",
+        TurnFailureSourceKind::AuthReauthRequired => "AuthReauthRequired",
+        TurnFailureSourceKind::CallbackPending => "CallbackPending",
+        TurnFailureSourceKind::StructuredOutputValidationFailed => {
+            "StructuredOutputValidationFailed"
         }
-    }
-
-    fn into_optional(self) -> Option<TurnTerminalCauseKind> {
-        match self {
-            Self::Present(cause_kind) => Some(cause_kind),
-            Self::Missing => None,
-        }
-    }
-}
-
-impl LocalFields {
-    fn init() -> Self {
-        Self {
-            active_run: None,
-            primitive_kind: TurnPrimitiveKind::None,
-            admitted_content_shape: None,
-            vision_enabled: false,
-            image_tool_results_enabled: false,
-            tool_calls_pending: 0,
-            pending_op_ids: Vec::new(),
-            barrier_operation_ids: Vec::new(),
-            has_barrier_ops: false,
-            barrier_satisfied: true,
-            boundary_count: 0,
-            cancel_after_boundary: false,
-            terminal_outcome: TurnTerminalOutcome::None,
-            terminal_cause_kind: None,
-            extraction_attempts: 0,
-            max_extraction_retries: 0,
-            llm_retry_attempt: 0,
-            llm_retry_max_retries: 0,
-            llm_retry_selected_delay_ms: 0,
-            force_next_llm_terminal_failed_cause_kind: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::init();
+        TurnFailureSourceKind::InvalidOutputSchema => "InvalidOutputSchema",
+        TurnFailureSourceKind::HookDenied => "HookDenied",
+        TurnFailureSourceKind::HookTimeout => "HookTimeout",
+        TurnFailureSourceKind::HookExecutionFailed => "HookExecutionFailed",
+        TurnFailureSourceKind::HookConfigInvalid => "HookConfigInvalid",
+        TurnFailureSourceKind::TerminalFailure => "TerminalFailure",
+        TurnFailureSourceKind::NoPendingBoundary => "NoPendingBoundary",
+        TurnFailureSourceKind::LlmRetryExhausted => "LlmRetryExhausted",
     }
 }
 
-impl LocalState {
-    fn new() -> Self {
-        Self {
-            phase: TurnPhase::Ready,
-            fields: LocalFields::init(),
-        }
-    }
-
-    fn guard_run_matches(&self, run_id: &RunId) -> bool {
-        self.fields.active_run.as_ref() == Some(run_id)
-    }
-
-    fn barrier_operation_ids_match(&self, operation_ids: &[OperationId]) -> bool {
-        let expected = self
-            .fields
-            .barrier_operation_ids
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let actual = operation_ids.iter().cloned().collect::<HashSet<_>>();
-        expected.len() == operation_ids.len() && expected == actual
-    }
-
-    fn apply(&mut self, input: TurnExecutionInput) -> Result<(), DslTransitionError> {
-        use TurnExecutionInput::{
-            AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
-            BudgetLimitExceeded, CancelAfterBoundary, CancelNow, CancellationObserved,
-            EnterExtraction, ExtractionFailed, ExtractionStart, ExtractionValidationFailed,
-            ExtractionValidationPassed, FatalFailure, ForceCancelNoRun, LlmReturnedTerminal,
-            LlmReturnedToolCalls, OpsBarrierSatisfied, PrimitiveApplied, RecoverableFailure,
-            RegisterPendingOps, RetryRequested, StartConversationRun, StartImmediateAppend,
-            StartImmediateContext, TimeBudgetExceeded, ToolCallsResolved, TurnLimitReached,
-        };
-        use TurnPhase::{
-            ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
-            ErrorRecovery, Extracting, Failed, Ready, WaitingForOps,
-        };
-
-        let phase = self.phase;
-        let mut fields = self.fields.clone();
-
-        let next_phase = match (phase, &input) {
-            (Ready | Completed | Failed | Cancelled, StartConversationRun { run_id }) => {
-                fields = LocalFields::init();
-                fields.active_run = Some(run_id.clone());
-                fields.primitive_kind = TurnPrimitiveKind::ConversationTurn;
-                ApplyingPrimitive
-            }
-            (Ready | Completed | Failed | Cancelled, StartImmediateAppend { run_id }) => {
-                fields = LocalFields::init();
-                fields.active_run = Some(run_id.clone());
-                fields.primitive_kind = TurnPrimitiveKind::ImmediateAppend;
-                fields.admitted_content_shape = Some(ContentShape::ImmediateAppend);
-                ApplyingPrimitive
-            }
-            (Ready | Completed | Failed | Cancelled, StartImmediateContext { run_id }) => {
-                fields = LocalFields::init();
-                fields.active_run = Some(run_id.clone());
-                fields.primitive_kind = TurnPrimitiveKind::ImmediateContextAppend;
-                fields.admitted_content_shape = Some(ContentShape::ImmediateContext);
-                ApplyingPrimitive
-            }
-            (
-                ApplyingPrimitive,
-                PrimitiveApplied {
-                    run_id,
-                    admitted_content_shape,
-                    vision_enabled,
-                    image_tool_results_enabled,
-                },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.admitted_content_shape = Some(*admitted_content_shape);
-                fields.vision_enabled = *vision_enabled;
-                fields.image_tool_results_enabled = *image_tool_results_enabled;
-                match fields.primitive_kind {
-                    TurnPrimitiveKind::ConversationTurn => CallingLlm,
-                    TurnPrimitiveKind::ImmediateAppend
-                    | TurnPrimitiveKind::ImmediateContextAppend => {
-                        fields.boundary_count += 1;
-                        if fields.cancel_after_boundary {
-                            fields.cancel_after_boundary = false;
-                            fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
-                            Cancelled
-                        } else {
-                            fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                            Completed
-                        }
-                    }
-                    TurnPrimitiveKind::None => return Err(invalid(phase, &input)),
-                }
-            }
-            (CallingLlm, LlmReturnedToolCalls { run_id, tool_count }) => {
-                if !self.guard_run_matches(run_id) || *tool_count == 0 {
-                    return Err(invalid(phase, &input));
-                }
-                fields.tool_calls_pending = *tool_count;
-                fields.pending_op_ids.clear();
-                fields.barrier_operation_ids.clear();
-                fields.has_barrier_ops = false;
-                fields.barrier_satisfied = true;
-                WaitingForOps
-            }
-            (CallingLlm, LlmReturnedTerminal { run_id }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.boundary_count += 1;
-                if let Some(cause_kind) = fields.force_next_llm_terminal_failed_cause_kind.take() {
-                    fields.terminal_outcome = TurnTerminalOutcome::Failed;
-                    fields.terminal_cause_kind = cause_kind.into_optional();
-                    Failed
-                } else {
-                    DrainingBoundary
-                }
-            }
-            (
-                WaitingForOps,
-                RegisterPendingOps {
-                    run_id,
-                    op_refs,
-                    barrier_operation_ids,
-                    has_barrier_ops,
-                },
-            ) => {
-                if !self.guard_run_matches(run_id) || fields.tool_calls_pending == 0 {
-                    return Err(invalid(phase, &input));
-                }
-                fields.pending_op_ids = op_refs.iter().map(|r| r.operation_id.clone()).collect();
-                fields.barrier_operation_ids = barrier_operation_ids.clone();
-                fields.has_barrier_ops = *has_barrier_ops;
-                fields.barrier_satisfied = !*has_barrier_ops;
-                WaitingForOps
-            }
-            (
-                WaitingForOps,
-                OpsBarrierSatisfied {
-                    run_id,
-                    operation_ids,
-                },
-            ) => {
-                if !self.guard_run_matches(run_id)
-                    || fields.barrier_satisfied
-                    || !self.barrier_operation_ids_match(operation_ids)
-                {
-                    return Err(invalid(phase, &input));
-                }
-                fields.barrier_satisfied = true;
-                WaitingForOps
-            }
-            (WaitingForOps, ToolCallsResolved { run_id }) => {
-                // Relaxed vs. the deleted `LocalTurnExecutionState`: the test
-                // stub does not require `pending_op_ids` to be non-empty —
-                // agent-loop tests that exercise tool calls without going
-                // through `RegisterPendingOps` should still advance.
-                if !self.guard_run_matches(run_id) || !fields.barrier_satisfied {
-                    return Err(invalid(phase, &input));
-                }
-                fields.tool_calls_pending = 0;
-                fields.pending_op_ids.clear();
-                fields.barrier_operation_ids.clear();
-                fields.has_barrier_ops = false;
-                fields.barrier_satisfied = true;
-                fields.boundary_count += 1;
-                DrainingBoundary
-            }
-            (DrainingBoundary, BoundaryContinue { run_id }) => {
-                if !self.guard_run_matches(run_id)
-                    || fields.primitive_kind != TurnPrimitiveKind::ConversationTurn
-                {
-                    return Err(invalid(phase, &input));
-                }
-                if fields.cancel_after_boundary {
-                    fields.cancel_after_boundary = false;
-                    fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
-                    Cancelled
-                } else {
-                    CallingLlm
-                }
-            }
-            (DrainingBoundary, BoundaryComplete { run_id }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if fields.cancel_after_boundary {
-                    fields.cancel_after_boundary = false;
-                    fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
-                    Cancelled
-                } else {
-                    fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                    Completed
-                }
-            }
-            (
-                DrainingBoundary,
-                EnterExtraction {
-                    run_id,
-                    max_retries,
-                },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.max_extraction_retries = *max_retries;
-                Extracting
-            }
-            (Extracting, ExtractionValidationPassed { run_id }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                Completed
-            }
-            (Extracting, ExtractionStart { run_id }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                CallingLlm
-            }
-            (Extracting, ExtractionValidationFailed { run_id, .. }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if fields.extraction_attempts < fields.max_extraction_retries {
-                    fields.extraction_attempts += 1;
-                    CallingLlm
-                } else {
-                    fields.extraction_attempts += 1;
-                    fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                    fields.terminal_cause_kind = None;
-                    Completed
-                }
-            }
-            (Extracting | CallingLlm | DrainingBoundary, ExtractionFailed { run_id, .. }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.extraction_attempts += 1;
-                fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                fields.terminal_cause_kind = None;
-                Completed
-            }
-            (
-                CallingLlm | WaitingForOps | DrainingBoundary,
-                RecoverableFailure { run_id, retry },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.llm_retry_attempt = retry.plan.attempt;
-                fields.llm_retry_max_retries = retry.plan.max_retries;
-                fields.llm_retry_selected_delay_ms = retry.plan.selected_delay_ms;
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                ErrorRecovery
-            }
-            (
-                ErrorRecovery,
-                RetryRequested {
-                    run_id,
-                    retry_attempt,
-                },
-            ) => {
-                if !self.guard_run_matches(run_id) || *retry_attempt != fields.llm_retry_attempt {
-                    return Err(invalid(phase, &input));
-                }
-                CallingLlm
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                FatalFailure { run_id, reason },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                fields.terminal_outcome = TurnTerminalOutcome::Failed;
-                fields.terminal_cause_kind = Some(reason.cause_kind);
-                Failed
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                CancelNow { run_id },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                Cancelling
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                CancelAfterBoundary { run_id },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.cancel_after_boundary = true;
-                phase
-            }
-            (Cancelling, CancellationObserved { run_id }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
-                fields.cancel_after_boundary = false;
-                Cancelled
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                TurnLimitReached { run_id },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                fields.boundary_count += 1;
-                fields.terminal_outcome = TurnTerminalOutcome::Failed;
-                fields.terminal_cause_kind = Some(TurnTerminalCauseKind::TurnLimitReached);
-                Failed
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                BudgetExhausted { run_id },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                fields.boundary_count += 1;
-                fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
-                fields.terminal_cause_kind = Some(TurnTerminalCauseKind::BudgetExhausted);
-                Completed
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                TimeBudgetExceeded { run_id },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                fields.boundary_count += 1;
-                fields.terminal_outcome = TurnTerminalOutcome::TimeBudgetExceeded;
-                fields.terminal_cause_kind = Some(TurnTerminalCauseKind::TimeBudgetExceeded);
-                Completed
-            }
-            (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
-                | ErrorRecovery,
-                BudgetLimitExceeded { run_id, exceeded },
-            ) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                fields.boundary_count += 1;
-                fields.terminal_outcome = terminal_outcome_for_budget_exceeded(*exceeded);
-                fields.terminal_cause_kind = Some(match exceeded.dimension {
-                    BudgetDimension::Time => TurnTerminalCauseKind::TimeBudgetExceeded,
-                    BudgetDimension::Tokens | BudgetDimension::ToolCalls => {
-                        TurnTerminalCauseKind::BudgetExhausted
-                    }
-                });
-                Completed
-            }
-            (
-                Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary
-                | Extracting | ErrorRecovery | Cancelling,
-                ForceCancelNoRun,
-            ) => {
-                if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids.clear();
-                    fields.barrier_operation_ids.clear();
-                    fields.has_barrier_ops = false;
-                    fields.barrier_satisfied = true;
-                }
-                fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
-                Cancelled
-            }
-            (Completed | Failed | Cancelled, AcknowledgeTerminal { run_id }) => {
-                if !self.guard_run_matches(run_id) {
-                    return Err(invalid(phase, &input));
-                }
-                fields.reset();
-                Ready
-            }
-            _ => return Err(invalid(phase, &input)),
-        };
-
-        self.phase = next_phase;
-        self.fields = fields;
-        Ok(())
+fn terminal_outcome_variant(outcome: TurnTerminalOutcome) -> &'static str {
+    match outcome {
+        TurnTerminalOutcome::None => "None",
+        TurnTerminalOutcome::Completed => "Completed",
+        TurnTerminalOutcome::Failed => "Failed",
+        TurnTerminalOutcome::Cancelled => "Cancelled",
+        TurnTerminalOutcome::BudgetExhausted => "BudgetExhausted",
+        TurnTerminalOutcome::TimeBudgetExceeded => "TimeBudgetExceeded",
+        TurnTerminalOutcome::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
     }
 }
 
-fn invalid(from: TurnPhase, input: &TurnExecutionInput) -> DslTransitionError {
+fn retry_failure_variant(kind: LlmRetryFailureKind) -> &'static str {
+    match kind {
+        LlmRetryFailureKind::RateLimited => "RateLimited",
+        LlmRetryFailureKind::NetworkTimeout => "NetworkTimeout",
+        LlmRetryFailureKind::CallTimeout => "CallTimeout",
+        LlmRetryFailureKind::RetryableProviderError => "RetryableProviderError",
+    }
+}
+
+fn string_set(values: impl IntoIterator<Item = String>) -> KernelValue {
+    KernelValue::Set(values.into_iter().map(KernelValue::String).collect())
+}
+
+fn state_field<'a>(state: &'a KernelState, name: &str) -> Option<&'a KernelValue> {
+    state.fields.get(&field_id(name))
+}
+
+fn named_payload<'a>(value: &'a KernelValue, expected_type: &str) -> Option<&'a KernelValue> {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == expected_type => {
+            Some(value.as_ref())
+        }
+        _ => None,
+    }
+}
+
+fn generated_projection_error(
+    context: &'static str,
+    reason: impl Into<String>,
+) -> DslTransitionError {
     DslTransitionError::guard_rejected(
-        "test-turn-state-handle",
-        format!("invalid transition from {from:?} for input {input:?}"),
+        context,
+        format!(
+            "generated MeerkatMachine turn authority projection failed: {}",
+            reason.into()
+        ),
     )
 }
 
-/// If no run is active (or the previous run reached a terminal phase),
-/// synthesize a fresh `StartConversationRun` + transition to `CallingLlm`
-/// so the caller can drive a terminal transition (BudgetExhausted,
-/// TurnLimitReached, etc.) from the expected phase.
-///
-/// Tests that directly invoke `agent.run_loop(None)` without a surface-staged
-/// primitive never call `primitive_applied`, so the stub would otherwise panic
-/// on the first terminal-routing transition. This helper keeps the stub
-/// permissive for such tests.
-fn ensure_active_conversation_run(state: &mut LocalState) -> Result<(), DslTransitionError> {
-    let is_terminal = matches!(
-        state.phase,
-        TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled
-    );
-    // RMAT-ALLOW(NoGuardedApply): this is a test-only `LocalState` stub
-    // reset, not an authority apply. The conditional resets the stub's
-    // synthetic state to a fresh run; the subsequent `state.apply(...)`
-    // calls in this function ARE unconditional authority submits against
-    // the now-reset stub. The RMAT rule flags `is_terminal`-gated branches
-    // that guard `.apply()` calls — here the guard gates the stub
-    // bootstrap, not the authority, so the flag is a false positive for
-    // test scaffolding.
-    if state.fields.active_run.is_none() || is_terminal {
-        *state = LocalState::new();
-    }
-    if state.fields.active_run.is_none() {
-        let run_id = RunId(uuid::Uuid::new_v4());
-        state
-            .apply(TurnExecutionInput::StartConversationRun {
-                run_id: run_id.clone(),
-            })
-            .map_err(|err| {
-                DslTransitionError::guard_rejected(
-                    "test-turn-state-handle",
-                    format!("synthetic StartConversationRun rejected: {err:?}"),
-                )
-            })?;
-        state
-            .apply(TurnExecutionInput::PrimitiveApplied {
-                run_id,
-                admitted_content_shape: ContentShape::Conversation,
-                vision_enabled: false,
-                image_tool_results_enabled: false,
-            })
-            .map_err(|err| {
-                DslTransitionError::guard_rejected(
-                    "test-turn-state-handle",
-                    format!("synthetic PrimitiveApplied rejected: {err:?}"),
-                )
-            })?;
-    }
-    Ok(())
-}
-
-fn active_run_or_err(state: &LocalState, context: &str) -> Result<RunId, DslTransitionError> {
-    state.fields.active_run.clone().ok_or_else(|| {
-        DslTransitionError::guard_rejected(
-            "test-turn-state-handle",
-            format!("{context} without active run"),
-        )
+fn required_state_field<'a>(
+    state: &'a KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<&'a KernelValue, DslTransitionError> {
+    state_field(state, name).ok_or_else(|| {
+        generated_projection_error(context, format!("missing required state field `{name}`"))
     })
 }
 
-/// Test-only `TurnStateHandle` that tracks phase via the deleted-wave-a
-/// `LocalTurnExecutionState` transition logic.
+fn required_effect_field<'a>(
+    effect: &'a KernelEffect,
+    name: &str,
+    context: &'static str,
+) -> Result<&'a KernelValue, DslTransitionError> {
+    effect.fields.get(&field_id(name)).ok_or_else(|| {
+        generated_projection_error(context, format!("missing required effect field `{name}`"))
+    })
+}
+
+fn required_enum_variant(
+    value: &KernelValue,
+    enum_name: &str,
+    field_name: &str,
+    context: &'static str,
+) -> Result<String, DslTransitionError> {
+    match value {
+        KernelValue::NamedVariant {
+            enum_name: actual,
+            variant,
+        } if actual.as_str() == enum_name => Ok(variant.as_str().to_string()),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{field_name}` was not generated enum `{enum_name}`"),
+        )),
+    }
+}
+
+fn option_inner<'a>(
+    value: &'a KernelValue,
+    field_name: &str,
+    context: &'static str,
+) -> Result<Option<&'a KernelValue>, DslTransitionError> {
+    match value {
+        KernelValue::None => Ok(None),
+        KernelValue::Map(fields) => fields
+            .get(&KernelValue::String("value".to_string()))
+            .map(Some)
+            .ok_or_else(|| {
+                generated_projection_error(
+                    context,
+                    format!("option field `{field_name}` missing generated `value` payload"),
+                )
+            }),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{field_name}` was not a generated option value"),
+        )),
+    }
+}
+
+fn option_enum_variant(
+    state: &KernelState,
+    name: &str,
+    enum_name: &str,
+    context: &'static str,
+) -> Result<Option<String>, DslTransitionError> {
+    required_state_field(state, name, context)
+        .and_then(|value| option_inner(value, name, context))
+        .and_then(|value| {
+            value
+                .map(|inner| required_enum_variant(inner, enum_name, name, context))
+                .transpose()
+        })
+}
+
+fn state_enum_variant(
+    state: &KernelState,
+    name: &str,
+    enum_name: &str,
+    context: &'static str,
+) -> Result<String, DslTransitionError> {
+    required_state_field(state, name, context)
+        .and_then(|value| required_enum_variant(value, enum_name, name, context))
+}
+
+fn option_named_string(
+    state: &KernelState,
+    name: &str,
+    type_name: &str,
+    context: &'static str,
+) -> Result<Option<String>, DslTransitionError> {
+    let Some(value) = option_inner(required_state_field(state, name, context)?, name, context)?
+    else {
+        return Ok(None);
+    };
+    let Some(KernelValue::String(value)) = named_payload(value, type_name) else {
+        return Err(generated_projection_error(
+            context,
+            format!("field `{name}` was not generated named string `{type_name}`"),
+        ));
+    };
+    Ok(Some(value.clone()))
+}
+
+fn state_bool(
+    state: &KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<bool, DslTransitionError> {
+    match required_state_field(state, name, context)? {
+        KernelValue::Bool(value) => Ok(*value),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{name}` was not bool"),
+        )),
+    }
+}
+
+fn state_u64(
+    state: &KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<u64, DslTransitionError> {
+    match required_state_field(state, name, context)? {
+        KernelValue::U64(value) => Ok(*value),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{name}` was not u64"),
+        )),
+    }
+}
+
+fn state_u32(
+    state: &KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<u32, DslTransitionError> {
+    u32::try_from(state_u64(state, name, context)?).map_err(|_| {
+        generated_projection_error(context, format!("field `{name}` exceeded u32 range"))
+    })
+}
+
+fn state_string_set(
+    state: &KernelState,
+    name: &str,
+    context: &'static str,
+) -> Result<BTreeSet<String>, DslTransitionError> {
+    match required_state_field(state, name, context)? {
+        KernelValue::Set(values) => values
+            .iter()
+            .map(|value| match value {
+                KernelValue::String(value) => Ok(value.clone()),
+                _ => Err(generated_projection_error(
+                    context,
+                    format!("field `{name}` contained a non-string set member"),
+                )),
+            })
+            .collect(),
+        _ => Err(generated_projection_error(
+            context,
+            format!("field `{name}` was not a string set"),
+        )),
+    }
+}
+
+fn parse_run_id(
+    value: &str,
+    field_name: &str,
+    context: &'static str,
+) -> Result<RunId, DslTransitionError> {
+    uuid::Uuid::parse_str(value)
+        .map(RunId::from_uuid)
+        .map_err(|err| {
+            generated_projection_error(
+                context,
+                format!("field `{field_name}` contained malformed run id `{value}`: {err}"),
+            )
+        })
+}
+
+fn parse_operation_id(
+    value: &str,
+    field_name: &str,
+    context: &'static str,
+) -> Result<OperationId, DslTransitionError> {
+    uuid::Uuid::parse_str(value)
+        .map(OperationId)
+        .map_err(|err| {
+            generated_projection_error(
+                context,
+                format!("field `{field_name}` contained malformed operation id `{value}`: {err}"),
+            )
+        })
+}
+
+fn map_transition_refusal(err: TransitionRefusal, context: &'static str) -> DslTransitionError {
+    match err {
+        TransitionRefusal::NoMatchingTransition { .. } => {
+            DslTransitionError::no_matching(context, err.to_string())
+        }
+        _ => DslTransitionError::guard_rejected(context, err.to_string()),
+    }
+}
+
+fn effect_run_id(
+    effect: &KernelEffect,
+    field_name: &str,
+    context: &'static str,
+) -> Result<RunId, DslTransitionError> {
+    let value = required_effect_field(effect, field_name, context)?;
+    let Some(KernelValue::String(value)) = named_payload(value, "RunId") else {
+        return Err(generated_projection_error(
+            context,
+            format!("effect field `{field_name}` was not generated RunId"),
+        ));
+    };
+    parse_run_id(value, field_name, context)
+}
+
+fn effect_u64(
+    effect: &KernelEffect,
+    field_name: &str,
+    context: &'static str,
+) -> Result<u64, DslTransitionError> {
+    match required_effect_field(effect, field_name, context)? {
+        KernelValue::U64(value) => Ok(*value),
+        _ => Err(generated_projection_error(
+            context,
+            format!("effect field `{field_name}` was not u64"),
+        )),
+    }
+}
+
+fn effect_string(
+    effect: &KernelEffect,
+    field_name: &str,
+    context: &'static str,
+) -> Result<String, DslTransitionError> {
+    match required_effect_field(effect, field_name, context)? {
+        KernelValue::String(value) => Ok(value.clone()),
+        _ => Err(generated_projection_error(
+            context,
+            format!("effect field `{field_name}` was not string"),
+        )),
+    }
+}
+
+fn effect_enum_variant(
+    effect: &KernelEffect,
+    field_name: &str,
+    enum_name: &str,
+    context: &'static str,
+) -> Result<String, DslTransitionError> {
+    required_effect_field(effect, field_name, context)
+        .and_then(|value| required_enum_variant(value, enum_name, field_name, context))
+}
+
+fn map_generated_effect(
+    effect: KernelEffect,
+    context: &'static str,
+) -> Result<Option<TurnExecutionEffect>, DslTransitionError> {
+    Ok(Some(if effect.variant == effect_id("TurnRunStarted") {
+        TurnExecutionEffect::RunStarted {
+            run_id: effect_run_id(&effect, "run_id", context)?,
+        }
+    } else if effect.variant == effect_id("TurnBoundaryApplied") {
+        TurnExecutionEffect::BoundaryApplied {
+            run_id: effect_run_id(&effect, "run_id", context)?,
+            boundary_sequence: effect_u64(&effect, "boundary_sequence", context)?,
+        }
+    } else if effect.variant == effect_id("TurnRunCompleted") {
+        TurnExecutionEffect::RunCompleted {
+            run_id: effect_run_id(&effect, "run_id", context)?,
+        }
+    } else if effect.variant == effect_id("TurnRunFailed") {
+        let cause_kind = map_terminal_cause_name(
+            &effect_enum_variant(
+                &effect,
+                "terminal_cause_kind",
+                "TurnTerminalCauseKind",
+                context,
+            )?,
+            context,
+        )?;
+        if !cause_kind.is_specific_failure_cause() {
+            return Err(generated_projection_error(
+                context,
+                "generated TurnRunFailed effect carried unknown terminal_cause_kind",
+            ));
+        }
+        let error = effect_string(&effect, "error", context)?;
+        TurnExecutionEffect::RunFailed {
+            run_id: effect_run_id(&effect, "run_id", context)?,
+            reason: TurnFailureReason::with_cause(
+                cause_kind,
+                cause_kind.agent_error_class(),
+                error,
+            ),
+        }
+    } else if effect.variant == effect_id("TurnRunCancelled") {
+        TurnExecutionEffect::RunCancelled {
+            run_id: effect_run_id(&effect, "run_id", context)?,
+        }
+    } else if effect.variant == effect_id("TurnCheckCompaction") {
+        TurnExecutionEffect::CheckCompaction
+    } else {
+        return Ok(None);
+    }))
+}
+
+/// Core unit-test handle backed by generated MeerkatMachine authority.
 #[derive(Debug)]
-pub struct TestTurnStateHandle {
-    state: Mutex<LocalState>,
+pub(crate) struct TestTurnStateHandle {
+    kernel: GeneratedMachineKernel,
+    state: Mutex<KernelState>,
     run_completed_effects: AtomicUsize,
     run_failed_effects: AtomicUsize,
-    suppress_terminal_cause_snapshots: AtomicBool,
 }
 
 impl TestTurnStateHandle {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
+        let kernel = GeneratedMachineKernel::new(meerkat::schema());
+        let initial_state = kernel
+            .initial_state()
+            .expect("generated MeerkatMachine initial state");
+        let state = seed_running_turn_authority(&kernel, initial_state);
         Self {
-            state: Mutex::new(LocalState::new()),
+            kernel,
+            state: Mutex::new(state),
             run_completed_effects: AtomicUsize::new(0),
             run_failed_effects: AtomicUsize::new(0),
-            suppress_terminal_cause_snapshots: AtomicBool::new(false),
         }
     }
 
-    fn lock_state(&self) -> Result<MutexGuard<'_, LocalState>, DslTransitionError> {
+    fn lock_state(&self) -> Result<MutexGuard<'_, KernelState>, DslTransitionError> {
         self.state.lock().map_err(|_| {
             DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                "state mutex poisoned".to_string(),
+                "TestTurnStateHandle",
+                "generated state mutex poisoned".to_string(),
             )
         })
     }
 
-    pub fn run_completed_effect_count(&self) -> usize {
+    fn apply_with_effects(
+        &self,
+        input: KernelInput,
+        context: &'static str,
+    ) -> Result<Vec<TurnExecutionEffect>, DslTransitionError> {
+        let mut state = self.lock_state()?;
+        let outcome = self
+            .kernel
+            .transition(&state, &input)
+            .map_err(|err| map_transition_refusal(err, context))?;
+        *state = outcome.next_state;
+        outcome
+            .effects
+            .into_iter()
+            .map(|effect| map_generated_effect(effect, context))
+            .filter_map(Result::transpose)
+            .collect()
+    }
+
+    fn apply(&self, input: KernelInput, context: &'static str) -> Result<(), DslTransitionError> {
+        self.apply_with_effects(input, context).map(|_| ())
+    }
+
+    pub(crate) fn run_completed_effect_count(&self) -> usize {
         self.run_completed_effects.load(Ordering::SeqCst)
     }
 
-    pub fn run_failed_effect_count(&self) -> usize {
+    pub(crate) fn run_failed_effect_count(&self) -> usize {
         self.run_failed_effects.load(Ordering::SeqCst)
-    }
-
-    pub fn suppress_terminal_cause_snapshots_for_test(&self) {
-        self.suppress_terminal_cause_snapshots
-            .store(true, Ordering::SeqCst);
-    }
-
-    pub fn force_next_llm_terminal_failed_for_test(
-        &self,
-        cause_kind: Option<TurnTerminalCauseKind>,
-    ) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        guard.fields.force_next_llm_terminal_failed_cause_kind =
-            Some(ForcedTerminalCauseKind::from_optional(cause_kind));
-        Ok(())
-    }
-
-    pub fn force_terminal_cause_kind_for_test(
-        &self,
-        cause_kind: Option<TurnTerminalCauseKind>,
-    ) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        guard.fields.terminal_cause_kind = cause_kind;
-        Ok(())
     }
 }
 
@@ -704,260 +587,519 @@ impl Default for TestTurnStateHandle {
     }
 }
 
+fn seed_running_turn_authority(
+    kernel: &GeneratedMachineKernel,
+    initial_state: KernelState,
+) -> KernelState {
+    let seed_run_id = RunId::new();
+    kernel
+        .transition(
+            &initial_state,
+            &input(
+                "RecoverRuntimeAuthority",
+                [
+                    (
+                        "session_id",
+                        named_string("SessionId", "core-test-turn-state".to_string()),
+                    ),
+                    (
+                        "state",
+                        enum_value("RuntimeLifecycleObservedState", "Running"),
+                    ),
+                    ("agent_runtime_id", KernelValue::None),
+                    ("fence_token", KernelValue::None),
+                    ("runtime_generation", KernelValue::None),
+                    ("runtime_epoch_id", KernelValue::None),
+                    ("current_run_id", option_value(run_id_value(&seed_run_id))),
+                    (
+                        "pre_run_phase",
+                        option_value(enum_value("PreRunPhase", "Idle")),
+                    ),
+                    ("silent_intent_overrides", string_set([])),
+                ],
+            ),
+        )
+        .expect("generated RecoverRuntimeAuthority should seed test turn authority")
+        .next_state
+}
+
 impl TurnStateHandle for TestTurnStateHandle {
+    fn apply_turn_input(
+        &self,
+        turn_input: TurnExecutionInput,
+    ) -> Result<Vec<TurnExecutionEffect>, DslTransitionError> {
+        let context = "TestTurnStateHandle::apply_turn_input";
+        let kernel_input = match turn_input {
+            TurnExecutionInput::StartConversationRun {
+                run_id,
+                primitive_kind,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            } => input(
+                "StartConversationRun",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "primitive_kind",
+                        enum_value(
+                            "TurnPrimitiveKind",
+                            primitive_kind_variant(primitive_kind),
+                        ),
+                    ),
+                    (
+                        "admitted_content_shape",
+                        enum_value("ContentShape", content_shape_variant(admitted_content_shape)),
+                    ),
+                    ("vision_enabled", KernelValue::Bool(vision_enabled)),
+                    (
+                        "image_tool_results_enabled",
+                        KernelValue::Bool(image_tool_results_enabled),
+                    ),
+                    (
+                        "max_extraction_retries",
+                        KernelValue::U64(max_extraction_retries),
+                    ),
+                ],
+            ),
+            TurnExecutionInput::StartImmediateAppend { run_id } => {
+                input("StartImmediateAppend", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::StartImmediateContext { run_id } => {
+                input("StartImmediateContext", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::PrimitiveApplied { run_id } => {
+                input("PrimitiveApplied", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::LlmReturnedToolCalls { run_id, tool_count } => input(
+                "LlmReturnedToolCalls",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    ("tool_count", KernelValue::U64(u64::from(tool_count))),
+                ],
+            ),
+            TurnExecutionInput::LlmReturnedTerminal { run_id } => {
+                input("LlmReturnedTerminal", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::RegisterPendingOps {
+                run_id,
+                op_refs,
+                barrier_operation_ids,
+                ..
+            } => input(
+                "RegisterPendingOps",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "op_refs",
+                        string_set(
+                            op_refs
+                                .into_iter()
+                                .map(|op_ref| op_ref.operation_id.to_string()),
+                        ),
+                    ),
+                    (
+                        "barrier_operation_ids",
+                        string_set(barrier_operation_ids.into_iter().map(|id| id.to_string())),
+                    ),
+                ],
+            ),
+            TurnExecutionInput::ToolCallsResolved { run_id } => {
+                input("ToolCallsResolved", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::OpsBarrierSatisfied {
+                run_id,
+                operation_ids,
+            } => input(
+                "OpsBarrierSatisfied",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "operation_ids",
+                        string_set(operation_ids.into_iter().map(|id| id.to_string())),
+                    ),
+                ],
+            ),
+            TurnExecutionInput::BoundaryContinue { run_id } => {
+                input("BoundaryContinue", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::BoundaryComplete { run_id } => {
+                input("BoundaryComplete", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::RecoverableFailure { run_id, retry } => input(
+                "RecoverableFailure",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "failure_kind",
+                        enum_value(
+                            "LlmRetryFailureKind",
+                            retry_failure_variant(retry.failure.kind),
+                        ),
+                    ),
+                    (
+                        "retry_attempt",
+                        KernelValue::U64(u64::from(retry.plan.attempt)),
+                    ),
+                    (
+                        "max_retries",
+                        KernelValue::U64(u64::from(retry.plan.max_retries)),
+                    ),
+                    (
+                        "selected_delay_ms",
+                        KernelValue::U64(retry.plan.selected_delay_ms),
+                    ),
+                    ("error", KernelValue::String(retry.failure.message)),
+                ],
+            ),
+            TurnExecutionInput::FatalFailure { run_id, failure } => input(
+                "FatalFailure",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "terminal_failure_source",
+                        enum_value(
+                            "RunFailureSourceKind",
+                            failure_source_variant(failure.source_kind),
+                        ),
+                    ),
+                    ("error", KernelValue::String(failure.message)),
+                ],
+            ),
+            TurnExecutionInput::RetryRequested {
+                run_id,
+                retry_attempt,
+            } => input(
+                "RetryRequested",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    ("retry_attempt", KernelValue::U64(u64::from(retry_attempt))),
+                ],
+            ),
+            TurnExecutionInput::CancelNow { run_id } => {
+                input("CancelNow", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::CancelAfterBoundary { run_id } => {
+                input(
+                    "RequestCancelAfterBoundary",
+                    [("run_id", run_id_value(&run_id))],
+                )
+            }
+            TurnExecutionInput::CancellationObserved { run_id } => {
+                input("CancellationObserved", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::AcknowledgeTerminal { run_id } => input(
+                "AcknowledgeTerminal",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "outcome",
+                        enum_value(
+                            "TurnTerminalOutcome",
+                            terminal_outcome_variant(self.snapshot().terminal_outcome.ok_or_else(
+                                || {
+                                    DslTransitionError::guard_rejected(
+                                        context,
+                                        "generated MeerkatMachine terminal outcome missing for AcknowledgeTerminal",
+                                    )
+                                },
+                            )?),
+                        ),
+                    ),
+                ],
+            ),
+            TurnExecutionInput::TurnLimitReached { run_id } => {
+                input("TurnLimitReached", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::BudgetExhausted { run_id } => {
+                input("BudgetExhausted", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::TimeBudgetExceeded { run_id } => {
+                input("TimeBudgetExceeded", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::BudgetLimitExceeded { run_id, exceeded } => {
+                match terminal_outcome_for_budget_exceeded(exceeded) {
+                    TurnTerminalOutcome::TimeBudgetExceeded => {
+                        input("TimeBudgetExceeded", [("run_id", run_id_value(&run_id))])
+                    }
+                    TurnTerminalOutcome::BudgetExhausted => {
+                        input("BudgetExhausted", [("run_id", run_id_value(&run_id))])
+                    }
+                    _ => unreachable!("budget exceeded maps only to budget terminal outcomes"),
+                }
+            }
+            TurnExecutionInput::EnterExtraction {
+                run_id,
+                max_retries,
+            } => input(
+                "EnterExtraction",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "max_extraction_retries",
+                        KernelValue::U64(u64::from(max_retries)),
+                    ),
+                ],
+            ),
+            TurnExecutionInput::ExtractionValidationPassed { run_id } => {
+                input(
+                    "ExtractionValidationPassed",
+                    [("run_id", run_id_value(&run_id))],
+                )
+            }
+            TurnExecutionInput::ExtractionValidationFailed { run_id, error } => input(
+                "ExtractionValidationFailed",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    ("error", KernelValue::String(error)),
+                ],
+            ),
+            TurnExecutionInput::ExtractionFailed { run_id, error } => {
+                input(
+                    "ExtractionFailed",
+                    [
+                        ("run_id", run_id_value(&run_id)),
+                        ("error", KernelValue::String(error)),
+                    ],
+                )
+            }
+            TurnExecutionInput::ExtractionStart { run_id } => {
+                input("ExtractionStart", [("run_id", run_id_value(&run_id))])
+            }
+            TurnExecutionInput::ForceCancelNoRun => input("ForceCancelNoRun", []),
+        };
+        self.apply_with_effects(kernel_input, context)
+    }
+
     fn start_conversation_run(
         &self,
         run_id: RunId,
-        primitive_kind: crate::turn_execution_authority::TurnPrimitiveKind,
+        primitive_kind: TurnPrimitiveKind,
         admitted_content_shape: ContentShape,
-        _vision_enabled: bool,
-        _image_tool_results_enabled: bool,
-        _max_extraction_retries: u64,
+        vision_enabled: bool,
+        image_tool_results_enabled: bool,
+        max_extraction_retries: u64,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        if primitive_kind != TurnPrimitiveKind::ConversationTurn {
-            return Err(DslTransitionError::guard_rejected(
-                "test-turn-state-handle",
-                format!("start_conversation_run with primitive_kind={primitive_kind:?}"),
-            ));
-        }
-        guard.apply(TurnExecutionInput::StartConversationRun { run_id })?;
-        guard.fields.admitted_content_shape = Some(admitted_content_shape);
-        Ok(())
+        self.apply(
+            input(
+                "StartConversationRun",
+                [
+                    ("run_id", run_id_value(&run_id)),
+                    (
+                        "primitive_kind",
+                        enum_value("TurnPrimitiveKind", primitive_kind_variant(primitive_kind)),
+                    ),
+                    (
+                        "admitted_content_shape",
+                        enum_value(
+                            "ContentShape",
+                            content_shape_variant(admitted_content_shape),
+                        ),
+                    ),
+                    ("vision_enabled", KernelValue::Bool(vision_enabled)),
+                    (
+                        "image_tool_results_enabled",
+                        KernelValue::Bool(image_tool_results_enabled),
+                    ),
+                    (
+                        "max_extraction_retries",
+                        KernelValue::U64(max_extraction_retries),
+                    ),
+                ],
+            ),
+            "TestTurnStateHandle::start_conversation_run",
+        )
     }
 
     fn start_immediate_append(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        guard.apply(TurnExecutionInput::StartImmediateAppend { run_id })
+        self.apply(
+            input("StartImmediateAppend", [("run_id", run_id_value(&run_id))]),
+            "TestTurnStateHandle::start_immediate_append",
+        )
     }
 
     fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        guard.apply(TurnExecutionInput::StartImmediateContext { run_id })
+        self.apply(
+            input("StartImmediateContext", [("run_id", run_id_value(&run_id))]),
+            "TestTurnStateHandle::start_immediate_context",
+        )
     }
 
-    fn primitive_applied(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        // `apply_turn_input_via_runtime_handle` in `agent::state` deliberately
-        // returns Ok without routing `TurnExecutionInput::StartConversationRun`
-        // (and its Immediate* siblings) through the handle — the real runtime
-        // DSL absorbs those Start* inputs through a separate wiring layer that
-        // does not exist in `meerkat-core`. Tests therefore arrive at
-        // `primitive_applied` with the stub still in `Ready`/no-active-run or
-        // at a terminal phase from a previous turn. Reset terminal phases and
-        // seed a synthetic `StartConversationRun` so the downstream phase
-        // transitions flow; multi-turn tests (e.g. compact-between-turns) do
-        // not fire `AcknowledgeTerminal` either, so we treat any non-active
-        // state as "ready for a fresh run".
-        let is_terminal = matches!(
-            guard.phase,
-            TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled
-        );
-        // RMAT-ALLOW(NoGuardedApply): test-stub bootstrap — the
-        // conditional resets the stub's synthetic state to a fresh run
-        // before unconditionally submitting `StartConversationRun`. See
-        // `ensure_active_conversation_run` above for the same pattern
-        // and rationale.
-        if guard.fields.active_run.is_none() || is_terminal {
-            *guard = LocalState::new();
-            let run_id = RunId(uuid::Uuid::new_v4());
-            guard
-                .apply(TurnExecutionInput::StartConversationRun { run_id })
-                .map_err(|err| {
-                    DslTransitionError::guard_rejected(
-                        "test-turn-state-handle",
-                        format!("synthetic StartConversationRun rejected: {err:?}"),
-                    )
-                })?;
-        }
-        let run_id = active_run_or_err(&guard, "primitive_applied")?;
-        let admitted_content_shape = guard
-            .fields
-            .admitted_content_shape
-            .unwrap_or(ContentShape::Conversation);
-        guard.apply(TurnExecutionInput::PrimitiveApplied {
+    fn primitive_applied(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply(
+            input("PrimitiveApplied", [("run_id", run_id_value(&run_id))]),
+            "TestTurnStateHandle::primitive_applied",
+        )
+    }
+
+    fn llm_returned_tool_calls(
+        &self,
+        run_id: RunId,
+        tool_count: u64,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
             run_id,
-            admitted_content_shape,
-            vision_enabled: false,
-            image_tool_results_enabled: false,
+            tool_count: u32::try_from(tool_count).map_err(|_| {
+                DslTransitionError::guard_rejected(
+                    "TestTurnStateHandle::llm_returned_tool_calls",
+                    "tool_count exceeds u32 turn input range",
+                )
+            })?,
         })
+        .map(|_| ())
     }
 
-    fn llm_returned_tool_calls(&self, tool_count: u64) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "llm_returned_tool_calls")?;
-        guard.apply(TurnExecutionInput::LlmReturnedToolCalls {
-            run_id,
-            tool_count: u32::try_from(tool_count).unwrap_or(u32::MAX),
-        })
-    }
-
-    fn llm_returned_terminal(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "llm_returned_terminal")?;
-        guard.apply(TurnExecutionInput::LlmReturnedTerminal { run_id })
+    fn llm_returned_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal { run_id })
+            .map(|_| ())
     }
 
     fn register_pending_ops(
         &self,
-        op_refs: BTreeSet<crate::ops::AsyncOpRef>,
+        run_id: RunId,
+        op_refs: BTreeSet<AsyncOpRef>,
         barrier_operation_ids: BTreeSet<OperationId>,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "register_pending_ops")?;
-        let op_refs_vec = op_refs.into_iter().collect();
-        let barrier_vec = barrier_operation_ids.into_iter().collect::<Vec<_>>();
-        let has_barrier_ops = !barrier_vec.is_empty();
-        guard.apply(TurnExecutionInput::RegisterPendingOps {
+        let has_barrier_ops = !barrier_operation_ids.is_empty();
+        self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
             run_id,
-            op_refs: op_refs_vec,
-            barrier_operation_ids: barrier_vec,
+            op_refs: op_refs.into_iter().collect(),
+            barrier_operation_ids: barrier_operation_ids.into_iter().collect(),
             has_barrier_ops,
         })
+        .map(|_| ())
     }
 
-    fn tool_calls_resolved(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "tool_calls_resolved")?;
-        guard.apply(TurnExecutionInput::ToolCallsResolved { run_id })
+    fn tool_calls_resolved(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ToolCallsResolved { run_id })
+            .map(|_| ())
     }
 
     fn ops_barrier_satisfied(
         &self,
+        run_id: RunId,
         operation_ids: BTreeSet<OperationId>,
     ) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "ops_barrier_satisfied")?;
-        let ops_vec = operation_ids.into_iter().collect::<Vec<_>>();
-        guard.apply(TurnExecutionInput::OpsBarrierSatisfied {
+        self.apply_turn_input(TurnExecutionInput::OpsBarrierSatisfied {
             run_id,
-            operation_ids: ops_vec,
+            operation_ids: operation_ids.into_iter().collect(),
         })
+        .map(|_| ())
     }
 
-    fn boundary_continue(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "boundary_continue")?;
-        guard.apply(TurnExecutionInput::BoundaryContinue { run_id })
+    fn boundary_continue(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::BoundaryContinue { run_id })
+            .map(|_| ())
     }
 
-    fn boundary_complete(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "boundary_complete")?;
-        guard.apply(TurnExecutionInput::BoundaryComplete { run_id })
+    fn boundary_complete(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::BoundaryComplete { run_id })
+            .map(|_| ())
     }
 
-    fn enter_extraction(&self, max_retries: u32) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "enter_extraction")?;
-        guard.apply(TurnExecutionInput::EnterExtraction {
+    fn enter_extraction(&self, run_id: RunId, max_retries: u32) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::EnterExtraction {
             run_id,
             max_retries,
         })
+        .map(|_| ())
     }
 
-    fn extraction_start(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "extraction_start")?;
-        guard.apply(TurnExecutionInput::ExtractionStart { run_id })
+    fn extraction_start(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionStart { run_id })
+            .map(|_| ())
     }
 
-    fn extraction_validation_passed(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "extraction_validation_passed")?;
-        guard.apply(TurnExecutionInput::ExtractionValidationPassed { run_id })
+    fn extraction_validation_passed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed { run_id })
+            .map(|_| ())
     }
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "extraction_validation_failed")?;
-        guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
+    fn extraction_validation_failed(
+        &self,
+        run_id: RunId,
+        error: String,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
+            .map(|_| ())
     }
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "extraction_failed")?;
-        guard.apply(TurnExecutionInput::ExtractionFailed { run_id, error })
+    fn extraction_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::ExtractionFailed { run_id, error })
+            .map(|_| ())
     }
 
-    fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "recoverable_failure")?;
-        guard.apply(TurnExecutionInput::RecoverableFailure { run_id, retry })
+    fn recoverable_failure(
+        &self,
+        run_id: RunId,
+        retry: LlmRetrySchedule,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::RecoverableFailure { run_id, retry })
+            .map(|_| ())
     }
 
-    fn fatal_failure(&self, reason: TurnFailureReason) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "fatal_failure")?;
-        guard.apply(TurnExecutionInput::FatalFailure { run_id, reason })
+    fn fatal_failure(
+        &self,
+        run_id: RunId,
+        failure: TurnFailureSource,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::FatalFailure { run_id, failure })
+            .map(|_| ())
     }
 
-    fn retry_requested(&self, retry_attempt: u32) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "retry_requested")?;
-        guard.apply(TurnExecutionInput::RetryRequested {
+    fn retry_requested(&self, run_id: RunId, retry_attempt: u32) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::RetryRequested {
             run_id,
             retry_attempt,
         })
+        .map(|_| ())
     }
 
-    fn cancel_now(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "cancel_now")?;
-        guard.apply(TurnExecutionInput::CancelNow { run_id })
+    fn cancel_now(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::CancelNow { run_id })
+            .map(|_| ())
     }
 
-    fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "request_cancel_after_boundary")?;
-        guard.apply(TurnExecutionInput::CancelAfterBoundary { run_id })
+    fn request_cancel_after_boundary(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::CancelAfterBoundary { run_id })
+            .map(|_| ())
     }
 
-    fn cancellation_observed(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "cancellation_observed")?;
-        guard.apply(TurnExecutionInput::CancellationObserved { run_id })
+    fn cancellation_observed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::CancellationObserved { run_id })
+            .map(|_| ())
     }
 
-    fn acknowledge_terminal(
-        &self,
-        _outcome: TurnTerminalOutcome,
-    ) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        let run_id = active_run_or_err(&guard, "acknowledge_terminal")?;
-        guard.apply(TurnExecutionInput::AcknowledgeTerminal { run_id })
+    fn acknowledge_terminal(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::AcknowledgeTerminal { run_id })
+            .map(|_| ())
     }
 
-    fn turn_limit_reached(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        ensure_active_conversation_run(&mut guard)?;
-        let run_id = active_run_or_err(&guard, "turn_limit_reached")?;
-        guard.apply(TurnExecutionInput::TurnLimitReached { run_id })
+    fn turn_limit_reached(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::TurnLimitReached { run_id })
+            .map(|_| ())
     }
 
-    fn budget_exhausted(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        ensure_active_conversation_run(&mut guard)?;
-        let run_id = active_run_or_err(&guard, "budget_exhausted")?;
-        guard.apply(TurnExecutionInput::BudgetExhausted { run_id })
+    fn budget_exhausted(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::BudgetExhausted { run_id })
+            .map(|_| ())
     }
 
-    fn time_budget_exceeded(&self) -> Result<(), DslTransitionError> {
-        let mut guard = self.lock_state()?;
-        ensure_active_conversation_run(&mut guard)?;
-        let run_id = active_run_or_err(&guard, "time_budget_exceeded")?;
-        guard.apply(TurnExecutionInput::TimeBudgetExceeded { run_id })
+    fn time_budget_exceeded(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded { run_id })
+            .map(|_| ())
     }
 
     fn force_cancel_no_run(&self) -> Result<(), DslTransitionError> {
-        self.lock_state()?
-            .apply(TurnExecutionInput::ForceCancelNoRun)
+        self.apply(
+            input("ForceCancelNoRun", []),
+            "TestTurnStateHandle::force_cancel_no_run",
+        )
     }
 
     fn run_completed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
         self.run_completed_effects.fetch_add(1, Ordering::SeqCst);
-        // The deleted `LocalTurnExecutionState` folded run_completed into
-        // the terminal transitions; accept at any terminal phase.
         Ok(())
     }
 
@@ -975,58 +1117,217 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn snapshot(&self) -> TurnStateSnapshot {
-        let guard = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let fields = &guard.fields;
-        TurnStateSnapshot {
-            active_run_id: fields.active_run.clone(),
-            loop_state: loop_state_from_turn_phase(guard.phase),
-            turn_phase: guard.phase,
-            primitive_kind: match fields.primitive_kind {
-                TurnPrimitiveKind::None => None,
-                other => Some(other),
-            },
-            admitted_content_shape: fields.admitted_content_shape,
-            vision_enabled: fields.vision_enabled,
-            image_tool_results_enabled: fields.image_tool_results_enabled,
-            tool_calls_pending: u64::from(fields.tool_calls_pending),
-            pending_op_refs: fields
-                .pending_op_ids
-                .iter()
-                .map(|operation_id| {
-                    if fields.barrier_operation_ids.contains(operation_id) {
-                        crate::ops::AsyncOpRef::barrier(operation_id.clone())
-                    } else {
-                        crate::ops::AsyncOpRef::detached(operation_id.clone())
-                    }
+        const CONTEXT: &str = "TestTurnStateHandle::snapshot";
+        let state = self
+            .state
+            .lock()
+            .expect("generated MeerkatMachine test state mutex poisoned");
+        (|| -> Result<TurnStateSnapshot, DslTransitionError> {
+            let turn_phase = map_turn_phase_name(
+                &state_enum_variant(&state, "turn_phase", "TurnPhase", CONTEXT)?,
+                CONTEXT,
+            )?;
+            let barrier_operation_ids = state_string_set(&state, "barrier_operation_ids", CONTEXT)?
+                .into_iter()
+                .map(|id| parse_operation_id(&id, "barrier_operation_ids", CONTEXT))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let pending_op_refs = state_string_set(&state, "pending_op_refs", CONTEXT)?
+                .into_iter()
+                .map(|id| {
+                    let operation_id = parse_operation_id(&id, "pending_op_refs", CONTEXT)?;
+                    Ok(AsyncOpRef {
+                        wait_policy: if barrier_operation_ids.contains(&operation_id) {
+                            WaitPolicy::Barrier
+                        } else {
+                            WaitPolicy::Detached
+                        },
+                        operation_id,
+                    })
                 })
-                .collect(),
-            barrier_operation_ids: fields.barrier_operation_ids.iter().cloned().collect(),
-            has_barrier_ops: fields.has_barrier_ops,
-            barrier_satisfied: fields.barrier_satisfied,
-            boundary_count: u64::from(fields.boundary_count),
-            cancel_after_boundary: fields.cancel_after_boundary,
-            terminal_outcome: match fields.terminal_outcome {
-                TurnTerminalOutcome::None => None,
-                other => Some(other),
-            },
-            terminal_cause_kind: if self
-                .suppress_terminal_cause_snapshots
-                .load(Ordering::SeqCst)
-            {
-                None
-            } else {
-                fields.terminal_cause_kind
-            },
-            extraction_attempts: u64::from(fields.extraction_attempts),
-            max_extraction_retries: u64::from(fields.max_extraction_retries),
-            llm_retry_attempt: fields.llm_retry_attempt,
-            llm_retry_max_retries: fields.llm_retry_max_retries,
-            llm_retry_selected_delay_ms: fields.llm_retry_selected_delay_ms,
-        }
+                .collect::<Result<BTreeSet<_>, DslTransitionError>>()?;
+            let active_run_id = match turn_phase {
+                TurnPhase::Ready
+                | TurnPhase::Completed
+                | TurnPhase::Failed
+                | TurnPhase::Cancelled => None,
+                _ => option_named_string(&state, "current_run_id", "RunId", CONTEXT)?
+                    .map(|id| parse_run_id(&id, "current_run_id", CONTEXT))
+                    .transpose()?,
+            };
+
+            Ok(TurnStateSnapshot {
+                active_run_id,
+                loop_state: loop_state_from_turn_phase(turn_phase),
+                turn_phase,
+                primitive_kind: option_enum_variant(
+                    &state,
+                    "primitive_kind",
+                    "TurnPrimitiveKind",
+                    CONTEXT,
+                )?
+                .map(|name| map_primitive_kind_name(&name, CONTEXT))
+                .transpose()?
+                .flatten(),
+                admitted_content_shape: option_enum_variant(
+                    &state,
+                    "admitted_content_shape",
+                    "ContentShape",
+                    CONTEXT,
+                )?
+                .map(|name| map_content_shape_name(&name, CONTEXT))
+                .transpose()?,
+                vision_enabled: state_bool(&state, "vision_enabled", CONTEXT)?,
+                image_tool_results_enabled: state_bool(
+                    &state,
+                    "image_tool_results_enabled",
+                    CONTEXT,
+                )?,
+                tool_calls_pending: state_u64(&state, "tool_calls_pending", CONTEXT)?,
+                pending_op_refs,
+                barrier_operation_ids,
+                has_barrier_ops: state_bool(&state, "has_barrier_ops", CONTEXT)?,
+                barrier_satisfied: state_bool(&state, "barrier_satisfied", CONTEXT)?,
+                boundary_count: state_u64(&state, "boundary_count", CONTEXT)?,
+                cancel_after_boundary: state_bool(&state, "cancel_after_boundary", CONTEXT)?,
+                terminal_outcome: option_enum_variant(
+                    &state,
+                    "terminal_outcome",
+                    "TurnTerminalOutcome",
+                    CONTEXT,
+                )?
+                .map(|name| map_terminal_outcome_name(&name, CONTEXT))
+                .transpose()?
+                .flatten(),
+                terminal_cause_kind: option_enum_variant(
+                    &state,
+                    "terminal_cause_kind",
+                    "TurnTerminalCauseKind",
+                    CONTEXT,
+                )?
+                .map(|name| map_terminal_cause_name(&name, CONTEXT))
+                .transpose()?,
+                extraction_attempts: state_u64(&state, "extraction_attempts", CONTEXT)?,
+                max_extraction_retries: state_u64(&state, "max_extraction_retries", CONTEXT)?,
+                llm_retry_attempt: state_u32(&state, "llm_retry_attempt", CONTEXT)?,
+                llm_retry_max_retries: state_u32(&state, "llm_retry_max_retries", CONTEXT)?,
+                llm_retry_selected_delay_ms: state_u64(
+                    &state,
+                    "llm_retry_selected_delay_ms",
+                    CONTEXT,
+                )?,
+            })
+        })()
+        .expect("generated MeerkatMachine turn authority projection should be well formed")
     }
+}
+
+fn map_turn_phase_name(name: &str, context: &'static str) -> Result<TurnPhase, DslTransitionError> {
+    Ok(match name {
+        "Ready" => TurnPhase::Ready,
+        "ApplyingPrimitive" => TurnPhase::ApplyingPrimitive,
+        "CallingLlm" => TurnPhase::CallingLlm,
+        "WaitingForOps" => TurnPhase::WaitingForOps,
+        "DrainingBoundary" => TurnPhase::DrainingBoundary,
+        "Extracting" => TurnPhase::Extracting,
+        "ErrorRecovery" => TurnPhase::ErrorRecovery,
+        "Cancelling" => TurnPhase::Cancelling,
+        "Completed" => TurnPhase::Completed,
+        "Failed" => TurnPhase::Failed,
+        "Cancelled" => TurnPhase::Cancelled,
+        _ => {
+            return Err(generated_projection_error(
+                context,
+                format!("unknown generated TurnPhase variant `{name}`"),
+            ));
+        }
+    })
+}
+
+fn map_primitive_kind_name(
+    name: &str,
+    context: &'static str,
+) -> Result<Option<TurnPrimitiveKind>, DslTransitionError> {
+    Ok(Some(match name {
+        "None" => return Ok(None),
+        "ConversationTurn" => TurnPrimitiveKind::ConversationTurn,
+        "ImmediateAppend" => TurnPrimitiveKind::ImmediateAppend,
+        "ImmediateContextAppend" => TurnPrimitiveKind::ImmediateContextAppend,
+        _ => {
+            return Err(generated_projection_error(
+                context,
+                format!("unknown generated TurnPrimitiveKind variant `{name}`"),
+            ));
+        }
+    }))
+}
+
+fn map_content_shape_name(
+    name: &str,
+    context: &'static str,
+) -> Result<ContentShape, DslTransitionError> {
+    Ok(match name {
+        "Conversation" => ContentShape::Conversation,
+        "ConversationAndContext" => ContentShape::ConversationAndContext,
+        "Context" => ContentShape::Context,
+        "Empty" => ContentShape::Empty,
+        "ImmediateAppend" => ContentShape::ImmediateAppend,
+        "ImmediateContext" => ContentShape::ImmediateContext,
+        _ => {
+            return Err(generated_projection_error(
+                context,
+                format!("unknown generated ContentShape variant `{name}`"),
+            ));
+        }
+    })
+}
+
+fn map_terminal_outcome_name(
+    name: &str,
+    context: &'static str,
+) -> Result<Option<TurnTerminalOutcome>, DslTransitionError> {
+    Ok(Some(match name {
+        "None" => return Ok(None),
+        "Completed" => TurnTerminalOutcome::Completed,
+        "Failed" => TurnTerminalOutcome::Failed,
+        "Cancelled" => TurnTerminalOutcome::Cancelled,
+        "BudgetExhausted" => TurnTerminalOutcome::BudgetExhausted,
+        "TimeBudgetExceeded" => TurnTerminalOutcome::TimeBudgetExceeded,
+        "StructuredOutputValidationFailed" => TurnTerminalOutcome::StructuredOutputValidationFailed,
+        _ => {
+            return Err(generated_projection_error(
+                context,
+                format!("unknown generated TurnTerminalOutcome variant `{name}`"),
+            ));
+        }
+    }))
+}
+
+fn map_terminal_cause_name(
+    name: &str,
+    context: &'static str,
+) -> Result<TurnTerminalCauseKind, DslTransitionError> {
+    Ok(match name {
+        "Unknown" => TurnTerminalCauseKind::Unknown,
+        "HookDenied" => TurnTerminalCauseKind::HookDenied,
+        "HookFailure" => TurnTerminalCauseKind::HookFailure,
+        "LlmFailure" => TurnTerminalCauseKind::LlmFailure,
+        "ToolFailure" => TurnTerminalCauseKind::ToolFailure,
+        "StructuredOutputValidationFailed" => {
+            TurnTerminalCauseKind::StructuredOutputValidationFailed
+        }
+        "BudgetExhausted" => TurnTerminalCauseKind::BudgetExhausted,
+        "TimeBudgetExceeded" => TurnTerminalCauseKind::TimeBudgetExceeded,
+        "RetryExhausted" => TurnTerminalCauseKind::RetryExhausted,
+        "TurnLimitReached" => TurnTerminalCauseKind::TurnLimitReached,
+        "RuntimeApplyFailure" => TurnTerminalCauseKind::RuntimeApplyFailure,
+        "FatalFailure" => TurnTerminalCauseKind::FatalFailure,
+        _ => {
+            return Err(generated_projection_error(
+                context,
+                format!("unknown generated TurnTerminalCauseKind variant `{name}`"),
+            ));
+        }
+    })
 }
 
 fn loop_state_from_turn_phase(phase: TurnPhase) -> crate::LoopState {
@@ -1048,7 +1349,6 @@ fn loop_state_from_turn_phase(phase: TurnPhase) -> crate::LoopState {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::ops::{AsyncOpRef, OperationId};
 
     #[test]
     fn test_turn_state_handle_preserves_typed_operation_ids() {
@@ -1059,7 +1359,7 @@ mod tests {
 
         handle
             .start_conversation_run(
-                run_id,
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 ContentShape::Conversation,
                 false,
@@ -1067,10 +1367,15 @@ mod tests {
                 2,
             )
             .expect("start run");
-        handle.primitive_applied().expect("primitive applied");
-        handle.llm_returned_tool_calls(2).expect("tool calls");
+        handle
+            .primitive_applied(run_id.clone())
+            .expect("primitive applied");
+        handle
+            .llm_returned_tool_calls(run_id.clone(), 2)
+            .expect("tool calls");
         handle
             .register_pending_ops(
+                run_id,
                 BTreeSet::from([
                     AsyncOpRef::detached(detached_id.clone()),
                     AsyncOpRef::barrier(barrier_id.clone()),
@@ -1097,9 +1402,10 @@ mod tests {
     fn test_turn_state_handle_preserves_supplied_content_shape() {
         let handle = TestTurnStateHandle::new();
 
+        let run_id = RunId::new();
         handle
             .start_conversation_run(
-                RunId::new(),
+                run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
                 ContentShape::ConversationAndContext,
                 false,
@@ -1107,7 +1413,7 @@ mod tests {
                 0,
             )
             .expect("start run");
-        handle.primitive_applied().expect("primitive applied");
+        handle.primitive_applied(run_id).expect("primitive applied");
 
         let snapshot = handle.snapshot();
         assert_eq!(

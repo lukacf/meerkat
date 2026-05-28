@@ -284,23 +284,19 @@ async fn create_agent_pair(
     drop(listener_b);
 
     // Create trusted peers lists
-    let trusted_for_a = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "agent-b".to_string(),
-            pubkey: pubkey_b,
-            addr: format!("tcp://{addr_b}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    };
+    let trusted_for_a = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "agent-b".to_string(),
+        pubkey: pubkey_b,
+        addr: format!("tcp://{addr_b}"),
+        meta: meerkat_comms::PeerMeta::default(),
+    }]);
 
-    let trusted_for_b = TrustedPeers {
-        peers: vec![TrustedPeer {
-            name: "agent-a".to_string(),
-            pubkey: pubkey_a,
-            addr: format!("tcp://{addr_a}"),
-            meta: meerkat_comms::PeerMeta::default(),
-        }],
-    };
+    let trusted_for_b = TrustedPeers::from_peers(vec![TrustedPeer {
+        name: "agent-a".to_string(),
+        pubkey: pubkey_a,
+        addr: format!("tcp://{addr_a}"),
+        meta: meerkat_comms::PeerMeta::default(),
+    }]);
 
     // Create CommsManagers
     let config_a = CommsManagerConfig::with_keypair(keypair_a)
@@ -349,12 +345,12 @@ async fn create_agent_pair(
     // Create tool dispatchers
     let tools_a = Arc::new(CommsToolDispatcher::new(
         comms_manager_a.router().clone(),
-        trusted_a_shared,
+        comms_manager_a.router().trusted_peers_view(),
     ));
 
     let tools_b = Arc::new(CommsToolDispatcher::new(
         comms_manager_b.router().clone(),
-        trusted_b_shared,
+        comms_manager_b.router().trusted_peers_view(),
     ));
 
     // Create stores
@@ -600,56 +596,50 @@ mod three_agent_coordination {
         drop(listener_c);
 
         // Create trusted peers lists (each agent knows about the other two)
-        let trusted_for_a = TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: "agent-b".to_string(),
-                    pubkey: pubkey_b,
-                    addr: format!("tcp://{addr_b}"),
-                    meta: meerkat_comms::PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: "agent-c".to_string(),
-                    pubkey: pubkey_c,
-                    addr: format!("tcp://{addr_c}"),
-                    meta: meerkat_comms::PeerMeta::default(),
-                },
-            ],
-        };
+        let trusted_for_a = TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: "agent-b".to_string(),
+                pubkey: pubkey_b,
+                addr: format!("tcp://{addr_b}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: "agent-c".to_string(),
+                pubkey: pubkey_c,
+                addr: format!("tcp://{addr_c}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            },
+        ]);
 
-        let trusted_for_b = TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: "agent-a".to_string(),
-                    pubkey: pubkey_a,
-                    addr: format!("tcp://{addr_a}"),
-                    meta: meerkat_comms::PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: "agent-c".to_string(),
-                    pubkey: pubkey_c,
-                    addr: format!("tcp://{addr_c}"),
-                    meta: meerkat_comms::PeerMeta::default(),
-                },
-            ],
-        };
+        let trusted_for_b = TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: "agent-a".to_string(),
+                pubkey: pubkey_a,
+                addr: format!("tcp://{addr_a}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: "agent-c".to_string(),
+                pubkey: pubkey_c,
+                addr: format!("tcp://{addr_c}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            },
+        ]);
 
-        let trusted_for_c = TrustedPeers {
-            peers: vec![
-                TrustedPeer {
-                    name: "agent-a".to_string(),
-                    pubkey: pubkey_a,
-                    addr: format!("tcp://{addr_a}"),
-                    meta: meerkat_comms::PeerMeta::default(),
-                },
-                TrustedPeer {
-                    name: "agent-b".to_string(),
-                    pubkey: pubkey_b,
-                    addr: format!("tcp://{addr_b}"),
-                    meta: meerkat_comms::PeerMeta::default(),
-                },
-            ],
-        };
+        let trusted_for_c = TrustedPeers::from_peers(vec![
+            TrustedPeer {
+                name: "agent-a".to_string(),
+                pubkey: pubkey_a,
+                addr: format!("tcp://{addr_a}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            },
+            TrustedPeer {
+                name: "agent-b".to_string(),
+                pubkey: pubkey_b,
+                addr: format!("tcp://{addr_b}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            },
+        ]);
 
         // Create CommsManagers
         let config_a =
@@ -703,21 +693,21 @@ mod three_agent_coordination {
         let llm_adapter_a = Arc::new(LlmClientAdapter::new(llm_client_a, anthropic_model()));
         let tools_a = Arc::new(CommsToolDispatcher::new(
             comms_manager_a.router().clone(),
-            trusted_a_shared,
+            comms_manager_a.router().trusted_peers_view(),
         ));
 
         let llm_client_b = Arc::new(AnthropicClient::new(api_key.clone()).unwrap());
         let llm_adapter_b = Arc::new(LlmClientAdapter::new(llm_client_b, anthropic_model()));
         let tools_b = Arc::new(CommsToolDispatcher::new(
             comms_manager_b.router().clone(),
-            trusted_b_shared,
+            comms_manager_b.router().trusted_peers_view(),
         ));
 
         let llm_client_c = Arc::new(AnthropicClient::new(api_key.clone()).unwrap());
         let llm_adapter_c = Arc::new(LlmClientAdapter::new(llm_client_c, anthropic_model()));
         let tools_c = Arc::new(CommsToolDispatcher::new(
             comms_manager_c.router().clone(),
-            trusted_c_shared,
+            comms_manager_c.router().trusted_peers_view(),
         ));
 
         // Create stores
@@ -822,36 +812,34 @@ mod sanity {
     #[test]
     fn test_trusted_peers_construction() {
         let keypair = Keypair::generate();
-        let peers = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "test-peer".to_string(),
-                pubkey: keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
-        assert_eq!(peers.peers.len(), 1);
-        assert_eq!(peers.peers[0].name, "test-peer");
+        let peers = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "test-peer".to_string(),
+            pubkey: keypair.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
+        assert_eq!(peers.peers().len(), 1);
+        assert_eq!(peers.peers()[0].name, "test-peer");
     }
 
     #[tokio::test]
     async fn test_comms_tool_dispatcher_has_tools() {
         let keypair = Keypair::generate();
         let peer_keypair = Keypair::generate();
-        let trusted = TrustedPeers {
-            peers: vec![TrustedPeer {
-                name: "peer".to_string(),
-                pubkey: peer_keypair.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: meerkat_comms::PeerMeta::default(),
-            }],
-        };
+        let trusted = TrustedPeers::from_peers(vec![TrustedPeer {
+            name: "peer".to_string(),
+            pubkey: peer_keypair.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: meerkat_comms::PeerMeta::default(),
+        }]);
 
-        let config = CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted.clone());
+        let config = CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted);
         let manager = CommsManager::new(config).unwrap();
 
-        let trusted = Arc::new(RwLock::new(trusted));
-        let dispatcher = CommsToolDispatcher::new(manager.router().clone(), trusted);
+        let dispatcher = CommsToolDispatcher::new(
+            manager.router().clone(),
+            manager.router().trusted_peers_view(),
+        );
 
         let tools = dispatcher.tools();
         assert!(!tools.is_empty(), "Should have comms tools");

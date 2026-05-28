@@ -20,7 +20,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError}
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
+    OperationKind, OperationResult, OperationSource, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_runtime::{
@@ -49,19 +49,22 @@ fn background_spec(name: &str) -> OperationSpec {
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "test-detached-wake".into(),
+        operation_source: None,
         child_session_id: None,
         expect_peer_channel: false,
     }
 }
 
 fn mob_member_spec(name: &str) -> OperationSpec {
+    let child_session_id = SessionId::new();
     OperationSpec {
         id: meerkat_core::ops_lifecycle::OperationId::new(),
         kind: OperationKind::MobMemberChild,
         owner_session_id: SessionId::new(),
         display_name: name.into(),
         source_label: "test-detached-wake".into(),
-        child_session_id: Some(SessionId::new()),
+        operation_source: Some(OperationSource::session_child(child_session_id.clone())),
+        child_session_id: Some(child_session_id),
         expect_peer_channel: true,
     }
 }
@@ -186,7 +189,8 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                 apply_count: Arc::clone(&apply_count),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -263,7 +267,8 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
                 apply_count: Arc::clone(&apply_count),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // The runtime loop owns detached wake for registered sessions.
 
@@ -363,7 +368,8 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
                 apply_count: Arc::clone(&apply_count),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // The runtime loop owns detached wake for registered sessions.
 
@@ -510,7 +516,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                 first_apply_started: Arc::clone(&first_apply_started),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     // Waker task is spawned automatically during register_session_with_executor.
 
@@ -656,7 +663,8 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                 apply_count: apply_count.clone(),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor registration should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)

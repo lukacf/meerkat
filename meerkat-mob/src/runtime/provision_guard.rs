@@ -25,6 +25,7 @@ pub(super) struct PendingProvision {
     agent_identity: MeerkatId,
     provisioner: Arc<dyn MobProvisioner>,
     committed: bool,
+    rollback_attempted: bool,
 }
 
 impl PendingProvision {
@@ -38,6 +39,7 @@ impl PendingProvision {
             agent_identity,
             provisioner,
             committed: false,
+            rollback_attempted: false,
         }
     }
 
@@ -59,10 +61,8 @@ impl PendingProvision {
                 Ok(())
             }
             Err(error) => {
-                // Preserve drop-time invariant checking and diagnostics when
-                // rollback fails by restoring the member ref.
+                self.rollback_attempted = true;
                 self.member_ref = Some(member_ref);
-                self.committed = false;
                 Err(error)
             }
         }
@@ -97,7 +97,7 @@ impl PendingProvision {
 
 impl Drop for PendingProvision {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed && !self.rollback_attempted {
             let member_ref = self.member_ref.take();
             tracing::error!(
                 meerkat_id = %self.agent_identity,
@@ -105,6 +105,12 @@ impl Drop for PendingProvision {
                 "PendingProvision dropped without commit or rollback — resource leak"
             );
             debug_assert!(false, "PendingProvision dropped without commit or rollback");
+        } else if self.rollback_attempted {
+            tracing::error!(
+                meerkat_id = %self.agent_identity,
+                member_ref = ?self.member_ref,
+                "PendingProvision rollback was attempted but failed"
+            );
         }
     }
 }
@@ -127,12 +133,21 @@ mod tests {
 
     struct MockProvisioner {
         retired: AtomicBool,
+        fail_retire: bool,
     }
 
     impl MockProvisioner {
         fn new() -> Self {
             Self {
                 retired: AtomicBool::new(false),
+                fail_retire: false,
+            }
+        }
+
+        fn failing_retire() -> Self {
+            Self {
+                retired: AtomicBool::new(false),
+                fail_retire: true,
             }
         }
     }
@@ -161,6 +176,9 @@ mod tests {
 
         async fn retire_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
             self.retired.store(true, Ordering::Release);
+            if self.fail_retire {
+                return Err(MobError::Internal("retire failed".to_string()));
+            }
             Ok(())
         }
 
@@ -261,6 +279,22 @@ mod tests {
         let guard = PendingProvision::new(member_ref, meerkat_id, provisioner.clone());
         guard.rollback().await.unwrap();
         assert!(provisioner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn rollback_failure_returns_error_without_drop_panic() {
+        let provisioner = Arc::new(MockProvisioner::failing_retire());
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+        let meerkat_id = MeerkatId::from("test-member");
+
+        let guard = PendingProvision::new(member_ref, meerkat_id, provisioner.clone());
+        let error = guard
+            .rollback()
+            .await
+            .expect_err("rollback failure should be returned to caller");
+
+        assert!(provisioner.retired.load(Ordering::Acquire));
+        assert!(error.to_string().contains("retire failed"));
     }
 
     #[tokio::test]

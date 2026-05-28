@@ -25,6 +25,7 @@
     clippy::large_futures,
     clippy::redundant_closure_for_method_calls,
     clippy::redundant_clone,
+    clippy::redundant_feature_names,
     clippy::unnecessary_to_owned
 )]
 #![cfg_attr(
@@ -61,7 +62,7 @@ mod roster;
 pub mod run;
 pub mod runtime;
 pub mod runtime_mode;
-pub mod snapshot;
+mod snapshot;
 pub mod spec;
 pub mod storage;
 pub mod store;
@@ -81,7 +82,8 @@ pub use error::MobError;
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
-    LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, WorkOrigin, WorkRef, WorkSpec,
+    LoopId, LoopInstanceId, MobId, ProfileName, RespawnTopologyPeerId, RunId, StepId, WorkOrigin,
+    WorkRef, WorkSpec,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]
@@ -111,7 +113,9 @@ pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConf
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,
-    LoopIterationLedgerEntry, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,
+    LoopIterationLedgerEntry, LoopSnapshot, MobFlowRunPublicResultClass, MobRun, MobRunStatus,
+    StepLedgerEntry, StepRunStatus, mob_machine_run_public_result_class,
+    mob_machine_run_status_is_terminal, mob_machine_step_status_is_terminal,
 };
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{
@@ -121,8 +125,9 @@ pub use runtime::bridge_protocol::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
     BridgeDeliveryResponse, BridgeDestroyResponse, BridgeHardCancelPayload,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
-    BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
+    BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload, BridgeReply,
+    BridgeRetireResponse, BridgeSupervisorPayload,
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
@@ -131,15 +136,15 @@ pub use runtime::{
     MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
     MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSessionService, MobState, MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt,
-    PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
-    SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec,
-    SpawnSystemPromptOverride, SupervisorRotationReport, WorkDeliveryReceipt,
+    MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
+    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec,
+    SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
+    SupervisorRotationReport, WorkDeliveryReceipt,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime_mode::MobRuntimeMode;
-pub use snapshot::ParentToolScopeSnapshot;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{

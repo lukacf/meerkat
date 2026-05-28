@@ -174,7 +174,7 @@ fn factory_policy_session() -> meerkat_core::Session {
     let mut session = meerkat_core::Session::new();
     session
         .set_session_metadata(meerkat_core::SessionMetadata {
-            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            schema_version: meerkat_core::session_metadata_schema_version(),
             model: "mock-model".to_string(),
             max_tokens: 1024,
             structured_output_retries: 2,
@@ -318,7 +318,7 @@ async fn build_agent(
     let builder = AgentBuilder::new()
         .resume_session(factory_policy_session())
         .with_turn_state_handle(Arc::new(
-            meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
         ))
         .with_hook_engine(Arc::new(hooks));
 

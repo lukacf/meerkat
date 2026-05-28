@@ -4,12 +4,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
 use meerkat_core::{ContentInput, SessionId, skills::SkillRef, types::RenderMetadata};
-use meerkat_runtime::{CompletionHandle, completion::CompletionOutcome};
+use meerkat_runtime::{
+    CompletionHandle,
+    completion::{CompletionOutcome, CompletionWaitError},
+};
 use meerkat_schedule::{
-    DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
-    MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrencePhase, ScheduleDomainError,
-    ScheduleDriver, ScheduleDriverConfig, ScheduleService, ScheduleStoreKind,
-    ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
+    DeliveryCompletion, DeliveryCompletionFailureReason, DeliveryDispatch, DeliveryFailureReason,
+    DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal, MobTargetBinding, Occurrence,
+    OccurrencePhase, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig, ScheduleService,
+    ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
 };
 
@@ -43,9 +46,35 @@ struct ResolvedScheduledSession {
     allow_system_prompt_override: bool,
 }
 
+pub enum AcceptedScheduledInputCompletion {
+    RuntimeHandle(CompletionHandle),
+    RuntimeCompletionAuthorityUnavailable { detail: String },
+}
+
 pub struct AcceptedScheduledInput {
     pub correlation_id: Option<String>,
-    pub handle: Option<CompletionHandle>,
+    pub completion: AcceptedScheduledInputCompletion,
+}
+
+impl AcceptedScheduledInput {
+    pub fn with_runtime_handle(correlation_id: Option<String>, handle: CompletionHandle) -> Self {
+        Self {
+            correlation_id,
+            completion: AcceptedScheduledInputCompletion::RuntimeHandle(handle),
+        }
+    }
+
+    pub fn with_authority_unavailable(
+        correlation_id: Option<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            correlation_id,
+            completion: AcceptedScheduledInputCompletion::RuntimeCompletionAuthorityUnavailable {
+                detail: detail.into(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +162,7 @@ impl SurfaceScheduleMobHost for NoopScheduleMobHost {
         Ok(immediate_delivery_failure(
             occurrence,
             self.detail.clone(),
-            OccurrenceFailureClass::MobRejected,
+            DeliveryFailureReason::MobRejected,
             None,
             None,
         ))
@@ -206,7 +235,7 @@ impl SharedScheduleTargetAdapter {
                             return Err(immediate_delivery_failure(
                                 occurrence,
                                 error.to_string(),
-                                OccurrenceFailureClass::InternalError,
+                                DeliveryFailureReason::InternalError,
                                 None,
                                 Some(session_id),
                             ));
@@ -220,7 +249,7 @@ impl SharedScheduleTargetAdapter {
                     Err(error) => Err(immediate_delivery_failure(
                         occurrence,
                         error.to_string(),
-                        OccurrenceFailureClass::TargetMaterializationFailed,
+                        DeliveryFailureReason::TargetMaterializationFailed,
                         None,
                         None,
                     )),
@@ -271,7 +300,7 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
                                 occurrence,
                                 "scheduled system_prompt override is only supported when materializing a new session"
                                     .to_string(),
-                                OccurrenceFailureClass::RuntimeRejected,
+                                DeliveryFailureReason::RuntimeRejected,
                                 None,
                                 resolved.materialized_session_id,
                             ));
@@ -386,8 +415,10 @@ pub fn build_dispatch_from_accepted(
     receipt.correlation_id = accepted.correlation_id.clone();
     receipt.materialized_session_id = materialized_session_id.clone();
 
-    let completion =
-        schedule_completion_from_runtime_handle(accepted.handle, materialized_session_id.clone());
+    let completion = schedule_completion_from_runtime_completion(
+        accepted.completion,
+        materialized_session_id.clone(),
+    );
 
     DeliveryDispatch {
         receipt,
@@ -397,14 +428,29 @@ pub fn build_dispatch_from_accepted(
     }
 }
 
-fn schedule_completion_from_runtime_handle(
-    handle: Option<CompletionHandle>,
+fn schedule_completion_from_runtime_completion(
+    completion: AcceptedScheduledInputCompletion,
     materialized_session_id: Option<SessionId>,
 ) -> DeliveryCompletion {
     Box::pin(async move {
-        let outcome = match handle {
-            Some(handle) => handle.wait().await,
-            None => CompletionOutcome::CompletedWithoutResult,
+        let outcome = match completion {
+            AcceptedScheduledInputCompletion::RuntimeHandle(handle) => {
+                match handle.try_wait().await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        return Err(ScheduleDomainError::DeliveryCompletionFailed {
+                            reason: completion_wait_failure_reason(&error),
+                            detail: format!("runtime completion authority unavailable: {error}"),
+                        });
+                    }
+                }
+            }
+            AcceptedScheduledInputCompletion::RuntimeCompletionAuthorityUnavailable { detail } => {
+                return Err(ScheduleDomainError::DeliveryCompletionFailed {
+                    reason: DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable,
+                    detail,
+                });
+            }
         };
         Ok(delivery_terminal_from_completion_outcome(
             outcome,
@@ -413,13 +459,28 @@ fn schedule_completion_from_runtime_handle(
     })
 }
 
+fn completion_wait_failure_reason(error: &CompletionWaitError) -> DeliveryCompletionFailureReason {
+    match error {
+        CompletionWaitError::ChannelClosed => {
+            DeliveryCompletionFailureReason::RuntimeCompletionChannelClosed
+        }
+        CompletionWaitError::AuthorityUnavailable(_) => {
+            DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
+        }
+    }
+}
+
 fn delivery_terminal_from_completion_outcome(
     outcome: CompletionOutcome,
-    materialized_session_id: Option<SessionId>,
+    _materialized_session_id: Option<SessionId>,
 ) -> DeliveryTerminal {
-    let mut terminal = match outcome {
+    match outcome {
         CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult => {
-            DeliveryTerminal::completed(None)
+            DeliveryTerminal::runtime_completion(
+                meerkat_schedule::RuntimeCompletionOutcome::Completed,
+                None,
+                None,
+            )
         }
         CompletionOutcome::CallbackPending { tool_name, args } => {
             let runtime_outcome =
@@ -427,18 +488,27 @@ fn delivery_terminal_from_completion_outcome(
                     tool_name,
                     payload: args,
                 };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::CallbackPending,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::Cancelled => {
             let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
                 detail: "request cancelled".to_string(),
             };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::Cancelled,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::Abandoned(reason) => {
             let runtime_outcome =
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned { detail: reason };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::Abandoned,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::AbandonedWithError { reason, error } => {
             let error_detail =
@@ -446,14 +516,20 @@ fn delivery_terminal_from_completion_outcome(
             let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
                 detail: format!("{reason}; error={error_detail}"),
             };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::Abandoned,
+                runtime_outcome,
+            )
         }
         CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
-            DeliveryTerminal::delivery_failed(
-                error
-                    .detail
-                    .unwrap_or_else(|| "turn finalization failed".to_string()),
-                OccurrenceFailureClass::InternalError,
+            DeliveryTerminal::runtime_completion(
+                meerkat_schedule::RuntimeCompletionOutcome::FinalizationFailed,
+                Some(
+                    error
+                        .detail
+                        .unwrap_or_else(|| "turn finalization failed".to_string()),
+                ),
+                None,
             )
         }
         CompletionOutcome::RuntimeTerminated(reason) => {
@@ -461,26 +537,20 @@ fn delivery_terminal_from_completion_outcome(
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionRuntimeTerminated {
                     detail: reason,
                 };
-            delivery_failed_from_runtime_outcome(runtime_outcome)
+            terminal_from_runtime_completion_outcome(
+                meerkat_schedule::RuntimeCompletionOutcome::RuntimeTerminated,
+                runtime_outcome,
+            )
         }
-    };
-    terminal.materialized_session_id = materialized_session_id;
-    terminal
+    }
 }
 
-fn delivery_failed_from_runtime_outcome(
+fn terminal_from_runtime_completion_outcome(
+    outcome: meerkat_schedule::RuntimeCompletionOutcome,
     runtime_outcome: meerkat_schedule::RuntimeDeliveryOutcome,
 ) -> DeliveryTerminal {
     let detail = runtime_outcome.detail();
-    let failure_class = runtime_outcome.derived_failure_class();
-    DeliveryTerminal {
-        phase: OccurrencePhase::DeliveryFailed,
-        receipt: None,
-        detail: Some(detail),
-        failure_class: Some(failure_class),
-        runtime_outcome: Some(runtime_outcome),
-        materialized_session_id: None,
-    }
+    DeliveryTerminal::runtime_completion(outcome, Some(detail), Some(runtime_outcome))
 }
 
 pub fn immediate_completed_dispatch(
@@ -523,7 +593,7 @@ pub fn async_completion_dispatch(
 pub fn immediate_delivery_failure(
     occurrence: &Occurrence,
     detail: String,
-    failure_class: OccurrenceFailureClass,
+    failure_reason: DeliveryFailureReason,
     correlation_id: Option<String>,
     materialized_session_id: Option<SessionId>,
 ) -> DeliveryDispatch {
@@ -537,15 +607,15 @@ pub fn immediate_delivery_failure(
     DeliveryDispatch {
         receipt,
         correlation_id,
-        materialized_session_id: materialized_session_id.clone(),
+        materialized_session_id,
         completion: Box::pin(async move {
             Ok(DeliveryTerminal {
                 phase: OccurrencePhase::DeliveryFailed,
                 receipt: None,
                 detail: Some(detail),
-                failure_class: Some(failure_class),
+                delivery_failure_reason: Some(failure_reason),
+                runtime_completion_outcome: None,
                 runtime_outcome: None,
-                materialized_session_id,
             })
         }),
     }
@@ -592,12 +662,14 @@ mod tests {
             labels: BTreeMap::new(),
             planning_horizon_days: None,
             planning_horizon_occurrences: None,
-        });
+        })
+        .expect("sample schedule creation should pass generated authority");
         let mut occurrence = Occurrence::planned_from_schedule(
             &schedule,
             meerkat_schedule::OccurrenceOrdinal(0),
             chrono::Utc::now(),
-        );
+        )
+        .expect("sample occurrence planning should pass generated authority");
         occurrence.attempt_count = 1;
         occurrence
     }
@@ -641,33 +713,25 @@ mod tests {
             Some("scheduled mob targets require the mob feature on the CLI host")
         );
         assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::MobRejected)
+            terminal.delivery_failure_reason,
+            Some(DeliveryFailureReason::MobRejected)
         );
     }
 
     #[tokio::test]
     async fn accepted_schedule_dispatch_waits_for_runtime_completion_failure() {
-        let occurrence = sample_occurrence();
-        let handle = CompletionHandle::already_resolved(CompletionOutcome::CallbackPending {
-            tool_name: "external_approval".to_string(),
-            args: serde_json::json!({"ticket": "INC-1"}),
-        });
-
-        let dispatch = build_dispatch_from_accepted(
-            &occurrence,
-            AcceptedScheduledInput {
-                correlation_id: Some("corr-1".to_string()),
-                handle: Some(handle),
+        let terminal = delivery_terminal_from_completion_outcome(
+            CompletionOutcome::CallbackPending {
+                tool_name: "external_approval".to_string(),
+                args: serde_json::json!({"ticket": "INC-1"}),
             },
             None,
         );
 
-        let terminal = dispatch.completion.await.expect("completion terminal");
-        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(terminal.phase, OccurrencePhase::AwaitingCompletion);
         assert_eq!(
-            terminal.failure_class,
-            Some(OccurrenceFailureClass::RuntimeRejected)
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::CallbackPending)
         );
         assert!(
             terminal
@@ -680,18 +744,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_schedule_dispatch_without_runtime_result_completes() {
+    async fn accepted_schedule_dispatch_without_runtime_authority_reports_typed_completion_failure()
+    {
         let occurrence = sample_occurrence();
         let dispatch = build_dispatch_from_accepted(
             &occurrence,
-            AcceptedScheduledInput {
-                correlation_id: Some("corr-1".to_string()),
-                handle: None,
-            },
+            AcceptedScheduledInput::with_authority_unavailable(
+                Some("corr-1".to_string()),
+                "runtime completion authority unavailable for terminal input",
+            ),
             None,
         );
 
-        let terminal = dispatch.completion.await.expect("completion terminal");
-        assert_eq!(terminal.phase, OccurrencePhase::Completed);
+        let error = dispatch.completion.await.expect_err("completion failure");
+        match error {
+            ScheduleDomainError::DeliveryCompletionFailed { reason, detail } => {
+                assert_eq!(
+                    reason,
+                    DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
+                );
+                assert_eq!(
+                    detail,
+                    "runtime completion authority unavailable for terminal input"
+                );
+            }
+            other => panic!("unexpected completion error: {other}"),
+        }
     }
 }

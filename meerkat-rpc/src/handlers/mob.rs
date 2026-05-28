@@ -19,7 +19,7 @@ use meerkat_contracts::{
     MobWireMembersBatchParams, MobWireMembersBatchResult, SupervisorRotationReportWire,
     WireMemberState, WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
 };
-use meerkat_core::service::{AppendSystemContextRequest, PublicTurnToolOverlay};
+use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::runtime::MobMemberSnapshot;
@@ -567,10 +567,7 @@ pub async fn handle_spawn_many(
                             WireMemberRef::encode(mob_id.as_str(), &identity_str),
                         )
                     }
-                    Err(err) => MobSpawnManyResultEntry::failed(
-                        err.spawn_many_failure_cause(),
-                        err.to_string(),
-                    ),
+                    Err(err) => MobSpawnManyResultEntry::failed(err.cause(), err.to_string()),
                 })
                 .collect();
             RpcResponse::success(
@@ -1172,7 +1169,10 @@ pub async fn handle_flow_status(
         Err(err) => return invalid_params(id, format!("Invalid run_id: {err}")),
     };
     match state.mob_flow_status(&mob_id, run_id).await {
-        Ok(run) => RpcResponse::success(id, serde_json::json!({"run": run})),
+        Ok(run) => match meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref()) {
+            Ok(run) => RpcResponse::success(id, serde_json::json!({"run": run})),
+            Err(err) => invalid_params(id, err.to_string()),
+        },
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1547,7 +1547,9 @@ async fn resolve_member_ref(
         .into_iter()
         .find(|entry| entry.agent_identity == identity)
         .ok_or_else(|| format!("member {identity} not found in mob {mob_id}"))?;
-    let (agent_runtime_id, fence_token) = entry.binding_atoms();
+    let (agent_runtime_id, fence_token) = entry
+        .binding_atoms()
+        .ok_or_else(|| format!("member {identity} has no MobMachine runtime binding"))?;
     Ok((mob_id, identity, agent_runtime_id, fence_token))
 }
 
@@ -1890,7 +1892,7 @@ pub struct MobTurnStartParams {
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub flow_tool_overlay: Option<PublicTurnToolOverlay>,
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default)]
@@ -2252,74 +2254,11 @@ pub async fn handle_list_members_matching(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use meerkat_mob::store::{
-        InMemoryMobEventStore, MobEventReceiver, MobEventStore, MobStoreError,
-    };
+    use meerkat_mob::store::InMemoryMobEventStore;
     use meerkat_mob::{
-        AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobEvent, MobStorage,
-        NewMobEvent,
+        AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobStorage,
     };
     use std::sync::Arc;
-
-    struct FailClearEventStore {
-        inner: InMemoryMobEventStore,
-    }
-
-    impl FailClearEventStore {
-        fn new() -> Self {
-            Self {
-                inner: InMemoryMobEventStore::new(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl MobEventStore for FailClearEventStore {
-        async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
-            self.inner.append(event).await
-        }
-
-        async fn append_terminal_event_if_absent(
-            &self,
-            event: NewMobEvent,
-        ) -> Result<Option<MobEvent>, MobStoreError> {
-            self.inner.append_terminal_event_if_absent(event).await
-        }
-
-        async fn append_batch(
-            &self,
-            events: Vec<NewMobEvent>,
-        ) -> Result<Vec<MobEvent>, MobStoreError> {
-            self.inner.append_batch(events).await
-        }
-
-        async fn poll(
-            &self,
-            after_cursor: u64,
-            limit: usize,
-        ) -> Result<Vec<MobEvent>, MobStoreError> {
-            self.inner.poll(after_cursor, limit).await
-        }
-
-        async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
-            self.inner.replay_all().await
-        }
-
-        async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
-            self.inner.latest_cursor().await
-        }
-
-        fn subscribe(&self) -> Result<MobEventReceiver, MobStoreError> {
-            self.inner.subscribe()
-        }
-
-        async fn clear(&self) -> Result<(), MobStoreError> {
-            Err(MobStoreError::Internal(
-                "forced destroy event clear failure".to_string(),
-            ))
-        }
-    }
 
     fn rpc_destroy_test_definition(mob_id: &MobId) -> MobDefinition {
         let mut profiles = BTreeMap::new();
@@ -2345,7 +2284,9 @@ mod tests {
 
     async fn state_with_incomplete_destroy(mob_id: &MobId) -> Arc<MobMcpState> {
         let state = MobMcpState::new_in_memory();
-        let storage = MobStorage::with_events(Arc::new(FailClearEventStore::new()));
+        let events = Arc::new(InMemoryMobEventStore::new());
+        events.fail_clear_until_allowed();
+        let storage = MobStorage::with_events(events);
         let handle = MobBuilder::new(rpc_destroy_test_definition(mob_id), storage)
             .with_session_service(state.session_service())
             .allow_ephemeral_sessions(true)
@@ -2382,7 +2323,7 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("destroy report first error");
         assert!(
-            first_error.contains("forced destroy event clear failure"),
+            first_error.contains("forced mob event store clear failure"),
             "unexpected destroy report error: {first_error}"
         );
     }
@@ -2477,7 +2418,10 @@ mod tests {
             &mob_id,
             Err(MobRespawnError::TopologyRestoreFailed {
                 receipt: receipt.clone(),
-                failed_peer_ids: vec![AgentIdentity::from("peer-a"), AgentIdentity::from("peer-b")],
+                failed_peer_ids: vec![
+                    meerkat_mob::RespawnTopologyPeerId::from("peer-a"),
+                    meerkat_mob::RespawnTopologyPeerId::from("peer-b"),
+                ],
             }),
         );
 

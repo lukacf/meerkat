@@ -169,8 +169,111 @@ pub struct EffectHandoffProtocol {
     pub closure_policy: ClosurePolicy,
     /// Optional fairness annotation for TLA+ liveness claims.
     pub liveness_annotation: Option<String>,
+    /// Generated machine-fact authority metadata for comms trust projection
+    /// mutation handoffs.
+    pub comms_trust_authority: Option<CommsTrustAuthorityProtocol>,
+    /// Generated durable-marker metadata for machine facts that must survive
+    /// process restart through the owning handoff protocol. When present, the
+    /// marker generator derives schema/provenance fields from this protocol
+    /// instead of carrying a separate handwritten contract.
+    pub durable_marker: Option<DurableMarkerProtocol>,
     /// Explicit Rust code generation metadata for the checked-in helper module.
     pub rust: ProtocolRustBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableMarkerProtocol {
+    pub metadata_key: String,
+    pub previous_metadata_key: String,
+    pub published_field: String,
+    pub version_field: String,
+    pub authority_field: String,
+    pub protocol_field: String,
+    pub realm_field: String,
+    pub binding_field: String,
+    pub profile_field: String,
+    pub schema_version: u64,
+    pub phase: DurableMarkerFieldBinding,
+    pub expires_at: DurableMarkerFieldBinding,
+    pub generation: DurableMarkerFieldBinding,
+    pub credential_published_at_millis: DurableMarkerFieldBinding,
+    pub relation: DurableMarkerRelationProtocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableMarkerFieldBinding {
+    pub marker_field: String,
+    pub obligation_field: FieldId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableMarkerRelationProtocol {
+    /// Compare generated durable marker publication time first. Equal
+    /// publication time must also match generated credential generation and
+    /// token expiry; when no snapshot publication exists, fall back to expiry
+    /// and generation. This is the generated AuthLease restore/admission
+    /// relation for `auth_lease_lifecycle_publication`.
+    AuthLeaseCredentialPublication,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommsTrustAuthorityProtocol {
+    pub source_kind: CommsTrustAuthoritySourceKind,
+    /// Generated owner of the trust row this protocol mutates.
+    ///
+    /// Revoke/unwire protocols have their own source kind for admission and
+    /// allowlisting, but they remove rows installed by their paired
+    /// publish/wire protocol. `None` means the row owner is `source_kind`.
+    pub row_owner_kind: Option<CommsTrustAuthoritySourceKind>,
+    pub allowed_operations: Vec<CommsTrustAuthorityOperation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommsTrustAuthorityOperation {
+    PublicAdd,
+    PublicRemove,
+    PrivateAdd,
+    PrivateRemove,
+}
+
+impl CommsTrustAuthorityOperation {
+    pub fn core_variant(self) -> &'static str {
+        match self {
+            Self::PublicAdd => "PublicAdd",
+            Self::PublicRemove => "PublicRemove",
+            Self::PrivateAdd => "PrivateAdd",
+            Self::PrivateRemove => "PrivateRemove",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CommsTrustAuthoritySourceKind {
+    MeerkatMachinePeerProjection,
+    MeerkatMachineSupervisorPublish,
+    MeerkatMachineSupervisorRevoke,
+    MobMachineMemberTrustWiring,
+    MobMachineMemberTrustUnwiring,
+    MobMachineExternalPeerTrustWiring,
+    MobMachineExternalPeerTrustUnwiring,
+    MobMachineExternalPeerTrustRepair,
+    MobMachineExternalPeerReciprocalTrust,
+}
+
+impl CommsTrustAuthoritySourceKind {
+    pub fn core_variant(self) -> &'static str {
+        match self {
+            Self::MeerkatMachinePeerProjection => "MeerkatMachinePeerProjection",
+            Self::MeerkatMachineSupervisorPublish => "MeerkatMachineSupervisorPublish",
+            Self::MeerkatMachineSupervisorRevoke => "MeerkatMachineSupervisorRevoke",
+            Self::MobMachineMemberTrustWiring => "MobMachineMemberTrustWiring",
+            Self::MobMachineMemberTrustUnwiring => "MobMachineMemberTrustUnwiring",
+            Self::MobMachineExternalPeerTrustWiring => "MobMachineExternalPeerTrustWiring",
+            Self::MobMachineExternalPeerTrustUnwiring => "MobMachineExternalPeerTrustUnwiring",
+            Self::MobMachineExternalPeerTrustRepair => "MobMachineExternalPeerTrustRepair",
+            Self::MobMachineExternalPeerReciprocalTrust => "MobMachineExternalPeerReciprocalTrust",
+        }
+    }
 }
 
 /// Determines the shape of generated protocol helper code.
@@ -431,6 +534,9 @@ pub enum ClosurePolicy {
     AckOrAbort,
     /// Obligation is closed when machine reaches terminal phase.
     TerminalClosure,
+    /// Generated publication/authority emission is the closure event; no
+    /// owner feedback input is part of the protocol.
+    PublicationOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,6 +746,21 @@ impl CompositionSchema {
                     protocol: protocol.name.as_str().to_owned(),
                     detail: "module_path must not be empty".into(),
                 });
+            }
+            match protocol.closure_policy {
+                ClosurePolicy::AckRequired if protocol.allowed_feedback_inputs.is_empty() => {
+                    return Err(CompositionSchemaError::InvalidHandoffClosurePolicy {
+                        protocol: protocol.name.as_str().to_owned(),
+                        detail: "AckRequired requires at least one generated feedback input".into(),
+                    });
+                }
+                ClosurePolicy::PublicationOnly if !protocol.allowed_feedback_inputs.is_empty() => {
+                    return Err(CompositionSchemaError::InvalidHandoffClosurePolicy {
+                        protocol: protocol.name.as_str().to_owned(),
+                        detail: "PublicationOnly protocols must not declare feedback inputs".into(),
+                    });
+                }
+                _ => {}
             }
             validate_generation_mode_binding(protocol, &protocol.rust.generation_mode)?;
             // Stacked modes must be distinct and not repeat the primary.
@@ -2387,6 +2508,10 @@ pub enum CompositionSchemaError {
         protocol: String,
         detail: String,
     },
+    InvalidHandoffClosurePolicy {
+        protocol: String,
+        detail: String,
+    },
     DirectRouteBypassesHandoffProtocol {
         protocol: String,
         machine: String,
@@ -2772,6 +2897,10 @@ impl fmt::Display for CompositionSchemaError {
                 f,
                 "handoff protocol `{protocol}` has invalid Rust binding metadata: {detail}"
             ),
+            Self::InvalidHandoffClosurePolicy { protocol, detail } => write!(
+                f,
+                "handoff protocol `{protocol}` has invalid closure policy: {detail}"
+            ),
             Self::DirectRouteBypassesHandoffProtocol {
                 protocol,
                 machine,
@@ -2798,6 +2927,7 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
     match expr {
         Expr::Bool(_)
         | Expr::U64(_)
+        | Expr::U64Max
         | Expr::String(_)
         | Expr::NamedVariant { .. }
         | Expr::None
@@ -2812,6 +2942,7 @@ fn literal_matches_type(schema: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bo
     match (expr, ty) {
         (Expr::Bool(_), TypeRef::Bool) => true,
         (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
+        (Expr::U64Max, TypeRef::U64) => true,
         (Expr::String(_), TypeRef::String) => true,
         (Expr::String(value), TypeRef::Named(name)) => {
             string_literal_matches_named_type(schema, name, value)

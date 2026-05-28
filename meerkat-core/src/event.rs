@@ -7,7 +7,7 @@ use crate::error::{
 };
 use crate::hooks::{HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
-use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
+use crate::ops_lifecycle::OperationTerminalOutcome;
 use crate::retry::LlmRetrySchedule;
 use crate::session::TranscriptRewriteRecord;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
@@ -179,21 +179,6 @@ impl BackgroundJobTerminalStatus {
             OperationTerminalOutcome::Cancelled { .. } => Self::Cancelled,
             OperationTerminalOutcome::Retired => Self::Retired,
             OperationTerminalOutcome::Terminated { .. } => Self::Terminated,
-        }
-    }
-
-    pub fn from_operation_status(status: OperationStatus) -> Option<Self> {
-        match status {
-            OperationStatus::Completed => Some(Self::Completed),
-            OperationStatus::Failed => Some(Self::Failed),
-            OperationStatus::Aborted => Some(Self::Aborted),
-            OperationStatus::Cancelled => Some(Self::Cancelled),
-            OperationStatus::Retired => Some(Self::Retired),
-            OperationStatus::Terminated => Some(Self::Terminated),
-            OperationStatus::Absent
-            | OperationStatus::Provisioning
-            | OperationStatus::Running
-            | OperationStatus::Retiring => None,
         }
     }
 }
@@ -594,11 +579,7 @@ impl TurnErrorMetadata {
             } if cause_kind.is_specific_failure_cause() => {
                 Some(Self::terminal(*cause_kind, *outcome, message.clone()))
             }
-            _ => {
-                let kind = TurnTerminalCauseKind::from_agent_error(error);
-                kind.is_specific_failure_cause()
-                    .then(|| Self::terminal(kind, TurnTerminalOutcome::Failed, error.to_string()))
-            }
+            _ => None,
         }
     }
 
@@ -1174,10 +1155,9 @@ impl<'de> Deserialize<'de> for ToolConfigChangedPayload {
         struct WirePayload {
             operation: ToolConfigChangeOperation,
             target: String,
-            #[serde(default)]
-            status: Option<String>,
-            #[serde(default)]
-            status_info: Option<ToolConfigChangeStatus>,
+            #[serde(default, rename = "status")]
+            _status: Option<String>,
+            status_info: ToolConfigChangeStatus,
             persisted: bool,
             #[serde(default)]
             applied_at_turn: Option<u32>,
@@ -1188,15 +1168,11 @@ impl<'de> Deserialize<'de> for ToolConfigChangedPayload {
         }
 
         let wire = WirePayload::deserialize(deserializer)?;
-        let status_info = wire
-            .status_info
-            .or_else(|| wire.status.map(ToolConfigChangeStatus::legacy_status))
-            .ok_or_else(|| de::Error::missing_field("status_info"))?;
 
         Ok(Self {
             operation: wire.operation,
             target: wire.target,
-            status_info,
+            status_info: wire.status_info,
             persisted: wire.persisted,
             applied_at_turn: wire.applied_at_turn,
             domain: wire.domain,
@@ -1219,8 +1195,7 @@ impl schemars::JsonSchema for ToolConfigChangedPayload {
             operation: ToolConfigChangeOperation,
             target: String,
             status: String,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            status_info: Option<ToolConfigChangeStatus>,
+            status_info: ToolConfigChangeStatus,
             persisted: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             applied_at_turn: Option<u32>,
@@ -1313,9 +1288,6 @@ pub enum ToolConfigChangeStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    LegacyStatus {
-        status: String,
-    },
 }
 
 impl ToolConfigChangeStatus {
@@ -1354,13 +1326,6 @@ impl ToolConfigChangeStatus {
     }
 
     #[must_use]
-    pub fn legacy_status(status: impl Into<String>) -> Self {
-        Self::LegacyStatus {
-            status: status.into(),
-        }
-    }
-
-    #[must_use]
     pub fn status_text(&self) -> String {
         match self {
             Self::BoundaryApplied {
@@ -1389,7 +1354,6 @@ impl ToolConfigChangeStatus {
                 }
                 status
             }
-            Self::LegacyStatus { status } => status.clone(),
         }
     }
 }
@@ -2365,8 +2329,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_config_changed_payload_deserializes_legacy_status_without_typed_data() {
-        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+    fn tool_config_changed_payload_rejects_legacy_status_without_typed_data() {
+        let err = serde_json::from_value::<AgentEvent>(serde_json::json!({
             "type": "tool_config_changed",
             "payload": {
                 "operation": "reload",
@@ -2377,24 +2341,11 @@ mod tests {
                 "domain": "tool_scope"
             }
         }))
-        .unwrap();
-
+        .expect_err("legacy display status must not become structured status authority");
         assert!(
-            matches!(event, AgentEvent::ToolConfigChanged { .. }),
-            "expected tool_config_changed, got {event:?}"
+            err.to_string().contains("status_info"),
+            "missing typed status_info should be the failure reason: {err}"
         );
-        if let AgentEvent::ToolConfigChanged { payload } = event {
-            assert_eq!(
-                payload.status_text(),
-                "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
-            );
-            assert_eq!(
-                payload.status_info(),
-                &ToolConfigChangeStatus::legacy_status(
-                    "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
-                )
-            );
-        }
     }
 
     #[test]
@@ -2433,7 +2384,7 @@ mod tests {
 
     #[cfg(feature = "schema")]
     #[test]
-    fn tool_config_changed_payload_schema_allows_legacy_status_only_replays() {
+    fn tool_config_changed_payload_schema_requires_typed_status_authority() {
         let schema = serde_json::to_value(schemars::schema_for!(ToolConfigChangedPayload)).unwrap();
         let required = schema["required"].as_array().expect("required array");
 
@@ -2442,12 +2393,12 @@ mod tests {
             "legacy status mirror remains required while it is emitted publicly"
         );
         assert!(
-            !required.iter().any(|field| field == "status_info"),
-            "legacy status-only event replays must remain schema-compatible"
+            required.iter().any(|field| field == "status_info"),
+            "typed status_info is required; legacy status is display-only"
         );
         assert!(
             schema["properties"]["status_info"].is_object(),
-            "typed status_info remains part of the schema when present"
+            "typed status_info remains part of the schema"
         );
     }
 
@@ -2549,7 +2500,10 @@ mod tests {
                 payload: ToolConfigChangedPayload::new(
                     ToolConfigChangeOperation::Remove,
                     "filesystem",
-                    ToolConfigChangeStatus::legacy_status("staged"),
+                    ToolConfigChangeStatus::external_tool_delta(
+                        ExternalToolDeltaPhase::Pending,
+                        None,
+                    ),
                     false,
                 )
                 .with_applied_at_turn(Some(12)),
@@ -2727,7 +2681,7 @@ mod tests {
     #[test]
     fn background_job_terminal_status_maps_operation_truth() {
         use crate::ops::{OperationId, OperationResult};
-        use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
+        use crate::ops_lifecycle::OperationTerminalOutcome;
 
         let result = OperationResult {
             id: OperationId(uuid::Uuid::new_v4()),
@@ -2774,35 +2728,6 @@ mod tests {
                 }
             ),
             BackgroundJobTerminalStatus::Terminated
-        );
-
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Completed),
-            Some(BackgroundJobTerminalStatus::Completed)
-        );
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Failed),
-            Some(BackgroundJobTerminalStatus::Failed)
-        );
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Aborted),
-            Some(BackgroundJobTerminalStatus::Aborted)
-        );
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Cancelled),
-            Some(BackgroundJobTerminalStatus::Cancelled)
-        );
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Retired),
-            Some(BackgroundJobTerminalStatus::Retired)
-        );
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Terminated),
-            Some(BackgroundJobTerminalStatus::Terminated)
-        );
-        assert_eq!(
-            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Running),
-            None
         );
     }
 

@@ -67,6 +67,7 @@ export type {
   BridgeCommandRevokeSupervisor,
   BridgeCommandUnwireMember,
   BridgeCommandWireMember,
+  BridgeMobPeerOverlayHandoff,
   BridgePeerSpec,
   BridgeProtocolVersion,
   CatalogModel,

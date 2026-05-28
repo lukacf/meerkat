@@ -35,7 +35,10 @@ use tokio_with_wasm::alias::{
 };
 
 use crate::MobMcpState;
-use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute};
+use meerkat_core::comms::{
+    CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, PeerName, PeerRoute,
+    SendError, TrustedPeerDescriptor,
+};
 
 // ─── Tool name constants ─────────────────────────────────────────────────
 
@@ -61,8 +64,8 @@ const TOOL_MOB_PROFILE_LIST_SOURCES: &str = "mob_profile_list_sources";
 /// Result of resolving `SpawnTooling` into concrete values for spawning.
 #[derive(Debug, Clone)]
 pub struct ResolvedSpawnTooling {
-    /// Inherited tool filter for the child session (from overlays or inherit mode).
-    pub inherited_tool_filter: Option<meerkat_core::WitnessedToolFilter>,
+    /// Parent/composition-authorized inherited tool filter for the child session.
+    pub inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
     /// Override profile resolved from `SpawnTooling::Profile` source.
     /// When set, the spawn path uses this profile instead of the definition's.
     pub override_profile: Option<meerkat_mob::Profile>,
@@ -96,8 +99,6 @@ pub struct AgentMobToolSurface {
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Context for capturing a parent agent's tool scope snapshot.
     snapshot_context: meerkat_core::service::MobToolSnapshotContext,
-    /// Runtime-owned ops registry for owner-bound mob operations.
-    ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
 }
 
 impl AgentMobToolSurface {
@@ -106,12 +107,12 @@ impl AgentMobToolSurface {
         peer_id: PeerId,
         address: String,
         runtime: &dyn meerkat_core::agent::CommsRuntime,
-    ) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+    ) -> Result<TrustedPeerDescriptor, String> {
         let pubkey = runtime.public_key_bytes().ok_or_else(|| {
             format!("comms runtime for '{name}' does not expose public key bytes")
         })?;
         let address = runtime.advertised_address().unwrap_or(address);
-        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        TrustedPeerDescriptor::unsigned_with_pubkey(
             name.to_string(),
             peer_id.to_string(),
             pubkey,
@@ -223,7 +224,15 @@ impl AgentMobToolSurface {
             &snapshot_context,
             meerkat_core::service::MobToolSnapshotContext::ParentOwned(_)
         );
-        let tools = build_tool_defs_with_profile_support(has_profile_store, has_snapshot_provider);
+        let has_generated_authority = effective_authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_generated_authority_context();
+        let tools = if has_generated_authority {
+            build_tool_defs_with_profile_support(has_profile_store, has_snapshot_provider)
+        } else {
+            Arc::<[Arc<ToolDef>]>::from([])
+        };
         Self {
             state,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
@@ -235,7 +244,6 @@ impl AgentMobToolSurface {
             comms_peer_id,
             comms_runtime,
             snapshot_context,
-            ops_registry: None,
         }
     }
 
@@ -384,8 +392,6 @@ impl AgentMobToolSurface {
                         ));
                     }
                 };
-                let tools = provider.snapshot_visible_tools();
-                let snapshot = meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
                 let allow_set = allow_overlay.as_ref().map(|v| {
                     v.iter()
                         .cloned()
@@ -396,8 +402,16 @@ impl AgentMobToolSurface {
                         .cloned()
                         .collect::<std::collections::HashSet<String>>()
                 });
-                let filter =
-                    snapshot.with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref());
+                let filter = provider
+                    .authorize_inherited_tool_visibility_with_overlays(
+                        allow_set.as_ref(),
+                        deny_set.as_ref(),
+                    )
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "parent tool visibility inheritance requires tool provenance witnesses: {err}"
+                        ))
+                    })?;
                 Ok(ResolvedSpawnTooling {
                     inherited_tool_filter: Some(filter),
                     override_profile: None,
@@ -423,12 +437,15 @@ impl AgentMobToolSurface {
                 .into_iter()
                 .map(String::from)
                 .collect();
-                let tools = provider.snapshot_visible_tools();
-                let snapshot = meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
+                let filter = provider
+                    .authorize_inherited_tool_visibility_with_overlays(Some(&comms_tools), None)
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "minimal tool visibility inheritance requires tool provenance witnesses: {err}"
+                        ))
+                    })?;
                 Ok(ResolvedSpawnTooling {
-                    inherited_tool_filter: Some(
-                        snapshot.with_witnessed_overlays(Some(&comms_tools), None),
-                    ),
+                    inherited_tool_filter: Some(filter),
                     override_profile: None,
                 })
             }
@@ -482,9 +499,6 @@ impl AgentMobToolSurface {
                             ));
                         }
                     };
-                    let tools = provider.snapshot_visible_tools();
-                    let snapshot =
-                        meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
                     let allow_set = allow_overlay.as_ref().map(|v| {
                         v.iter()
                             .cloned()
@@ -495,7 +509,18 @@ impl AgentMobToolSurface {
                             .cloned()
                             .collect::<std::collections::HashSet<String>>()
                     });
-                    Some(snapshot.with_witnessed_overlays(allow_set.as_ref(), deny_set.as_ref()))
+                    Some(
+                        provider
+                            .authorize_inherited_tool_visibility_with_overlays(
+                                allow_set.as_ref(),
+                                deny_set.as_ref(),
+                            )
+                            .map_err(|err| {
+                                ToolError::execution_failed(format!(
+                                    "profile tool visibility inheritance requires tool provenance witnesses: {err}"
+                                ))
+                            })?,
+                    )
                 };
 
                 Ok(ResolvedSpawnTooling {
@@ -525,9 +550,9 @@ impl AgentMobToolSurface {
         }
     }
 
-    // grant_exact_mob_scope_after_create removed — mob authority grants are
-    // now returned as typed SessionEffect::GrantManageMob effects. The turn
-    // owner (agent loop) merges and commits them to session build_state.
+    // grant_exact_mob_scope_after_create removed — generated mob authority
+    // returns a replacement context as a typed session effect. The turn owner
+    // (agent loop) commits that projection to session build_state.
     // No re-entrant session service call from inside tool dispatch.
 
     /// Get or create the implicit mob for this agent's session.
@@ -614,9 +639,8 @@ impl AgentMobToolSurface {
                 identity.clone(),
                 meerkat_mob::PeerTarget::External(parent_spec),
             )
-            .await
-            .is_ok();
-        if !helper_trusts_parent {
+            .await;
+        if helper_trusts_parent.is_err() {
             return false;
         }
 
@@ -628,8 +652,16 @@ impl AgentMobToolSurface {
         ) else {
             return false;
         };
-
-        if comms_rt.add_trusted_peer(helper_spec).await.is_err() {
+        if handle
+            .apply_external_peer_reciprocal_trust(
+                identity,
+                name.as_str(),
+                Arc::clone(comms_rt),
+                helper_spec,
+            )
+            .await
+            .is_err()
+        {
             return false;
         }
 
@@ -675,13 +707,21 @@ impl AgentMobToolSurface {
         // on first_delegate — a prior failed delegate may have created the
         // implicit mob without the grant effect being applied.
         let mut session_effects = Vec::new();
-        if !self
-            .authority_context_snapshot()
-            .can_manage_mob(mob_id.as_str())
-        {
-            session_effects.push(meerkat_core::SessionEffect::GrantManageMob {
-                mob_id: mob_id.to_string(),
-            });
+        let authority_context = self.authority_context_snapshot();
+        if !authority_context.can_manage_mob(mob_id.as_str()) {
+            let authority_context = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+                &authority_context,
+                mob_id.as_str(),
+            )
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "{}: generated mob operator authority rejected implicit mob grant: {error}",
+                    call.name
+                ))
+            })?;
+            session_effects.push(
+                meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context },
+            );
         }
 
         // Build spawn spec
@@ -758,24 +798,31 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
-        // Explicit mob creation owns its lifecycle semantics here. Caller-
-        // supplied bookkeeping/lifecycle fields must not mint faux implicit
-        // mobs, spoof cross-session ownership, or bypass session-scoped
-        // cleanup policy.
-        let mut definition = args.definition;
-        definition.clear_internal_lifecycle_flags();
-        definition.mark_owner_bridge_session_indexed(&self.owner_bridge_session_id.to_string());
-
         let mob_id = self
             .state
-            .mob_create_definition(definition)
+            .mob_create_definition_with_owner_bridge_session(
+                args.definition,
+                self.owner_bridge_session_id.clone(),
+                true,
+                false,
+            )
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        // Authority grant as typed effect — no re-entrant session service call.
-        let session_effects = vec![meerkat_core::SessionEffect::GrantManageMob {
-            mob_id: mob_id.to_string(),
-        }];
+        // Authority grant as generated replacement context — no re-entrant
+        // session service call and no local scope widening.
+        let authority_context = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &self.authority_context_snapshot(),
+            mob_id.as_str(),
+        )
+        .map_err(|error| {
+            ToolError::execution_failed(format!(
+                "{}: generated mob operator authority rejected created mob grant: {error}",
+                call.name
+            ))
+        })?;
+        let session_effects =
+            vec![meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context }];
 
         if let Ok(handle) = self.state.handle_for(&mob_id).await {
             self.record_successful_operator_action(&handle, call.name)
@@ -859,18 +906,10 @@ impl AgentMobToolSurface {
             spec.auth_binding = Some(cref);
         }
 
-        let spawn_result = if let Some(ops_registry) = self.ops_registry.as_ref() {
-            audit_handle
-                .spawn_spec_with_owner_context(
-                    spec,
-                    self.owner_bridge_session_id.clone(),
-                    Arc::clone(ops_registry),
-                )
-                .await
-        } else {
-            self.state.mob_spawn_spec(&mob_id, spec).await
-        }
-        .map_err(|e| Self::map_mob_error(call, e))?;
+        let spawn_result = audit_handle
+            .spawn_spec_with_generated_owner_context(spec, self.owner_bridge_session_id.clone())
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
 
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
@@ -975,12 +1014,21 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self
+            .state
+            .handle_for(&mob_id)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = wire_peer_target_from_args(args.peer);
         self.state
             .mob_wire(&mob_id, local, target)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        self.record_successful_operator_action(&audit_handle, call.name)
+            .await;
         Self::encode_result(call, json!({ "wired": true }))
     }
 
@@ -992,12 +1040,21 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self
+            .state
+            .handle_for(&mob_id)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = unwire_peer_target_from_args(args.peer)?;
         self.state
             .mob_unwire(&mob_id, local, target)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        self.record_successful_operator_action(&audit_handle, call.name)
+            .await;
         Self::encode_result(call, json!({ "unwired": true }))
     }
 
@@ -1154,6 +1211,9 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
         let Some(authority_context) = args.authority_context else {
             return Ok(Arc::new(EmptyAgentToolSurface));
         };
+        if !authority_context.is_generated_authority_context() {
+            return Ok(Arc::new(EmptyAgentToolSurface));
+        }
         let session_id_str = args.session_id.to_string();
         let implicit_mob_id = self
             .state
@@ -1241,7 +1301,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
-        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        _registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
         owner_bridge_session_id: SessionId,
     ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
@@ -1260,7 +1320,6 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             comms_peer_id: this.comms_peer_id,
             comms_runtime: this.comms_runtime,
             snapshot_context: this.snapshot_context,
-            ops_registry: Some(registry),
         })))
     }
 }
@@ -2166,8 +2225,8 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
     use meerkat_core::comms::{
-        CommsCommand, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerReachability,
-        PeerSendability, SendError, SendReceipt, TrustedPeerDescriptor,
+        CommsCommand, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerSendability,
+        SendError, SendReceipt, TrustedPeerDescriptor,
     };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{InteractionSubscription, SubscribableInjector};
@@ -2176,10 +2235,10 @@ mod tests {
     };
     use meerkat_core::service::{
         AppendSystemContextRequest, AppendSystemContextResult, MobToolAuthorityContext,
-        MobToolSnapshotContext, MobToolsFactory, OpaquePrincipalToken, SessionControlError,
-        SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
-        SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
-        SessionUsage, SessionView, StartTurnRequest, VisibleToolSnapshotProvider,
+        MobToolSnapshotContext, MobToolsFactory, SessionControlError, SessionHistoryPage,
+        SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
+        SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage,
+        SessionView, StartTurnRequest,
     };
     use meerkat_core::time_compat::SystemTime;
     use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, RunResult, Usage};
@@ -2426,6 +2485,7 @@ mod tests {
         peer_id: PeerId,
         public_key_bytes: [u8; 32],
         trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerDescriptor>>,
+        mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
         inbox: tokio::sync::RwLock<Vec<InboxInteraction>>,
         notify: Arc<tokio::sync::Notify>,
         registry: Arc<TestCommsRegistry>,
@@ -2449,6 +2509,7 @@ mod tests {
                 peer_id,
                 public_key_bytes,
                 trusted: tokio::sync::RwLock::new(HashMap::new()),
+                mob_machine_trust_owner: std::sync::RwLock::new(None),
                 inbox: tokio::sync::RwLock::new(Vec::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 registry,
@@ -2456,12 +2517,37 @@ mod tests {
             runtime.registry.insert(runtime.clone()).await;
             runtime
         }
+
+        fn validate_mob_trust_authority_owner(
+            &self,
+            authority: &meerkat_core::comms::CommsTrustMutationAuthority,
+        ) -> Result<(), SendError> {
+            if !authority.is_mob_machine_source() {
+                return Ok(());
+            }
+            let expected = self
+                .mob_machine_trust_owner
+                .read()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime");
+            authority
+                .validate_raw_source_owner_token(expected.as_ref())
+                .map_err(SendError::Validation)
+        }
     }
 
     #[async_trait]
     impl CoreCommsRuntime for TestCommsRuntime {
         fn peer_id(&self) -> Option<PeerId> {
             Some(self.peer_id)
+        }
+
+        fn public_key(&self) -> Option<String> {
+            use base64::Engine as _;
+
+            Some(format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(self.public_key_bytes)
+            ))
         }
 
         fn public_key_bytes(&self) -> Option<[u8; 32]> {
@@ -2474,6 +2560,116 @@ mod tests {
 
         fn advertised_address(&self) -> Option<String> {
             Some(format!("inproc://{}", self.name))
+        }
+
+        async fn apply_trust_mutation(
+            &self,
+            mutation: CommsTrustMutation,
+        ) -> Result<CommsTrustMutationResult, SendError> {
+            match mutation {
+                CommsTrustMutation::AddTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
+                    authority
+                        .validate_public_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    let created = !self
+                        .trusted
+                        .read()
+                        .await
+                        .contains_key(&peer.peer_id.as_str().to_string());
+                    self.add_trusted_peer(peer).await?;
+                    Ok(CommsTrustMutationResult::Added { created })
+                }
+                CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_public_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+                CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
+                    authority
+                        .validate_private_add(self.peer_id(), &peer)
+                        .map_err(SendError::Validation)?;
+                    self.add_private_trusted_peer(peer).await?;
+                    Ok(CommsTrustMutationResult::Added { created: true })
+                }
+                CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
+                    self.validate_mob_trust_authority_owner(&authority)?;
+                    let parsed_peer_id = PeerId::parse(&peer_id)
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
+                    authority
+                        .validate_private_remove(self.peer_id(), parsed_peer_id)
+                        .map_err(SendError::Validation)?;
+                    let removed = self.remove_trusted_peer(&peer_id).await?;
+                    Ok(CommsTrustMutationResult::Removed { removed })
+                }
+            }
+        }
+
+        async fn install_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let mut expected = self
+                .mob_machine_trust_owner
+                .write()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime");
+            if let Some(existing) = expected.as_ref() {
+                if Arc::ptr_eq(existing, &owner) {
+                    return Ok(());
+                }
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            *expected = Some(owner);
+            Ok(())
+        }
+
+        async fn validate_recovered_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let expected = self
+                .mob_machine_trust_owner
+                .read()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime");
+            if let Some(existing) = expected.as_ref()
+                && !Arc::ptr_eq(existing, &owner)
+            {
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn install_recovered_generated_mob_trust_owner(
+            &self,
+            owner: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<(), SendError> {
+            let mut expected = self
+                .mob_machine_trust_owner
+                .write()
+                .expect("poisoned mob_machine_trust_owner lock in test comms runtime");
+            if let Some(existing) = expected.as_ref() {
+                if Arc::ptr_eq(existing, &owner) {
+                    return Ok(());
+                }
+                return Err(SendError::Validation(
+                    "target runtime is already bound to a different generated MobMachine trust owner"
+                        .to_string(),
+                ));
+            }
+            *expected = Some(owner);
+            Ok(())
         }
 
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
@@ -2559,8 +2755,6 @@ mod tests {
                         source: PeerDirectorySource::Trusted,
                         sendable_kinds: vec![PeerSendability::PeerRequest],
                         capabilities: PeerCapabilitySet::default(),
-                        reachability: PeerReachability::Reachable,
-                        last_unreachable_reason: None,
                         meta: Default::default(),
                     })
                 })
@@ -2587,63 +2781,14 @@ mod tests {
                 .await
                 .into_iter()
                 .map(|interaction| {
-                    let id = interaction.id;
-                    let (class, kind, convention, response_terminality) = match &interaction.content
-                    {
-                        InteractionContent::Message { .. } => (
-                            PeerInputClass::ActionableMessage,
-                            meerkat_core::PeerIngressKind::Message,
-                            meerkat_core::PeerIngressConvention::Message,
-                            None,
-                        ),
-                        InteractionContent::Request { intent, .. } => (
-                            PeerInputClass::ActionableRequest,
-                            meerkat_core::PeerIngressKind::Request,
-                            meerkat_core::PeerIngressConvention::Request {
-                                request_id: id.to_string(),
-                                intent: intent.clone(),
-                            },
-                            None,
-                        ),
-                        InteractionContent::Response {
-                            in_reply_to,
-                            status,
-                            ..
-                        } => {
-                            let classification = meerkat_core::PeerIngressMachinePolicy::default()
-                                .classify_response(*status);
-                            (
-                                classification.class,
-                                meerkat_core::PeerIngressKind::Response,
-                                meerkat_core::PeerIngressConvention::Response {
-                                    in_reply_to: *in_reply_to,
-                                    status: *status,
-                                },
-                                classification.response_terminality,
-                            )
-                        }
-                    };
                     let canonical_peer_id = peer_id_by_name
                         .get(interaction.from.as_str())
                         .copied()
                         .unwrap_or_else(PeerId::new);
-                    let ingress = meerkat_core::PeerIngressFact::peer(
-                        id,
-                        class,
-                        kind,
-                        Some(meerkat_core::PeerIngressAuthDecision::Required),
-                        meerkat_core::PeerIngressIdentity::new(
-                            canonical_peer_id,
-                            interaction.from.clone(),
-                            convention,
-                        ),
-                    );
-                    PeerInputCandidate {
+                    meerkat_runtime::test_peer_input_candidate_from_interaction(
                         interaction,
-                        ingress,
-                        lifecycle_peer: None,
-                        response_terminality,
-                    }
+                        canonical_peer_id,
+                    )
                 })
                 .collect()
         }
@@ -2892,27 +3037,127 @@ mod tests {
     }
 
     fn create_only_authority() -> MobToolAuthorityContext {
-        MobToolAuthorityContext::new(OpaquePrincipalToken::new("create-only"), true)
+        meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+            .expect("generated create-only mob authority should be accepted")
     }
 
     fn scope_only_authority(mob_id: &str) -> MobToolAuthorityContext {
-        MobToolAuthorityContext::new(OpaquePrincipalToken::new("scope-only"), false)
-            .with_managed_mob_scope([mob_id])
+        let authority = meerkat_runtime::mob_operator_authority::set_create_authority(
+            &create_only_authority(),
+            false,
+        )
+        .expect("generated mob authority should disable create scope");
+        meerkat_runtime::mob_operator_authority::grant_manage_mob(&authority, mob_id)
+            .expect("generated mob authority should grant managed mob scope")
     }
 
     fn spawn_profile_authority(mob_id: &str, profile: &str) -> MobToolAuthorityContext {
-        MobToolAuthorityContext::new(OpaquePrincipalToken::new("spawn-profile"), false)
-            .grant_spawn_profile_in_mob(mob_id, profile)
+        let authority = meerkat_runtime::mob_operator_authority::set_create_authority(
+            &create_only_authority(),
+            false,
+        )
+        .expect("generated mob authority should disable create scope");
+        meerkat_runtime::mob_operator_authority::grant_spawn_profile_in_mob(
+            &authority, mob_id, profile,
+        )
+        .expect("generated mob authority should grant spawn profile scope")
     }
 
     fn create_only_authority_with_provenance() -> MobToolAuthorityContext {
-        create_only_authority()
-            .with_caller_provenance(
-                meerkat_core::service::MobToolCallerProvenance::new()
-                    .with_session_id(SessionId::new())
-                    .with_member_id("lead-1"),
-            )
-            .with_audit_invocation_id("audit-create")
+        let authority = meerkat_runtime::mob_operator_authority::with_caller_provenance(
+            &create_only_authority(),
+            meerkat_core::service::MobToolCallerProvenance::new()
+                .with_session_id(SessionId::new())
+                .with_member_id("lead-1"),
+        )
+        .expect("generated mob authority should attach caller provenance");
+        meerkat_runtime::mob_operator_authority::with_audit_invocation_id(
+            &authority,
+            "audit-create",
+        )
+        .expect("generated mob authority should attach audit invocation id")
+    }
+
+    struct TestVisibilityToolDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for TestVisibilityToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    struct CaptureSnapshotMobFactory {
+        captured: Arc<std::sync::Mutex<Option<MobToolSnapshotContext>>>,
+    }
+
+    #[async_trait]
+    impl MobToolsFactory for CaptureSnapshotMobFactory {
+        async fn build_mob_tools(
+            &self,
+            args: meerkat_core::service::MobToolsBuildArgs,
+        ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            *self.captured.lock().expect("snapshot capture lock") =
+                Some(args.snapshot_context.clone());
+            Ok(Arc::new(TestVisibilityToolDispatcher {
+                tools: Arc::from(Vec::<Arc<ToolDef>>::new()),
+            }))
+        }
+    }
+
+    async fn parent_snapshot_context_for_tools_with_filter(
+        tools: Vec<Arc<ToolDef>>,
+        initial_filter: Option<meerkat_core::ToolFilter>,
+    ) -> MobToolSnapshotContext {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let mob_factory = Arc::new(CaptureSnapshotMobFactory {
+            captured: Arc::clone(&captured),
+        });
+        let temp = tempfile::tempdir().expect("temp agent factory dir");
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .mob(true)
+            .mob_tools_factory(mob_factory.clone());
+        let mut build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(meerkat_core::Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_mob = meerkat_core::ToolCategoryOverride::Enable;
+        build.mob_tool_authority_context = Some(create_only_authority());
+        build.mob_tools = Some(mob_factory);
+        build.tool_dispatcher_override = Some(Arc::new(TestVisibilityToolDispatcher {
+            tools: Arc::from(tools),
+        }));
+        if let Some(filter) = initial_filter {
+            build
+                .set_initial_tool_filter(filter)
+                .expect("initial tool filter should serialize");
+        }
+
+        let agent = factory
+            .build_agent(build, &meerkat_core::Config::default())
+            .await
+            .expect("agent build should mint parent tool composition authority");
+        let context = captured
+            .lock()
+            .expect("snapshot capture lock")
+            .take()
+            .expect("mob factory should capture snapshot context");
+        let _agent = Box::leak(Box::new(agent));
+        context
+    }
+
+    async fn parent_snapshot_context_for_tools(tools: Vec<Arc<ToolDef>>) -> MobToolSnapshotContext {
+        parent_snapshot_context_for_tools_with_filter(tools, None).await
     }
 
     fn sample_definition(mob_id: &str) -> MobDefinition {
@@ -3108,14 +3353,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_mob_tools_rejects_deserialized_operator_authority_projection() {
+        let state = MobMcpState::new_in_memory();
+        let factory = AgentMobToolSurfaceFactory::new(state);
+        let authority_projection: MobToolAuthorityContext =
+            serde_json::from_value(serde_json::to_value(create_only_authority()).unwrap()).unwrap();
+        assert!(!authority_projection.is_generated_authority_context());
+
+        let dispatcher = factory
+            .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
+                session_id: SessionId::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                authority_context: Some(authority_projection),
+                effective_authority: None,
+                comms_name: None,
+                comms_runtime: None,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::Standalone,
+            })
+            .await
+            .expect("build_mob_tools");
+
+        assert!(
+            dispatcher.tools().is_empty(),
+            "deserialized mob authority projection must not surface operator tools"
+        );
+    }
+
+    #[tokio::test]
     async fn test_build_mob_tools_does_not_widen_scope_from_bridge_session_owned_mobs() {
         let state = MobMcpState::new_in_memory();
         let factory = AgentMobToolSurfaceFactory::new(Arc::clone(&state));
         let session_id = SessionId::new();
-        let mut definition = sample_definition("owned-without-scope");
-        definition.mark_owner_bridge_session_indexed(&session_id.to_string());
+        let definition = sample_definition("owned-without-scope");
         let mob_id = state
-            .mob_create_definition(definition)
+            .mob_create_definition_with_owner_bridge_session(
+                definition,
+                session_id.clone(),
+                true,
+                false,
+            )
             .await
             .expect("create explicit mob");
 
@@ -3334,36 +3610,39 @@ mod tests {
             .handle_for(&MobId::from(mob_id.as_str()))
             .await
             .expect("created mob handle");
-        let created_definition = created_handle.definition();
+        let owner_authority = created_handle
+            .owner_bridge_session_lifecycle_authority()
+            .expect("created mob owner bridge authority");
         assert_eq!(
-            created_definition.owner_bridge_session_index(),
-            Some(expected_session_id.as_str()),
+            owner_authority.bridge_session_id.to_string(),
+            expected_session_id,
             "mob_create must rebind bridge-session indexing to the current owner bridge session"
         );
-        assert_eq!(
-            created_definition.session_cleanup_policy,
-            meerkat_mob::definition::SessionCleanupPolicy::DestroyOnOwnerArchive,
+        assert!(
+            owner_authority.destroy_on_owner_archive,
             "mob_create must set explicit bridge-session-scoped cleanup truth"
         );
         assert!(
-            !created_definition.is_implicit,
+            !owner_authority.implicit_delegation_mob,
             "mob_create must not allow callers to mint faux implicit mobs"
         );
 
-        // mob_create should return a GrantManageMob effect for the turn owner
-        // to merge into canonical session authority.
+        // mob_create should return a generated replacement context for the
+        // turn owner to merge into canonical session authority.
         assert_eq!(
             create_result.session_effects.len(),
             1,
             "mob_create should emit exactly one session effect"
         );
-        assert_eq!(
-            create_result.session_effects[0],
-            meerkat_core::SessionEffect::GrantManageMob {
-                mob_id: mob_id.clone()
-            },
-            "mob_create effect should carry the created mob_id"
-        );
+        match &create_result.session_effects[0] {
+            meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context } => {
+                assert!(
+                    authority_context.can_manage_mob(&mob_id),
+                    "mob_create replacement authority should manage the created mob_id"
+                );
+            }
+            other => panic!("unexpected mob_create session effect: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3510,7 +3789,7 @@ mod tests {
             .expect("operator action event");
 
         assert_eq!(audit_event.0, "mob_create");
-        assert_eq!(audit_event.1.as_str(), "create-only");
+        assert!(!audit_event.1.as_str().is_empty());
         assert_eq!(audit_event.3.as_deref(), Some("audit-create"));
         assert_eq!(
             audit_event
@@ -3528,10 +3807,12 @@ mod tests {
             .mob_create_definition(sample_definition("provenance-scope"))
             .await
             .expect("create mob");
-        let authority =
-            MobToolAuthorityContext::new(OpaquePrincipalToken::new("scope-principal"), false)
-                .with_managed_mob_scope([mob_id.to_string()])
-                .with_audit_invocation_id("audit-scope");
+        let authority = meerkat_runtime::mob_operator_authority::with_audit_invocation_id(
+            &scope_only_authority(mob_id.as_str()),
+            "audit-scope",
+        )
+        .expect("generated mob authority should attach scope audit id");
+        let expected_principal = authority.principal_token().clone();
         let surface = AgentMobToolSurface::new(
             Arc::clone(&state),
             None,
@@ -3619,7 +3900,7 @@ mod tests {
             "denied calls must not persist provenance"
         );
         assert_eq!(audit_events[0].0, "mob_spawn_member");
-        assert_eq!(audit_events[0].1.as_str(), "scope-principal");
+        assert_eq!(audit_events[0].1, expected_principal);
         assert_eq!(audit_events[0].2.as_deref(), Some("audit-scope"));
     }
 
@@ -3776,27 +4057,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_delegate_dispatch_auto_wires_parent_and_helper_peers() {
-        struct TestSnapshotProvider;
-        impl VisibleToolSnapshotProvider for TestSnapshotProvider {
-            fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
-                vec![Arc::new(ToolDef {
-                    name: "read_file".into(),
-                    description: "read_file tool".to_string(),
-                    input_schema: json!({"type": "object"}),
-                    provenance: Some(ToolProvenance {
-                        kind: ToolSourceKind::Builtin,
-                        source_id: "test-read-file".into(),
-                    }),
-                })]
-            }
-        }
-
         let service = Arc::new(RealCommsSessionSvc::new());
         let state = Arc::new(MobMcpState::new(service.clone()));
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
-        let provider: Arc<dyn VisibleToolSnapshotProvider> = Arc::new(TestSnapshotProvider);
+        let snapshot_context = parent_snapshot_context_for_tools(vec![Arc::new(ToolDef {
+            name: "read_file".into(),
+            description: "read_file tool".to_string(),
+            input_schema: json!({"type": "object"}),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "test-read-file".into(),
+            }),
+        })])
+        .await;
         let session_id = SessionId::new();
         let surface = AgentMobToolSurface::new_with_effective_authority(
             Arc::clone(&state),
@@ -3807,7 +4082,7 @@ mod tests {
             Some(parent_name.clone()),
             Some(parent_peer_id),
             Some(parent_comms.clone() as Arc<dyn CoreCommsRuntime>),
-            MobToolSnapshotContext::ParentOwned(provider),
+            snapshot_context,
         );
 
         let delegate_args = serde_json::value::RawValue::from_string(
@@ -4166,7 +4441,11 @@ mod tests {
         let state = MobMcpState::new_in_memory();
         let surface = surface_with_profiles_and_authority(
             Arc::clone(&state),
-            create_only_authority().with_profile_mutation(false),
+            meerkat_runtime::mob_operator_authority::set_profile_mutation(
+                &create_only_authority(),
+                false,
+            )
+            .expect("generated mob authority should disable profile mutation"),
         );
         let create_args = serde_json::value::RawValue::from_string(
             json!({
@@ -4270,36 +4549,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sources_with_parent_provider() {
-        use meerkat_core::service::{MobToolSnapshotContext, VisibleToolSnapshotProvider};
-
-        struct TestSnapshotProvider;
-        impl VisibleToolSnapshotProvider for TestSnapshotProvider {
-            fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
-                vec![
-                    Arc::new(ToolDef {
-                        name: "tool_a".into(),
-                        description: "Tool A".to_string(),
-                        input_schema: json!({"type": "object"}),
-                        provenance: Some(ToolProvenance {
-                            kind: ToolSourceKind::Builtin,
-                            source_id: "core".into(),
-                        }),
-                    }),
-                    Arc::new(ToolDef {
-                        name: "tool_b".into(),
-                        description: "Tool B".to_string(),
-                        input_schema: json!({"type": "object"}),
-                        provenance: Some(ToolProvenance {
-                            kind: ToolSourceKind::Mob,
-                            source_id: "mob".into(),
-                        }),
-                    }),
-                ]
-            }
-        }
-
         let state = MobMcpState::new_in_memory();
-        let provider: Arc<dyn VisibleToolSnapshotProvider> = Arc::new(TestSnapshotProvider);
+        let snapshot_context = parent_snapshot_context_for_tools(vec![
+            Arc::new(ToolDef {
+                name: "tool_a".into(),
+                description: "Tool A".to_string(),
+                input_schema: json!({"type": "object"}),
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Builtin,
+                    source_id: "core".into(),
+                }),
+            }),
+            Arc::new(ToolDef {
+                name: "tool_b".into(),
+                description: "Tool B".to_string(),
+                input_schema: json!({"type": "object"}),
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Mob,
+                    source_id: "mob".into(),
+                }),
+            }),
+        ])
+        .await;
         let surface = AgentMobToolSurface::new_with_effective_authority(
             Arc::clone(&state),
             None,
@@ -4309,7 +4580,7 @@ mod tests {
             None,
             None,
             None,
-            MobToolSnapshotContext::ParentOwned(provider),
+            snapshot_context,
         );
 
         // list_sources should be in tools
@@ -4334,38 +4605,35 @@ mod tests {
 
     // ─── SpawnTooling resolution tests (T2.3) ───────────────────────────
 
-    /// Snapshot provider with comms + non-comms tools for overlay testing.
-    struct ToolingTestSnapshotProvider;
-    impl VisibleToolSnapshotProvider for ToolingTestSnapshotProvider {
-        fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
-            [
-                "send",
-                "send_message",
-                "send_request",
-                "send_response",
-                "peers",
-                "read_file",
-                "write_file",
-                "bash",
-            ]
-            .iter()
-            .map(|name| {
-                Arc::new(ToolDef {
-                    name: (*name).into(),
-                    description: format!("{name} tool"),
-                    input_schema: json!({"type": "object"}),
-                    provenance: Some(ToolProvenance {
-                        kind: ToolSourceKind::Callback,
-                        source_id: format!("parent-{name}").into(),
-                    }),
-                })
+    /// Comms + non-comms tools for overlay testing.
+    fn tooling_test_tools() -> Vec<Arc<ToolDef>> {
+        [
+            "send",
+            "send_message",
+            "send_request",
+            "send_response",
+            "peers",
+            "read_file",
+            "write_file",
+            "bash",
+        ]
+        .iter()
+        .map(|name| {
+            Arc::new(ToolDef {
+                name: (*name).into(),
+                description: format!("{name} tool"),
+                input_schema: json!({"type": "object"}),
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Callback,
+                    source_id: format!("parent-{name}").into(),
+                }),
             })
-            .collect()
-        }
+        })
+        .collect()
     }
 
-    fn surface_with_parent_tools() -> AgentMobToolSurface {
-        let provider: Arc<dyn VisibleToolSnapshotProvider> = Arc::new(ToolingTestSnapshotProvider);
+    async fn surface_with_parent_tools() -> AgentMobToolSurface {
+        let snapshot_context = parent_snapshot_context_for_tools(tooling_test_tools()).await;
         AgentMobToolSurface::new_with_effective_authority(
             MobMcpState::new_in_memory(),
             None,
@@ -4375,25 +4643,14 @@ mod tests {
             None,
             None,
             None,
-            MobToolSnapshotContext::ParentOwned(provider),
+            snapshot_context,
         )
     }
 
-    struct UnprovenancedParentToolProvider;
-    impl VisibleToolSnapshotProvider for UnprovenancedParentToolProvider {
-        fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
-            vec![Arc::new(ToolDef {
-                name: "external_ob3_tool".into(),
-                description: "external Ob3 tool".to_string(),
-                input_schema: json!({"type": "object"}),
-                provenance: None,
-            })]
-        }
-    }
-
-    fn surface_with_unprovenanced_parent_tool() -> AgentMobToolSurface {
-        let provider: Arc<dyn VisibleToolSnapshotProvider> =
-            Arc::new(UnprovenancedParentToolProvider);
+    async fn surface_with_filtered_parent_tools() -> AgentMobToolSurface {
+        let filter = meerkat_core::ToolFilter::Deny(["bash".to_string()].into_iter().collect());
+        let snapshot_context =
+            parent_snapshot_context_for_tools_with_filter(tooling_test_tools(), Some(filter)).await;
         AgentMobToolSurface::new_with_effective_authority(
             MobMcpState::new_in_memory(),
             None,
@@ -4403,7 +4660,28 @@ mod tests {
             None,
             None,
             None,
-            MobToolSnapshotContext::ParentOwned(provider),
+            snapshot_context,
+        )
+    }
+
+    async fn surface_with_unprovenanced_parent_tool() -> AgentMobToolSurface {
+        let snapshot_context = parent_snapshot_context_for_tools(vec![Arc::new(ToolDef {
+            name: "external_ob3_tool".into(),
+            description: "external Ob3 tool".to_string(),
+            input_schema: json!({"type": "object"}),
+            provenance: None,
+        })])
+        .await;
+        AgentMobToolSurface::new_with_effective_authority(
+            MobMcpState::new_in_memory(),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+            snapshot_context,
         )
     }
 
@@ -4424,14 +4702,14 @@ mod tests {
         let authority = resolved
             .inherited_tool_filter
             .expect("expected inherited tool filter authority");
-        let names = match authority.filter {
+        let names = match authority.filter().clone() {
             meerkat_core::tool_scope::ToolFilter::Allow(names) => names,
             other => panic!("expected Allow, got {other:?}"),
         };
         for name in &names {
             assert!(
                 authority
-                    .witnesses
+                    .witnesses()
                     .get(name.as_str())
                     .is_some_and(meerkat_core::ToolVisibilityWitness::has_identity_witness),
                 "inherited filter should carry witness for {name}"
@@ -4442,7 +4720,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_spawn_tooling_inherit_parent_captures_all_visible() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::InheritParent {
             allow_overlay: None,
             deny_overlay: None,
@@ -4456,35 +4734,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_spawn_tooling_inherit_parent_synthesizes_missing_witnesses() {
-        let surface = surface_with_unprovenanced_parent_tool();
+    async fn test_resolve_spawn_tooling_inherit_parent_uses_tool_scope_visibility() {
+        let surface = surface_with_filtered_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::InheritParent {
             allow_overlay: None,
             deny_overlay: None,
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
-        let authority = resolved
-            .inherited_tool_filter
-            .expect("expected inherited tool filter authority");
-        let witness = authority
-            .witnesses
-            .get("external_ob3_tool")
-            .expect("unprovenanced parent tool should still get a witness");
+        let names = inherited_allow_names(resolved);
+        assert_eq!(names.len(), 7, "hidden parent tools must not be inherited");
+        assert!(names.contains("read_file"));
+        assert!(!names.contains("bash"));
+    }
 
-        assert!(
-            witness.has_provenance_identity_witness(),
-            "delegate inheritance should be valid for visible external tools without provenance"
-        );
-        meerkat_core::tool_scope::validate_witnessed_filter_authority(
-            &authority.filter,
-            &authority.witnesses,
-        )
-        .expect("delegate inherited filter should validate with synthesized witness");
+    #[tokio::test]
+    async fn test_resolve_spawn_tooling_inherit_parent_rejects_unprovenanced_parent_tool() {
+        let surface = surface_with_unprovenanced_parent_tool().await;
+        let tooling = meerkat_mob::SpawnTooling::InheritParent {
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let err = surface.resolve_spawn_tooling(&tooling).await.unwrap_err();
+
+        match err {
+            ToolError::ExecutionFailed { message } => {
+                assert!(message.contains("requires tool provenance witnesses"));
+                assert!(message.contains("external_ob3_tool"));
+            }
+            other => {
+                panic!("expected ExecutionFailed for unprovenanced parent tool, got {other:?}")
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_resolve_spawn_tooling_inherit_parent_with_deny_overlay() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::InheritParent {
             allow_overlay: None,
             deny_overlay: Some(vec!["bash".to_string(), "write_file".to_string()]),
@@ -4500,7 +4785,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_spawn_tooling_inherit_parent_with_allow_overlay() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::InheritParent {
             allow_overlay: Some(vec!["send".to_string(), "read_file".to_string()]),
             deny_overlay: None,
@@ -4528,7 +4813,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_spawn_tooling_minimal_returns_comms_only() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Minimal;
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
@@ -4552,7 +4837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_spawn_tooling_profile_no_overlays_returns_none() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
@@ -4578,7 +4863,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_spawn_tooling_profile_with_deny_overlay() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: "claude-sonnet-4-5".to_string(),
@@ -4628,7 +4913,7 @@ mod tests {
     /// `override_profile` so the spawn path uses it instead of the definition's default.
     #[tokio::test]
     async fn test_resolve_spawn_tooling_profile_source_populates_override_profile() {
-        let surface = surface_with_parent_tools();
+        let surface = surface_with_parent_tools().await;
         let expected_model = "claude-opus-4-6".to_string();
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {

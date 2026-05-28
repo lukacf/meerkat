@@ -1,8 +1,9 @@
+use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 1,
+        version: 5,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -11,14 +12,34 @@ machine! {
             schedule_id: ScheduleId,
             schedule_revision: u64,
             occurrence_ordinal: u64,
+            trigger_key: String,
             target_binding_key: String,
+            misfire_policy: Enum<MisfirePolicy>,
+            misfire_policy_key: String,
+            overlap_policy: Enum<OverlapPolicy>,
+            overlap_policy_key: String,
+            missing_target_policy: Enum<MissingTargetPolicy>,
+            missing_target_policy_key: String,
             due_at_utc_ms: u64,
+            misfire_deadline_utc_ms: u64,
             claimed_by: Option<String>,
             lease_expires_at_utc_ms: Option<u64>,
             claimed_at_utc_ms: Option<u64>,
             claim_token: Option<ClaimToken>,
             delivery_correlation_id: Option<String>,
-            last_receipt: Option<DeliveryReceipt>,
+            target_materialized_session_id: Option<SessionId>,
+            receipt_recorded_at_utc_ms: Option<u64>,
+            last_receipt_recorded_at_utc_ms: Option<u64>,
+            last_receipt_attempt: Option<u64>,
+            last_receipt_stage: Option<Enum<DeliveryReceiptStage>>,
+            last_receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
+            last_receipt_detail: Option<String>,
+            last_receipt_correlation_id: Option<String>,
+            last_receipt_materialized_session_id: Option<SessionId>,
+            runtime_outcome_key: Option<String>,
+            receipt_stage: Option<Enum<DeliveryReceiptStage>>,
+            receipt_failure_class: Option<Enum<OccurrenceFailureClass>>,
+            receipt_detail: Option<String>,
             failure_class: Option<Enum<OccurrenceFailureClass>>,
             failure_detail: Option<String>,
             dispatched_at_utc_ms: Option<u64>,
@@ -32,14 +53,34 @@ machine! {
             schedule_id = "schedule-0",
             schedule_revision = 1,
             occurrence_ordinal = 0,
+            trigger_key = "trigger-0",
             target_binding_key = "target-0",
+            misfire_policy = MisfirePolicy::Skip,
+            misfire_policy_key = "misfire:skip",
+            overlap_policy = OverlapPolicy::SkipIfRunning,
+            overlap_policy_key = "overlap:skip_if_running",
+            missing_target_policy = MissingTargetPolicy::MarkMisfired,
+            missing_target_policy_key = "missing_target:mark_misfired",
             due_at_utc_ms = 1,
+            misfire_deadline_utc_ms = 1,
             claimed_by = None,
             lease_expires_at_utc_ms = None,
             claimed_at_utc_ms = None,
             claim_token = None,
             delivery_correlation_id = None,
-            last_receipt = None,
+            target_materialized_session_id = None,
+            receipt_recorded_at_utc_ms = None,
+            last_receipt_recorded_at_utc_ms = None,
+            last_receipt_attempt = None,
+            last_receipt_stage = None,
+            last_receipt_failure_class = None,
+            last_receipt_detail = None,
+            last_receipt_correlation_id = None,
+            last_receipt_materialized_session_id = None,
+            runtime_outcome_key = None,
+            receipt_stage = None,
+            receipt_failure_class = None,
+            receipt_detail = None,
             failure_class = None,
             failure_detail = None,
             dispatched_at_utc_ms = None,
@@ -63,15 +104,63 @@ machine! {
         }
 
         input OccurrenceLifecycleInput {
+            PlanOccurrence {
+                occurrence_id: OccurrenceId,
+                schedule_id: ScheduleId,
+                schedule_revision: u64,
+                occurrence_ordinal: u64,
+                trigger_key: String,
+                target_binding_key: String,
+                misfire_policy: Enum<MisfirePolicy>,
+                misfire_policy_key: String,
+                overlap_policy: Enum<OverlapPolicy>,
+                overlap_policy_key: String,
+                missing_target_policy: Enum<MissingTargetPolicy>,
+                missing_target_policy_key: String,
+                target_materialized_session_id: Option<SessionId>,
+                due_at_utc_ms: u64,
+                misfire_deadline_utc_ms: u64,
+            },
+            SyncTargetSnapshot { target_binding_key: String, target_materialized_session_id: Option<SessionId> },
+            RecordReceipt {
+                correlation_id: Option<String>,
+                detail: Option<String>,
+                materialized_session_id: Option<SessionId>,
+                runtime_outcome_key: Option<String>
+            },
+            ClassifyDue { now_utc_ms: u64 },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
-            Complete { receipt: DeliveryReceipt, at_utc_ms: u64 },
-            Skip { detail: Option<String>, failure_class: Option<Enum<OccurrenceFailureClass>>, at_utc_ms: u64 },
-            Misfire { detail: Option<String>, failure_class: Option<Enum<OccurrenceFailureClass>>, at_utc_ms: u64 },
+            Complete { at_utc_ms: u64 },
+            ResolveRuntimeCompletion {
+                outcome: Enum<RuntimeCompletionOutcome>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
+            ResolveDeliveryCompletionFailure {
+                reason: Enum<DeliveryCompletionFailureReason>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
+            ResolveDeliveryFailure {
+                reason: Enum<DeliveryFailureReason>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
+            ResolveTargetProbe {
+                outcome: Enum<OccurrenceTargetProbeOutcome>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
+            ResolveDueMisfire { detail: Option<String>, at_utc_ms: u64 },
             Supersede { superseded_by_revision: u64, at_utc_ms: u64 },
-            DeliveryFailed { receipt: Option<DeliveryReceipt>, failure_class: Enum<OccurrenceFailureClass>, detail: Option<String>, at_utc_ms: u64 },
             LeaseExpired { at_utc_ms: u64 },
+            ReleaseLeaseForPausedSchedule { at_utc_ms: u64 },
+            ClassifyTransitionFailure {
+                refusal_kind: Enum<OccurrenceTransitionFailureRefusalKind>,
+                trigger: Enum<OccurrenceLifecycleInputVariant>
+            },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -89,8 +178,18 @@ machine! {
             // superseded (instead of firing a one-way Supersede and
             // hoping).
             OccurrencesSuperseded { occurrence_id: OccurrenceId, superseding_revision: u64 },
+            DueNoAction,
+            DueClaimEligible,
+            DueMisfireRequired,
+            DueLeaseExpired,
             DeliveryFailed,
             LeaseExpired,
+            TransitionFailureClassified {
+                phase: Enum<OccurrenceLifecycleState>,
+                refusal_kind: Enum<OccurrenceTransitionFailureRefusalKind>,
+                trigger: Enum<OccurrenceLifecycleInputVariant>,
+                public_class: Enum<OccurrenceTransitionFailureClassKind>,
+            },
         }
 
         helper is_live_claim_phase(phase: OccurrenceLifecycleState) -> bool {
@@ -109,6 +208,10 @@ machine! {
             self.lifecycle_phase != Phase::DeliveryFailed || self.failure_class != None
         }
 
+        invariant misfire_deadline_not_before_due {
+            self.misfire_deadline_utc_ms >= self.due_at_utc_ms
+        }
+
         disposition Claimed => external,
         disposition DispatchStarted => external,
         disposition AwaitingCompletion => external,
@@ -117,21 +220,713 @@ machine! {
         disposition Misfired => external,
         disposition Superseded => external,
         disposition OccurrencesSuperseded => routed [ScheduleLifecycleMachine],
+        disposition DueNoAction => local,
+        disposition DueClaimEligible => local,
+        disposition DueMisfireRequired => local,
+        disposition DueLeaseExpired => local,
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
+        disposition TransitionFailureClassified => local,
+
+        // --- Transition failure classification ---
+        //
+        // Public occurrence lifecycle error class is a machine fact. Shells
+        // feed back the typed refusal evidence emitted by this generated
+        // authority, and the occurrence machine owns the mapping from that
+        // refusal to the public class exposed by the domain API.
+
+        transition ClassifyTransitionFailurePlanRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "plan_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::PlanOccurrence
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::PlanRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureTargetSyncRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "target_sync_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::SyncTargetSnapshot
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::TargetSyncRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureReceiptRecordRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "receipt_record_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::RecordReceipt
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::ReceiptRecordRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureDueClassificationRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "due_classification_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::ClassifyDue
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::DueClassificationRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureClaimRejectedPending {
+            per_phase [Pending]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "claim_rejected_pending" {
+                trigger == OccurrenceLifecycleInputVariant::Claim
+                && refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::ClaimRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureNotPendingForClaim {
+            per_phase [Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_pending_for_claim" {
+                trigger == OccurrenceLifecycleInputVariant::Claim
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::NotPendingForClaim
+            }
+        }
+
+        transition ClassifyTransitionFailureNotClaimed {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_claimed" {
+                trigger == OccurrenceLifecycleInputVariant::DispatchStarted
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::NotClaimed
+            }
+        }
+
+        transition ClassifyTransitionFailureNotDispatching {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_dispatching" {
+                trigger == OccurrenceLifecycleInputVariant::AwaitCompletion
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::NotDispatching
+            }
+        }
+
+        transition ClassifyTransitionFailureNotLeaseHolding {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_lease_holding" {
+                (
+                    trigger == OccurrenceLifecycleInputVariant::LeaseExpired
+                    || trigger == OccurrenceLifecycleInputVariant::ReleaseLeaseForPausedSchedule
+                )
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::NotLeaseHolding
+            }
+        }
+
+        transition ClassifyTransitionFailureNotLiveForTerminal {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "not_live_for_terminal" {
+                (
+                    trigger == OccurrenceLifecycleInputVariant::Complete
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveRuntimeCompletion
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveDeliveryCompletionFailure
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveDeliveryFailure
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveTargetProbe
+                    || trigger == OccurrenceLifecycleInputVariant::ResolveDueMisfire
+                    || trigger == OccurrenceLifecycleInputVariant::Supersede
+                )
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::NotLiveForTerminal
+            }
+        }
+
+        // --- Plan occurrence ---
+        //
+        // Occurrence creation is a semantic fact: id, schedule revision,
+        // ordinal, due time, and target binding determine later dispatch
+        // behavior. The shell may allocate opaque ids and carry full target
+        // snapshots, but the machine owns accepting the planned occurrence
+        // facts before the domain row is materialized.
+
+        transition PlanOccurrenceFromPending {
+            on input PlanOccurrence {
+                occurrence_id,
+                schedule_id,
+                schedule_revision,
+                occurrence_ordinal,
+                trigger_key,
+                target_binding_key,
+                misfire_policy,
+                misfire_policy_key,
+                overlap_policy,
+                overlap_policy_key,
+                missing_target_policy,
+                missing_target_policy_key,
+                target_materialized_session_id,
+                due_at_utc_ms,
+                misfire_deadline_utc_ms
+            }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.attempt_count == 0
+                && self.claimed_by == None
+                && self.claim_token == None
+                && self.delivery_correlation_id == None
+                && self.target_materialized_session_id == None
+                && self.completed_at_utc_ms == None
+                && self.superseded_by_revision == None
+                && misfire_deadline_utc_ms >= due_at_utc_ms
+            }
+            update {
+                self.occurrence_id = occurrence_id;
+                self.schedule_id = schedule_id;
+                self.schedule_revision = schedule_revision;
+                self.occurrence_ordinal = occurrence_ordinal;
+                self.trigger_key = trigger_key;
+                self.target_binding_key = target_binding_key;
+                self.misfire_policy = misfire_policy;
+                self.misfire_policy_key = misfire_policy_key;
+                self.overlap_policy = overlap_policy;
+                self.overlap_policy_key = overlap_policy_key;
+                self.missing_target_policy = missing_target_policy;
+                self.missing_target_policy_key = missing_target_policy_key;
+                self.target_materialized_session_id = target_materialized_session_id;
+                self.due_at_utc_ms = due_at_utc_ms;
+                self.misfire_deadline_utc_ms = misfire_deadline_utc_ms;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claimed_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.receipt_recorded_at_utc_ms = None;
+                self.last_receipt_recorded_at_utc_ms = None;
+                self.last_receipt_attempt = None;
+                self.last_receipt_stage = None;
+                self.last_receipt_failure_class = None;
+                self.last_receipt_detail = None;
+                self.last_receipt_correlation_id = None;
+                self.last_receipt_materialized_session_id = None;
+                self.runtime_outcome_key = None;
+                self.receipt_stage = None;
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+                self.failure_class = None;
+                self.failure_detail = None;
+                self.dispatched_at_utc_ms = None;
+                self.completed_at_utc_ms = None;
+                self.attempt_count = 0;
+                self.superseded_by_revision = None;
+            }
+            to Pending
+        }
+
+        // --- Due classification ---
+        //
+        // Store shells observe time and durable ordering, but occurrence
+        // authority classifies due admission, pending misfire, and expired
+        // lease reclaimability.
+
+        transition ClassifyDuePendingFuture {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Pending && now_utc_ms < self.due_at_utc_ms }
+            to Pending
+            emit DueNoAction
+        }
+
+        transition ClassifyDuePendingMisfire {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= now_utc_ms
+                && self.misfire_deadline_utc_ms < now_utc_ms
+            }
+            to Pending
+            emit DueMisfireRequired
+        }
+
+        transition ClassifyDuePendingClaimEligible {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= now_utc_ms
+                && now_utc_ms <= self.misfire_deadline_utc_ms
+            }
+            to Pending
+            emit DueClaimEligible
+        }
+
+        transition ClassifyDueClaimedLeaseExpired {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && self.lease_expires_at_utc_ms != None
+                && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+            }
+            to Claimed
+            emit DueLeaseExpired
+        }
+
+        transition ClassifyDueDispatchingLeaseExpired {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && self.lease_expires_at_utc_ms != None
+                && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+            }
+            to Dispatching
+            emit DueLeaseExpired
+        }
+
+        transition ClassifyDueAwaitingCompletionLeaseExpired {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && self.lease_expires_at_utc_ms != None
+                && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+            }
+            to AwaitingCompletion
+            emit DueLeaseExpired
+        }
+
+        transition ClassifyDueClaimedLeaseCurrent {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && (
+                    self.lease_expires_at_utc_ms == None
+                    || now_utc_ms < self.lease_expires_at_utc_ms.get("value")
+                )
+            }
+            to Claimed
+            emit DueNoAction
+        }
+
+        transition ClassifyDueDispatchingLeaseCurrent {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && (
+                    self.lease_expires_at_utc_ms == None
+                    || now_utc_ms < self.lease_expires_at_utc_ms.get("value")
+                )
+            }
+            to Dispatching
+            emit DueNoAction
+        }
+
+        transition ClassifyDueAwaitingCompletionLeaseCurrent {
+            on input ClassifyDue { now_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && (
+                    self.lease_expires_at_utc_ms == None
+                    || now_utc_ms < self.lease_expires_at_utc_ms.get("value")
+                )
+            }
+            to AwaitingCompletion
+            emit DueNoAction
+        }
+
+        transition ClassifyDueCompletedNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Completed }
+            to Completed
+            emit DueNoAction
+        }
+
+        transition ClassifyDueSkippedNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Skipped }
+            to Skipped
+            emit DueNoAction
+        }
+
+        transition ClassifyDueMisfiredNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Misfired }
+            to Misfired
+            emit DueNoAction
+        }
+
+        transition ClassifyDueSupersededNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            to Superseded
+            emit DueNoAction
+        }
+
+        transition ClassifyDueDeliveryFailedNoAction {
+            on input ClassifyDue { now_utc_ms }
+            guard { self.lifecycle_phase == Phase::DeliveryFailed }
+            to DeliveryFailed
+            emit DueNoAction
+        }
+
+        // --- Target snapshot sync ---
+        //
+        // Materialized session binding changes the dispatch target. Keep that
+        // target-binding fact behind generated occurrence authority; the shell
+        // writes the full target snapshot only after this input is accepted.
+
+        transition SyncTargetSnapshotPending {
+            on input SyncTargetSnapshot { target_binding_key, target_materialized_session_id }
+            guard { self.lifecycle_phase == Phase::Pending }
+            update {
+                self.target_binding_key = target_binding_key;
+                self.target_materialized_session_id = target_materialized_session_id;
+            }
+            to Pending
+        }
+
+        transition SyncTargetSnapshotClaimed {
+            on input SyncTargetSnapshot { target_binding_key, target_materialized_session_id }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            update {
+                self.target_binding_key = target_binding_key;
+                self.target_materialized_session_id = target_materialized_session_id;
+            }
+            to Claimed
+        }
+
+        // --- Receipt/result projection ---
+
+        transition RecordReceiptPending {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Pending
+        }
+
+        transition RecordReceiptClaimed {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Claimed
+        }
+
+        transition RecordReceiptDispatching {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Dispatching
+        }
+
+        transition RecordReceiptAwaitingCompletion {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to AwaitingCompletion
+        }
+
+        transition RecordReceiptCompleted {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Completed
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Completed
+        }
+
+        transition RecordReceiptSkipped {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Skipped
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Skipped
+        }
+
+        transition RecordReceiptMisfired {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Misfired
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Misfired
+        }
+
+        transition RecordReceiptSuperseded {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::Superseded
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to Superseded
+        }
+
+        transition RecordReceiptDeliveryFailed {
+            on input RecordReceipt { correlation_id, detail, materialized_session_id, runtime_outcome_key }
+            guard {
+                self.lifecycle_phase == Phase::DeliveryFailed
+                && self.receipt_stage != None
+                && self.receipt_recorded_at_utc_ms != None
+                && self.receipt_detail == detail
+                && self.delivery_correlation_id == correlation_id
+                && self.target_materialized_session_id == materialized_session_id
+            }
+            update {
+                self.last_receipt_recorded_at_utc_ms = self.receipt_recorded_at_utc_ms;
+                self.last_receipt_attempt = Some(self.attempt_count);
+                self.last_receipt_stage = self.receipt_stage;
+                self.last_receipt_failure_class = self.receipt_failure_class;
+                self.last_receipt_detail = detail;
+                self.last_receipt_correlation_id = correlation_id;
+                self.last_receipt_materialized_session_id = materialized_session_id;
+                self.runtime_outcome_key = runtime_outcome_key;
+            }
+            to DeliveryFailed
+        }
 
         // --- Claim ---
 
         transition ClaimPending {
             on input Claim { owner_id, at_utc_ms, lease_expires_at_utc_ms, claim_token }
-            guard { self.lifecycle_phase == Phase::Pending }
+            guard {
+                self.lifecycle_phase == Phase::Pending
+                && self.due_at_utc_ms <= at_utc_ms
+                && at_utc_ms <= self.misfire_deadline_utc_ms
+            }
             update {
                 self.claimed_by = Some(owner_id);
                 self.lease_expires_at_utc_ms = Some(lease_expires_at_utc_ms);
                 self.claimed_at_utc_ms = Some(at_utc_ms);
                 self.claim_token = Some(claim_token);
                 self.delivery_correlation_id = None;
-                self.last_receipt = None;
+                self.receipt_recorded_at_utc_ms = None;
+                self.last_receipt_recorded_at_utc_ms = None;
+                self.last_receipt_attempt = None;
+                self.last_receipt_stage = None;
+                self.last_receipt_failure_class = None;
+                self.last_receipt_detail = None;
+                self.last_receipt_correlation_id = None;
+                self.last_receipt_materialized_session_id = None;
+                self.runtime_outcome_key = None;
+                self.receipt_stage = None;
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
                 self.failure_class = None;
                 self.failure_detail = None;
                 self.dispatched_at_utc_ms = None;
@@ -150,6 +945,10 @@ machine! {
             update {
                 self.delivery_correlation_id = correlation_id;
                 self.dispatched_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DispatchStarted);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
             }
             to Dispatching
             emit DispatchStarted
@@ -170,30 +969,282 @@ machine! {
         // --- Complete ---
 
         transition CompleteFromDispatchingOrAwaiting {
-            on input Complete { receipt, at_utc_ms }
+            on input Complete { at_utc_ms }
             guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
             update {
-                self.last_receipt = Some(receipt);
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Completed);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
             }
             to Completed
             emit Completed
         }
 
-        // --- Skip (from Pending or live claim phases) ---
+        transition RuntimeCompletionCompleted {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_completed" { outcome == RuntimeCompletionOutcome::Completed }
+            update {
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Completed);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+            }
+            to Completed
+            emit Completed
+        }
 
-        transition SkipFromPendingOrLive {
-            on input Skip { detail, failure_class, at_utc_ms }
-            guard {
-                self.lifecycle_phase == Phase::Pending
-                || self.lifecycle_phase == Phase::Claimed
-                || self.lifecycle_phase == Phase::Dispatching
-                || self.lifecycle_phase == Phase::AwaitingCompletion
+        transition RuntimeCompletionRuntimeRejected {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_rejected" {
+                outcome == RuntimeCompletionOutcome::CallbackPending
+                || outcome == RuntimeCompletionOutcome::Cancelled
+                || outcome == RuntimeCompletionOutcome::Abandoned
             }
             update {
+                self.failure_class = Some(OccurrenceFailureClass::RuntimeRejected);
                 self.failure_detail = detail;
-                self.failure_class = failure_class;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::RuntimeRejected);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition RuntimeCompletionTransportError {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_transport_error" { outcome == RuntimeCompletionOutcome::RuntimeTerminated }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition RuntimeCompletionInternalError {
+            on input ResolveRuntimeCompletion { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_outcome_internal_error" { outcome == RuntimeCompletionOutcome::FinalizationFailed }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryCompletionFailureTransportError {
+            on input ResolveDeliveryCompletionFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "completion_future_failed" {
+                reason == DeliveryCompletionFailureReason::CompletionFutureFailed
+            }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryCompletionFailureInternalError {
+            on input ResolveDeliveryCompletionFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_completion_authority_absent" {
+                reason == DeliveryCompletionFailureReason::RuntimeCompletionChannelClosed
+                || reason == DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
+                || reason == DeliveryCompletionFailureReason::RuntimeCompletionHandleMissing
+            }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureTargetMaterializationFailed {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "target_materialization_failed" { reason == DeliveryFailureReason::TargetMaterializationFailed }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TargetMaterializationFailed);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TargetMaterializationFailed);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureTargetMissing {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "target_missing" { reason == DeliveryFailureReason::TargetMissing }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TargetMissing);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TargetMissing);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureTargetBusy {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "target_busy" { reason == DeliveryFailureReason::TargetBusy }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TargetBusy);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TargetBusy);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureRuntimeRejected {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "runtime_rejected" { reason == DeliveryFailureReason::RuntimeRejected }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::RuntimeRejected);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::RuntimeRejected);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureMobRejected {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "mob_rejected" { reason == DeliveryFailureReason::MobRejected }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::MobRejected);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::MobRejected);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureTransportError {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "transport_error" { reason == DeliveryFailureReason::TransportError }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TransportError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        transition DeliveryFailureInternalError {
+            on input ResolveDeliveryFailure { reason, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed || self.lifecycle_phase == Phase::Dispatching || self.lifecycle_phase == Phase::AwaitingCompletion }
+            guard "internal_error" { reason == DeliveryFailureReason::InternalError }
+            update {
+                self.failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.failure_detail = detail;
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DeliveryFailed);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::InternalError);
+                self.receipt_detail = detail;
+            }
+            to DeliveryFailed
+            emit DeliveryFailed
+        }
+
+        // --- Target probe resolution ---
+        //
+        // Shells report typed target observations; occurrence authority owns
+        // the policy decision that turns them into delivery admission,
+        // skipped terminality, or misfired terminality.
+
+        transition TargetProbeReadyClaimed {
+            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            guard "ready" { outcome == OccurrenceTargetProbeOutcome::Ready }
+            to Claimed
+        }
+
+        transition TargetProbeBusyAllowedByPolicy {
+            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            guard "busy" { outcome == OccurrenceTargetProbeOutcome::Busy }
+            guard "allow_concurrent" { self.overlap_policy == OverlapPolicy::AllowConcurrent }
+            to Claimed
+        }
+
+        transition TargetProbeBusySkipByPolicy {
+            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            guard "busy" { outcome == OccurrenceTargetProbeOutcome::Busy }
+            guard "skip_if_running" { self.overlap_policy == OverlapPolicy::SkipIfRunning }
+            update {
+                self.failure_detail = detail;
+                self.failure_class = Some(OccurrenceFailureClass::TargetBusy);
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Skipped);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TargetBusy);
+                self.receipt_detail = detail;
                 self.claimed_by = None;
                 self.lease_expires_at_utc_ms = None;
                 self.claim_token = None;
@@ -203,20 +1254,67 @@ machine! {
             emit Skipped
         }
 
-        // --- Misfire ---
+        transition TargetProbeMissingSkipByPolicy {
+            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            guard "missing" { outcome == OccurrenceTargetProbeOutcome::Missing }
+            guard "skip_missing_target" { self.missing_target_policy == MissingTargetPolicy::Skip }
+            update {
+                self.failure_detail = detail;
+                self.failure_class = Some(OccurrenceFailureClass::TargetMissing);
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Skipped);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TargetMissing);
+                self.receipt_detail = detail;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+            }
+            to Skipped
+            emit Skipped
+        }
 
-        transition MisfireFromPendingOrLive {
-            on input Misfire { detail, failure_class, at_utc_ms }
+        transition TargetProbeMissingMisfireByPolicy {
+            on input ResolveTargetProbe { outcome, detail, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            guard "missing" { outcome == OccurrenceTargetProbeOutcome::Missing }
+            guard "mark_misfired_missing_target" { self.missing_target_policy == MissingTargetPolicy::MarkMisfired }
+            update {
+                self.failure_detail = detail;
+                self.failure_class = Some(OccurrenceFailureClass::TargetMissing);
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::TargetMissing);
+                self.receipt_detail = detail;
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+            }
+            to Misfired
+            emit Misfired
+        }
+
+        // --- Due misfire ---
+
+        transition DueMisfirePending {
+            on input ResolveDueMisfire { detail, at_utc_ms }
             guard {
                 self.lifecycle_phase == Phase::Pending
-                || self.lifecycle_phase == Phase::Claimed
-                || self.lifecycle_phase == Phase::Dispatching
-                || self.lifecycle_phase == Phase::AwaitingCompletion
+                && self.due_at_utc_ms <= at_utc_ms
+                && self.misfire_deadline_utc_ms < at_utc_ms
             }
             update {
                 self.failure_detail = detail;
-                self.failure_class = failure_class;
+                self.failure_class = None;
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Misfired);
+                self.receipt_failure_class = None;
+                self.receipt_detail = detail;
                 self.claimed_by = None;
                 self.lease_expires_at_utc_ms = None;
                 self.claim_token = None;
@@ -239,29 +1337,14 @@ machine! {
             update {
                 self.superseded_by_revision = Some(superseded_by_revision);
                 self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Superseded);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
             }
             to Superseded
             emit Superseded
             emit OccurrencesSuperseded { occurrence_id: self.occurrence_id, superseding_revision: superseded_by_revision }
-        }
-
-        // --- Delivery failed ---
-
-        transition DeliveryFailedFromClaimedOrLive {
-            on input DeliveryFailed { receipt, failure_class, detail, at_utc_ms }
-            guard {
-                self.lifecycle_phase == Phase::Claimed
-                || self.lifecycle_phase == Phase::Dispatching
-                || self.lifecycle_phase == Phase::AwaitingCompletion
-            }
-            update {
-                self.last_receipt = receipt;
-                self.failure_class = Some(failure_class);
-                self.failure_detail = detail;
-                self.completed_at_utc_ms = Some(at_utc_ms);
-            }
-            to DeliveryFailed
-            emit DeliveryFailed
         }
 
         // --- Lease expired (one per source phase, returns to Pending) ---
@@ -276,6 +1359,10 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease expired before completion");
             }
             to Pending
             emit LeaseExpired
@@ -291,6 +1378,10 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease expired before completion");
             }
             to Pending
             emit LeaseExpired
@@ -306,6 +1397,67 @@ machine! {
                 self.delivery_correlation_id = None;
                 self.claimed_at_utc_ms = None;
                 self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease expired before completion");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        transition ReleaseLeaseForPausedScheduleFromClaimed {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Claimed }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease released because schedule was paused before dispatch");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        transition ReleaseLeaseForPausedScheduleFromDispatching {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Dispatching }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease released because schedule was paused before dispatch");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        transition ReleaseLeaseForPausedScheduleFromAwaitingCompletion {
+            on input ReleaseLeaseForPausedSchedule { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::AwaitingCompletion }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("lease released because schedule was paused before dispatch");
             }
             to Pending
             emit LeaseExpired
@@ -339,11 +1491,27 @@ impl<T: Into<String>> From<T> for ClaimToken {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryReceipt(pub String);
-impl<T: Into<String>> From<T> for DeliveryReceipt {
+pub struct SessionId(pub String);
+impl<T: Into<String>> From<T> for SessionId {
     fn from(s: T) -> Self {
         Self(s.into())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MisfirePolicy {
+    Skip,
+    CatchUpWithin,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapPolicy {
+    AllowConcurrent,
+    SkipIfRunning,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingTargetPolicy {
+    MarkMisfired,
+    Skip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,4 +1524,75 @@ pub enum OccurrenceFailureClass {
     LeaseLost,
     TransportError,
     InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCompletionOutcome {
+    Completed,
+    CallbackPending,
+    Cancelled,
+    Abandoned,
+    FinalizationFailed,
+    RuntimeTerminated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryCompletionFailureReason {
+    CompletionFutureFailed,
+    RuntimeCompletionChannelClosed,
+    RuntimeCompletionAuthorityUnavailable,
+    RuntimeCompletionHandleMissing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryFailureReason {
+    TargetMaterializationFailed,
+    TargetMissing,
+    TargetBusy,
+    RuntimeRejected,
+    MobRejected,
+    TransportError,
+    InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceTargetProbeOutcome {
+    Ready,
+    Busy,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryReceiptStage {
+    Planned,
+    Claimed,
+    DispatchStarted,
+    DispatchAccepted,
+    AwaitingCompletion,
+    Completed,
+    Skipped,
+    Misfired,
+    Superseded,
+    DeliveryFailed,
+    LeaseExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceTransitionFailureRefusalKind {
+    NoMatchingTransition,
+    GuardRejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceTransitionFailureClassKind {
+    PlanRejected,
+    TargetSyncRejected,
+    ReceiptRecordRejected,
+    DueClassificationRejected,
+    ClaimRejected,
+    NotPendingForClaim,
+    NotClaimed,
+    NotDispatching,
+    NotLeaseHolding,
+    NotLiveForTerminal,
 }

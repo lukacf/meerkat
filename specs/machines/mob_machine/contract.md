@@ -7,17 +7,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
+- `destroy_admitted`: `Bool`
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
 - `externally_addressable_runtime_ids`: `Set<AgentRuntimeId>`
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
+- `identity_runtime_generations`: `Map<AgentIdentity, Generation>`
+- `identity_runtime_fence_tokens`: `Map<AgentIdentity, FenceToken>`
 - `active_run_count`: `u64`
+- `flow_authority_schema_version`: `u64`
 - `run_status`: `Map<RunId, FlowRunStatus>`
 - `run_ordered_steps`: `Map<RunId, Seq<StepId>>`
 - `run_tracked_steps`: `Map<RunId, Set<StepId>>`
 - `run_step_status`: `Map<RunId, Map<StepId, Option<StepRunStatus>>>`
-- `run_step_status_flat`: `Map<RunStepKey, StepRunStatus>`
 - `run_output_recorded`: `Map<RunId, Map<StepId, Bool>>`
-- `run_step_condition_results_flat`: `Map<RunStepKey, Option<Bool>>`
 - `run_step_condition_results`: `Map<RunId, Map<StepId, Option<Bool>>>`
 - `run_step_has_conditions`: `Map<RunId, Map<StepId, Bool>>`
 - `run_step_dependencies`: `Map<RunId, Map<StepId, Seq<StepId>>>`
@@ -28,15 +30,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `run_step_target_counts`: `Map<RunId, Map<StepId, u64>>`
 - `run_step_target_success_counts`: `Map<RunId, Map<StepId, u64>>`
 - `run_step_target_terminal_failure_counts`: `Map<RunId, Map<StepId, u64>>`
-- `run_output_recorded_flat`: `Map<RunStepKey, Bool>`
-- `run_step_target_counts_flat`: `Map<RunStepKey, u64>`
-- `run_step_target_success_counts_flat`: `Map<RunStepKey, u64>`
-- `run_step_target_terminal_failure_counts_flat`: `Map<RunStepKey, u64>`
 - `run_target_retry_counts`: `Map<RunId, Map<String, u64>>`
-- `run_target_retry_counts_flat`: `Map<RunStepKey, u64>`
 - `run_failure_count`: `Map<RunId, u64>`
 - `run_consecutive_failure_count`: `Map<RunId, u64>`
-- `run_escalation_threshold`: `Map<RunId, u32>`
+- `run_escalation_threshold`: `Map<RunId, u64>`
 - `run_max_step_retries`: `Map<RunId, u32>`
 - `run_ready_frames`: `Map<RunId, Seq<FrameId>>`
 - `run_ready_frame_membership`: `Map<RunId, Set<FrameId>>`
@@ -46,8 +43,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `run_pending_body_frame_loop_membership_flat`: `Set<LoopInstanceId>`
 - `run_active_node_count`: `Map<RunId, u64>`
 - `run_active_frame_count`: `Map<RunId, u64>`
-- `run_last_granted_frame`: `Map<RunId, FrameId>`
-- `run_last_granted_loop`: `Map<RunId, LoopInstanceId>`
+- `run_last_granted_frame`: `Map<RunId, Option<FrameId>>`
+- `run_last_granted_loop`: `Map<RunId, Option<LoopInstanceId>>`
 - `run_max_active_nodes`: `Map<RunId, u64>`
 - `run_max_active_frames`: `Map<RunId, u64>`
 - `run_max_frame_depth`: `Map<RunId, u64>`
@@ -66,8 +63,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `frame_node_status`: `Map<FrameId, Map<FlowNodeId, NodeRunStatus>>`
 - `frame_ready_queue`: `Map<FrameId, Seq<FlowNodeId>>`
 - `frame_output_recorded`: `Map<FrameId, Map<FlowNodeId, Bool>>`
-- `frame_output_recorded_flat`: `Map<FrameNodeKey, Bool>`
-- `frame_last_admitted_node`: `Map<FrameId, FlowNodeId>`
+- `frame_last_admitted_node`: `Map<FrameId, Option<FlowNodeId>>`
 - `frame_node_condition_results`: `Map<FrameId, Map<FlowNodeId, Option<Bool>>>`
 - `frame_node_branches`: `Map<FrameId, Map<FlowNodeId, Option<BranchId>>>`
 - `loop_phase`: `Map<LoopInstanceId, LoopStatus>`
@@ -97,39 +93,97 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`
+- `external_peer_edges_by_key`: `Map<ExternalPeerKey, ExternalPeerEdge>`
+- `supervisor_authority_peer_id`: `Option<PeerId>`
+- `supervisor_authority_signing_key`: `Option<PeerSigningKey>`
+- `supervisor_authority_epoch`: `Option<u64>`
+- `supervisor_authority_protocol_version`: `Option<SupervisorProtocolVersion>`
+- `supervisor_pending_authority_peer_id`: `Option<PeerId>`
+- `supervisor_pending_authority_signing_key`: `Option<PeerSigningKey>`
+- `supervisor_pending_authority_epoch`: `Option<u64>`
+- `supervisor_pending_authority_protocol_version`: `Option<SupervisorProtocolVersion>`
+- `supervisor_pending_authority_accepted_peer_ids`: `Set<PeerId>`
+- `owner_bridge_session_id`: `Option<SessionId>`
+- `owner_bridge_destroy_on_archive`: `Bool`
+- `implicit_delegation_mob`: `Bool`
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
 - `member_session_bindings`: `Map<AgentIdentity, SessionId>`
+- `member_profile_names`: `Map<AgentIdentity, String>`
+- `member_runtime_modes`: `Map<AgentIdentity, SpawnPolicyRuntimeMode>`
+- `member_peer_ids`: `Map<AgentIdentity, PeerId>`
+- `member_peer_endpoints`: `Map<AgentIdentity, MemberPeerEndpoint>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
+- `spawn_policy_enabled`: `Bool`
+- `spawn_policy_revision`: `u64`
+- `spawn_policy_resolution_revision`: `Map<AgentIdentity, u64>`
+- `spawn_policy_resolution_profiles`: `Map<AgentIdentity, String>`
+- `spawn_policy_resolution_runtime_modes`: `Map<AgentIdentity, Option<SpawnPolicyRuntimeMode>>`
+- `spawn_policy_resolution_absent`: `Set<AgentIdentity>`
+- `spawn_profile_authority_profile_names`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_models`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_material_digests`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_tool_config_digests`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_skills_digests`: `Map<AgentIdentity, String>`
+- `spawn_profile_authority_provider_params_digests`: `Map<AgentIdentity, Option<String>>`
+- `spawn_profile_authority_output_schema_digests`: `Map<AgentIdentity, Option<String>>`
+- `spawn_profile_authority_external_addressable`: `Map<AgentIdentity, Bool>`
 - `topology_epoch`: `u64`
 
 ## Inputs
-- `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u32, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u32, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
-- `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>)
+- `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
+- `CreateRunSeed`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
+- `CreateFrameSeed`(run_id: RunId, frame_id: FrameId, frame_scope: FrameScope, loop_instance_id: Option<LoopInstanceId>, iteration: u32, tracked_nodes: Set<FlowNodeId>, ordered_nodes: Seq<FlowNodeId>, node_kind: Map<FlowNodeId, FlowNodeKind>, node_dependencies: Map<FlowNodeId, Seq<FlowNodeId>>, node_dependency_modes: Map<FlowNodeId, DependencyMode>, node_branches: Map<FlowNodeId, Option<BranchId>>, node_step_ids: Map<FlowNodeId, StepId>, node_loop_ids: Map<FlowNodeId, LoopId>, node_status: Map<FlowNodeId, NodeRunStatus>, ready_queue: Seq<FlowNodeId>, output_recorded: Map<FlowNodeId, Bool>, node_condition_results: Map<FlowNodeId, Option<Bool>>, last_admitted_node: Option<FlowNodeId>)
 - `CreateLoopSeed`(loop_instance_id: LoopInstanceId, parent_frame_id: FrameId, parent_node_id: FlowNodeId, loop_id: LoopId, depth: u32, max_iterations: u64)
 - `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
 - `RecordLoopUntilConditionMet`(loop_instance_id: LoopInstanceId, iteration: u64)
 - `RecordLoopUntilConditionFailed`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, run_step_key: Option<RunStepKey>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
-- `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, frame_node_key: Option<FrameNodeKey>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
+- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
+- `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
 - `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
 - `CancelFlow`(run_id: RunId)
 - `FlowStatus`
-- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
+- `ClassifyFlowRunTerminality`(run_id: RunId, status: FlowRunStatus)
+- `ClassifyFlowStepTerminality`(run_id: RunId, step_id: StepId, status: StepRunStatus)
+- `ClassifyFlowFrameTerminalStatus`(frame_id: FrameId)
+- `ClassifyFlowRunPublicResult`(run_id: RunId, status: FlowRunStatus)
+- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_material_digest: String, external_addressable: Bool, runtime_mode: SpawnPolicyRuntimeMode, bridge_session_id: Option<SessionId>, replacing: Option<SessionId>)
+- `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
+- `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
+- `ClassifyMemberWait`(agent_identity: AgentIdentity)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
-- `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>, session_id: SessionId)
+- `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
+- `RetireAbsent`(agent_identity: AgentIdentity)
+- `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
+- `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `WireMembers`(edge: WiringEdge)
+- `WireMembersWithTrust`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `UnwireMembers`(edge: WiringEdge)
-- `WireExternalPeer`(edge: ExternalPeerEdge)
-- `UnwireExternalPeer`(edge: ExternalPeerEdge)
+- `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
+- `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
+- `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
+- `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `ProvisionSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `ClearSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>)
+- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
-- `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
-- `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
 - `Resume`
 - `Complete`
@@ -140,16 +194,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListMembersIncludingRetiring`
 - `ListAllMembers`
 - `MemberStatus`
-- `SubscribeAgentEvents`
-- `SubscribeAllAgentEvents`
-- `SubscribeMobEvents`
+- `SubscribeAgentEvents`(agent_identity: AgentIdentity)
+- `SubscribeAllAgentEvents`(session_bound_runtimes: Set<AgentRuntimeId>)
+- `SubscribeMobEvents`(initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId>)
+- `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
+- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEvents`
+- `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ReplayAllEvents`
-- `RecordOperatorActionProvenance`
+- `RecordOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `GetMember`
-- `SetSpawnPolicy`
+- `SetSpawnPolicy`(enabled: Bool)
+- `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
 - `Shutdown`
-- `ForceCancel`
+- `ForceCancel`(agent_identity: AgentIdentity)
 - `KickoffMarkPending`(member_id: String)
 - `KickoffMarkStarting`(member_id: String)
 - `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -173,12 +232,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
+- `RetireMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId>)
+- `AdmitDestroyMemberRetire`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId>)
 - `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
-- `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
+- `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ObserveDestroyMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>)
+- `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, session_id: SessionId)
+- `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, session_id: SessionId)
+- `ResolveRespawnTopologyRestore`(agent_identity: AgentIdentity, failed_peer_ids: Seq<RespawnTopologyPeerId>)
 - `DestroyMob`(session_id: SessionId)
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool)
+- `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
+- `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `RecoverMemberKickoff`(member_id: String, phase: KickoffPhase, error: Option<String>)
+- `RecoverRosterWiring`(edge: WiringEdge)
+- `RecoverRosterUnwire`(edge: WiringEdge)
+- `RecoverExternalPeerWiring`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `RecoverExternalPeerUnwire`(key: ExternalPeerKey)
+- `RecoverSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `RecoverOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
+- `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
+- `AdmitDestroyCleanup`
+- `AdmitDestroyStorageFinalizing`
 - `MarkCompleted`
 - `StartRun`
 - `FinishRun`
@@ -202,16 +279,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CreateRun`
 
 ## Effects
-- `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId)
-- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId)
+- `SpawnProfileAuthorized`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
+- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, work_id: WorkId, origin: WorkOrigin)
+- `RequestPeerRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: WorkOrigin)
+- `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
+- `CancelAllWorkRejected`(agent_runtime_id: AgentRuntimeId, reason: CancelAllWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `RequestRuntimeRetire`(session_id: SessionId)
 - `RequestRuntimeDestroy`(session_id: SessionId)
+- `PendingSpawnOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
 - `RequestSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
+- `AppendLifecycleJournal`(kind: MobLifecycleJournalKind, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId>)
+- `AppendOperatorActionProvenance`(tool_name: String, principal_token: OpaquePrincipalToken, caller_provenance: Option<MobToolCallerProvenance>, audit_invocation_id: Option<String>)
 - `EmitMemberLifecycleNotice`(kind: MemberLifecycleKind)
 - `EmitRunLifecycleNotice`
 - `EmitFlowRunNotice`
 - `AppendFailureLedger`
 - `FlowTerminalized`
+- `FlowRunTerminal`(run_id: RunId)
+- `FlowRunNonTerminal`(run_id: RunId)
+- `FlowStepTerminal`(run_id: RunId, step_id: StepId)
+- `FlowStepNonTerminal`(run_id: RunId, step_id: StepId)
+- `FlowFrameTerminalStatusClassified`(frame_id: FrameId, terminal_status: FrameStatus)
+- `FlowFrameTerminalStatusUnavailable`(frame_id: FrameId)
+- `FlowRunPublicResultClassified`(run_id: RunId, result: FlowRunPublicResultClassKind)
 - `EscalateSupervisor`
 - `NotifyCoordinator`
 - `ExposePendingSpawn`
@@ -221,34 +312,1493 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PersistKickoffUpdate`(member_id: String, phase: KickoffPhase)
 - `PersistKickoffFailureUpdate`(member_id: String, phase: KickoffPhase, error: String)
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
+- `SpawnPolicyResolutionRecorded`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
+- `OwnerBridgeSessionBound`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
+- `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
+- `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
+- `MemberWaitClassified`(agent_identity: AgentIdentity, result: MemberWaitClassificationKind)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
+- `SessionProvisionOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
+- `MemberTrustWiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, a_endpoint: MemberPeerEndpoint, b_endpoint: MemberPeerEndpoint, epoch: u64)
+- `MemberTrustUnwiringRequested`(edge: WiringEdge, a_peer_id: PeerId, b_peer_id: PeerId, epoch: u64)
+- `WiringTrustRepairRequested`(edge: WiringEdge)
+- `ExternalPeerTrustWiringRequested`(edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustUnwiringRequested`(edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64)
+- `ExternalPeerTrustRepairRequested`(edge: ExternalPeerEdge, local_peer_id: PeerId, peer_id: PeerId, epoch: u64)
+- `MemberPeerRegistered`(agent_identity: AgentIdentity, peer_id: PeerId)
+- `MemberPeerRebindAuthorized`(agent_identity: AgentIdentity, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint)
+- `MemberPeerOverlayAuthorized`(agent_identity: AgentIdentity, peer_id: PeerId, peer_overlay_endpoints: Set<MemberPeerEndpoint>, epoch: u64)
+- `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64)
+- `PersistSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `DeleteSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
+- `AuthorizeAgentEventSubscription`(agent_identity: AgentIdentity, session_id: SessionId)
+- `RejectAgentEventSubscription`(agent_identity: AgentIdentity, reason: EventSubscriptionRejectReasonKind)
+- `AuthorizeAllAgentEventSubscription`(session_bound_runtimes: Set<AgentRuntimeId>)
+- `RejectAllAgentEventSubscription`(reason: EventSubscriptionRejectReasonKind)
+- `AuthorizeMobEventRouter`(initial_cursor: u64, channel_capacity: u64, poll_interval_ms: u64, session_bound_runtimes: Set<AgentRuntimeId>)
+- `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId)
+- `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
+- `AuthorizeStructuralEventSubscription`(after_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
+- `RejectStructuralEventSubscription`(after_cursor: u64, latest_cursor: u64)
+- `AuthorizeStrictEventPoll`(after_cursor: u64, limit: u64)
+- `RejectStrictEventPoll`(after_cursor: u64, latest_cursor: u64)
 
 ## Invariants
 - `bindings_require_known_identity`
+- `identity_runtime_material_matches_runtime_binding`
+- `member_spawn_material_matches_runtime_binding`
+- `external_peer_edges_are_keyed_coherently`
+- `supervisor_authority_tuple_consistent`
+- `supervisor_pending_authority_tuple_consistent`
+- `supervisor_pending_authority_requires_current`
+- `owner_bridge_cleanup_requires_owner`
+- `implicit_delegation_requires_owner`
+- `implicit_delegation_requires_cleanup`
 
 ## Transitions
+### `ClassifyFlowRunTerminalityTerminalRunning`
+- From: `Running`
+- On: `ClassifyFlowRunTerminality`(run_id, status)
+- Guards:
+  - `run_status_terminal`
+- Emits: `FlowRunTerminal`
+- To: `Running`
+
+### `ClassifyFlowRunTerminalityNonTerminalRunning`
+- From: `Running`
+- On: `ClassifyFlowRunTerminality`(run_id, status)
+- Guards:
+  - `run_status_non_terminal`
+- Emits: `FlowRunNonTerminal`
+- To: `Running`
+
+### `ClassifyFlowStepTerminalityTerminalRunning`
+- From: `Running`
+- On: `ClassifyFlowStepTerminality`(run_id, step_id, status)
+- Guards:
+  - `step_status_terminal`
+- Emits: `FlowStepTerminal`
+- To: `Running`
+
+### `ClassifyFlowStepTerminalityNonTerminalRunning`
+- From: `Running`
+- On: `ClassifyFlowStepTerminality`(run_id, step_id, status)
+- Guards:
+  - `step_status_non_terminal`
+- Emits: `FlowStepNonTerminal`
+- To: `Running`
+
+### `ClassifyFlowFrameTerminalStatusFailedRunning`
+- From: `Running`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `any_node_failed`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Running`
+
+### `ClassifyFlowFrameTerminalStatusFailedStopped`
+- From: `Stopped`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `any_node_failed`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Stopped`
+
+### `ClassifyFlowFrameTerminalStatusFailedCompleted`
+- From: `Completed`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `any_node_failed`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Completed`
+
+### `ClassifyFlowFrameTerminalStatusCanceledRunning`
+- From: `Running`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `no_node_failed`
+  - `any_node_canceled`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Running`
+
+### `ClassifyFlowFrameTerminalStatusCanceledStopped`
+- From: `Stopped`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `no_node_failed`
+  - `any_node_canceled`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Stopped`
+
+### `ClassifyFlowFrameTerminalStatusCanceledCompleted`
+- From: `Completed`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `no_node_failed`
+  - `any_node_canceled`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Completed`
+
+### `ClassifyFlowFrameTerminalStatusCompletedRunning`
+- From: `Running`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `no_node_failed`
+  - `no_node_canceled`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Running`
+
+### `ClassifyFlowFrameTerminalStatusCompletedStopped`
+- From: `Stopped`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `no_node_failed`
+  - `no_node_canceled`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Stopped`
+
+### `ClassifyFlowFrameTerminalStatusCompletedCompleted`
+- From: `Completed`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `frame_running`
+  - `all_nodes_terminal`
+  - `no_node_failed`
+  - `no_node_canceled`
+- Emits: `FlowFrameTerminalStatusClassified`
+- To: `Completed`
+
+### `ClassifyFlowFrameTerminalStatusUnavailableRunning`
+- From: `Running`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `terminal_status_unavailable`
+- Emits: `FlowFrameTerminalStatusUnavailable`
+- To: `Running`
+
+### `ClassifyFlowFrameTerminalStatusUnavailableStopped`
+- From: `Stopped`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `terminal_status_unavailable`
+- Emits: `FlowFrameTerminalStatusUnavailable`
+- To: `Stopped`
+
+### `ClassifyFlowFrameTerminalStatusUnavailableCompleted`
+- From: `Completed`
+- On: `ClassifyFlowFrameTerminalStatus`(frame_id)
+- Guards:
+  - `known_frame`
+  - `frame_tracked_nodes_known`
+  - `frame_node_status_known`
+  - `terminal_status_unavailable`
+- Emits: `FlowFrameTerminalStatusUnavailable`
+- To: `Completed`
+
+### `ClassifyFlowRunPublicResultSuccessRunning`
+- From: `Running`
+- On: `ClassifyFlowRunPublicResult`(run_id, status)
+- Guards:
+  - `run_status_success`
+- Emits: `FlowRunPublicResultClassified`
+- To: `Running`
+
+### `ClassifyFlowRunPublicResultFailureRunning`
+- From: `Running`
+- On: `ClassifyFlowRunPublicResult`(run_id, status)
+- Guards:
+  - `run_status_failure`
+- Emits: `FlowRunPublicResultClassified`
+- To: `Running`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentRunning`
+- From: `Running`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Running`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentStopped`
+- From: `Stopped`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Stopped`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentCompleted`
+- From: `Completed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Completed`
+
+### `ClassifyMemberWaitRuntimeMaterialPresentDestroyed`
+- From: `Destroyed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_present`
+- Emits: `MemberWaitClassified`
+- To: `Destroyed`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialRunning`
+- From: `Running`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Running`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialStopped`
+- From: `Stopped`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Stopped`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialCompleted`
+- From: `Completed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Completed`
+
+### `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
+- From: `Destroyed`
+- On: `ClassifyMemberWait`(agent_identity)
+- Guards:
+  - `runtime_material_missing`
+- Emits: `MemberWaitClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureProfileNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureProfileNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureProfileNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureProfileNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `profile_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMemberNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMemberNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMemberNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMemberNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMemberAlreadyExistsDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_already_exists`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureNotExternallyAddressableDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `not_externally_addressable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureInvalidTransitionRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureInvalidTransitionStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureInvalidTransitionCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureInvalidTransitionDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `invalid_transition`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureWiringErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureWiringErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureWiringErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureWiringErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `wiring_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureBridgeCommandRejectedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_command_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMemberRestoreFailedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `member_restore_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureKickoffWaitTimedOutDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `kickoff_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureReadyWaitTimedOutDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `ready_wait_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureDefinitionErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureDefinitionErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureDefinitionErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureDefinitionErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `definition_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFlowNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFlowNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFlowNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFlowNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFlowFailedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFlowFailedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFlowFailedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFlowFailedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_failed`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureRunNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureRunNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureRunNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureRunNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureRunCanceledRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureRunCanceledStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureRunCanceledCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureRunCanceledDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `run_canceled`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFlowTurnTimedOutDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `flow_turn_timed_out`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFrameDepthLimitExceededDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_depth_limit_exceeded`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `frame_atomic_persistence_unavailable`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSpecRevisionConflictDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `spec_revision_conflict`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSchemaValidationRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSchemaValidationStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSchemaValidationCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSchemaValidationDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `schema_validation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureInsufficientTargetsRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureInsufficientTargetsStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureInsufficientTargetsCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureInsufficientTargetsDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `insufficient_targets`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureTopologyViolationRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureTopologyViolationStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureTopologyViolationCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureTopologyViolationDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `topology_violation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `bridge_delivery_rejected`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSupervisorEscalationRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSupervisorEscalationStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSupervisorEscalationCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSupervisorEscalationDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `supervisor_escalation`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureUnsupportedForModeRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureUnsupportedForModeStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureUnsupportedForModeCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureUnsupportedForModeDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `unsupported_for_mode`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureMissingMemberCapabilityDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `missing_member_capability`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureResetBarrierRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureResetBarrierStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureResetBarrierCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureResetBarrierDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `reset_barrier`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureStorageErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureStorageErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureStorageErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureStorageErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `storage_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureSessionErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureSessionErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureSessionErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureSessionErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `session_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureCommsErrorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureCommsErrorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureCommsErrorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureCommsErrorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `comms_error`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureCallbackPendingRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureCallbackPendingStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureCallbackPendingCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureCallbackPendingDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `callback_pending`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureStaleFenceTokenRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureStaleFenceTokenStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureStaleFenceTokenCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureStaleFenceTokenDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_fence_token`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureStaleEventCursorRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureStaleEventCursorStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureStaleEventCursorCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureStaleEventCursorDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `stale_event_cursor`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureWorkNotFoundRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureWorkNotFoundStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureWorkNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureWorkNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `work_not_found`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
+### `ClassifySpawnManyFailureInternalRunning`
+- From: `Running`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Running`
+
+### `ClassifySpawnManyFailureInternalStopped`
+- From: `Stopped`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Stopped`
+
+### `ClassifySpawnManyFailureInternalCompleted`
+- From: `Completed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Completed`
+
+### `ClassifySpawnManyFailureInternalDestroyed`
+- From: `Destroyed`
+- On: `ClassifySpawnManyFailure`(observation)
+- Guards:
+  - `internal`
+- Emits: `SpawnManyFailureClassified`
+- To: `Destroyed`
+
 ### `SpawnRunningFresh`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
   - `no_prior_session_binding`
   - `replacing_absent`
-- Emits: `RequestRuntimeBinding`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+  - `identity_not_external_peer`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_authorized`
+  - `spawn_profile_addressability_authorized`
+  - `bridge_session_present`
+- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `SpawnRunningFreshPeerOnly`
+- From: `Running`
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
+- Guards:
+  - `coordinator_bound`
+  - `no_prior_session_binding`
+  - `replacing_absent`
+  - `identity_not_external_peer`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_authorized`
+  - `spawn_profile_addressability_authorized`
+  - `bridge_session_absent`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `SpawnRunningReplacing`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, profile_material_digest, external_addressable, runtime_mode, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
   - `prior_session_binding_present`
   - `replacing_present`
   - `replacing_matches_current`
-- Emits: `RequestRuntimeBinding`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+  - `identity_not_external_peer`
+  - `spawn_profile_name_authorized`
+  - `spawn_profile_authorized`
+  - `spawn_profile_addressability_authorized`
+  - `bridge_session_present`
+- Emits: `RequestRuntimeBinding`, `AppendLifecycleJournal`, `MemberSessionBindingChanged`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `AuthorizeSpawnProfileRunning`
+- From: `Running`
+- On: `AuthorizeSpawnProfile`(agent_identity, profile_name, model, profile_material_digest, tool_config_digest, skills_digest, provider_params_digest, output_schema_digest, external_addressable)
+- Guards:
+  - `coordinator_bound`
+- Emits: `SpawnProfileAuthorized`
 - To: `Running`
 
 ### `EnsureMemberRunningExisting`
@@ -265,6 +1815,130 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `coordinator_bound`
   - `identity_absent`
+- To: `Running`
+
+### `RecoverRosterMemberRunning`
+- From: `Running`
+- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable)
+- Guards:
+  - `identity_not_recovered`
+  - `runtime_not_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberAddressabilityRunning`
+- From: `Running`
+- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `fence_token_matches`
+  - `generation_matches`
+- To: `Running`
+
+### `RecoverMemberSessionBindingFreshRunning`
+- From: `Running`
+- On: `RecoverMemberSessionBinding`(agent_identity, agent_runtime_id, bridge_session_id, replacing)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `no_prior_session_binding`
+  - `replacing_absent`
+- Emits: `MemberSessionBindingChanged`, `SessionProvisionOperationOwnerAuthorized`
+- To: `Running`
+
+### `RecoverMemberSessionBindingReplacingRunning`
+- From: `Running`
+- On: `RecoverMemberSessionBinding`(agent_identity, agent_runtime_id, bridge_session_id, replacing)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `prior_session_binding_present`
+  - `replacing_present`
+  - `replacing_matches_current`
+  - `replacement_changes_binding`
+- Emits: `MemberSessionBindingChanged`, `SessionProvisionOperationOwnerAuthorized`
+- To: `Running`
+
+### `RecoverMemberSessionBindingAlreadyCurrentRunning`
+- From: `Running`
+- On: `RecoverMemberSessionBinding`(agent_identity, agent_runtime_id, bridge_session_id, replacing)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `prior_session_binding_present`
+  - `binding_already_current`
+  - `replacing_absent_or_current`
+- Emits: `SessionProvisionOperationOwnerAuthorized`
+- To: `Running`
+
+### `RecoverRosterMemberResetRunning`
+- From: `Running`
+- On: `RecoverRosterMemberReset`(agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `previous_runtime_recovered`
+  - `identity_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberRetiredRunning`
+- From: `Running`
+- On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
+- Guards:
+  - `runtime_recovered`
+- To: `Running`
+
+### `RecoverRosterMemberRetiredAlreadyAbsent`
+- From: `Running`
+- On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
+- Guards:
+  - `runtime_not_recovered`
+- To: `Running`
+
+### `RecoverMemberKickoffPending`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_pending_phase`
+  - `recover_pending_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffStarting`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_starting_phase`
+  - `recover_starting_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffCallbackPending`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_callback_pending_phase`
+  - `recover_callback_pending_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffStarted`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_started_phase`
+  - `recover_started_without_error`
+- To: `Running`
+
+### `RecoverMemberKickoffFailed`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_failed_phase`
+  - `recover_failed_has_error`
+- To: `Running`
+
+### `RecoverMemberKickoffCancelled`
+- From: `Running`
+- On: `RecoverMemberKickoff`(member_id, phase, error)
+- Guards:
+  - `recover_cancelled_phase`
+  - `recover_cancelled_without_error`
 - To: `Running`
 
 ### `ReconcileRunning`
@@ -287,7 +1961,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ObserveRuntimeReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Running`
 
 ### `StartupMarkReadyRunning`
@@ -295,7 +1969,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartupMarkReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Running`
 
 ### `StartupMarkReadyStopped`
@@ -303,7 +1977,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartupMarkReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Stopped`
 
 ### `StartupMarkReadyCompleted`
@@ -311,7 +1985,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartupMarkReady`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - To: `Completed`
 
 ### `KickoffMarkPendingRunning`
@@ -475,54 +2149,425 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningExternal`
 - From: `Running`
-- On: `SubmitWork`(agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
 - Guards:
   - `active_members_present`
+  - `identity_binding_matches`
   - `current_binding_matches`
+  - `fence_token_matches`
+  - `generation_binding_present`
+  - `session_binding_present`
+  - `member_not_retiring`
   - `external_origin`
   - `runtime_externally_addressable`
 - Emits: `RequestRuntimeIngress`
 - To: `Running`
 
-### `SubmitWorkRunningInternal`
+### `SubmitWorkRunningExternalPeerOnly`
 - From: `Running`
-- On: `SubmitWork`(agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
 - Guards:
   - `active_members_present`
+  - `identity_binding_matches`
   - `current_binding_matches`
+  - `fence_token_matches`
+  - `generation_binding_present`
+  - `session_binding_absent`
+  - `member_not_retiring`
+  - `external_origin`
+  - `runtime_externally_addressable`
+  - `member_peer_registered`
+- Emits: `RequestPeerRuntimeIngress`
+- To: `Running`
+
+### `SubmitWorkRunningInternal`
+- From: `Running`
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
+- Guards:
+  - `active_members_present`
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `generation_binding_present`
+  - `session_binding_present`
+  - `member_not_retiring`
   - `internal_origin`
 - Emits: `RequestRuntimeIngress`
 - To: `Running`
 
+### `SubmitWorkRunningInternalPeerOnly`
+- From: `Running`
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
+- Guards:
+  - `active_members_present`
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `generation_binding_present`
+  - `session_binding_absent`
+  - `member_not_retiring`
+  - `internal_origin`
+  - `member_peer_registered`
+- Emits: `RequestPeerRuntimeIngress`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionStopped`
+- From: `Stopped`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Emits: `SubmitWorkRejected`
+- To: `Stopped`
+
+### `ResolveSubmitWorkRejectionCompleted`
+- From: `Completed`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Emits: `SubmitWorkRejected`
+- To: `Completed`
+
+### `ResolveSubmitWorkRejectionDestroyed`
+- From: `Destroyed`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Emits: `SubmitWorkRejected`
+- To: `Destroyed`
+
+### `ResolveSubmitWorkRejectionMemberNotFound`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_absent`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_present`
+  - `current_runtime_not_live`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionStaleFenceToken`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_present`
+  - `current_runtime_live`
+  - `runtime_or_fence_stale`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionNotExternallyAddressable`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `member_not_retiring`
+  - `external_origin`
+  - `runtime_not_externally_addressable`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, origin)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `member_not_retiring`
+  - `internal_origin`
+  - `session_binding_absent`
+  - `member_peer_absent`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
 ### `RetireMember`
 - From: `Running`
-- On: `RetireMember`(agent_runtime_id, fence_token, session_id)
+- On: `RetireMember`(agent_identity, agent_runtime_id, fence_token, session_id)
 - Guards:
+  - `identity_binding_matches`
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
+  - `session_present`
+  - `session_binding_matches`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
+
+### `RetireMemberPeerOnly`
+- From: `Running`
+- On: `RetireMember`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `session_absent`
+  - `session_binding_absent`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireLiveRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `session_present`
+  - `session_binding_matches`
+- Emits: `RequestRuntimeRetire`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireLiveStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `session_present`
+  - `session_binding_matches`
+- Emits: `RequestRuntimeRetire`
+- To: `Stopped`
+
+### `AdmitDestroyMemberRetirePeerOnlyRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `session_absent`
+  - `session_binding_absent`
+- To: `Running`
+
+### `AdmitDestroyMemberRetirePeerOnlyStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `current_binding_matches`
+  - `fence_token_matches`
+  - `session_absent`
+  - `session_binding_absent`
+- To: `Stopped`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `session_matches_binding_or_absent`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `session_matches_binding_or_absent`
+- To: `Stopped`
 
 ### `ObserveRuntimeRetired`
 - From: `Running`
 - On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
+### `ObserveMemberRetirementArchivedLive`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedLiveStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Stopped`
+
+### `ObserveMemberRetirementArchivedRetired`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedRetiredStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Stopped`
+
+### `ObserveMemberRetirementArchivedStaleRuntime`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_remapped`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedStaleRuntimeStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_remapped`
+  - `runtime_not_live`
+  - `member_retiring`
+- To: `Stopped`
+
+### `ObserveMemberRetirementArchivedAlreadyCleared`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `runtime_not_live`
+  - `member_not_retiring`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedAlreadyClearedStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `runtime_not_live`
+  - `member_not_retiring`
+- To: `Stopped`
+
+### `ObserveDestroyMemberRetirementArchivedLiveRunning`
+- From: `Running`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
+- To: `Running`
+
+### `ObserveDestroyMemberRetirementArchivedLiveStopped`
+- From: `Stopped`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
+- To: `Stopped`
+
+### `ObserveDestroyMemberRetirementArchivedRetiredRunning`
+- From: `Running`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
+- To: `Running`
+
+### `ObserveDestroyMemberRetirementArchivedRetiredStopped`
+- From: `Stopped`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `session_binding_matches`
+  - `runtime_not_live`
+  - `member_retiring`
+- Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
+- To: `Stopped`
+
 ### `ResetMember`
 - From: `Running`, `Stopped`
-- On: `ResetMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
+- On: `ResetMember`(agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable, session_id)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `RespawnMember`
 - From: `Running`
-- On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, session_id)
+- On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable, session_id)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
+
+### `ResolveRespawnTopologyRestoreCompleted`
+- From: `Running`
+- On: `ResolveRespawnTopologyRestore`(agent_identity, failed_peer_ids)
+- Guards:
+  - `identity_present`
+  - `no_failed_peers`
+- Emits: `RespawnTopologyRestoreResolved`
+- To: `Running`
+
+### `ResolveRespawnTopologyRestoreFailed`
+- From: `Running`
+- On: `ResolveRespawnTopologyRestore`(agent_identity, failed_peer_ids)
+- Guards:
+  - `identity_present`
+  - `failed_peers_present`
+- Emits: `RespawnTopologyRestoreResolved`
+- To: `Running`
+
+### `RecoverMemberRestoreFailureRunning`
+- From: `Running`
+- On: `RecoverMemberRestoreFailure`(agent_identity, reason)
+- To: `Running`
+
+### `AdmitDestroyCleanup`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AdmitDestroyCleanup`()
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `AdmitDestroyStorageFinalizing`
+- From: `Destroyed`
+- On: `AdmitDestroyStorageFinalizing`()
+- Guards:
+  - `destroy_admitted`
+- Emits: `AppendLifecycleJournal`
+- To: `Destroyed`
 
 ### `MarkCompleted`
 - From: `Running`, `Stopped`
@@ -545,49 +2590,103 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ObserveRuntimeDestroyed`(agent_runtime_id, fence_token)
 - Guards:
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Destroyed`
 
 ### `RecordOperatorActionProvenanceRunning`
 - From: `Running`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Running`
 
 ### `RecordOperatorActionProvenanceStopped`
 - From: `Stopped`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Stopped`
 
 ### `RecordOperatorActionProvenanceCompleted`
 - From: `Completed`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Completed`
 
 ### `RecordOperatorActionProvenanceDestroyed`
 - From: `Destroyed`
-- On: `RecordOperatorActionProvenance`()
+- On: `RecordOperatorActionProvenance`(tool_name, principal_token, caller_provenance, audit_invocation_id)
+- Emits: `AppendOperatorActionProvenance`
 - To: `Destroyed`
 
 ### `SetSpawnPolicyRunning`
 - From: `Running`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Running`
 
 ### `SetSpawnPolicyStopped`
 - From: `Stopped`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Stopped`
 
 ### `SetSpawnPolicyCompleted`
 - From: `Completed`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Completed`
 
 ### `SetSpawnPolicyDestroyed`
 - From: `Destroyed`
-- On: `SetSpawnPolicy`()
+- On: `SetSpawnPolicy`(enabled)
 - To: `Destroyed`
+
+### `ResolveSpawnPolicyAdmitted`
+- From: `Running`
+- On: `ResolveSpawnPolicy`(agent_identity, revision, profile_name, runtime_mode)
+- Guards:
+  - `policy_enabled`
+  - `revision_matches`
+  - `identity_absent`
+  - `profile_present`
+- Emits: `SpawnPolicyResolutionRecorded`
+- To: `Running`
+
+### `ResolveSpawnPolicyNoMatch`
+- From: `Running`
+- On: `ResolveSpawnPolicy`(agent_identity, revision, profile_name, runtime_mode)
+- Guards:
+  - `policy_enabled`
+  - `revision_matches`
+  - `identity_absent`
+  - `profile_absent`
+  - `runtime_mode_absent`
+- Emits: `SpawnPolicyResolutionRecorded`
+- To: `Running`
+
+### `BindOwnerBridgeSessionRunning`
+- From: `Running`
+- On: `BindOwnerBridgeSession`(bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)
+- Guards:
+  - `owner_bridge_session_absent`
+  - `implicit_delegation_requires_cleanup`
+- Emits: `OwnerBridgeSessionBound`
+- To: `Running`
+
+### `RecoverOwnerBridgeSessionRunning`
+- From: `Running`
+- On: `RecoverOwnerBridgeSession`(bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)
+- Guards:
+  - `owner_bridge_session_absent`
+  - `implicit_delegation_requires_cleanup`
+- To: `Running`
+
+### `RecoverOwnerBridgeSessionAlreadyCurrent`
+- From: `Running`
+- On: `RecoverOwnerBridgeSession`(bridge_session_id, destroy_on_owner_archive, implicit_delegation_mob)
+- Guards:
+  - `owner_bridge_session_current`
+  - `cleanup_policy_current`
+  - `implicit_classification_current`
+  - `implicit_delegation_requires_cleanup`
+- To: `Running`
 
 ### `StopRunning`
 - From: `Running`
@@ -606,13 +2705,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `CompleteRunning`
 - From: `Running`
 - On: `Complete`()
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `AppendLifecycleJournal`, `EmitRunLifecycleNotice`
 - To: `Completed`
 
 ### `ResetToRunning`
 - From: `Running`, `Stopped`, `Completed`
 - On: `Reset`()
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `AppendLifecycleJournal`, `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `WireMembersRunning`
@@ -623,6 +2722,64 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
 - To: `Running`
 
+### `WireMembersWithTrustRunning`
+- From: `Running`
+- On: `WireMembersWithTrust`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_not_already_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+  - `a_member_endpoint_registered`
+  - `b_member_endpoint_registered`
+- Emits: `WiringGraphChanged`, `MemberTrustWiringRequested`, `EmitWiringLifecycleNotice`
+- To: `Running`
+
+### `WireMembersWithTrustAlreadyWired`
+- From: `Running`
+- On: `WireMembersWithTrust`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_already_wired`
+  - `edge_matches_members`
+- Emits: `WiringTrustRepairRequested`
+- To: `Running`
+
+### `WireMembersAlreadyWired`
+- From: `Running`
+- On: `WireMembers`(edge)
+- Guards:
+  - `edge_already_wired`
+- Emits: `WiringTrustRepairRequested`
+- To: `Running`
+
+### `RecoverRosterWiringRunning`
+- From: `Running`
+- On: `RecoverRosterWiring`(edge)
+- Guards:
+  - `edge_not_already_recovered`
+- To: `Running`
+
+### `RecoverRosterWiringAlreadyRecovered`
+- From: `Running`
+- On: `RecoverRosterWiring`(edge)
+- Guards:
+  - `edge_already_recovered`
+- To: `Running`
+
+### `RecoverRosterUnwireRunning`
+- From: `Running`
+- On: `RecoverRosterUnwire`(edge)
+- Guards:
+  - `edge_recovered`
+- To: `Running`
+
+### `RecoverRosterUnwireAlreadyAbsent`
+- From: `Running`
+- On: `RecoverRosterUnwire`(edge)
+- Guards:
+  - `edge_not_recovered`
+- To: `Running`
+
 ### `UnwireMembersRunning`
 - From: `Running`
 - On: `UnwireMembers`(edge)
@@ -631,94 +2788,898 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
 - To: `Running`
 
+### `UnwireMembersAlreadyAbsent`
+- From: `Running`
+- On: `UnwireMembers`(edge)
+- Guards:
+  - `edge_already_absent`
+- To: `Running`
+
 ### `WireExternalPeerRunning`
 - From: `Running`
-- On: `WireExternalPeer`(edge)
+- On: `WireExternalPeer`(key, edge)
 - Guards:
-  - `external_peer_not_already_wired`
-- Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_not_already_wired`
+  - `external_peer_edge_not_already_wired`
+  - `local_member_peer_registered`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustWiringRequested`, `EmitExternalPeerWiringLifecycleNotice`
+- To: `Running`
+
+### `WireExternalPeerAlreadyWired`
+- From: `Running`
+- On: `WireExternalPeer`(key, edge)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_already_wired`
+  - `external_peer_edge_already_wired`
+  - `local_member_peer_registered`
+- Emits: `ExternalPeerTrustRepairRequested`
+- To: `Running`
+
+### `RegisterMemberPeerRunning`
+- From: `Running`
+- On: `RegisterMemberPeer`(agent_identity, peer_endpoint)
+- Guards:
+  - `identity_present`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `AuthorizeMemberPeerRebindRunning`
+- From: `Running`
+- On: `AuthorizeMemberPeerRebind`(agent_identity, expected_peer_endpoint)
+- Guards:
+  - `identity_present`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+  - `current_endpoint_matches_expected`
+  - `current_peer_id_matches_expected`
+- Emits: `MemberPeerRebindAuthorized`
+- To: `Running`
+
+### `AuthorizeMemberPeerOverlayRunning`
+- From: `Running`
+- On: `AuthorizeMemberPeerOverlay`(agent_identity, expected_peer_endpoint)
+- Guards:
+  - `identity_present`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+  - `current_endpoint_matches_expected`
+  - `current_peer_id_matches_expected`
+  - `overlay_member_endpoints_complete`
+  - `overlay_peer_ids_unique`
+- Emits: `MemberPeerOverlayAuthorized`
+- To: `Running`
+
+### `AuthorizeMemberTrustWiringRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustWiring`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+  - `a_member_endpoint_registered`
+  - `b_member_endpoint_registered`
+- Emits: `MemberTrustWiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberTrustUnwiringRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustUnwiring`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberTrustCleanupRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustCleanup`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberTrustCleanupObservedRunning`
+- From: `Running`
+- On: `AuthorizeMemberTrustCleanupObserved`(edge, a_identity, a_peer_id, b_identity, b_peer_id)
+- Guards:
+  - `edge_matches_members`
+  - `edge_currently_wired`
+  - `cleanup_has_restore_failure`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeExternalPeerReciprocalTrustRunning`
+- From: `Running`
+- On: `AuthorizeExternalPeerReciprocalTrust`(key, agent_identity)
+- Guards:
+  - `external_peer_key_already_wired`
+  - `external_peer_key_matches_member`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+- Emits: `ExternalPeerReciprocalTrustRequested`
+- To: `Running`
+
+### `RecoverExternalPeerWiringRunning`
+- From: `Running`
+- On: `RecoverExternalPeerWiring`(key, edge)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_not_already_recovered`
+  - `external_peer_edge_not_already_recovered`
+- To: `Running`
+
+### `RecoverExternalPeerWiringAlreadyRecovered`
+- From: `Running`
+- On: `RecoverExternalPeerWiring`(key, edge)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_already_recovered`
+  - `external_peer_edge_already_recovered`
+- To: `Running`
+
+### `RecoverExternalPeerUnwireRunning`
+- From: `Running`
+- On: `RecoverExternalPeerUnwire`(key)
+- Guards:
+  - `external_peer_recovered`
+- To: `Running`
+
+### `RecoverExternalPeerUnwireAlreadyAbsent`
+- From: `Running`
+- On: `RecoverExternalPeerUnwire`(key)
+- Guards:
+  - `external_peer_not_recovered`
 - To: `Running`
 
 ### `UnwireExternalPeerRunning`
 - From: `Running`
-- On: `UnwireExternalPeer`(edge)
+- On: `UnwireExternalPeer`(key, edge)
 - Guards:
-  - `external_peer_currently_wired`
-- Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_currently_wired`
+  - `external_peer_edge_currently_wired`
+  - `local_member_peer_registered`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustUnwiringRequested`, `EmitExternalPeerWiringLifecycleNotice`
 - To: `Running`
+
+### `UnwireExternalPeerAlreadyAbsent`
+- From: `Running`
+- On: `UnwireExternalPeer`(key, edge)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_already_absent`
+  - `external_peer_edge_already_absent`
+- To: `Running`
+
+### `ProvisionSupervisorAuthorityRunning`
+- From: `Running`
+- On: `ProvisionSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version)
+- Guards:
+  - `supervisor_authority_absent`
+  - `initial_epoch`
+- Emits: `PersistSupervisorAuthority`
+- To: `Running`
+
+### `ProvisionSupervisorAuthorityStopped`
+- From: `Stopped`
+- On: `ProvisionSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version)
+- Guards:
+  - `supervisor_authority_absent`
+  - `initial_epoch`
+- Emits: `PersistSupervisorAuthority`
+- To: `Stopped`
+
+### `ProvisionSupervisorAuthorityCompleted`
+- From: `Completed`
+- On: `ProvisionSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version)
+- Guards:
+  - `supervisor_authority_absent`
+  - `initial_epoch`
+- Emits: `PersistSupervisorAuthority`
+- To: `Completed`
+
+### `ProvisionSupervisorAuthorityDestroyed`
+- From: `Destroyed`
+- On: `ProvisionSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version)
+- Guards:
+  - `supervisor_authority_absent`
+  - `initial_epoch`
+- Emits: `PersistSupervisorAuthority`
+- To: `Destroyed`
+
+### `RecoverSupervisorAuthorityRunning`
+- From: `Running`
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- Guards:
+  - `supervisor_authority_absent`
+  - `pending_shape_consistent`
+- To: `Running`
+
+### `RecoverSupervisorAuthorityStopped`
+- From: `Stopped`
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- Guards:
+  - `supervisor_authority_absent`
+  - `pending_shape_consistent`
+- To: `Stopped`
+
+### `RecoverSupervisorAuthorityCompleted`
+- From: `Completed`
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- Guards:
+  - `supervisor_authority_absent`
+  - `pending_shape_consistent`
+- To: `Completed`
+
+### `RecoverSupervisorAuthorityDestroyed`
+- From: `Destroyed`
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- Guards:
+  - `supervisor_authority_absent`
+  - `pending_shape_consistent`
+- To: `Destroyed`
+
+### `ClearSupervisorPendingRotationRunning`
+- From: `Running`
+- On: `ClearSupervisorPendingRotation`(current_peer_id, current_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+- Emits: `PersistSupervisorAuthority`
+- To: `Running`
+
+### `ClearSupervisorPendingRotationStopped`
+- From: `Stopped`
+- On: `ClearSupervisorPendingRotation`(current_peer_id, current_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+- Emits: `PersistSupervisorAuthority`
+- To: `Stopped`
+
+### `ClearSupervisorPendingRotationCompleted`
+- From: `Completed`
+- On: `ClearSupervisorPendingRotation`(current_peer_id, current_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+- Emits: `PersistSupervisorAuthority`
+- To: `Completed`
+
+### `RecordSupervisorPendingRotationRunning`
+- From: `Running`
+- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, pending_peer_id, pending_signing_key, pending_epoch, protocol_version, accepted_peer_ids)
+- Guards:
+  - `current_supervisor_matches`
+  - `pending_authority_changes_peer`
+- Emits: `PersistSupervisorAuthority`
+- To: `Running`
+
+### `RecordSupervisorPendingRotationStopped`
+- From: `Stopped`
+- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, pending_peer_id, pending_signing_key, pending_epoch, protocol_version, accepted_peer_ids)
+- Guards:
+  - `current_supervisor_matches`
+  - `pending_authority_changes_peer`
+- Emits: `PersistSupervisorAuthority`
+- To: `Stopped`
+
+### `RecordSupervisorPendingRotationCompleted`
+- From: `Completed`
+- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, pending_peer_id, pending_signing_key, pending_epoch, protocol_version, accepted_peer_ids)
+- Guards:
+  - `current_supervisor_matches`
+  - `pending_authority_changes_peer`
+- Emits: `PersistSupervisorAuthority`
+- To: `Completed`
+
+### `CommitSupervisorRotationRunning`
+- From: `Running`
+- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+  - `next_epoch_is_successor`
+  - `next_authority_changes_peer`
+- Emits: `PersistSupervisorAuthority`
+- To: `Running`
+
+### `CommitSupervisorRotationStopped`
+- From: `Stopped`
+- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+  - `next_epoch_is_successor`
+  - `next_authority_changes_peer`
+- Emits: `PersistSupervisorAuthority`
+- To: `Stopped`
+
+### `CommitSupervisorRotationCompleted`
+- From: `Completed`
+- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+  - `next_epoch_is_successor`
+  - `next_authority_changes_peer`
+- Emits: `PersistSupervisorAuthority`
+- To: `Completed`
+
+### `ClearSupervisorAuthorityForDestroy`
+- From: `Destroyed`
+- On: `ClearSupervisorAuthorityForDestroy`(current_peer_id, current_signing_key, current_epoch, protocol_version)
+- Guards:
+  - `current_supervisor_matches`
+- Emits: `DeleteSupervisorAuthority`
+- To: `Destroyed`
+
+### `RestoreSupervisorAuthorityAfterDestroyRollback`
+- From: `Destroyed`
+- On: `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- Guards:
+  - `supervisor_authority_absent`
+  - `pending_shape_consistent`
+- Emits: `PersistSupervisorAuthority`
+- To: `Destroyed`
 
 ### `ForceCancelRunning`
 - From: `Running`
-- On: `ForceCancel`()
+- On: `ForceCancel`(agent_identity)
+- Guards:
+  - `identity_known`
+  - `runtime_live`
+  - `member_not_retiring`
 - Emits: `FlowTerminalized`
 - To: `Running`
 
 ### `SubscribeAgentEventsRunning`
 - From: `Running`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
 - To: `Running`
 
 ### `SubscribeAgentEventsStopped`
 - From: `Stopped`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
 - To: `Stopped`
 
 ### `SubscribeAgentEventsCompleted`
 - From: `Completed`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
 - To: `Completed`
 
 ### `SubscribeAgentEventsDestroyed`
 - From: `Destroyed`
-- On: `SubscribeAgentEvents`()
+- On: `SubscribeAgentEvents`(agent_identity)
 - Guards:
-  - `active_members_present`
+  - `identity_present`
+  - `runtime_live`
+  - `session_bound`
+- Emits: `AuthorizeAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAgentEventsMissingMemberRunning`
+- From: `Running`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAgentEventsMissingMemberStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAgentEventsMissingMemberCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAgentEventsMissingMemberDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `RejectAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAgentEventsMissingSessionRunning`
+- From: `Running`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAgentEventsMissingSessionStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAgentEventsMissingSessionCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAgentEventsMissingSessionDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_live`
+  - `session_unbound`
+- Emits: `RejectAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAgentEventsRuntimeNotLiveRunning`
+- From: `Running`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAgentEventsRuntimeNotLiveStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAgentEventsRuntimeNotLiveCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAgentEventsRuntimeNotLiveDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `RejectAgentEventSubscription`
 - To: `Destroyed`
 
 ### `SubscribeAllAgentEventsRunning`
 - From: `Running`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
 - To: `Running`
 
 ### `SubscribeAllAgentEventsStopped`
 - From: `Stopped`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
 - To: `Stopped`
 
 ### `SubscribeAllAgentEventsCompleted`
 - From: `Completed`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
 - To: `Completed`
 
 ### `SubscribeAllAgentEventsDestroyed`
 - From: `Destroyed`
-- On: `SubscribeAllAgentEvents`()
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `session_bound_or_no_live_members`
+- Emits: `AuthorizeAllAgentEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeAllAgentEventsNoSessionBindingsRunning`
+- From: `Running`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
+- To: `Running`
+
+### `SubscribeAllAgentEventsNoSessionBindingsStopped`
+- From: `Stopped`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
+- To: `Stopped`
+
+### `SubscribeAllAgentEventsNoSessionBindingsCompleted`
+- From: `Completed`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
+- To: `Completed`
+
+### `SubscribeAllAgentEventsNoSessionBindingsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAllAgentEvents`(session_bound_runtimes)
+- Guards:
+  - `session_bound_runtimes_match`
+  - `no_session_bound_runtime`
+  - `live_members_present`
+- Emits: `RejectAllAgentEventSubscription`
 - To: `Destroyed`
 
 ### `SubscribeMobEventsRunning`
 - From: `Running`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
 - To: `Running`
 
 ### `SubscribeMobEventsStopped`
 - From: `Stopped`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
 - To: `Stopped`
 
 ### `SubscribeMobEventsCompleted`
 - From: `Completed`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
 - To: `Completed`
 
 ### `SubscribeMobEventsDestroyed`
 - From: `Destroyed`
-- On: `SubscribeMobEvents`()
+- On: `SubscribeMobEvents`(initial_cursor, channel_capacity, poll_interval_ms, session_bound_runtimes)
+- Guards:
+  - `channel_capacity_positive`
+  - `poll_interval_positive`
+  - `session_bound_runtimes_match`
+- Emits: `AuthorizeMobEventRouter`
+- To: `Destroyed`
+
+### `SubscribeStructuralEventsRunning`
+- From: `Running`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Running`
+
+### `SubscribeStructuralEventsStopped`
+- From: `Stopped`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Stopped`
+
+### `SubscribeStructuralEventsCompleted`
+- From: `Completed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Completed`
+
+### `SubscribeStructuralEventsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_not_stale`
+  - `batch_limit_positive`
+  - `channel_capacity_positive`
+- Emits: `AuthorizeStructuralEventSubscription`
+- To: `Destroyed`
+
+### `SubscribeStructuralEventsStaleRunning`
+- From: `Running`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Running`
+
+### `SubscribeStructuralEventsStaleStopped`
+- From: `Stopped`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Stopped`
+
+### `SubscribeStructuralEventsStaleCompleted`
+- From: `Completed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Completed`
+
+### `SubscribeStructuralEventsStaleDestroyed`
+- From: `Destroyed`
+- On: `SubscribeStructuralEvents`(after_cursor, latest_cursor, explicit_after_cursor, batch_limit, channel_capacity)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStructuralEventSubscription`
+- To: `Destroyed`
+
+### `PollEventsStrictRunning`
+- From: `Running`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Running`
+
+### `PollEventsStrictStopped`
+- From: `Stopped`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Stopped`
+
+### `PollEventsStrictCompleted`
+- From: `Completed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Completed`
+
+### `PollEventsStrictDestroyed`
+- From: `Destroyed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_not_stale`
+- Emits: `AuthorizeStrictEventPoll`
+- To: `Destroyed`
+
+### `PollEventsStrictStaleRunning`
+- From: `Running`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Running`
+
+### `PollEventsStrictStaleStopped`
+- From: `Stopped`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Stopped`
+
+### `PollEventsStrictStaleCompleted`
+- From: `Completed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Completed`
+
+### `PollEventsStrictStaleDestroyed`
+- From: `Destroyed`
+- On: `PollEventsStrict`(after_cursor, latest_cursor, limit)
+- Guards:
+  - `cursor_stale`
+- Emits: `RejectStrictEventPoll`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberSubscriptionRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberSubscriptionStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberSubscriptionCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberSubscriptionDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberSubscription`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `fence_matches`
+  - `session_bound`
+- Emits: `AuthorizeMobEventRouterMemberSubscription`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberRemovalMissingDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_absent`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberRemovalUnboundDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `session_unbound`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Destroyed`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning`
+- From: `Running`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Running`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped`
+- From: `Stopped`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Stopped`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted`
+- From: `Completed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
+- To: `Completed`
+
+### `AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeMobEventRouterMemberRemoval`(agent_identity)
+- Guards:
+  - `identity_present`
+  - `runtime_not_live`
+- Emits: `AuthorizeMobEventRouterMemberRemoval`
 - To: `Destroyed`
 
 ### `ShutdownRunning`
@@ -770,7 +3731,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StageSpawn`(agent_identity, session_id)
 - Guards:
   - `pending_identity_unused`
-- Emits: `ExposePendingSpawn`
+- Emits: `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
 - To: `Running`
 
 ### `StopOrchestratorRunning`
@@ -883,29 +3844,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RunFlowRunning`
 - From: `Running`
-- On: `RunFlow`(run_id, step_ids, ordered_steps, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, escalation_threshold, max_step_retries, max_active_nodes, max_active_frames, max_frame_depth)
+- On: `RunFlow`(run_id, step_ids, ordered_steps, step_status, output_recorded, step_condition_results, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, step_target_counts, step_target_success_counts, step_target_terminal_failure_counts, escalation_threshold, max_step_retries, max_active_nodes, max_active_frames, max_frame_depth)
 - Guards:
   - `coordinator_bound`
   - `run_seed_is_new`
+  - `run_seed_ordered_steps_match_tracked_steps`
+  - `run_seed_defaults_cover_tracked_steps`
+  - `run_seed_maps_cover_tracked_steps`
+  - `run_seed_map_keys_are_tracked`
+  - `run_seed_dependency_targets_are_tracked`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
 ### `CreateRunSeedRunning`
 - From: `Running`
-- On: `CreateRunSeed`(run_id, step_ids, ordered_steps, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, escalation_threshold, max_step_retries, max_active_nodes, max_active_frames, max_frame_depth)
+- On: `CreateRunSeed`(run_id, step_ids, ordered_steps, step_status, output_recorded, step_condition_results, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, step_target_counts, step_target_success_counts, step_target_terminal_failure_counts, escalation_threshold, max_step_retries, max_active_nodes, max_active_frames, max_frame_depth)
 - Guards:
   - `run_seed_is_new`
+  - `run_seed_ordered_steps_match_tracked_steps`
+  - `run_seed_defaults_cover_tracked_steps`
+  - `run_seed_maps_cover_tracked_steps`
+  - `run_seed_map_keys_are_tracked`
+  - `run_seed_dependency_targets_are_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `CreateFrameSeedRunning`
 - From: `Running`
-- On: `CreateFrameSeed`(run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue)
+- On: `CreateFrameSeed`(run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue, output_recorded, node_condition_results, last_admitted_node)
 - Guards:
   - `frame_seed_is_new`
   - `run_known`
   - `body_frame_has_parent_loop`
+  - `frame_seed_has_no_last_admitted_node`
+  - `frame_seed_ordered_nodes_match_tracked_nodes`
   - `frame_seed_status_covers_tracked_nodes`
+  - `frame_seed_defaults_cover_tracked_nodes`
+  - `frame_seed_maps_cover_tracked_nodes`
+  - `frame_seed_map_keys_are_tracked`
+  - `frame_seed_ready_queue_nodes_are_tracked`
+  - `frame_seed_dependency_targets_are_tracked`
   - `frame_seed_node_kind_covers_tracked_nodes`
   - `frame_seed_node_kind_keys_are_tracked`
   - `frame_seed_ready_queue_matches_dependency_roots`
@@ -973,7 +3951,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandStartRun`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `start_run_command`
@@ -983,13 +3961,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandDispatchStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `dispatch_step_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
   - `dispatched_step_status`
 - Emits: `EmitRunLifecycleNotice`
@@ -997,13 +3974,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandCompleteStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `complete_step_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `completed_step_status`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
@@ -1011,66 +3987,76 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordStepOutput`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `record_step_output_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandConditionPassed`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `condition_passed_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandConditionRejected`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `condition_rejected_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandFailStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `fail_step_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `failed_step_status`
   - `step_tracked`
+  - `supervisor_escalation_not_due`
 - Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Running`
+
+### `AuthorizeFlowRunReducerCommandFailStepEscalating`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `fail_step_command`
+  - `has_step_id`
+  - `failed_step_status`
+  - `step_tracked`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandSkipStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `skip_step_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `skipped_step_status`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
@@ -1078,13 +4064,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandProjectFrameStepStatus`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `project_frame_step_status_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `has_frame_id`
   - `has_node_id`
   - `step_tracked`
@@ -1092,19 +4077,58 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `frame_node_tracked`
   - `frame_node_maps_to_step`
   - `run_step_not_already_terminal_projected`
-  - `frame_node_completed_skipped_or_failed`
+  - `frame_node_completed_or_skipped`
 - Emits: `EmitRunLifecycleNotice`
+- To: `Running`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_not_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`
+- To: `Running`
+
+### `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating`
+- From: `Running`, `Stopped`, `Completed`
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- Guards:
+  - `known_run`
+  - `run_running`
+  - `project_frame_step_status_command`
+  - `has_step_id`
+  - `has_frame_id`
+  - `has_node_id`
+  - `step_tracked`
+  - `frame_belongs_to_run`
+  - `frame_node_tracked`
+  - `frame_node_maps_to_step`
+  - `run_step_not_already_terminal_projected`
+  - `frame_node_failed`
+  - `supervisor_escalation_due`
+- Emits: `EmitRunLifecycleNotice`, `AppendFailureLedger`, `EscalateSupervisor`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandCancelStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `cancel_step_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
   - `canceled_step_status`
 - Emits: `EmitRunLifecycleNotice`
@@ -1112,13 +4136,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterTargets`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `register_targets_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `has_target_count`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
@@ -1126,52 +4149,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetSuccess`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `record_target_success_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `record_target_terminal_failure_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetCanceled`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `record_target_canceled_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetFailure`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
   - `record_target_failure_command`
   - `has_step_id`
-  - `has_run_step_key`
   - `has_retry_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
@@ -1179,7 +4198,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterReadyFrame`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1192,7 +4211,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1205,7 +4224,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandPumpNodeScheduler`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1219,7 +4238,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1232,7 +4251,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandPumpFrameScheduler`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1246,7 +4265,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandNodeExecutionReleased`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1258,7 +4277,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandFrameTerminated`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1270,7 +4289,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1282,7 +4301,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandTerminalCompleted`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1292,7 +4311,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandTerminalFailed`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1302,7 +4321,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandTerminalCanceled`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1312,7 +4331,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowFrameReducerCommandAdmitNextReadyNode`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
@@ -1327,7 +4346,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowFrameReducerCommandCompleteNode`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
@@ -1342,21 +4361,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowFrameReducerCommandRecordNodeOutput`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
   - `record_node_output_command`
   - `no_terminal_status`
   - `has_node_id`
-  - `has_frame_node_key`
   - `node_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowFrameReducerCommandFailNode`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
@@ -1371,7 +4389,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowFrameReducerCommandSkipNode`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
@@ -1386,7 +4404,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowFrameReducerCommandCancelNode`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
@@ -1399,9 +4417,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
-### `AuthorizeFlowFrameReducerCommandSealFrame`
-- From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, frame_node_key, node_status, terminal_status)
+### `AuthorizeFlowFrameReducerCommandSealFrameRunning`
+- From: `Running`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
 - Guards:
   - `known_frame`
   - `frame_running`
@@ -1411,6 +4429,32 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `terminal_class_matches_nodes`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
+
+### `AuthorizeFlowFrameReducerCommandSealFrameStopped`
+- From: `Stopped`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `seal_frame_command`
+  - `terminal_frame_status`
+  - `all_nodes_terminal`
+  - `terminal_class_matches_nodes`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `AuthorizeFlowFrameReducerCommandSealFrameCompleted`
+- From: `Completed`
+- On: `AuthorizeFlowFrameReducerCommand`(frame_id, command, node_id, node_status, terminal_status)
+- Guards:
+  - `known_frame`
+  - `frame_running`
+  - `seal_frame_command`
+  - `terminal_frame_status`
+  - `all_nodes_terminal`
+  - `terminal_class_matches_nodes`
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
 
 ### `AuthorizeLoopIterationReducerCommandBodyFrameStarted`
 - From: `Running`, `Stopped`, `Completed`
@@ -1543,48 +4587,76 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RetireRunningReleasing`
 - From: `Running`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `identity_binding_matches`
+  - `generation_matches`
   - `prior_session_binding_present`
   - `releasing_present`
   - `releasing_matches_current`
-- Emits: `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+  - `session_matches_releasing`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
 - To: `Running`
 
 ### `RetireRunningPreservingBinding`
 - From: `Running`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `identity_binding_matches`
+  - `generation_matches`
   - `prior_session_binding_present`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+  - `session_binding_matches`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
 - To: `Running`
 
 ### `RetireRunningNoBinding`
 - From: `Running`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `identity_binding_matches`
+  - `generation_matches`
   - `no_prior_session_binding`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+  - `session_absent`
+- Emits: `AppendLifecycleJournal`
 - To: `Running`
 
 ### `RetireStoppedReleasing`
 - From: `Stopped`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `identity_binding_matches`
+  - `generation_matches`
   - `prior_session_binding_present`
   - `releasing_present`
   - `releasing_matches_current`
-- Emits: `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+  - `session_matches_releasing`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `MemberSessionBindingChanged`
+- To: `Stopped`
+
+### `RequestPendingSessionIngressDetachForMobDestroyRunning`
+- From: `Running`
+- On: `RequestPendingSessionIngressDetachForMobDestroy`(mob_id, agent_runtime_id)
+- Guards:
+  - `pending_detach_present`
+- Emits: `RequestSessionIngressDetachForMobDestroy`
+- To: `Running`
+
+### `RequestPendingSessionIngressDetachForMobDestroyStopped`
+- From: `Stopped`
+- On: `RequestPendingSessionIngressDetachForMobDestroy`(mob_id, agent_runtime_id)
+- Guards:
+  - `pending_detach_present`
+- Emits: `RequestSessionIngressDetachForMobDestroy`
 - To: `Stopped`
 
 ### `SessionIngressDetachedForMobDestroyRunning`
@@ -1617,24 +4689,44 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RetireStoppedPreservingBinding`
 - From: `Stopped`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `identity_binding_matches`
+  - `generation_matches`
   - `prior_session_binding_present`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+  - `session_binding_matches`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`
 - To: `Stopped`
 
 ### `RetireStoppedNoBinding`
 - From: `Stopped`
-- On: `Retire`(mob_id, agent_runtime_id, agent_identity, releasing, session_id)
+- On: `Retire`(mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `identity_binding_matches`
+  - `generation_matches`
   - `no_prior_session_binding`
   - `releasing_absent`
-- Emits: `RequestRuntimeRetire`
+  - `session_absent`
+- Emits: `AppendLifecycleJournal`
+- To: `Stopped`
+
+### `RetireAbsentRunning`
+- From: `Running`
+- On: `RetireAbsent`(agent_identity)
+- Guards:
+  - `identity_absent`
+- To: `Running`
+
+### `RetireAbsentStopped`
+- From: `Stopped`
+- On: `RetireAbsent`(agent_identity)
+- Guards:
+  - `identity_absent`
 - To: `Stopped`
 
 ### `RetireAllRunning`
@@ -1648,6 +4740,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RetireAll`()
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Stopped`
+
+### `RetireAllCompleted`
+- From: `Completed`
+- On: `RetireAll`()
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Completed`
 
 ### `CompleteSpawnRunning`
 - From: `Running`, `Stopped`
@@ -1676,18 +4774,65 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CancelAllWorkRunning`
 - From: `Running`
-- On: `CancelAllWork`(agent_runtime_id, fence_token)
+- On: `CancelAllWork`(agent_identity, agent_runtime_id, fence_token)
 - Guards:
   - `active_members_present`
+  - `identity_binding_matches`
   - `current_binding_matches`
-  - `fence_token_present`
+  - `fence_token_matches`
 - Emits: `FlowTerminalized`
+- To: `Running`
+
+### `ResolveCancelAllWorkRejectionStopped`
+- From: `Stopped`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Emits: `CancelAllWorkRejected`
+- To: `Stopped`
+
+### `ResolveCancelAllWorkRejectionCompleted`
+- From: `Completed`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Emits: `CancelAllWorkRejected`
+- To: `Completed`
+
+### `ResolveCancelAllWorkRejectionDestroyed`
+- From: `Destroyed`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Emits: `CancelAllWorkRejected`
+- To: `Destroyed`
+
+### `ResolveCancelAllWorkRejectionMemberNotFound`
+- From: `Running`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_absent`
+- Emits: `CancelAllWorkRejected`
+- To: `Running`
+
+### `ResolveCancelAllWorkRejectionCurrentRuntimeNotLive`
+- From: `Running`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_present`
+  - `current_runtime_not_live`
+- Emits: `CancelAllWorkRejected`
+- To: `Running`
+
+### `ResolveCancelAllWorkRejectionStaleFenceToken`
+- From: `Running`
+- On: `ResolveCancelAllWorkRejection`(agent_identity, agent_runtime_id, fence_token)
+- Guards:
+  - `identity_present`
+  - `current_runtime_live`
+  - `runtime_or_fence_stale`
+- Emits: `CancelAllWorkRejected`
 - To: `Running`
 
 ## Coverage
 ### Code Anchors
 - `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
 - `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
+- `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 
 ### Scenarios
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
@@ -1696,4 +4841,5 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
+- `owner-bridge-cleanup` — bind owner bridge session, owner bridge cleanup requires owner, implicit delegation requires owner, and recover owner bridge session authority for archive cleanup
 - `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs

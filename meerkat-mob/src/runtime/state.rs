@@ -100,6 +100,24 @@ impl Default for MobLifecycleSnapshot {
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MobDslT2Snapshot {
+    pub destroy_admitted: bool,
+    pub flow_authority_schema_version: u64,
+    pub owner_bridge_session_id: Option<crate::machines::mob_machine::SessionId>,
+    pub owner_bridge_destroy_on_archive: bool,
+    pub implicit_delegation_mob: bool,
+    pub supervisor_authority_peer_id: Option<crate::machines::mob_machine::PeerId>,
+    pub supervisor_authority_signing_key: Option<crate::machines::mob_machine::PeerSigningKey>,
+    pub supervisor_authority_epoch: Option<u64>,
+    pub supervisor_authority_protocol_version:
+        Option<crate::machines::mob_machine::SupervisorProtocolVersion>,
+    pub supervisor_pending_authority_peer_id: Option<crate::machines::mob_machine::PeerId>,
+    pub supervisor_pending_authority_signing_key:
+        Option<crate::machines::mob_machine::PeerSigningKey>,
+    pub supervisor_pending_authority_epoch: Option<u64>,
+    pub supervisor_pending_authority_protocol_version:
+        Option<crate::machines::mob_machine::SupervisorProtocolVersion>,
+    pub supervisor_pending_authority_accepted_peer_ids:
+        std::collections::BTreeSet<crate::machines::mob_machine::PeerId>,
     pub member_state_markers: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentRuntimeId,
         crate::machines::mob_machine::MobMemberState,
@@ -107,9 +125,35 @@ pub(crate) struct MobDslT2Snapshot {
     pub wiring_edges: std::collections::BTreeSet<crate::machines::mob_machine::WiringEdge>,
     pub external_peer_edges:
         std::collections::BTreeSet<crate::machines::mob_machine::ExternalPeerEdge>,
+    pub external_peer_edges_by_key: std::collections::BTreeMap<
+        crate::machines::mob_machine::ExternalPeerKey,
+        crate::machines::mob_machine::ExternalPeerEdge,
+    >,
     pub identity_to_runtime: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::AgentRuntimeId,
+    >,
+    pub identity_runtime_generations: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::Generation,
+    >,
+    pub identity_runtime_fence_tokens: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::FenceToken,
+    >,
+    pub member_profile_names:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub member_runtime_modes: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::SpawnPolicyRuntimeMode,
+    >,
+    pub member_peer_ids: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::PeerId,
+    >,
+    pub member_peer_endpoints: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberPeerEndpoint,
     >,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
@@ -128,6 +172,34 @@ pub(crate) struct MobDslT2Snapshot {
     pub pending_session_ingress_detach_runtime_ids:
         std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
     pub topology_epoch: u64,
+    pub spawn_policy_enabled: bool,
+    pub spawn_policy_revision: u64,
+    pub spawn_policy_resolution_revision:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub spawn_policy_resolution_profiles:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_policy_resolution_runtime_modes: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        Option<crate::machines::mob_machine::SpawnPolicyRuntimeMode>,
+    >,
+    pub spawn_policy_resolution_absent:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub spawn_profile_authority_profile_names:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_models:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_material_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_tool_config_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_skills_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub spawn_profile_authority_provider_params_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_output_schema_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_external_addressable:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -214,10 +286,9 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
     },
     /// Unified work-lane cancellation: the MobMachine DSL owns live-runtime
-    /// membership and phase legality via the `CancelAllWork` transition;
-    /// fence-token freshness is a shell-level concurrency invariant. The
-    /// actor feeds the machine, then interrupts the member when the
-    /// transition lands.
+    /// membership, fence-token freshness, and phase legality via the
+    /// `CancelAllWork` transition. The actor feeds the machine, then
+    /// interrupts the member when the transition lands.
     CancelAllWork {
         runtime_id: AgentRuntimeId,
         fence_token: FenceToken,
@@ -226,7 +297,10 @@ pub(super) enum MobCommand {
     #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
         agent_identity: MeerkatId,
-        outcome: meerkat_runtime::completion::CompletionOutcome,
+        outcome: Result<
+            meerkat_runtime::completion::CompletionOutcome,
+            meerkat_runtime::completion::CompletionWaitError,
+        >,
         ack_tx: oneshot::Sender<()>,
     },
     RunFlow {
@@ -266,12 +340,32 @@ pub(super) enum MobCommand {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<mob_dsl::MobMachineState, MobError>>,
     },
+    ApplyMachineInputEffects {
+        input: Box<mob_dsl::MobMachineInput>,
+        reply_tx: oneshot::Sender<Result<Vec<mob_dsl::MobMachineEffect>, MobError>>,
+    },
     PreviewMachineInput {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<mob_dsl::MobMachineState, MobError>>,
     },
     QueryMachineState {
         reply_tx: oneshot::Sender<mob_dsl::MobMachineState>,
+    },
+    #[cfg(test)]
+    AuthorizeMemberTrustCleanupForTest {
+        edge: mob_dsl::WiringEdge,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::generated::protocol_mob_member_trust_unwiring::MobMemberTrustUnwiringObligation,
+                MobError,
+            >,
+        >,
+    },
+    ApplyExternalPeerReciprocalTrust {
+        key: mob_dsl::ExternalPeerKey,
+        target_comms: std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>,
+        peer: meerkat_core::comms::TrustedPeerDescriptor,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ProjectMachineSignal {
         signal: mob_dsl::MobMachineSignal,
@@ -318,7 +412,7 @@ pub(super) enum MobCommand {
     },
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
-        reply_tx: oneshot::Sender<super::MobMemberSnapshot>,
+        reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
     MemberMachineProjection {
         agent_identity: crate::ids::AgentIdentity,
@@ -340,13 +434,6 @@ pub(super) enum MobCommand {
     },
     Reset {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    SubscribeAgentEvents {
-        agent_identity: MeerkatId,
-        reply_tx: oneshot::Sender<Result<EventStream, MobError>>,
-    },
-    SubscribeAllAgentEvents {
-        reply_tx: oneshot::Sender<Result<Vec<(MeerkatId, EventStream)>, MobError>>,
     },
     RotateSupervisor {
         reply_tx: oneshot::Sender<Result<super::handle::SupervisorRotationReport, MobError>>,
@@ -372,9 +459,9 @@ pub(super) enum MobCommand {
     ///
     /// D-wire-handler (#26): the MobMachine DSL owns wiring-graph authority.
     /// Local member targets route through `WireMembers { edge }`; raw
-    /// external peer descriptors route through `WireExternalPeer { edge }`
-    /// so descriptor/key/address truth is not collapsed into a member
-    /// `WiringEdge`.
+    /// external peer descriptors route through `WireExternalPeer { key, edge }`
+    /// so local/name uniqueness and descriptor/key/address truth are not
+    /// collapsed into a member `WiringEdge`.
     Wire {
         local: MeerkatId,
         target: super::handle::PeerTarget,
@@ -429,8 +516,12 @@ impl MobCommand {
             Self::CommitFlowTerminalization { .. } => "CommitFlowTerminalization",
             Self::CommitFlowFrameStorePlan { .. } => "CommitFlowFrameStorePlan",
             Self::ProjectMachineInput { .. } => "ProjectMachineInput",
+            Self::ApplyMachineInputEffects { .. } => "ApplyMachineInputEffects",
             Self::PreviewMachineInput { .. } => "PreviewMachineInput",
             Self::QueryMachineState { .. } => "QueryMachineState",
+            #[cfg(test)]
+            Self::AuthorizeMemberTrustCleanupForTest { .. } => "AuthorizeMemberTrustCleanupForTest",
+            Self::ApplyExternalPeerReciprocalTrust { .. } => "ApplyExternalPeerReciprocalTrust",
             Self::ProjectMachineSignal { .. } => "ProjectMachineSignal",
             Self::FlowFinished { .. } => "FlowFinished",
             Self::FlowCanceledCleanup { .. } => "FlowCanceledCleanup",
@@ -453,8 +544,6 @@ impl MobCommand {
             Self::Complete { .. } => "Complete",
             Self::Destroy { .. } => "Destroy",
             Self::Reset { .. } => "Reset",
-            Self::SubscribeAgentEvents { .. } => "SubscribeAgentEvents",
-            Self::SubscribeAllAgentEvents { .. } => "SubscribeAllAgentEvents",
             Self::RotateSupervisor { .. } => "RotateSupervisor",
             Self::PollEvents { .. } => "PollEvents",
             Self::ReplayAllEvents { .. } => "ReplayAllEvents",

@@ -197,6 +197,7 @@ async fn integration_real_shell_background_spawn() {
     let job = job_manager
         .get_status(&job_id)
         .await
+        .expect("status projection")
         .expect("Job should exist");
     assert!(
         matches!(job.status, JobStatus::Running { .. }),
@@ -228,7 +229,10 @@ async fn integration_real_shell_background_completion() {
     // Wait for the job to complete
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let status = job_manager.get_status(&job_id).await;
+            let status = job_manager
+                .get_status(&job_id)
+                .await
+                .expect("status projection");
             if status
                 .as_ref()
                 .is_some_and(|j| matches!(j.status, JobStatus::Completed { .. }))
@@ -244,6 +248,7 @@ async fn integration_real_shell_background_completion() {
     let job = job_manager
         .get_status(&job_id)
         .await
+        .expect("status projection")
         .expect("Job should exist");
     assert!(
         matches!(job.status, JobStatus::Completed { .. }),
@@ -268,7 +273,7 @@ async fn integration_real_shell_background_cancel() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify it's running
-    let job = job_manager.get_status(&job_id).await.unwrap();
+    let job = job_manager.get_status(&job_id).await.unwrap().unwrap();
     assert!(
         matches!(job.status, JobStatus::Running { .. }),
         "Job should be running"
@@ -281,7 +286,7 @@ async fn integration_real_shell_background_cancel() {
         .expect("Cancel should succeed");
 
     // Verify it's cancelled
-    let job = job_manager.get_status(&job_id).await.unwrap();
+    let job = job_manager.get_status(&job_id).await.unwrap().unwrap();
     assert!(
         matches!(job.status, JobStatus::Cancelled { .. }),
         "Job should be cancelled: {:?}",
@@ -311,7 +316,7 @@ async fn integration_real_shell_multiple_jobs() {
         .expect("Should spawn job 3");
 
     // List all jobs
-    let jobs = job_manager.list_jobs().await;
+    let jobs = job_manager.list_jobs().await.unwrap();
 
     assert_eq!(jobs.len(), 3, "Should have 3 jobs");
 
@@ -434,7 +439,7 @@ async fn integration_real_shell_job_not_found() {
 
     // Try to get status of non-existent job
     let fake_id = JobId::from_string("job_nonexistent123");
-    let status = job_manager.get_status(&fake_id).await;
+    let status = job_manager.get_status(&fake_id).await.unwrap();
 
     assert!(status.is_none(), "Non-existent job should return None");
 
@@ -567,14 +572,14 @@ async fn integration_real_job_manager_basic_sh() {
         .expect("Should spawn job");
 
     // Verify job exists
-    let job = job_manager.get_status(&job_id).await;
+    let job = job_manager.get_status(&job_id).await.unwrap();
     assert!(job.is_some(), "Job should exist");
 
     // Wait for completion (echo is fast)
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify job completed
-    let job = job_manager.get_status(&job_id).await.unwrap();
+    let job = job_manager.get_status(&job_id).await.unwrap().unwrap();
     assert!(
         matches!(job.status, JobStatus::Completed { .. }),
         "Job should be completed: {:?}",
@@ -601,7 +606,10 @@ async fn integration_real_job_status_after_completion_sh() {
     // Wait for the job to complete
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let status = job_manager.get_status(&job_id).await;
+            let status = job_manager
+                .get_status(&job_id)
+                .await
+                .expect("status projection");
             if status
                 .as_ref()
                 .is_some_and(|j| matches!(j.status, JobStatus::Completed { .. }))
@@ -617,6 +625,7 @@ async fn integration_real_job_status_after_completion_sh() {
     let job = job_manager
         .get_status(&job_id)
         .await
+        .expect("status projection")
         .expect("Job should exist");
     assert!(
         matches!(job.status, JobStatus::Completed { .. }),
@@ -663,7 +672,11 @@ async fn integration_real_regression_async_execution_nonblocking() {
 
     // Verify all jobs are running
     for id in &job_ids {
-        let job = job_manager.get_status(id).await.expect("Job should exist");
+        let job = job_manager
+            .get_status(id)
+            .await
+            .expect("status projection")
+            .expect("Job should exist");
         assert!(
             matches!(job.status, JobStatus::Running { .. }),
             "Job {} should be running: {:?}",
@@ -681,7 +694,7 @@ async fn integration_real_regression_async_execution_nonblocking() {
 /// Regression: Timeout should be enforced for background jobs
 ///
 /// Jobs that run longer than their timeout should be terminated and marked
-/// as TimedOut.
+/// as Failed through generated public result authority.
 #[tokio::test]
 #[ignore = "lane:e2e-system"]
 async fn integration_real_regression_timeout_enforced() {
@@ -701,19 +714,22 @@ async fn integration_real_regression_timeout_enforced() {
     let job = job_manager
         .get_status(&job_id)
         .await
+        .expect("status projection")
         .expect("Job should exist");
-    assert!(
-        matches!(job.status, JobStatus::TimedOut { .. }),
-        "Job should have timed out, got {:?}",
-        job.status
-    );
 
     // Verify duration is approximately the timeout value
-    if let JobStatus::TimedOut { duration_secs, .. } = &job.status {
+    if let JobStatus::Failed {
+        error,
+        duration_secs,
+    } = &job.status
+    {
+        assert!(error.contains("timed out"));
         assert!(
             *duration_secs >= 1.0 && *duration_secs < 3.0,
             "Duration should be close to timeout: {duration_secs}"
         );
+    } else {
+        unreachable!("Expected Failed timeout status, got {:?}", job.status);
     }
 }
 
@@ -760,7 +776,7 @@ async fn integration_real_regression_kill_terminates_process() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify it's running
-    let job = job_manager.get_status(&job_id).await.unwrap();
+    let job = job_manager.get_status(&job_id).await.unwrap().unwrap();
     assert!(
         matches!(job.status, JobStatus::Running { .. }),
         "Job should be running before cancel"
@@ -790,7 +806,7 @@ async fn integration_real_regression_kill_terminates_process() {
     );
 
     // Verify it's cancelled
-    let job = job_manager.get_status(&job_id).await.unwrap();
+    let job = job_manager.get_status(&job_id).await.unwrap().unwrap();
     assert!(
         matches!(job.status, JobStatus::Cancelled { .. }),
         "Job should be cancelled, got {:?}",
@@ -799,7 +815,7 @@ async fn integration_real_regression_kill_terminates_process() {
 
     // Wait a moment and verify it stays cancelled (process is gone, not restarting)
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let job = job_manager.get_status(&job_id).await.unwrap();
+    let job = job_manager.get_status(&job_id).await.unwrap().unwrap();
     assert!(
         matches!(job.status, JobStatus::Cancelled { .. }),
         "Job should still be cancelled"
@@ -923,6 +939,7 @@ async fn integration_real_regression_concurrent_job_spawning() {
         let job = job_manager
             .get_status(job_id)
             .await
+            .expect("status projection")
             .expect("Job should exist");
         assert!(
             matches!(job.status, JobStatus::Completed { .. }),
@@ -958,7 +975,7 @@ async fn integration_real_regression_job_cleanup_prevents_leak() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Verify completed jobs can still be queried (at least some)
-    let jobs = job_manager.list_jobs().await;
+    let jobs = job_manager.list_jobs().await.unwrap();
 
     // All jobs should still be listable (unless cleanup has removed some)
     // The important thing is that this doesn't crash or cause memory issues
@@ -970,7 +987,7 @@ async fn integration_real_regression_job_cleanup_prevents_leak() {
     // Verify job statuses are queryable
     for job_id in all_ids.iter().take(10) {
         // Check first 10
-        let job = job_manager.get_status(job_id).await;
+        let job = job_manager.get_status(job_id).await.unwrap();
         // Job might be cleaned up, so we just verify the operation doesn't crash
         if let Some(j) = job {
             assert!(

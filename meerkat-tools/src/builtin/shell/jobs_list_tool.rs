@@ -52,7 +52,11 @@ impl BuiltinTool for ShellJobsListTool {
     }
 
     async fn call(&self, _args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        let jobs = self.job_manager.list_jobs().await;
+        let jobs = self
+            .job_manager
+            .list_jobs()
+            .await
+            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
 
         serde_json::to_value(jobs)
             .map(ToolOutput::Json)

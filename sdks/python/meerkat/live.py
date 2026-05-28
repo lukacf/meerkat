@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
-    from .generated.types import LiveRefreshResult
+    from .generated.types import LiveCloseResult, LiveRefreshResult
 
 
 class LiveChannel:
@@ -108,7 +108,7 @@ class LiveChannel:
         self._channel_id = result.get("channel_id") or result.get("channelId")
         return result
 
-    async def close(self) -> dict[str, Any]:
+    async def close(self) -> LiveCloseResult:
         """Close the live channel. Calls ``live/close``."""
         return await self._client.live_close(self._require_channel_id())
 

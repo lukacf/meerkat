@@ -4,20 +4,16 @@ use super::*;
 use meerkat_core::comms::TrustedPeerDescriptor;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::ops_lifecycle::{
-    OperationId, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
-    OperationProgressUpdate, OperationSpec, OperationStatus, OpsLifecycleError,
-    OpsLifecycleRegistry,
+    OperationId, OperationKind, OperationLifecycleAction, OperationLifecycleSnapshot,
+    OperationPeerHandle, OperationProgressUpdate, OperationSource, OperationSpec, OperationStatus,
+    OpsLifecycleError, OpsLifecycleRegistry,
 };
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::types::SessionId;
 #[cfg(feature = "runtime-adapter")]
-use meerkat_runtime::RuntimeOpsLifecycleRegistry;
-#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::sync::Mutex;
-#[cfg(feature = "runtime-adapter")]
-use uuid::Uuid;
 
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
@@ -25,6 +21,7 @@ struct MemberOpsBinding {
     owner_bridge_session_id: SessionId,
     registry: Arc<dyn OpsLifecycleRegistry>,
     display_name: Option<String>,
+    operation_source: OperationSource,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -55,16 +52,6 @@ impl MemberOpsKey {
         }
     }
 
-    fn synthetic_owner_bridge_session_id(&self) -> SessionId {
-        match self {
-            Self::Session(session_id) => session_id.clone(),
-            Self::BackendPeer { peer_id, address } => SessionId::from_uuid(Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("meerkat-mob/member-ops-owner/{peer_id}/{address}").as_bytes(),
-            )),
-        }
-    }
-
     fn fallback_display_name(&self) -> String {
         match self {
             Self::Session(session_id) => format!("mob_member/{session_id}"),
@@ -84,7 +71,6 @@ impl MemberOpsKey {
 
 #[cfg(feature = "runtime-adapter")]
 pub(crate) struct MobOpsAdapter {
-    fallback_registry: Arc<RuntimeOpsLifecycleRegistry>,
     member_bindings: Mutex<HashMap<MemberOpsKey, MemberOpsBinding>>,
 }
 
@@ -92,14 +78,8 @@ pub(crate) struct MobOpsAdapter {
 impl MobOpsAdapter {
     pub(crate) fn new() -> Self {
         Self {
-            fallback_registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
             member_bindings: Mutex::new(HashMap::new()),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn registry(&self) -> Arc<RuntimeOpsLifecycleRegistry> {
-        Arc::clone(&self.fallback_registry)
     }
 
     pub(crate) fn bind_session_registry(
@@ -112,11 +92,12 @@ impl MobOpsAdapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
-                MemberOpsKey::Session(child_session_id),
+                MemberOpsKey::Session(child_session_id.clone()),
                 MemberOpsBinding {
                     owner_bridge_session_id,
                     registry,
                     display_name: None,
+                    operation_source: OperationSource::session_child(child_session_id),
                 },
             );
     }
@@ -127,6 +108,7 @@ impl MobOpsAdapter {
         owner_bridge_session_id: SessionId,
         registry: Arc<dyn OpsLifecycleRegistry>,
         display_name: impl Into<String>,
+        operation_source: OperationSource,
     ) -> Result<(), MobError> {
         let member_key = MemberOpsKey::from_member_ref(member_ref).ok_or_else(|| {
             MobError::Internal(format!(
@@ -142,36 +124,30 @@ impl MobOpsAdapter {
                     owner_bridge_session_id,
                     registry,
                     display_name: Some(display_name.into()),
+                    operation_source,
                 },
             );
         Ok(())
     }
 
-    fn registry_for_key(
-        &self,
-        member_key: &MemberOpsKey,
-    ) -> (Arc<dyn OpsLifecycleRegistry>, SessionId, String) {
-        if let Some(binding) = self
-            .member_bindings
+    fn binding_for_key(&self, member_key: &MemberOpsKey) -> Option<MemberOpsBinding> {
+        self.member_bindings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(member_key)
             .cloned()
-        {
-            (
-                binding.registry,
-                binding.owner_bridge_session_id,
-                binding
-                    .display_name
-                    .unwrap_or_else(|| member_key.fallback_display_name()),
-            )
-        } else {
-            (
-                Arc::clone(&self.fallback_registry) as Arc<dyn OpsLifecycleRegistry>,
-                member_key.synthetic_owner_bridge_session_id(),
-                member_key.fallback_display_name(),
-            )
-        }
+    }
+
+    fn require_binding_for_key(
+        &self,
+        member_key: &MemberOpsKey,
+        operation: &str,
+    ) -> Result<MemberOpsBinding, MobError> {
+        self.binding_for_key(member_key).ok_or_else(|| {
+            MobError::Internal(format!(
+                "mob ops adapter cannot {operation} for member '{member_key:?}': missing generated owner operation binding"
+            ))
+        })
     }
 
     fn clear_member_binding(&self, member_key: &MemberOpsKey) {
@@ -203,7 +179,18 @@ impl MobOpsAdapter {
     }
 
     async fn active_operation_id_for_key(&self, member_key: &MemberOpsKey) -> Option<OperationId> {
-        let snapshots = self.matching_operations_for_key(member_key);
+        let binding = self.binding_for_key(member_key)?;
+        let snapshots = match Self::matching_operations_for_binding(member_key, &binding) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                tracing::error!(
+                    member_key = ?member_key,
+                    error = %error,
+                    "mob ops adapter failed to project operations through generated authority",
+                );
+                return None;
+            }
+        };
         let active_ids = Self::active_operation_ids(&snapshots);
         match active_ids.len() {
             1 => {
@@ -249,24 +236,55 @@ impl MobOpsAdapter {
     fn matching_operations_for_key(
         &self,
         member_key: &MemberOpsKey,
-    ) -> Vec<OperationLifecycleSnapshot> {
-        let (registry, _, display_name) = self.registry_for_key(member_key);
-        registry
+    ) -> Result<Vec<OperationLifecycleSnapshot>, MobError> {
+        let Some(binding) = self.binding_for_key(member_key) else {
+            return Ok(Vec::new());
+        };
+        Self::matching_operations_for_binding(member_key, &binding)
+    }
+
+    fn snapshot_matches_binding(
+        binding: &MemberOpsBinding,
+        snapshot: &OperationLifecycleSnapshot,
+    ) -> bool {
+        snapshot.kind == OperationKind::MobMemberChild
+            && snapshot.operation_source.as_ref() == Some(&binding.operation_source)
+    }
+
+    fn matching_operations_for_binding(
+        _member_key: &MemberOpsKey,
+        binding: &MemberOpsBinding,
+    ) -> Result<Vec<OperationLifecycleSnapshot>, MobError> {
+        Ok(binding
+            .registry
             .list_operations()
+            .map_err(|error| MobError::Internal(error.to_string()))?
             .into_iter()
-            .filter(|snapshot| {
-                snapshot.kind == OperationKind::MobMemberChild
-                    && match member_key {
-                        MemberOpsKey::Session(session_id) => {
-                            snapshot.child_session_id.as_ref() == Some(session_id)
-                        }
-                        MemberOpsKey::BackendPeer { .. } => {
-                            snapshot.child_session_id.is_none()
-                                && snapshot.display_name == display_name
-                        }
-                    }
-            })
-            .collect()
+            .filter(|snapshot| Self::snapshot_matches_binding(binding, snapshot))
+            .collect())
+    }
+
+    fn require_operation_for_binding(
+        member_key: &MemberOpsKey,
+        binding: &MemberOpsBinding,
+        operation_id: &OperationId,
+        operation: &str,
+    ) -> Result<OperationLifecycleSnapshot, MobError> {
+        let Some(snapshot) = binding
+            .registry
+            .snapshot(operation_id)
+            .map_err(|error| MobError::Internal(error.to_string()))?
+        else {
+            return Err(MobError::Internal(format!(
+                "mob ops adapter cannot {operation}: operation '{operation_id}' not found",
+            )));
+        };
+        if !Self::snapshot_matches_binding(binding, &snapshot) {
+            return Err(MobError::Internal(format!(
+                "mob ops adapter cannot {operation} for member '{member_key:?}': operation '{operation_id}' is not owned by generated operation source authority"
+            )));
+        }
+        Ok(snapshot)
     }
 
     fn newest_operation_snapshot(
@@ -279,12 +297,31 @@ impl MobOpsAdapter {
         })
     }
 
+    fn snapshot_is_terminal(snapshot: &OperationLifecycleSnapshot) -> bool {
+        snapshot.terminal
+    }
+
     fn active_operation_ids(snapshots: &[OperationLifecycleSnapshot]) -> Vec<OperationId> {
-        snapshots
-            .iter()
-            .filter(|snapshot| !snapshot.status.is_terminal())
-            .map(|snapshot| snapshot.id.clone())
-            .collect()
+        let mut active_ids = Vec::new();
+        for snapshot in snapshots {
+            if !Self::snapshot_is_terminal(snapshot) {
+                active_ids.push(snapshot.id.clone());
+            }
+        }
+        active_ids
+    }
+
+    fn invalid_transition_is_idempotent(
+        registry: &Arc<dyn OpsLifecycleRegistry>,
+        action: OperationLifecycleAction,
+        error: &OpsLifecycleError,
+    ) -> Result<bool, MobError> {
+        match error {
+            OpsLifecycleError::InvalidTransition { id, .. } => registry
+                .classify_operation_transition_idempotence(id, action)
+                .map_err(|error| MobError::Internal(error.to_string())),
+            _ => Ok(false),
+        }
     }
 
     fn format_operation_ids(ids: &[OperationId]) -> String {
@@ -294,15 +331,48 @@ impl MobOpsAdapter {
             .join(", ")
     }
 
-    pub(crate) fn operation_status(
+    pub(crate) fn operation_status_with_terminality(
         &self,
         session_id: &SessionId,
         operation_id: &OperationId,
-    ) -> Option<OperationStatus> {
-        let (registry, _, _) = self.registry_for_key(&MemberOpsKey::Session(session_id.clone()));
-        registry
+    ) -> Result<Option<(OperationStatus, bool)>, MobError> {
+        let Some(binding) = self.binding_for_key(&MemberOpsKey::Session(session_id.clone())) else {
+            return Ok(None);
+        };
+        let Some(snapshot) = binding
+            .registry
             .snapshot(operation_id)
-            .map(|snapshot| snapshot.status)
+            .map_err(|error| MobError::Internal(error.to_string()))?
+            .filter(|snapshot| Self::snapshot_matches_binding(&binding, snapshot))
+        else {
+            return Ok(None);
+        };
+        let terminal = binding
+            .registry
+            .classify_operation_terminality(operation_id, snapshot.status)
+            .map_err(|error| MobError::Internal(error.to_string()))?;
+        Ok(Some((snapshot.status, terminal)))
+    }
+
+    fn display_name_for_key(
+        &self,
+        member_key: &MemberOpsKey,
+        operation: &str,
+    ) -> Result<String, MobError> {
+        let binding = self.require_binding_for_key(member_key, operation)?;
+        Ok(binding
+            .display_name
+            .unwrap_or_else(|| member_key.fallback_display_name()))
+    }
+
+    fn registry_for_existing_binding(
+        &self,
+        member_key: &MemberOpsKey,
+        operation: &str,
+    ) -> Result<Arc<dyn OpsLifecycleRegistry>, MobError> {
+        Ok(self
+            .require_binding_for_key(member_key, operation)?
+            .registry)
     }
 
     async fn resolve_or_register_active_operation_id_for_key(
@@ -311,7 +381,8 @@ impl MobOpsAdapter {
         operation: &str,
         display_name: &str,
     ) -> Result<OperationId, MobError> {
-        let snapshots = self.matching_operations_for_key(member_key);
+        let binding = self.require_binding_for_key(member_key, operation)?;
+        let snapshots = Self::matching_operations_for_binding(member_key, &binding)?;
         let active_ids = Self::active_operation_ids(&snapshots);
         match active_ids.len() {
             1 => Ok(active_ids[0].clone()),
@@ -331,7 +402,8 @@ impl MobOpsAdapter {
         member_key: &MemberOpsKey,
         display_name: &str,
     ) -> Result<OperationId, MobError> {
-        let snapshots = self.matching_operations_for_key(member_key);
+        let binding = self.require_binding_for_key(member_key, "register operation")?;
+        let snapshots = Self::matching_operations_for_binding(member_key, &binding)?;
         let active_ids = Self::active_operation_ids(&snapshots);
         match active_ids.len() {
             1 => return Ok(active_ids[0].clone()),
@@ -345,14 +417,15 @@ impl MobOpsAdapter {
         }
 
         let operation_id = OperationId::new();
-        let (registry, owner_bridge_session_id, _) = self.registry_for_key(member_key);
+        let registry = binding.registry;
         registry
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
                 kind: OperationKind::MobMemberChild,
-                owner_session_id: owner_bridge_session_id,
+                owner_session_id: binding.owner_bridge_session_id,
                 display_name: display_name.to_string(),
                 source_label: "mob_member".to_string(),
+                operation_source: Some(binding.operation_source.clone()),
                 child_session_id: member_key.child_session_id(),
                 expect_peer_channel: true,
             })
@@ -390,14 +463,18 @@ impl MobOpsAdapter {
         let operation_id = self
             .ensure_operation_for_key(member_key, display_name)
             .await?;
-        let (registry, _, _) = self.registry_for_key(member_key);
+        let registry = self.registry_for_existing_binding(member_key, "mark provisioned")?;
         match registry.provisioning_succeeded(&operation_id) {
             Ok(()) => {}
-            Err(OpsLifecycleError::InvalidTransition {
-                status: OperationStatus::Running,
-                ..
-            }) => {}
-            Err(error) => return Err(MobError::Internal(error.to_string())),
+            Err(error) => {
+                if !Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::Start,
+                    &error,
+                )? {
+                    return Err(MobError::Internal(error.to_string()));
+                }
+            }
         }
         Ok(operation_id)
     }
@@ -408,7 +485,7 @@ impl MobOpsAdapter {
         message: impl Into<String>,
     ) -> Result<(), MobError> {
         let member_key = Self::require_member_key(member_ref, "report progress for")?;
-        let (_, _, display_name) = self.registry_for_key(&member_key);
+        let display_name = self.display_name_for_key(&member_key, "report progress")?;
         let operation_id = self
             .resolve_or_register_active_operation_id_for_key(
                 &member_key,
@@ -417,7 +494,7 @@ impl MobOpsAdapter {
             )
             .await?;
         self.ensure_running_before_live_update(&member_key, &operation_id, "report progress")?;
-        let (registry, _, _) = self.registry_for_key(&member_key);
+        let registry = self.registry_for_existing_binding(&member_key, "report progress")?;
         match registry.report_progress(
             &operation_id,
             OperationProgressUpdate {
@@ -426,10 +503,17 @@ impl MobOpsAdapter {
             },
         ) {
             Ok(()) => Ok(()),
-            Err(OpsLifecycleError::InvalidTransition { status, .. }) if status.is_terminal() => {
-                Ok(())
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::ProgressReported,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(error.to_string()))
+                }
             }
-            Err(error) => Err(MobError::Internal(error.to_string())),
         }
     }
 
@@ -448,7 +532,7 @@ impl MobOpsAdapter {
             )
             .await?;
         self.ensure_running_before_live_update(&member_key, &operation_id, "mark peer ready")?;
-        let (registry, _, _) = self.registry_for_key(&member_key);
+        let registry = self.registry_for_existing_binding(&member_key, "mark peer ready")?;
         match registry.peer_ready(
             &operation_id,
             OperationPeerHandle {
@@ -457,23 +541,31 @@ impl MobOpsAdapter {
                 trusted_peer,
             },
         ) {
-            Err(OpsLifecycleError::InvalidTransition { status, .. }) if status.is_terminal() => {
-                Ok(())
-            }
             Ok(()) | Err(OpsLifecycleError::AlreadyPeerReady(_)) => Ok(()),
-            Err(error) => Err(MobError::Internal(error.to_string())),
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::PeerReady,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(error.to_string()))
+                }
+            }
         }
     }
 
     pub(crate) async fn mark_member_retired(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let member_key = Self::require_member_key(member_ref, "mark retired for")?;
-        let snapshots = self.matching_operations_for_key(&member_key);
+        let binding = self.require_binding_for_key(&member_key, "mark retired")?;
+        let snapshots = Self::matching_operations_for_binding(&member_key, &binding)?;
         let active_ids = Self::active_operation_ids(&snapshots);
         let operation_id = match active_ids.len() {
             1 => active_ids[0].clone(),
             0 => {
                 if let Some(latest) = Self::newest_operation_snapshot(&snapshots)
-                    && latest.status.is_terminal()
+                    && Self::snapshot_is_terminal(latest)
                 {
                     return Ok(());
                 }
@@ -486,22 +578,32 @@ impl MobOpsAdapter {
                 )));
             }
         };
-        let (registry, _, _) = self.registry_for_key(&member_key);
+        let registry = binding.registry;
         match registry.request_retire(&operation_id) {
             Ok(()) => {}
-            Err(OpsLifecycleError::InvalidTransition {
-                status: OperationStatus::Retiring | OperationStatus::Retired,
-                ..
-            }) => {}
-            Err(error) => return Err(MobError::Internal(error.to_string())),
+            Err(error) => {
+                if !Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::RetireRequested,
+                    &error,
+                )? {
+                    return Err(MobError::Internal(error.to_string()));
+                }
+            }
         }
         let result = match registry.mark_retired(&operation_id) {
             Ok(()) => Ok(()),
-            Err(OpsLifecycleError::InvalidTransition {
-                status: OperationStatus::Retired,
-                ..
-            }) => Ok(()),
-            Err(error) => Err(MobError::Internal(error.to_string())),
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::RetireCompleted,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(error.to_string()))
+                }
+            }
         };
         if result.is_ok() {
             self.clear_member_binding(&member_key);
@@ -540,14 +642,23 @@ impl MobOpsAdapter {
         operation_id: &OperationId,
         reason: Option<String>,
     ) -> Result<(), MobError> {
-        let (registry, _, _) = self.registry_for_key(member_key);
+        let binding = self.require_binding_for_key(member_key, "abort provision")?;
+        let registry = Arc::clone(&binding.registry);
+        Self::require_operation_for_binding(member_key, &binding, operation_id, "abort provision")?;
         let result = match registry.abort_provisioning(operation_id, reason) {
             Ok(()) => Ok(()),
             Err(OpsLifecycleError::NotFound(_)) => Ok(()),
-            Err(OpsLifecycleError::InvalidTransition { status, .. }) if status.is_terminal() => {
-                Ok(())
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::Abort,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(error.to_string()))
+                }
             }
-            Err(error) => Err(MobError::Internal(error.to_string())),
         };
         if result.is_ok() {
             self.clear_member_binding(member_key);
@@ -561,26 +672,29 @@ impl MobOpsAdapter {
         operation_id: &OperationId,
         operation: &str,
     ) -> Result<(), MobError> {
-        let (registry, _, _) = self.registry_for_key(member_key);
-        let Some(snapshot) = registry.snapshot(operation_id) else {
-            return Err(MobError::Internal(format!(
-                "mob ops adapter cannot {operation}: operation '{operation_id}' not found",
-            )));
-        };
+        let binding = self.require_binding_for_key(member_key, operation)?;
+        let registry = Arc::clone(&binding.registry);
+        let snapshot =
+            Self::require_operation_for_binding(member_key, &binding, operation_id, operation)?;
         if snapshot.status != OperationStatus::Provisioning {
             return Ok(());
         }
 
         match registry.provisioning_succeeded(operation_id) {
             Ok(()) => Ok(()),
-            Err(OpsLifecycleError::InvalidTransition { status, .. })
-                if status != OperationStatus::Provisioning =>
-            {
-                Ok(())
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::Start,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(format!(
+                        "mob ops adapter cannot {operation}: failed to canonicalize provisioning operation '{operation_id}' into running state: {error}",
+                    )))
+                }
             }
-            Err(error) => Err(MobError::Internal(format!(
-                "mob ops adapter cannot {operation}: failed to canonicalize provisioning operation '{operation_id}' into running state: {error}",
-            ))),
         }
     }
 }
@@ -589,14 +703,22 @@ impl MobOpsAdapter {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::comms::TrustedPeerDescriptor;
+    use meerkat_core::comms::{PeerAddress, PeerId, TrustedPeerDescriptor};
     use meerkat_core::ops_lifecycle::OperationStatus;
+    use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 
     #[tokio::test]
     async fn ops_registry_integration_red_ok_member_adapter_tracks_peer_ready_and_retire() {
         let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
         let session_id = SessionId::new();
         let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter.bind_session_registry(
+            session_id.clone(),
+            owner_bridge_session_id,
+            Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+        );
 
         let operation_id = adapter
             .mark_member_provisioned(&session_id, "mob-a/orchestrator/member-alpha")
@@ -620,9 +742,9 @@ mod tests {
             .await
             .expect("peer ready");
 
-        let running_snapshot = adapter
-            .registry()
+        let running_snapshot = registry
             .snapshot(&operation_id)
+            .expect("snapshot projection")
             .expect("snapshot");
         assert_eq!(running_snapshot.status, OperationStatus::Running);
         assert!(running_snapshot.peer_ready);
@@ -633,9 +755,9 @@ mod tests {
             .await
             .expect("retire member");
 
-        let retired_snapshot = adapter
-            .registry()
+        let retired_snapshot = registry
             .snapshot(&operation_id)
+            .expect("snapshot projection")
             .expect("snapshot");
         assert_eq!(retired_snapshot.status, OperationStatus::Retired);
     }
@@ -659,21 +781,87 @@ mod tests {
 
         let bound_snapshot = bound_registry
             .snapshot(&operation_id)
+            .expect("snapshot projection")
             .expect("bound registry should own exported child operation ids");
         assert_eq!(bound_snapshot.kind, OperationKind::MobMemberChild);
         assert_eq!(bound_snapshot.status, OperationStatus::Running);
         assert_eq!(bound_snapshot.child_session_id, Some(child_session_id));
-        assert!(
-            adapter.registry().snapshot(&operation_id).is_none(),
-            "fallback registry must not own bound child operation ids"
+    }
+
+    #[tokio::test]
+    async fn repeated_member_provision_uses_generated_idempotence_classifier() {
+        let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
+        let child_session_id = SessionId::new();
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter.bind_session_registry(
+            child_session_id.clone(),
+            owner_bridge_session_id,
+            Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
         );
+
+        let first = adapter
+            .mark_member_provisioned(&child_session_id, "mob/member-idempotent")
+            .await
+            .expect("first provision");
+        let second = adapter
+            .mark_member_provisioned(&child_session_id, "mob/member-idempotent")
+            .await
+            .expect("generated idempotent start classification");
+
+        assert_eq!(first, second);
+        let snapshot = registry
+            .snapshot(&first)
+            .expect("snapshot projection")
+            .expect("snapshot");
+        assert_eq!(snapshot.status, OperationStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn already_retiring_member_retire_uses_generated_idempotence_classifier() {
+        let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
+        let child_session_id = SessionId::new();
+        let member_ref = MemberRef::from_bridge_session_id(child_session_id.clone());
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter.bind_session_registry(
+            child_session_id.clone(),
+            owner_bridge_session_id,
+            Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+        );
+
+        let operation_id = adapter
+            .mark_member_provisioned(&child_session_id, "mob/member-retiring")
+            .await
+            .expect("provision member");
+        registry
+            .request_retire(&operation_id)
+            .expect("generated retire request");
+
+        adapter
+            .mark_member_retired(&member_ref)
+            .await
+            .expect("generated idempotent retire-request classification");
+
+        let snapshot = registry
+            .snapshot(&operation_id)
+            .expect("snapshot projection")
+            .expect("snapshot");
+        assert_eq!(snapshot.status, OperationStatus::Retired);
     }
 
     #[tokio::test]
     async fn mark_member_retired_without_existing_operation_is_noop() {
         let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
         let session_id = SessionId::new();
-        let member_ref = MemberRef::from_bridge_session_id(session_id);
+        let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter.bind_session_registry(
+            session_id,
+            owner_bridge_session_id,
+            Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+        );
 
         adapter
             .mark_member_retired(&member_ref)
@@ -681,17 +869,132 @@ mod tests {
             .expect("missing lifecycle entry should retire as no-op");
 
         assert!(
-            adapter.registry().list_operations().is_empty(),
+            registry.list_operations().unwrap().is_empty(),
             "retire must not fabricate a provisioning operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_operation_registration_without_owner_binding_fails_closed() {
+        let adapter = MobOpsAdapter::new();
+        let session_id = SessionId::new();
+        let err = adapter
+            .mark_member_provisioned(&session_id, "mob/member-unbound")
+            .await
+            .expect_err("missing generated owner binding must fail closed");
+        assert!(
+            err.to_string()
+                .contains("missing generated owner operation binding"),
+            "unexpected error: {err}"
+        );
+
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: "peer-a".into(),
+            address: "inproc://peer-a".into(),
+            pubkey: None,
+            bootstrap_token: None,
+            session_id: None,
+        };
+        let err = adapter
+            .mark_member_provisioned_for_member(&member_ref, "mob/backend-peer")
+            .await
+            .expect_err("peer-only member without generated owner binding must fail closed");
+        assert!(
+            err.to_string()
+                .contains("missing generated owner operation binding"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            adapter
+                .active_operation_id_for_member(&member_ref)
+                .await
+                .is_none(),
+            "unbound peer-only member must not create fallback operation state"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_only_operation_identity_uses_generated_operation_source() {
+        let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let peer_id = PeerId::new();
+        let address = PeerAddress::parse("inproc://peer-a").expect("peer address");
+        let operation_source = OperationSource::backend_peer(peer_id, address.clone());
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: peer_id.to_string(),
+            address: address.to_string(),
+            pubkey: None,
+            bootstrap_token: None,
+            session_id: None,
+        };
+        adapter
+            .bind_member_registry(
+                &member_ref,
+                owner_bridge_session_id.clone(),
+                Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+                "display-before",
+                operation_source.clone(),
+            )
+            .expect("bind peer-only member registry");
+
+        let operation_id = adapter
+            .mark_member_provisioned_for_member(&member_ref, "display-before")
+            .await
+            .expect("register peer-only child operation");
+        let snapshot = registry
+            .snapshot(&operation_id)
+            .expect("snapshot projection")
+            .expect("snapshot");
+        assert_eq!(snapshot.display_name, "display-before");
+        assert_eq!(snapshot.operation_source, Some(operation_source.clone()));
+
+        adapter
+            .bind_member_registry(
+                &member_ref,
+                owner_bridge_session_id,
+                Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+                "display-after",
+                operation_source,
+            )
+            .expect("rebinding display name must not change lifecycle identity");
+
+        assert_eq!(
+            adapter.active_operation_id_for_member(&member_ref).await,
+            Some(operation_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_member_retired_without_owner_binding_fails_closed() {
+        let adapter = MobOpsAdapter::new();
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+
+        let err = adapter
+            .mark_member_retired(&member_ref)
+            .await
+            .expect_err("missing generated owner binding must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("missing generated owner operation binding"),
+            "unexpected error: {err}"
         );
     }
 
     #[tokio::test]
     async fn abort_member_provision_marks_provisioning_operation_aborted() {
         let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
         let session_id = SessionId::new();
         let operation_id = OperationId::new();
-        let registry = adapter.registry();
+        let operation_source = OperationSource::session_child(session_id.clone());
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter.bind_session_registry(
+            session_id.clone(),
+            owner_bridge_session_id,
+            Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+        );
         registry
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
@@ -699,6 +1002,7 @@ mod tests {
                 owner_session_id: session_id.clone(),
                 display_name: "mob/member-abort".into(),
                 source_label: "mob_member".into(),
+                operation_source: Some(operation_source),
                 child_session_id: Some(session_id.clone()),
                 expect_peer_channel: true,
             })
@@ -709,7 +1013,28 @@ mod tests {
             .await
             .expect("abort provisioning should succeed");
 
-        let snapshot = registry.snapshot(&operation_id).expect("snapshot");
+        let snapshot = registry
+            .snapshot(&operation_id)
+            .expect("snapshot projection")
+            .expect("snapshot");
         assert_eq!(snapshot.status, OperationStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn abort_member_provision_without_owner_binding_fails_closed() {
+        let adapter = MobOpsAdapter::new();
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+
+        let err = adapter
+            .abort_member_provision(&session_id, &operation_id, Some("mob is stopping".into()))
+            .await
+            .expect_err("missing generated owner binding must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("missing generated owner operation binding"),
+            "unexpected error: {err}"
+        );
     }
 }

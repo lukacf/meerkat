@@ -38,8 +38,16 @@ const packageKey = (pkg) => {
 };
 const packageLabel = (pkg) => `//${relative(root, packageDir(pkg))}:${crateName(pkg.name)}`;
 const crateName = (name) => name.replaceAll("-", "_");
+const byKey = new Map([...localPackages.values()].map((pkg) => [packageKey(pkg), pkg]));
 const q = (value) => JSON.stringify(value);
 const cargoPackageVersionEnv = (pkg) => `        "CARGO_PKG_VERSION": ${q(pkg.version)},`;
+const generatedAuthorityBridgeSymbolSuffix = "bazel_private_generated_authority_bridge";
+const generatedAuthorityBridgePackageKeys = new Set([
+  "meerkat-core",
+  "meerkat-live",
+  "meerkat-runtime",
+  "meerkat-mob",
+]);
 
 function defaultFeatures(pkg) {
   return pkg.features?.default ?? [];
@@ -209,6 +217,55 @@ function publicCoreCrateFeatures(key, pkg) {
   return [...features].sort();
 }
 
+function rustLibraryCrateFeaturesFor(key, pkg) {
+  const features = new Set(
+    key === "meerkat-core" ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg),
+  );
+  if (key === "meerkat-runtime") {
+    features.delete("test-support");
+  }
+  return [...features].sort();
+}
+
+const runtimePackage = byName.get("meerkat-runtime") ?? null;
+const runtimePackageKey = runtimePackage ? packageKey(runtimePackage) : null;
+
+function runtimeTestSupportVariantNameFor(pkg) {
+  return packageKey(pkg) === "meerkat-runtime"
+    ? "meerkat_runtime_test_support"
+    : `${crateName(pkg.name)}_with_runtime_test_support`;
+}
+
+function runtimeTestSupportVariantLabel(pkg) {
+  return `//${relative(root, packageDir(pkg))}:${runtimeTestSupportVariantNameFor(pkg)}`;
+}
+
+function runtimeAgentFactoryTestSupportVariantNameFor(pkg) {
+  return packageKey(pkg) === "meerkat-runtime"
+    ? `${agentFactoryVariantName(pkg)}_test_support`
+    : `${agentFactoryVariantName(pkg)}_with_runtime_test_support`;
+}
+
+function runtimeAgentFactoryTestSupportActualLabel(pkg) {
+  return `//${relative(root, packageDir(pkg))}:${runtimeAgentFactoryTestSupportVariantNameFor(pkg)}`;
+}
+
+function runtimeAgentFactoryTestSupportFacadeLabel(pkg) {
+  return `//meerkat:${runtimeAgentFactoryTestSupportVariantNameFor(pkg)}`;
+}
+
+function rewriteRuntimeTestSupportDeps(deps, useAgentFactoryDeps) {
+  return deps.map((dep) => {
+    const runtimeTestSupportVariant = runtimeTestSupportVariantByPublicLabel.get(dep);
+    if (runtimeTestSupportVariant) return runtimeTestSupportVariant;
+    const runtimeAgentFactoryTestSupportVariant = useAgentFactoryDeps
+      ? runtimeAgentFactoryTestSupportVariantByFacadeLabel.get(dep)
+      : null;
+    if (runtimeAgentFactoryTestSupportVariant) return runtimeAgentFactoryTestSupportVariant;
+    return dep;
+  });
+}
+
 function externalCrateLabel(dep) {
   const candidates = externalByName.get(dep.name) ?? [];
   let pkg = candidates.length === 1 ? candidates[0] : null;
@@ -247,6 +304,19 @@ function listExpr(values, indent = 8) {
   if (values.length === 0) return "[]";
   const pad = " ".repeat(indent);
   return `[\n${values.map((v) => `${pad}${q(v)},`).join("\n")}\n${" ".repeat(indent - 4)}]`;
+}
+
+function generatedAuthorityBridgeRustcEnv(key) {
+  if (!generatedAuthorityBridgePackageKeys.has(key)) return [];
+  return [
+    `        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": ${q(generatedAuthorityBridgeSymbolSuffix)},`,
+  ];
+}
+
+function generatedAuthorityBridgeRustcFlags(key) {
+  return key === "meerkat-core" || key === "meerkat-live"
+    ? ["--cfg=meerkat_internal_generated_authority_bridge"]
+    : [];
 }
 
 function rustTargetVisibility(key) {
@@ -305,9 +375,44 @@ function reverseDependencyKeys(includeDev) {
 }
 
 const localNormalReverseDependencyKeys = reverseDependencyKeys(false);
+const localAllReverseDependencyKeys = reverseDependencyKeys(true);
 const publicDownstreamFixtureKeys = new Set([
   "test-fixtures/surface-build-fixtures",
 ]);
+
+const runtimeTestSupportPackageKeys = new Set();
+if (runtimePackageKey) {
+  const stack = [runtimePackageKey];
+  while (stack.length) {
+    const key = stack.pop();
+    if (runtimeTestSupportPackageKeys.has(key)) continue;
+    runtimeTestSupportPackageKeys.add(key);
+    for (const consumerKey of localNormalReverseDependencyKeys.get(key) ?? []) {
+      if (byKey.has(consumerKey)) stack.push(consumerKey);
+    }
+  }
+}
+
+function packageVisibilityLabel(key) {
+  return key === "." ? "//:__pkg__" : `//${key}:__pkg__`;
+}
+
+function shouldGenerateRuntimeTestSupportVariantForKey(key) {
+  const pkg = byKey.get(key);
+  return Boolean(pkg)
+    && runtimeTestSupportPackageKeys.has(key)
+    && hasRustLibraryTarget(pkg);
+}
+
+function runtimeTestSupportVisibilityFor(pkg) {
+  const key = packageKey(pkg);
+  const visibilityKeys = new Set([key]);
+  for (const consumerKey of localAllReverseDependencyKeys.get(key) ?? []) {
+    if (byKey.has(consumerKey)) visibilityKeys.add(consumerKey);
+  }
+  return listExpr([...visibilityKeys].sort().map(packageVisibilityLabel));
+}
+
 const agentFactoryConsumerKeys = new Set();
 const agentFactoryConsumerStack = ["meerkat"];
 while (agentFactoryConsumerStack.length) {
@@ -385,6 +490,29 @@ const agentFactoryVariantByPublicLabel = new Map(
   agentFactoryVariantPackages
     .map((pkg) => [packageLabel(pkg), agentFactoryFacadeVariantAliasLabel(pkg)]),
 );
+
+const runtimeTestSupportVariantPackages = [...localPackages.values()]
+  .filter((pkg) => shouldGenerateRuntimeTestSupportVariantForKey(packageKey(pkg)));
+
+const runtimeTestSupportVariantByPublicLabel = new Map(
+  runtimeTestSupportVariantPackages
+    .map((pkg) => [packageLabel(pkg), runtimeTestSupportVariantLabel(pkg)]),
+);
+
+const runtimeAgentFactoryTestSupportVariantPackages = agentFactoryVariantPackages
+  .filter((pkg) => shouldGenerateRuntimeTestSupportVariantForKey(packageKey(pkg)));
+
+const runtimeAgentFactoryTestSupportVariantByFacadeLabel = new Map(
+  runtimeAgentFactoryTestSupportVariantPackages
+    .map((pkg) => [
+      agentFactoryFacadeVariantAliasLabel(pkg),
+      runtimeAgentFactoryTestSupportFacadeLabel(pkg),
+    ]),
+);
+
+function shouldGenerateRuntimeAgentFactoryTestSupportVariantForKey(key) {
+  return runtimeAgentFactoryTestSupportVariantPackages.some((pkg) => packageKey(pkg) === key);
+}
 
 const agentFactoryActualVariantVisibility = listExpr(["//meerkat:__pkg__"]);
 
@@ -955,6 +1083,13 @@ for (const pkg of localPackages.values()) {
     actual = ${q(agentFactoryActualVariantLabel(variantPkg))},
     visibility = ${agentFactoryFacadeVariantAliasVisibility},
 )`);
+      if (shouldGenerateRuntimeAgentFactoryTestSupportVariantForKey(packageKey(variantPkg))) {
+        rules.push(`alias(
+    name = ${q(runtimeAgentFactoryTestSupportVariantNameFor(variantPkg))},
+    actual = ${q(runtimeAgentFactoryTestSupportActualLabel(variantPkg))},
+    visibility = ${agentFactoryFacadeVariantAliasVisibility},
+)`);
+      }
     }
   }
 
@@ -987,7 +1122,6 @@ for (const pkg of localPackages.values()) {
       ? rewriteAgentFactoryDeps(rawDeps)
       : rawDeps;
     const procMacroDeps = localDeps(pkg, true, isTest);
-    const isCorePublicLibrary = key === "meerkat-core" && rule === "rust_library";
     const targetSourceText = isTest ? readFileSync(target.src_path, "utf8") : "";
     let targetDeps = deps;
     if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
@@ -1000,6 +1134,12 @@ for (const pkg of localPackages.values()) {
         .filter((dep) => dep !== "//meerkat:meerkat_schedule_agent_factory_build")
         .concat(scheduleMachineSchemaExports)
         .sort();
+    }
+    if (isTest) {
+      targetDeps = rewriteRuntimeTestSupportDeps(
+        targetDeps,
+        shouldRewriteAgentFactoryDepsFor(key, true),
+      );
     }
     const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
     const externalNormalWithDev = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n    )`;
@@ -1034,13 +1174,18 @@ for (const pkg of localPackages.values()) {
       `    aliases = ${aliasesExpr},`,
       `    crate_name = ${q(crateName(target.name))},`,
       `    crate_root = ${q(relative(dir, target.src_path))},`,
-      `    crate_features = ${listExpr(isCorePublicLibrary ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg))},`,
+      `    crate_features = ${listExpr(rule === "rust_library" ? rustLibraryCrateFeaturesFor(key, pkg) : crateFeaturesFor(key, pkg))},`,
       `    edition = "2024",`,
       `    compile_data = ${compileDataExpr},`,
       `    srcs = ${srcsExpr},`,
       `    visibility = ${rustTargetVisibility(key)},`,
       `    deps = ${depsExpr},`,
     ];
+    const bridgeRustcFlags = generatedAuthorityBridgeRustcFlags(key);
+    if (bridgeRustcFlags.length) {
+      const editionIndex = attrs.indexOf(`    edition = "2024",`);
+      attrs.splice(editionIndex + 1, 0, `    rustc_flags = ${listExpr(bridgeRustcFlags)},`);
+    }
     if (rule === "rust_binary" || rule === "rust_test") {
       const packageRunfilesDir = relative(root, dir) || ".";
       const cargoManifestDir = isTest && packageRunfilesDir !== "."
@@ -1050,6 +1195,7 @@ for (const pkg of localPackages.values()) {
         cargoPackageVersionEnv(pkg),
         `        "CARGO_BIN_NAME": ${q(target.name)},`,
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
+        ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (rule === "rust_test" && key === "meerkat-rpc") {
         rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
@@ -1064,6 +1210,7 @@ for (const pkg of localPackages.values()) {
       const rustcEnv = [
         cargoPackageVersionEnv(pkg),
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
+        ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (key === "meerkat") {
         rustcEnv.push(
@@ -1176,6 +1323,38 @@ for (const pkg of localPackages.values()) {
     }
     attrs.splice(attrs.length - 1, 0, `    proc_macro_deps = ${procExpr},`);
     rules.push(`${rule}(\n${attrs.join("\n")}\n)`);
+    if (rule === "rust_library" && shouldGenerateRuntimeTestSupportVariantForKey(key)) {
+      const testSupportDepsWithOptionalExternal = [
+        ...new Set([
+          ...rewriteRuntimeTestSupportDeps(
+            targetDeps,
+            shouldRewriteAgentFactoryDepsFor(key, false),
+          ),
+          ...optionalExternal,
+        ]),
+      ].sort();
+      const testSupportDepsExpr = testSupportDepsWithOptionalExternal.length
+        ? `${listExpr(testSupportDepsWithOptionalExternal)} + ${externalNormal}`
+        : externalNormal;
+      const testSupportAttrs = attrs.map((line) => {
+        if (line === `    name = ${q(name)},`) {
+          return `    name = ${q(runtimeTestSupportVariantNameFor(pkg))},`;
+        }
+        if (line.startsWith("    crate_features = ")) {
+          return `    crate_features = ${
+            listExpr(key === "meerkat-runtime" ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
+          },`;
+        }
+        if (line === `    visibility = ${rustTargetVisibility(key)},`) {
+          return `    visibility = ${runtimeTestSupportVisibilityFor(pkg)},`;
+        }
+        if (line === `    deps = ${depsExpr},`) {
+          return `    deps = ${testSupportDepsExpr},`;
+        }
+        return line;
+      });
+      rules.push(`rust_library(\n${testSupportAttrs.join("\n")}\n)`);
+    }
     const shouldGenerateAgentFactoryVariant =
       rule === "rust_library"
       && shouldGenerateAgentFactoryVariantForKey(key)
@@ -1200,15 +1379,30 @@ for (const pkg of localPackages.values()) {
         return line;
       });
       if (key === "meerkat-core") {
-        const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
-        internalAttrs.splice(
-          editionIndex + 1,
-          0,
-          `    rustc_flags = ["--cfg=meerkat_internal_agent_factory_build"],`,
-        );
+        const rustcFlags = [
+          "--cfg=meerkat_internal_agent_factory_build",
+          ...generatedAuthorityBridgeRustcFlags(key),
+        ];
+        const rustcFlagsIndex = internalAttrs.findIndex((line) => line.startsWith("    rustc_flags = "));
+        if (rustcFlagsIndex >= 0) {
+          internalAttrs[rustcFlagsIndex] = `    rustc_flags = ${listExpr(rustcFlags)},`;
+        } else {
+          const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
+          internalAttrs.splice(
+            editionIndex + 1,
+            0,
+            `    rustc_flags = ${listExpr(rustcFlags)},`,
+          );
+        }
         const rustcEnvIndex = internalAttrs.findIndex((line) => line.startsWith("    rustc_env = {"));
         if (rustcEnvIndex >= 0) {
-          internalAttrs[rustcEnvIndex] = `    rustc_env = {\n${cargoPackageVersionEnv(pkg)}\n        "CARGO_MANIFEST_DIR": "./meerkat-core",\n        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},\n    },`;
+          const rustcEnv = [
+            cargoPackageVersionEnv(pkg),
+            `        "CARGO_MANIFEST_DIR": "./meerkat-core",`,
+            ...generatedAuthorityBridgeRustcEnv(key),
+            `        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},`,
+          ];
+          internalAttrs[rustcEnvIndex] = `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`;
         }
       }
       if (key === "meerkat-machine-schema" || key === "meerkat-runtime") {
@@ -1220,6 +1414,30 @@ for (const pkg of localPackages.values()) {
         );
       }
       rules.push(`rust_library(\n${internalAttrs.join("\n")}\n)`);
+      if (shouldGenerateRuntimeAgentFactoryTestSupportVariantForKey(key)) {
+        const internalTestSupportDepsWithOptionalExternal = rewriteRuntimeTestSupportDeps(
+          internalDepsWithOptionalExternal,
+          true,
+        );
+        const internalTestSupportDepsExpr = internalTestSupportDepsWithOptionalExternal.length
+          ? `${listExpr(internalTestSupportDepsWithOptionalExternal)} + ${externalNormal}`
+          : externalNormal;
+        const internalTestSupportAttrs = internalAttrs.map((line) => {
+          if (line === `    name = ${q(agentFactoryVariantName(pkg))},`) {
+            return `    name = ${q(runtimeAgentFactoryTestSupportVariantNameFor(pkg))},`;
+          }
+          if (line.startsWith("    crate_features = ")) {
+            return `    crate_features = ${
+              listExpr(key === "meerkat-runtime" ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
+            },`;
+          }
+          if (line === `    deps = ${internalDepsExpr},`) {
+            return `    deps = ${internalTestSupportDepsExpr},`;
+          }
+          return line;
+        });
+        rules.push(`rust_library(\n${internalTestSupportAttrs.join("\n")}\n)`);
+      }
     }
     if (rule === "rust_library") {
       const unitName = `${crateName(target.name)}_unit_test`;
@@ -1239,9 +1457,13 @@ for (const pkg of localPackages.values()) {
           ...unitLocalDeps,
         ]),
       ].sort();
+      const unitDepsWithTestSupport = rewriteRuntimeTestSupportDeps(
+        unitDeps,
+        shouldRewriteAgentFactoryDepsFor(key, true),
+      );
       const unitProcDeps = [...new Set([...procMacroDeps, ...localDeps(pkg, true, true)])].sort();
-      const unitDepsExpr = unitDeps.length
-        ? `${listExpr(unitDeps)} + ${externalNormalWithDev}`
+      const unitDepsExpr = unitDepsWithTestSupport.length
+        ? `${listExpr(unitDepsWithTestSupport)} + ${externalNormalWithDev}`
         : externalNormalWithDev;
       const unitProcExpr = unitProcDeps.length
         ? `${listExpr(unitProcDeps)} + ${externalProcWithDev}`
@@ -1272,6 +1494,7 @@ for (const pkg of localPackages.values()) {
       const unitRustcEnv = [
         cargoPackageVersionEnv(pkg),
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
+        ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (key === "meerkat") {
         unitRustcEnv.push(
@@ -1296,6 +1519,15 @@ for (const pkg of localPackages.values()) {
         `    proc_macro_deps = ${unitProcExpr},`,
         `    deps = ${unitDepsExpr},`,
       ];
+      const unitBridgeRustcFlags = generatedAuthorityBridgeRustcFlags(key);
+      if (unitBridgeRustcFlags.length) {
+        const editionIndex = unitAttrs.indexOf(`    edition = "2024",`);
+        unitAttrs.splice(
+          editionIndex + 1,
+          0,
+          `    rustc_flags = ${listExpr(unitBridgeRustcFlags)},`,
+        );
+      }
       rules.push(`rust_test(\n${unitAttrs.join("\n")}\n)`);
       fastTestLabels.push(`//${relative(root, dir)}:${unitName}`);
       packageFastTests.push(`:${unitName}`);

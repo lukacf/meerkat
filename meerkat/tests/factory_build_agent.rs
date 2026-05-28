@@ -21,7 +21,7 @@ use meerkat_client::{LlmClient, TestClient};
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
 use meerkat_core::AssistantBlock;
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
-use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
+use meerkat_core::service::MobToolAuthorityContext;
 use meerkat_core::web_search::{WEB_SEARCH_TOOL_NAME, WebSearchRequest, WebSearchResult};
 use meerkat_core::{
     AgentToolDispatcher, Config, Provider, SelfHostedApiStyle, SelfHostedModelConfig,
@@ -163,6 +163,36 @@ fn counting_agent_llm_client_decorator(
             stream_calls: Arc::clone(&stream_calls),
         })
     })
+}
+
+#[cfg(feature = "comms")]
+fn trusted_peer_descriptor(peer: TrustedPeer) -> meerkat_core::comms::TrustedPeerDescriptor {
+    meerkat_core::comms::TrustedPeerDescriptor {
+        peer_id: peer.pubkey.to_peer_id(),
+        name: meerkat_core::comms::PeerName::new(peer.name).expect("valid peer name"),
+        address: meerkat_core::comms::PeerAddress::parse(peer.addr).expect("valid peer address"),
+        pubkey: *peer.pubkey.as_bytes(),
+    }
+}
+
+#[cfg(feature = "comms")]
+async fn add_trusted_peer_with_generated_authority(runtime: Arc<CommsRuntime>, peer: TrustedPeer) {
+    let peer = trusted_peer_descriptor(peer);
+    let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+    let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("generated MeerkatMachine should prepare peer-comms bindings");
+    bindings
+        .install_peer_comms_on(runtime.as_ref())
+        .expect("install generated peer-comms handle");
+    let comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = runtime;
+    machine
+        .stage_add_direct_peer_endpoint(&session_id, endpoint, comms_runtime)
+        .await
+        .expect("generated peer projection should reconcile trusted peer");
 }
 
 #[derive(Default)]
@@ -454,8 +484,10 @@ async fn web_search_fallback_is_not_added_to_native_search_models() {
 }
 
 fn create_test_authority() -> MobToolAuthorityContext {
-    MobToolAuthorityContext::new(OpaquePrincipalToken::new("test-principal"), true)
-        .with_managed_mob_scope(["mob-a"])
+    let authority = meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+        .expect("generated create-only mob authority should be accepted");
+    meerkat_runtime::mob_operator_authority::grant_manage_mob(&authority, "mob-a")
+        .expect("generated mob authority should grant managed mob scope")
 }
 
 fn assert_generated_create_only_authority(authority: Option<&MobToolAuthorityContext>) {
@@ -914,6 +946,7 @@ async fn build_agent_without_scheduler_keeps_injected_scheduler_tools_hidden() {
     let tool_names = run_and_capture_tool_names(
         factory,
         AgentBuildConfig {
+            override_mob: ToolCategoryOverride::Enable,
             schedule_tools: Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
                 Arc::new(MemoryScheduleStore::default()),
             )))),
@@ -954,15 +987,16 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
             .await
             .unwrap(),
     );
-    comms_runtime
-        .register_trusted_peer(TrustedPeer {
+    add_trusted_peer_with_generated_authority(
+        Arc::clone(&comms_runtime),
+        TrustedPeer {
             name: "peer-a".into(),
             pubkey: Keypair::generate().public_key(),
             addr: "tcp://127.0.0.1:9999".into(),
             meta: Default::default(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
     let factory = temp_factory(&temp)
         .comms(true)
         .with_comms_runtime(comms_runtime)
@@ -975,6 +1009,7 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
     let tool_names = run_and_capture_tool_names(
         factory,
         AgentBuildConfig {
+            mob_tool_authority_context: Some(create_test_authority()),
             schedule_tools: Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
                 Arc::new(MemoryScheduleStore::default()),
             )))),
@@ -1005,6 +1040,37 @@ async fn build_agent_with_resume_preserves_messages() {
     session.push(meerkat_core::Message::User(UserMessage::text(
         "Previous question".to_string(),
     )));
+    session
+        .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            self_hosted_server_id: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Inherit,
+                shell: ToolCategoryOverride::Inherit,
+                comms: ToolCategoryOverride::Inherit,
+                mob: ToolCategoryOverride::Inherit,
+                memory: ToolCategoryOverride::Inherit,
+                schedule: ToolCategoryOverride::Inherit,
+                workgraph: ToolCategoryOverride::Inherit,
+                image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+        })
+        .unwrap();
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
@@ -2030,10 +2096,11 @@ async fn resume_with_disable_mob_stays_disabled() {
     );
 }
 
-/// Regression: a session with mob=Enable should remain enabled even if
-/// the factory default changes to disabled.
+/// Regression: metadata-only mob=Enable is a compatibility mirror on resume.
+/// Without generated authority or explicit fresh override, it must not survive
+/// as active build intent when the factory default disables mob.
 #[tokio::test]
-async fn resume_with_enable_mob_stays_enabled() {
+async fn resume_with_metadata_mob_enable_becomes_inherit() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp).mob(false); // factory disables mob
     let config = Config::default();
@@ -2052,7 +2119,7 @@ async fn resume_with_enable_mob_stays_enabled() {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,
                 comms: ToolCategoryOverride::Disable,
-                mob: ToolCategoryOverride::Enable, // <-- explicitly on
+                mob: ToolCategoryOverride::Enable,
                 memory: ToolCategoryOverride::Disable,
                 schedule: ToolCategoryOverride::Inherit,
                 workgraph: ToolCategoryOverride::Inherit,
@@ -2080,8 +2147,8 @@ async fn resume_with_enable_mob_stays_enabled() {
 
     assert_eq!(
         metadata.tooling.mob,
-        ToolCategoryOverride::Enable,
-        "Enable mob should be preserved on resume despite factory disabling it"
+        ToolCategoryOverride::Inherit,
+        "metadata-only mob enablement must not be preserved as active authority"
     );
 }
 
@@ -2102,7 +2169,29 @@ async fn ambient_factory_mob_enable_does_not_imply_operator_capabilities() {
 
     let _agent = factory.build_agent(build_config, &config).await.unwrap();
     let observed = observed.lock().expect("recording mutex");
-    assert_eq!(observed.as_slice(), &[None]);
+    assert!(
+        observed.is_empty(),
+        "ambient mob defaults must not invoke a mob factory without generated authority"
+    );
+}
+
+#[tokio::test]
+async fn ambient_factory_mob_enable_does_not_mount_mob_dispatcher() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory =
+        temp_factory(&temp)
+            .mob(true)
+            .mob_tools_factory(Arc::new(StaticMobToolsFactory {
+                dispatcher: Arc::new(NamedDispatcher::new("mob_probe")),
+            }));
+
+    let tool_names =
+        run_and_capture_tool_names(factory, AgentBuildConfig::new("claude-sonnet-4-5")).await;
+
+    assert!(
+        !tool_names.iter().any(|name| name == "mob_probe"),
+        "ambient mob defaults must not mount a mob dispatcher without generated authority"
+    );
 }
 
 #[tokio::test]
@@ -2156,7 +2245,145 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
 
     let _agent = factory.build_agent(build_config, &config).await.unwrap();
     let observed = observed.lock().expect("recording mutex");
-    assert_eq!(observed.as_slice(), &[None]);
+    assert!(
+        observed.is_empty(),
+        "resumed metadata-only mob enablement must not invoke a mob factory without generated authority"
+    );
+}
+
+#[tokio::test]
+async fn resumed_enable_mob_metadata_does_not_mount_mob_surface() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .mob(false)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            self_hosted_server_id: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Enable,
+                memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
+                workgraph: ToolCategoryOverride::Inherit,
+                image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+        })
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        resume_session: Some(session),
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert!(
+        observed.is_empty(),
+        "metadata-only mob enablement must not request a mob surface when factory defaults disable it"
+    );
+    assert_eq!(
+        agent.session().session_metadata().unwrap().tooling.mob,
+        ToolCategoryOverride::Inherit,
+        "metadata-only mob enablement must not be repersisted as active build intent"
+    );
+}
+
+#[tokio::test]
+async fn recovered_create_request_mob_metadata_enable_does_not_mint_operator_capabilities() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp).mob(true).mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            self_hosted_server_id: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Enable,
+                memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
+                workgraph: ToolCategoryOverride::Inherit,
+                image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+        })
+        .unwrap();
+    session
+        .set_build_state(meerkat_core::SessionBuildState::default())
+        .unwrap();
+
+    let recovered = meerkat_core::build_recovered_session(
+        session,
+        &meerkat_core::SurfaceSessionRecoveryOverrides::default(),
+        meerkat_core::SurfaceSessionRecoveryContext::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered.build.override_mob,
+        ToolCategoryOverride::Inherit,
+        "metadata-only mob enablement must not become an explicit build override"
+    );
+
+    let request = recovered.into_deferred_create_request();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+    let mut build_config = AgentBuildConfig::from_create_session_request(&request, event_tx);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert!(
+        observed.is_empty(),
+        "recovered metadata-only mob enablement must not invoke a mob factory without generated authority"
+    );
 }
 
 #[tokio::test]
@@ -2237,14 +2464,9 @@ async fn ambient_mob_enable_without_authority_does_not_create_parent_comms_ident
 
     let _agent = factory.build_agent(build_config, &config).await.unwrap();
     let observed = observed.lock().expect("recording mutex");
-    assert_eq!(observed.len(), 1);
-    assert_eq!(
-        observed[0].comms_name, None,
-        "ambient mob availability without operator authority must not synthesize a parent comms_name"
-    );
     assert!(
-        !observed[0].comms_runtime_present,
-        "ambient mob availability without operator authority must not create delegate wiring comms"
+        observed.is_empty(),
+        "ambient mob availability without generated authority must not invoke a mob factory"
     );
 }
 
@@ -2320,15 +2542,79 @@ async fn explicit_mob_authority_is_forwarded_to_mob_tools_factory() {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
-    build_config.mob_tool_authority_context = Some(create_test_authority());
+    let expected_authority = create_test_authority();
+    build_config.mob_tool_authority_context = Some(expected_authority.clone());
 
-    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
     let observed = observed.lock().expect("recording mutex");
-    assert_eq!(observed.as_slice(), &[Some(create_test_authority())]);
+    assert_eq!(observed.as_slice(), &[Some(expected_authority)]);
+    assert_eq!(
+        agent.session().session_metadata().unwrap().tooling.mob,
+        ToolCategoryOverride::Enable,
+        "generated authority handoff should update the durable visibility mirror explicitly"
+    );
 }
 
 #[tokio::test]
-async fn explicit_mob_authority_is_persisted_on_session() {
+async fn resumed_explicit_mob_authority_is_not_erased_by_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .mob(false)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            self_hosted_server_id: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Inherit,
+                workgraph: ToolCategoryOverride::Inherit,
+                image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+        })
+        .unwrap();
+    let expected_authority = create_test_authority();
+
+    let build_config = AgentBuildConfig {
+        resume_session: Some(session),
+        mob_tool_authority_context: Some(expected_authority.clone()),
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.as_slice(), &[Some(expected_authority)]);
+}
+
+#[tokio::test]
+async fn explicit_mob_authority_persists_only_non_authoritative_projection() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
@@ -2337,17 +2623,22 @@ async fn explicit_mob_authority_is_persisted_on_session() {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
-    build_config.mob_tool_authority_context = Some(create_test_authority());
+    let expected_authority = create_test_authority();
+    build_config.mob_tool_authority_context = Some(expected_authority.clone());
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
-    assert_eq!(
-        agent.session().mob_tool_authority_context(),
-        Some(create_test_authority())
-    );
+    assert!(agent.session().mob_tool_authority_context().is_none());
+    let persisted = agent
+        .session()
+        .build_state()
+        .and_then(|state| state.mob_tool_authority_context)
+        .expect("mob authority projection should be stored");
+    assert!(!persisted.is_generated_authority_context());
+    assert!(!persisted.can_manage_mob("mob-a"));
 }
 
 #[tokio::test]
-async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
+async fn resumed_persisted_mob_authority_is_not_forwarded_as_behavior_authority() {
     let temp = tempfile::tempdir().unwrap();
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mob_factory = Arc::new(RecordingMobToolsFactory {
@@ -2391,7 +2682,11 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
         })
         .unwrap();
     session
-        .set_mob_tool_authority_context(Some(create_test_authority()))
+        .set_build_state(meerkat_core::SessionBuildState::default())
+        .unwrap();
+    let expected_authority = create_test_authority();
+    session
+        .set_mob_tool_authority_context(Some(expected_authority.clone()))
         .unwrap();
 
     let build_config = AgentBuildConfig {
@@ -2402,7 +2697,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
 
     let _agent = factory.build_agent(build_config, &config).await.unwrap();
     let observed = observed.lock().expect("recording mutex");
-    assert_eq!(observed.as_slice(), &[Some(create_test_authority())]);
+    assert!(observed.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -2451,15 +2746,16 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
     let _shared_pubkey = shared_runtime.public_key().to_peer_id();
 
     // Add a sentinel peer to the shared runtime so we can detect reuse.
-    shared_runtime
-        .register_trusted_peer(meerkat_comms::TrustedPeer {
+    add_trusted_peer_with_generated_authority(
+        Arc::clone(&shared_runtime),
+        meerkat_comms::TrustedPeer {
             name: "sentinel".into(),
             pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
             addr: "tcp://127.0.0.1:9999".into(),
             meta: meerkat_comms::PeerMeta::default(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
 
     let factory = temp_factory(&temp).with_comms_runtime(shared_runtime);
     let config = Config::default();

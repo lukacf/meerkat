@@ -75,16 +75,6 @@ pub enum JobStatus {
         duration_secs: f64,
     },
 
-    /// Job exceeded timeout
-    TimedOut {
-        /// Partial stdout captured before timeout
-        stdout: String,
-        /// Partial stderr captured before timeout
-        stderr: String,
-        /// Duration (should be approximately the timeout value)
-        duration_secs: f64,
-    },
-
     /// Job was cancelled by user
     Cancelled {
         /// Duration before cancellation in seconds
@@ -103,8 +93,6 @@ pub enum JobSummaryStatus {
     Completed,
     /// Job failed to execute or terminated unsuccessfully.
     Failed,
-    /// Job exceeded timeout.
-    TimedOut,
     /// Job was cancelled by user or lifecycle retirement.
     Cancelled,
 }
@@ -115,7 +103,6 @@ impl From<&JobStatus> for JobSummaryStatus {
             JobStatus::Running { .. } => Self::Running,
             JobStatus::Completed { .. } => Self::Completed,
             JobStatus::Failed { .. } => Self::Failed,
-            JobStatus::TimedOut { .. } => Self::TimedOut,
             JobStatus::Cancelled { .. } => Self::Cancelled,
         }
     }
@@ -236,18 +223,12 @@ mod tests {
             error: "spawn error".to_string(),
             duration_secs: 0.1,
         };
-        let timed_out = JobStatus::TimedOut {
-            stdout: "partial".to_string(),
-            stderr: "".to_string(),
-            duration_secs: 30.0,
-        };
         let cancelled = JobStatus::Cancelled { duration_secs: 5.0 };
 
         // Verify they are distinct
         assert_ne!(running, completed);
         assert_ne!(completed, failed);
-        assert_ne!(failed, timed_out);
-        assert_ne!(timed_out, cancelled);
+        assert_ne!(failed, cancelled);
     }
 
     #[test]
@@ -283,17 +264,6 @@ mod tests {
         assert!(json.contains("\"status\":\"failed\""));
         let parsed: JobStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, failed);
-
-        // Test TimedOut
-        let timed_out = JobStatus::TimedOut {
-            stdout: "partial output".to_string(),
-            stderr: "".to_string(),
-            duration_secs: 30.0,
-        };
-        let json = serde_json::to_string(&timed_out).unwrap();
-        assert!(json.contains("\"status\":\"timed_out\""));
-        let parsed: JobStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, timed_out);
 
         // Test Cancelled
         let cancelled = JobStatus::Cancelled { duration_secs: 5.5 };
@@ -460,7 +430,6 @@ mod tests {
             (JobSummaryStatus::Running, "running"),
             (JobSummaryStatus::Completed, "completed"),
             (JobSummaryStatus::Failed, "failed"),
-            (JobSummaryStatus::TimedOut, "timed_out"),
             (JobSummaryStatus::Cancelled, "cancelled"),
         ];
 

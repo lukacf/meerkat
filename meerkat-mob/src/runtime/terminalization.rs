@@ -1,10 +1,8 @@
-use super::flow_system_step_id;
 use crate::error::MobError;
 use crate::event::{MobEventKind, NewMobEvent};
 use crate::ids::{FlowId, MobId, RunId};
-use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus};
-use crate::store::{MobEventStore, MobRunStore};
-use chrono::Utc;
+use crate::run::{MobRun, MobRunStatus, mob_machine_run_status_is_terminal};
+use crate::store::{MobEventStore, MobRunStore, authority_validating_mob_run_store};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -69,7 +67,7 @@ impl FlowTerminalizationAuthority {
         mob_id: MobId,
     ) -> Self {
         Self {
-            run_store,
+            run_store: authority_validating_mob_run_store(run_store),
             events,
             mob_id,
         }
@@ -115,7 +113,7 @@ impl FlowTerminalizationAuthority {
             .get_run(&run_id)
             .await?
             .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
-        if !run.status.is_terminal() {
+        if !mob_machine_run_status_is_terminal(&run.run_id, &run.status)? {
             return Ok(TerminalizationOutcome::Noop);
         }
         let target = Self::repair_target_for_run(&run, target);
@@ -160,11 +158,7 @@ impl FlowTerminalizationAuthority {
             MobRunStatus::Failed => {
                 let reason = match requested {
                     TerminalizationTarget::Failed { reason } => reason,
-                    _ => run
-                        .failure_ledger
-                        .last()
-                        .map(|entry| entry.reason.clone())
-                        .unwrap_or_else(|| "run already failed".to_string()),
+                    _ => "run already failed".to_string(),
                 };
                 TerminalizationTarget::Failed { reason }
             }
@@ -205,37 +199,11 @@ impl FlowTerminalizationAuthority {
     ) -> Result<TerminalizationOutcome, MobError> {
         let reason =
             format!("terminal run status persisted but {event_name} append failed: {append_error}");
-        if let Err(failure_ledger_error) = self
-            .run_store
-            .append_failure_entry(
-                run_id,
-                FailureLedgerEntry {
-                    step_id: flow_system_step_id(),
-                    reason: reason.clone(),
-                    error_report: None,
-                    error: None,
-                    timestamp: Utc::now(),
-                },
-            )
-            .await
-        {
-            tracing::error!(
-                run_id = %run_id,
-                event_name,
-                append_error = %append_error,
-                ledger_error = %failure_ledger_error,
-                "terminal event append divergence could not be recorded in failure ledger"
-            );
-            return Err(MobError::Internal(format!(
-                "terminal run status persisted but {event_name} append failed and failure ledger append also failed: {failure_ledger_error}"
-            )));
-        }
-
         tracing::error!(
             run_id = %run_id,
             event_name,
             append_error = %append_error,
-            "terminal event append divergence recorded in failure ledger"
+            "terminal event append divergence surfaced without mutating run provenance"
         );
         Err(MobError::Internal(reason))
     }
@@ -246,9 +214,10 @@ mod tests {
     use super::{FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget};
     use crate::event::{MobEvent, MobEventKind, NewMobEvent};
     use crate::ids::{FlowId, LoopId, MobId, RunId, StepId};
-    use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
+    use crate::run::{MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry};
     use crate::store::{
-        InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError, terminal_event_identity,
+        InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError, private,
+        terminal_event_identity,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -297,268 +266,36 @@ mod tests {
             self.inner.list_runs(mob_id, flow_id).await
         }
 
-        async fn cas_run_status(
-            &self,
-            run_id: &RunId,
-            expected: MobRunStatus,
-            next: MobRunStatus,
-        ) -> Result<bool, MobStoreError> {
-            self.inner.cas_run_status(run_id, expected, next).await
-        }
-
-        async fn cas_flow_state(
-            &self,
-            run_id: &RunId,
-            expected: &crate::run::flow_run::State,
-            next: &crate::run::flow_run::State,
-        ) -> Result<bool, MobStoreError> {
-            self.inner.cas_flow_state(run_id, expected, next).await
-        }
-
-        async fn cas_run_snapshot(
-            &self,
-            run_id: &RunId,
-            expected_status: MobRunStatus,
-            expected_flow_state: &crate::run::flow_run::State,
-            next_status: MobRunStatus,
-            next_flow_state: &crate::run::flow_run::State,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_run_snapshot(
-                    run_id,
-                    expected_status,
-                    expected_flow_state,
-                    next_status,
-                    next_flow_state,
-                )
-                .await
-        }
-
-        async fn append_step_entry(
+        async fn append_step_entry_with_authority(
             &self,
             run_id: &RunId,
             entry: StepLedgerEntry,
+            authority: MobRunProvenanceAuthority,
         ) -> Result<(), MobStoreError> {
-            self.inner.append_step_entry(run_id, entry).await
+            self.inner
+                .append_step_entry_with_authority(run_id, entry, authority)
+                .await
         }
 
-        async fn append_step_entry_if_absent(
+        async fn append_step_entry_if_absent_with_authority(
             &self,
             run_id: &RunId,
             entry: StepLedgerEntry,
+            authority: MobRunProvenanceAuthority,
         ) -> Result<bool, MobStoreError> {
-            self.inner.append_step_entry_if_absent(run_id, entry).await
+            self.inner
+                .append_step_entry_if_absent_with_authority(run_id, entry, authority)
+                .await
         }
 
-        async fn put_step_output(
+        async fn append_failure_entry_with_authority(
             &self,
             run_id: &RunId,
-            step_id: &StepId,
-            output: serde_json::Value,
-        ) -> Result<(), MobStoreError> {
-            self.inner.put_step_output(run_id, step_id, output).await
-        }
-
-        async fn append_failure_entry(
-            &self,
-            run_id: &RunId,
-            entry: FailureLedgerEntry,
-        ) -> Result<(), MobStoreError> {
-            self.inner.append_failure_entry(run_id, entry).await
-        }
-
-        async fn upsert_loop_snapshot(
-            &self,
-            run_id: &RunId,
-            loop_instance_id: &crate::ids::LoopInstanceId,
-            snapshot: crate::run::LoopSnapshot,
-            ledger_entry: Option<crate::run::LoopIterationLedgerEntry>,
+            entry: crate::run::FailureLedgerEntry,
+            authority: MobRunProvenanceAuthority,
         ) -> Result<(), MobStoreError> {
             self.inner
-                .upsert_loop_snapshot(run_id, loop_instance_id, snapshot, ledger_entry)
-                .await
-        }
-
-        async fn cas_frame_state(
-            &self,
-            run_id: &RunId,
-            frame_id: &crate::ids::FrameId,
-            expected: Option<&crate::run::FrameSnapshot>,
-            next: crate::run::FrameSnapshot,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_frame_state(run_id, frame_id, expected, next)
-                .await
-        }
-
-        async fn cas_grant_node_slot(
-            &self,
-            run_id: &RunId,
-            expected_run_state: &crate::run::flow_run::State,
-            next_run_state: crate::run::flow_run::State,
-            frame_id: &crate::ids::FrameId,
-            expected_frame: &crate::run::FrameSnapshot,
-            next_frame: crate::run::FrameSnapshot,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_grant_node_slot(
-                    run_id,
-                    expected_run_state,
-                    next_run_state,
-                    frame_id,
-                    expected_frame,
-                    next_frame,
-                )
-                .await
-        }
-
-        async fn cas_complete_step_and_record_output(
-            &self,
-            run_id: &RunId,
-            frame_id: &crate::ids::FrameId,
-            expected_frame: &crate::run::FrameSnapshot,
-            next_frame: crate::run::FrameSnapshot,
-            step_output_key: String,
-            step_output: serde_json::Value,
-            loop_context: Option<(&crate::ids::LoopId, u64)>,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_complete_step_and_record_output(
-                    run_id,
-                    frame_id,
-                    expected_frame,
-                    next_frame,
-                    step_output_key,
-                    step_output,
-                    loop_context,
-                )
-                .await
-        }
-
-        async fn cas_start_loop(
-            &self,
-            run_id: &RunId,
-            loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_run_state: &crate::run::flow_run::State,
-            next_run_state: crate::run::flow_run::State,
-            frame_id: &crate::ids::FrameId,
-            expected_frame: &crate::run::FrameSnapshot,
-            next_frame: crate::run::FrameSnapshot,
-            initial_loop: crate::run::LoopSnapshot,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_start_loop(
-                    run_id,
-                    loop_instance_id,
-                    expected_run_state,
-                    next_run_state,
-                    frame_id,
-                    expected_frame,
-                    next_frame,
-                    initial_loop,
-                )
-                .await
-        }
-
-        async fn cas_loop_request_body_frame(
-            &self,
-            run_id: &RunId,
-            loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_loop: &crate::run::LoopSnapshot,
-            next_loop: crate::run::LoopSnapshot,
-            expected_run_state: &crate::run::flow_run::State,
-            next_run_state: crate::run::flow_run::State,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_loop_request_body_frame(
-                    run_id,
-                    loop_instance_id,
-                    expected_loop,
-                    next_loop,
-                    expected_run_state,
-                    next_run_state,
-                )
-                .await
-        }
-
-        async fn cas_grant_body_frame_start(
-            &self,
-            run_id: &RunId,
-            loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_loop: &crate::run::LoopSnapshot,
-            next_loop: crate::run::LoopSnapshot,
-            frame_id: &crate::ids::FrameId,
-            initial_frame: crate::run::FrameSnapshot,
-            ledger_entry: crate::run::LoopIterationLedgerEntry,
-            expected_run_state: &crate::run::flow_run::State,
-            next_run_state: crate::run::flow_run::State,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_grant_body_frame_start(
-                    run_id,
-                    loop_instance_id,
-                    expected_loop,
-                    next_loop,
-                    frame_id,
-                    initial_frame,
-                    ledger_entry,
-                    expected_run_state,
-                    next_run_state,
-                )
-                .await
-        }
-
-        async fn cas_complete_body_frame(
-            &self,
-            run_id: &RunId,
-            loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_loop: &crate::run::LoopSnapshot,
-            next_loop: crate::run::LoopSnapshot,
-            frame_id: &crate::ids::FrameId,
-            expected_frame: &crate::run::FrameSnapshot,
-            next_frame: crate::run::FrameSnapshot,
-            expected_run_state: &crate::run::flow_run::State,
-            next_run_state: crate::run::flow_run::State,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_complete_body_frame(
-                    run_id,
-                    loop_instance_id,
-                    expected_loop,
-                    next_loop,
-                    frame_id,
-                    expected_frame,
-                    next_frame,
-                    expected_run_state,
-                    next_run_state,
-                )
-                .await
-        }
-
-        async fn cas_complete_loop(
-            &self,
-            run_id: &RunId,
-            loop_instance_id: &crate::ids::LoopInstanceId,
-            expected_loop: &crate::run::LoopSnapshot,
-            next_loop: crate::run::LoopSnapshot,
-            frame_id: &crate::ids::FrameId,
-            expected_frame: &crate::run::FrameSnapshot,
-            next_frame: crate::run::FrameSnapshot,
-            expected_run_state: &crate::run::flow_run::State,
-            next_run_state: crate::run::flow_run::State,
-        ) -> Result<bool, MobStoreError> {
-            self.inner
-                .cas_complete_loop(
-                    run_id,
-                    loop_instance_id,
-                    expected_loop,
-                    next_loop,
-                    frame_id,
-                    expected_frame,
-                    next_frame,
-                    expected_run_state,
-                    next_run_state,
-                )
+                .append_failure_entry_with_authority(run_id, entry, authority)
                 .await
         }
 
@@ -826,6 +563,8 @@ mod tests {
         }
     }
 
+    impl private::MobEventStoreSealed for FaultInjectedEventStore {}
+
     #[async_trait]
     impl MobEventStore for FaultInjectedEventStore {
         async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
@@ -932,25 +671,15 @@ mod tests {
     }
 
     fn sample_run(run_id: RunId, status: MobRunStatus) -> MobRun {
-        MobRun {
+        MobRun::authority_backed_for_steps(
             run_id,
-            mob_id: MobId::from("mob"),
-            flow_id: FlowId::from("flow"),
+            MobId::from("mob"),
+            FlowId::from("flow"),
+            [StepId::from("step-1")],
             status,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        }
+            serde_json::json!({}),
+        )
+        .expect("authority-backed sample run")
     }
 
     #[tokio::test]
@@ -1280,7 +1009,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terminalization_records_coherence_failure_ledger_on_append_error() {
+    async fn test_terminalization_surfaces_append_error_without_provenance_mutation() {
         let run_store = Arc::new(InMemoryMobRunStore::new());
         let events = Arc::new(FaultInjectedEventStore::default());
         events.fail_appends_for("FlowFailed").await;
@@ -1317,11 +1046,8 @@ mod tests {
             .expect("run exists");
         assert_eq!(run.status, MobRunStatus::Failed);
         assert!(
-            run.failure_ledger.iter().any(|entry| {
-                entry.step_id == crate::runtime::flow_system_step_id()
-                    && entry.reason.contains("FlowFailed append failed")
-            }),
-            "failed terminal append should always be mirrored into failure ledger"
+            run.failure_ledger.is_empty(),
+            "failed terminal append must not invent run provenance outside machine authority"
         );
     }
 }

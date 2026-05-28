@@ -224,6 +224,7 @@ pub enum ExprDef {
     // Literals
     Bool(bool),
     U64(u64),
+    U64Max,
     StringLit(String),
     None,
     Some(Box<ExprDef>),
@@ -240,6 +241,22 @@ pub enum ExprDef {
     NamedVariant {
         enum_name: Ident,
         variant: Ident,
+    },
+    FieldAccess {
+        base: Box<ExprDef>,
+        field: Ident,
+    },
+    EnumVariantIs {
+        value: Box<ExprDef>,
+        enum_name: Ident,
+        variant: Ident,
+        tuple_variant: bool,
+    },
+    EnumStringSetPayload {
+        value: Box<ExprDef>,
+        enum_name: Ident,
+        variant: Ident,
+        field: String,
     },
 
     // Boolean operators
@@ -271,6 +288,10 @@ pub enum ExprDef {
         key: Box<ExprDef>,
     },
     Len(Box<ExprDef>),
+    Count {
+        collection: Box<ExprDef>,
+        value: Box<ExprDef>,
+    },
     MapGet {
         map: Box<ExprDef>,
         key: Box<ExprDef>,

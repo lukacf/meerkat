@@ -32,11 +32,19 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
     }
 }
 
+pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod meerkat_machine;
+pub mod mob_coordination_lifecycle_authority;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
+pub mod pending_continuation_admission;
 pub mod schedule_lifecycle;
+pub mod session_deferred_turn_authority;
+pub mod session_durable_config_authority;
+pub mod session_persistence_version_authority;
+pub mod session_realtime_transcript_authority;
+pub mod session_system_context_authority;
 pub mod work_attention_lifecycle;
 pub mod workgraph_lifecycle;
 
@@ -68,14 +76,37 @@ impl MachineSchemaMetadata {
 
 pub const AUTH_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const AUTH_MACHINE_PRODUCTION_RUST_MODULE: &str = "auth_machine::dsl";
+pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const MOB_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_MACHINE_PRODUCTION_RUST_MODULE: &str = "machines::mob_machine";
+pub const MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "generated::mob_coordination_lifecycle_authority";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::schedule_lifecycle";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurrence_lifecycle";
+pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE: &str =
+    "generated::pending_continuation_admission";
+pub const SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "generated::session_deferred_turn_authority";
+pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "generated::session_durable_config_authority";
+pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "generated::session_persistence_version_authority";
+pub const SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "generated::session_realtime_transcript_authority";
+pub const SESSION_SYSTEM_CONTEXT_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const SESSION_SYSTEM_CONTEXT_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "generated::session_system_context_authority";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
@@ -165,6 +196,44 @@ pub fn dsl_auth_machine_production_schema() -> MachineSchema {
     )
 }
 
+pub fn dsl_approval_lifecycle_machine() -> MachineSchema {
+    approval_lifecycle_schema_metadata()
+        .attach_to(approval_lifecycle::ApprovalLifecycleMachineState::schema())
+}
+
+pub fn dsl_approval_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_approval_lifecycle_machine(),
+        APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn approval_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "ApprovalLifecycleStatus",
+                &["Pending", "Approved", "Denied", "Expired", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum("ApprovalLifecycleDecision", &["Approve", "Deny"]),
+            NamedTypeBinding::string_enum(
+                "ApprovalLifecycleRejectionReason",
+                &[
+                    "NotFound",
+                    "AlreadyExists",
+                    "AlreadyDecided",
+                    "Expired",
+                    "InvalidDecision",
+                    "EmptyAllowedDecisions",
+                    "InvalidRestoredRecord",
+                ],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
 pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![NamedTypeBinding::string_enum(
@@ -172,17 +241,303 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             &[
                 "Valid",
                 "Expiring",
+                "Expired",
                 "Refreshing",
                 "ReauthRequired",
                 "Released",
             ],
         )],
-        vec![],
+        vec![
+            InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
+            InputVariantId::from_trusted_catalog_literal("RestoreCredentialLifecycleSnapshot"),
+            InputVariantId::from_trusted_catalog_literal("RestoreOAuthBrowserFlow"),
+            InputVariantId::from_trusted_catalog_literal("RestoreOAuthDeviceFlow"),
+            InputVariantId::from_trusted_catalog_literal("RestoreOAuthDevicePoll"),
+        ],
     )
 }
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
     meerkat_machine_schema_metadata().attach_to(meerkat_machine::MeerkatMachineState::schema())
+}
+
+pub fn dsl_pending_continuation_admission_machine() -> MachineSchema {
+    pending_continuation_admission_schema_metadata().attach_to(
+        pending_continuation_admission::PendingContinuationAdmissionMachineState::schema(),
+    )
+}
+
+pub fn dsl_pending_continuation_admission_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_pending_continuation_admission_machine(),
+        PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE,
+        PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn pending_continuation_admission_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "ObservedSessionTailKind",
+                &[
+                    "Empty",
+                    "System",
+                    "SystemNotice",
+                    "User",
+                    "Assistant",
+                    "BlockAssistant",
+                    "ToolResults",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PendingContinuationDisposition",
+                &["RunPending", "NoPendingBoundary"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PendingContinuationPublicTerminal",
+                &["NoPendingBoundary"],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+/// Non-canonical support schema used only to emit the generated session
+/// deferred-turn authority protocol into `meerkat-core`.
+pub fn dsl_session_deferred_turn_authority_machine() -> MachineSchema {
+    session_deferred_turn_authority_schema_metadata().attach_to(
+        session_deferred_turn_authority::SessionDeferredTurnAuthorityMachineState::schema(),
+    )
+}
+
+pub fn dsl_session_deferred_turn_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_session_deferred_turn_authority_machine(),
+        SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_CRATE,
+        SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn session_deferred_turn_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "DeferredTurnFirstTurnPhase",
+                &["Inactive", "Pending", "Consumed"],
+            ),
+            NamedTypeBinding::string_enum("InitialPromptStageDecision", &["Clear", "Store"]),
+        ],
+        Vec::new(),
+    )
+}
+
+/// Non-canonical support schema used only to emit generated session durable
+/// config authority into `meerkat-core`.
+pub fn dsl_session_durable_config_authority_machine() -> MachineSchema {
+    session_durable_config_authority_schema_metadata().attach_to(
+        session_durable_config_authority::SessionDurableConfigAuthorityMachineState::schema(),
+    )
+}
+
+pub fn dsl_session_durable_config_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_session_durable_config_authority_machine(),
+        SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_CRATE,
+        SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn session_durable_config_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "SessionDurableProviderKind",
+                &["Anthropic", "OpenAI", "Gemini", "SelfHosted", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SessionToolCategoryOverrideKind",
+                &["Inherit", "Enable", "Disable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SessionCallTimeoutOverrideKind",
+                &["Inherit", "Disabled", "Value"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SessionSystemPromptSource",
+                &[
+                    "DirectMutation",
+                    "ExplicitBuild",
+                    "DefaultBuild",
+                    "WasmDefaultBuild",
+                    "RuntimeContextAppend",
+                    "RuntimeSteerCleanup",
+                ],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+/// Non-canonical support schema used only to emit generated session
+/// persistence-version authority into `meerkat-core`.
+pub fn dsl_session_persistence_version_authority_machine() -> MachineSchema {
+    session_persistence_version_authority_schema_metadata().attach_to(
+        session_persistence_version_authority::SessionPersistenceVersionAuthorityMachineState::schema(
+        ),
+    )
+}
+
+pub fn dsl_session_persistence_version_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_session_persistence_version_authority_machine(),
+        SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_CRATE,
+        SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn session_persistence_version_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![NamedTypeBinding::string_enum(
+            "SessionPersistenceVersionField",
+            &[
+                "SessionEnvelope",
+                "StoredInputState",
+                "SessionMetadataSchema",
+            ],
+        )],
+        Vec::new(),
+    )
+}
+
+/// Non-canonical support schema used only to emit generated mob coordination
+/// lifecycle authority into `meerkat-mob`.
+pub fn dsl_mob_coordination_lifecycle_authority_machine() -> MachineSchema {
+    mob_coordination_lifecycle_authority_schema_metadata().attach_to(
+        mob_coordination_lifecycle_authority::MobCoordinationLifecycleAuthorityMachineState::schema(
+        ),
+    )
+}
+
+pub fn dsl_mob_coordination_lifecycle_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_mob_coordination_lifecycle_authority_machine(),
+        MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_CRATE,
+        MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn mob_coordination_lifecycle_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "MobCoordinationWorkIntentStatus",
+                &["Planned", "Active", "Blocked", "Completed", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationResourceClaimStatus",
+                &["Active", "Released", "Expired", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationResourceClaimKind",
+                &["Advisory", "SoftReservation", "Exclusive"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationEventKind",
+                &[
+                    "WorkIntentRecorded",
+                    "WorkIntentStatusChanged",
+                    "ResourceClaimRecorded",
+                    "ResourceClaimStatusChanged",
+                    "ResourceClaimOverlapObserved",
+                ],
+            ),
+            NamedTypeBinding::string("WorkIntentId"),
+            NamedTypeBinding::string("ResourceClaimId"),
+            NamedTypeBinding::string("CoordinationResourceRef"),
+        ],
+        Vec::new(),
+    )
+}
+
+/// Session-local support authority for realtime transcript staging and
+/// materialization decisions emitted into `meerkat-core`.
+pub fn dsl_session_realtime_transcript_authority_machine() -> MachineSchema {
+    session_realtime_transcript_authority_schema_metadata().attach_to(
+        session_realtime_transcript_authority::SessionRealtimeTranscriptAuthorityMachineState::schema(
+        ),
+    )
+}
+
+pub fn dsl_session_realtime_transcript_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_session_realtime_transcript_authority_machine(),
+        SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_CRATE,
+        SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn session_realtime_transcript_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptEventKind",
+                &[
+                    "ItemObserved",
+                    "ItemSkipped",
+                    "UserTranscriptFinal",
+                    "AssistantTextDelta",
+                    "AssistantTranscriptDelta",
+                    "AssistantTranscriptTruncated",
+                    "AssistantTranscriptFinalText",
+                    "AssistantTurnCompleted",
+                    "AssistantTurnInterrupted",
+                ],
+            ),
+            NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
+            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptStopReasonKind",
+                &["Cancelled", "ToolUse", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptMaterializeDecision",
+                &[
+                    "Wait",
+                    "MarkSkipped",
+                    "MaterializeUser",
+                    "MaterializeAssistant",
+                ],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+/// Non-canonical support schema used only to emit the generated session
+/// system-context authority protocol into `meerkat-core`.
+pub fn dsl_session_system_context_authority_machine() -> MachineSchema {
+    session_system_context_authority_schema_metadata().attach_to(
+        session_system_context_authority::SessionSystemContextAuthorityMachineState::schema(),
+    )
+}
+
+pub fn dsl_session_system_context_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_session_system_context_authority_machine(),
+        SESSION_SYSTEM_CONTEXT_AUTHORITY_PRODUCTION_RUST_CRATE,
+        SESSION_SYSTEM_CONTEXT_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn session_system_context_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![NamedTypeBinding::string_enum(
+            "SystemContextAppendDecision",
+            &["Staged", "Duplicate", "RejectEmpty", "RejectConflict"],
+        )],
+        Vec::new(),
+    )
 }
 
 pub fn dsl_meerkat_machine_production_schema() -> MachineSchema {
@@ -200,6 +555,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::u64("FenceToken"),
             NamedTypeBinding::u64("Generation"),
             NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("CommsRuntimeId"),
             NamedTypeBinding::string("AuthBindingRef"),
             NamedTypeBinding::string_enum(
@@ -243,6 +599,173 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("InboundPeerRequestState", &["Received", "Replied"]),
             NamedTypeBinding::string("InputId"),
             NamedTypeBinding::string_enum(
+                "AdmissionInputKind",
+                &[
+                    "Prompt",
+                    "PeerMessage",
+                    "PeerRequest",
+                    "PeerResponseProgress",
+                    "PeerResponseTerminal",
+                    "FlowStep",
+                    "ExternalEvent",
+                    "Continuation",
+                    "Operation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "InputDurabilityKind",
+                &["Durable", "Ephemeral", "Derived", "Missing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionInputOriginKind",
+                &["Operator", "Peer", "Flow", "System", "External"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyApplyMode",
+                &["StageRunStart", "StageRunBoundary", "InjectNow", "Ignore"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyWakeMode",
+                &["WakeIfIdle", "InterruptYielding", "None"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyQueueMode",
+                &["None", "Fifo", "Coalesce", "Supersede", "Priority"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyConsumePoint",
+                &[
+                    "OnAccept",
+                    "OnApply",
+                    "OnRunStart",
+                    "OnRunComplete",
+                    "ExplicitAck",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyDrainPolicy",
+                &["QueueNextTurn", "SteerBatch", "Immediate", "Ignore"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRoutingDisposition",
+                &["Queue", "Steer", "Immediate", "Drop"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRunApplyBoundary",
+                &["RunStart", "RunCheckpoint", "Immediate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRuntimeExecutionKind",
+                &["ContentTurn", "ResumePending"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPeerResponseTerminalApplyIntent",
+                &["AppendContextAndRun"],
+            ),
+            NamedTypeBinding::string_enum("AdmissionPlanKind", &["ConsumedOnAccept", "Queued"]),
+            NamedTypeBinding::string_enum(
+                "AdmissionQueueActionKind",
+                &["None", "EnqueueTo", "EnqueueFront"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionExistingQueuedActionKind",
+                &["None", "Coalesce", "Supersede"],
+            ),
+            NamedTypeBinding::string_enum("AdmissionValidationResultKind", &["Accept", "Reject"]),
+            NamedTypeBinding::string_enum(
+                "PeerResponseTerminalObservedStatus",
+                &["NotPeerTerminal", "Completed", "Failed", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRejectReasonKind",
+                &[
+                    "DurabilityViolation",
+                    "PeerHandlingModeInvalid",
+                    "PeerResponseTerminalInvalid",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionIdempotencyResultKind",
+                &["Accept", "Deduplicated"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OpRegistrationAdmissionResultKind",
+                &["Accept", "Reject"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OpRegistrationRejectReasonKind",
+                &["AlreadyRegistered", "MaxConcurrentExceeded"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OperationPublicResultClass",
+                &[
+                    "MissingAuthority",
+                    "Running",
+                    "Completed",
+                    "Failed",
+                    "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::string_enum("OperationCompletionFeedClass", &["Emit", "Suppress"]),
+            NamedTypeBinding::string_enum("OperationCompletionWakeClass", &["Wake", "Ignore"]),
+            NamedTypeBinding::string_enum("OperationDurabilityClass", &["Retain", "Discard"]),
+            NamedTypeBinding::string_enum(
+                "OpLifecycleActionKind",
+                &[
+                    "Start",
+                    "Fail",
+                    "PeerReady",
+                    "ProgressReported",
+                    "Complete",
+                    "Abort",
+                    "Cancel",
+                    "RetireRequested",
+                    "RetireCompleted",
+                    "Terminate",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OpLifecycleRejectReasonKind",
+                &[
+                    "OperationNotFound",
+                    "InvalidTransition",
+                    "PeerNotExpected",
+                    "AlreadyPeerReady",
+                ],
+            ),
+            NamedTypeBinding::string_enum("WaitAllAdmissionResultKind", &["Accept", "Reject"]),
+            NamedTypeBinding::string_enum(
+                "WaitAllRejectReasonKind",
+                &[
+                    "DuplicateOperation",
+                    "WaitAlreadyActive",
+                    "OperationNotFound",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputObservedPhase",
+                &[
+                    "Accepted",
+                    "Queued",
+                    "Staged",
+                    "Applied",
+                    "AppliedPendingConsumption",
+                    "Consumed",
+                    "Superseded",
+                    "Coalesced",
+                    "Abandoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputNormalizationReasonKind",
+                &[
+                    "QueueAccepted",
+                    "RollbackStaged",
+                    "BoundaryReceiptCommitted",
+                    "MissingBoundaryReceipt",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputAbandonReason",
                 &[
                     "Retired",
@@ -272,6 +795,30 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Consumed", "Superseded", "Coalesced", "Abandoned"],
             ),
             NamedTypeBinding::string_enum(
+                "InputPublicLifecycleState",
+                &[
+                    "Accepted",
+                    "Queued",
+                    "Staged",
+                    "Applied",
+                    "AppliedPendingConsumption",
+                    "Consumed",
+                    "Superseded",
+                    "Coalesced",
+                    "Abandoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "InputPublicTerminalOutcome",
+                &[
+                    "Completed",
+                    "Abandoned",
+                    "Superseded",
+                    "Coalesced",
+                    "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "InteractionStreamState",
                 &[
                     "Reserved",
@@ -290,6 +837,110 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RetryableProviderError",
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "LiveOpenAdmissionRejection",
+                &["AlreadyBound", "ChannelAlreadyBound"],
+            ),
+            NamedTypeBinding::string_enum("LiveRefreshPublicStatus", &["Queued"]),
+            NamedTypeBinding::string_enum("LiveClosePublicStatus", &["Closed"]),
+            NamedTypeBinding::string_enum(
+                "LiveCommandPublicKind",
+                &[
+                    "SendInput",
+                    "CommitInput",
+                    "Interrupt",
+                    "TruncateAssistantOutput",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveCommandRejectionReason",
+                &[
+                    "ChannelNotFound",
+                    "NoAdapter",
+                    "ChannelNotReady",
+                    "UnsupportedCommand",
+                    "AdapterError",
+                    "InternalHostError",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveCommandRejectionPublicErrorClass",
+                &["InvalidParams", "InternalError"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveChannelRequestPublicKind",
+                &["Status", "Close", "Refresh", "WebrtcAnswer"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveChannelRequestRejectionReason",
+                &[
+                    "ChannelNotFound",
+                    "NoAdapter",
+                    "InvalidToken",
+                    "InvalidPayload",
+                    "WebrtcAnswerError",
+                    "InternalHostError",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveChannelRequestRejectionPublicErrorClass",
+                &["InvalidParams", "InternalError"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveWebrtcAnswerAdmissionRejection",
+                &[
+                    "TokenNotFound",
+                    "TokenExpired",
+                    "TokenChannelMismatch",
+                    "TokenAlreadyConsumed",
+                    "ChannelNotBound",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveWebsocketTokenAdmissionRejection",
+                &[
+                    "TokenNotFound",
+                    "TokenExpired",
+                    "TokenChannelMismatch",
+                    "TokenAlreadyConsumed",
+                    "ChannelNotBound",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveWebsocketTokenAdmissionPublicErrorClass",
+                &["InvalidToken"],
+            ),
+            NamedTypeBinding::string_enum("LiveWebrtcAnswerPublicStatus", &["Answered"]),
+            NamedTypeBinding::string_enum(
+                "RpcEventStreamTerminalReason",
+                &["RemoteEnd", "TerminalError", "ExplicitClose"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RpcEventStreamTerminalObservationKind",
+                &[
+                    "TransportEnded",
+                    "NotificationQueueOverflow",
+                    "NotificationReceiverGone",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RpcEventStreamTerminalErrorCode",
+                &["StreamQueueOverflow", "StreamReceiverGone"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveChannelPublicStatus",
+                &["Idle", "Opening", "Ready", "Degraded", "Closing", "Closed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveChannelDegradationReason",
+                &[
+                    "Unknown",
+                    "RateLimited",
+                    "ProviderThrottled",
+                    "NetworkUnstable",
+                    "Other",
+                ],
+            ),
             NamedTypeBinding::string("McpServerId"),
             NamedTypeBinding::string_enum(
                 "McpServerState",
@@ -298,7 +949,25 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("MeerkatPhase"),
             NamedTypeBinding::string("MobId"),
             NamedTypeBinding::string("OperationId"),
-            NamedTypeBinding::string_enum("OperationKind", &["MobMemberChild", "BackgroundToolOp"]),
+            NamedTypeBinding::string_enum(
+                "OperationKind",
+                &[
+                    "MobMemberChild",
+                    "BackgroundToolOp",
+                    "BackgroundToolCapacitySlot",
+                ],
+            ),
+            NamedTypeBinding::string_enum("OperationSourceKind", &["SessionChild", "BackendPeer"]),
+            NamedTypeBinding::type_path_struct(
+                "OperationSource",
+                "crate::catalog::dsl::meerkat_machine::OperationSource",
+                vec![
+                    TypePathStructField::named("kind", "OperationSourceKind"),
+                    TypePathStructField::optional_named("session_id", "SessionId"),
+                    TypePathStructField::optional_named("peer_id", "PeerId"),
+                    TypePathStructField::optional_named("address", "PeerAddress"),
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "OperationStatus",
                 &[
@@ -368,6 +1037,23 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["PeerAdded", "PeerRetired", "PeerUnwired"],
             ),
             NamedTypeBinding::string_enum(
+                "PeerIngressAuthorityPhaseClass",
+                &["Absent", "Received", "Dropped", "Delivered"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressReceiveOutcomeClass",
+                &[
+                    "Admitted",
+                    "DroppedUntrustedSender",
+                    "DroppedSessionClosed",
+                    "DroppedInboxFull",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressAdmissionDiagnosticClass",
+                &["TrustedAtAdmission", "UntrustedAtAdmission"],
+            ),
+            NamedTypeBinding::string_enum(
                 "PeerIngressOwnerKind",
                 &["Unattached", "SessionOwned", "MobOwned"],
             ),
@@ -389,6 +1075,22 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("PreRunPhase", &["Idle", "Attached", "Retired"]),
+            NamedTypeBinding::string_enum(
+                "StagedSessionPhase",
+                &["NotStaged", "Staged", "Promoting", "Closing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobOperatorAccessRequestKind",
+                &["Inherit", "Enable", "Disable"],
+            ),
+            NamedTypeBinding::type_path(
+                "MobToolCallerProvenance",
+                "meerkat_core::service::MobToolCallerProvenance",
+            ),
+            NamedTypeBinding::type_path(
+                "OpaquePrincipalToken",
+                "meerkat_core::service::OpaquePrincipalToken",
+            ),
             NamedTypeBinding::string_enum(
                 "Provider",
                 &["Anthropic", "OpenAI", "Gemini", "SelfHosted", "Other"],
@@ -419,6 +1121,40 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "RoutingSwitchApprovalReason",
+                &[
+                    "CrossProvider",
+                    "CostExceedsThreshold",
+                    "SafetyHold",
+                    "UntilChangedFromModelOrigin",
+                    "RealtimeDetachRequired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingImageApprovalReason",
+                &[
+                    "CrossProvider",
+                    "CostExceedsThreshold",
+                    "SafetyHold",
+                    "RealtimeDetachRequired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingImagePlanDenialReason",
+                &[
+                    "UnsupportedTarget",
+                    "UnsupportedCount",
+                    "CapabilityPolicy",
+                    "CostPolicy",
+                    "SafetyPolicy",
+                    "ApprovalRequiredButUnavailable",
+                    "DeniedDuringApproval",
+                    "ScopedOverrideConflict",
+                    "RealtimeTransportConflict",
+                    "ProjectionUnsupported",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RoutingImageOperationPhase",
                 &[
                     "Requested",
@@ -445,6 +1181,57 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "RoutingImageTerminalObservation",
+                &[
+                    "Generated",
+                    "EmptyResult",
+                    "ProviderHttpError",
+                    "ProviderNativeError",
+                    "ExecutionFailed",
+                    "BlobCommitFailed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingImageProviderErrorCode",
+                &[
+                    "Unknown",
+                    "OpenAiContentFilter",
+                    "OpenAiModelRefusal",
+                    "GeminiSafety",
+                    "GeminiModelRefusal",
+                    "GeminiDeadlineExceeded",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RoutingProviderTextDisposition",
+                &["NotEmitted", "Captured", "EmittedButNotStored"],
+            ),
+            NamedTypeBinding::string_enum("MobPeerOverlayCommandKind", &["Wire", "Unwire"]),
+            NamedTypeBinding::string_enum(
+                "SupervisorBridgeCommandAdmissionResultKind",
+                &["Accept", "Reject"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorBridgeCommandRejectionKind",
+                &["NotBound", "StaleSupervisor", "SenderMismatch"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorBindAdmissionResultKind",
+                &["Bootstrap", "IdempotentAck", "Reject"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorBindRejectionKind",
+                &["AlreadyBound", "SenderMismatch"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorAuthorizeAdmissionResultKind",
+                &["Proceed", "IdempotentAck", "Reject"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorAuthorizeRejectionKind",
+                &["NotBound", "StaleSupervisor", "SenderMismatch"],
+            ),
+            NamedTypeBinding::string_enum(
                 "RoutingSwitchTurnPhase",
                 &[
                     "Requested",
@@ -463,6 +1250,43 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("RunId"),
+            NamedTypeBinding::string_enum(
+                "RunFailureSourceKind",
+                &[
+                    "Unknown",
+                    "Llm",
+                    "StoreError",
+                    "ToolError",
+                    "McpError",
+                    "SessionNotFound",
+                    "TokenBudgetExceeded",
+                    "TimeBudgetExceeded",
+                    "ToolCallBudgetExceeded",
+                    "MaxTokensReached",
+                    "ContentFiltered",
+                    "MaxTurnsReached",
+                    "Cancelled",
+                    "InvalidStateTransition",
+                    "OperationNotFound",
+                    "DepthLimitExceeded",
+                    "ConcurrencyLimitExceeded",
+                    "ConfigError",
+                    "InvalidToolAccess",
+                    "InternalError",
+                    "BuildError",
+                    "AuthReauthRequired",
+                    "CallbackPending",
+                    "StructuredOutputValidationFailed",
+                    "InvalidOutputSchema",
+                    "HookDenied",
+                    "HookTimeout",
+                    "HookExecutionFailed",
+                    "HookConfigInvalid",
+                    "TerminalFailure",
+                    "NoPendingBoundary",
+                    "LlmRetryExhausted",
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "RuntimeApplyFailureCause",
                 &[
@@ -485,6 +1309,154 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RuntimeEffectKind",
                 &["CancelAfterBoundary", "StopRuntimeExecutor"],
             ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionObservedOutcome",
+                &[
+                    "Completed",
+                    "CompletedWithoutResult",
+                    "CallbackPending",
+                    "Cancelled",
+                    "Abandoned",
+                    "RuntimeApplyFailed",
+                    "FinalizationFailed",
+                    "RuntimeTerminated",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionTerminalObservation",
+                &[
+                    "RunResult",
+                    "NoResult",
+                    "CallbackPending",
+                    "MachineTerminal",
+                    "RuntimeTerminated",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionFinalizationObservation",
+                &["Succeeded", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "UserInterruptObservationKind",
+                &[
+                    "Accepted",
+                    "IdleNoop",
+                    "AttachedNoop",
+                    "StagedNoop",
+                    "Destroyed",
+                    "NotInterruptible",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "UserInterruptPublicResultKind",
+                &["Interrupted", "NotFound", "SessionBusy", "Conflict"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionResultClass",
+                &[
+                    "Completed",
+                    "CompletedWithoutResult",
+                    "CallbackPending",
+                    "Cancelled",
+                    "AbandonedWithError",
+                    "CompletedWithFinalizationFailure",
+                    "RuntimeTerminated",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionLiveSessionObservation",
+                &["NotObserved", "Present", "Absent"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionCleanupAction",
+                &["RetainRuntime", "CleanupRuntime"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionPreAdmissionAction",
+                &["RetainPreAdmission", "ReleasePreAdmission"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionWaitFailureObservation",
+                &["ChannelClosed", "AuthorityUnavailable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionWaitFailurePublicErrorClass",
+                &["InternalError"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionWaitFailurePublicReason",
+                &["CompletionChannelClosed", "CompletionAuthorityUnavailable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeOpsLifecycleDurabilityAction",
+                &["RetainSnapshot", "DeleteSnapshot"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeLifecycleObservedState",
+                &[
+                    "Initializing",
+                    "Idle",
+                    "Attached",
+                    "Running",
+                    "Retired",
+                    "Stopped",
+                    "Destroyed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeLifecycleTerminality",
+                &["NonTerminal", "Terminal"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeInputAdmission",
+                &["RejectsInput", "AcceptsInput"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeQueueAdmission",
+                &["BlocksQueue", "ProcessesQueue"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimePrepareAdmission",
+                &["NotReady", "Ready", "Destroyed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeIngressAdmission",
+                &["Open", "NotReady", "Destroyed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeLoopRunBinding",
+                &["Blocked", "AllocateNew", "UsePrebound"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputKind",
+                &[
+                    "Prompt",
+                    "PeerMessage",
+                    "PeerRequest",
+                    "PeerResponseProgress",
+                    "PeerResponseTerminal",
+                    "FlowStep",
+                    "ExternalEvent",
+                    "Continuation",
+                    "Operation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputRecoveryDisposition",
+                &["Retain", "Discard"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredRunApplyBoundary",
+                &["RunStart", "RunCheckpoint", "Immediate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredRuntimeExecutionKind",
+                &["ContentTurn", "ResumePending"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredPeerResponseTerminalApplyIntent",
+                &["AppendContextAndRun"],
+            ),
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("SessionLlmCapabilitySurface"),
             NamedTypeBinding::string_enum(
@@ -500,6 +1472,14 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("SurfacePhase", &["Operating", "Shutdown"]),
             NamedTypeBinding::string("SurfaceId"),
             NamedTypeBinding::string_enum("SurfacePendingOp", &["None", "Add", "Reload"]),
+            NamedTypeBinding::string_enum(
+                "SurfaceRequestPhase",
+                &["Pending", "Published", "Cancelled", "Completed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SurfaceRequestTerminalPolicy",
+                &["RespondWithoutPublish", "PublishOnSuccess"],
+            ),
             NamedTypeBinding::string_enum("SurfaceStagedOp", &["None", "Add", "Remove", "Reload"]),
             NamedTypeBinding::type_path_enum_with_structural_variants(
                 "ToolFilter",
@@ -633,6 +1613,7 @@ runtime_internal_inputs!(
     meerkat_machine::MeerkatMachineInputVariant,
     [
         AbandonInput,
+        AbandonLiveOpenAdmission,
         AbortOp,
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,
@@ -641,6 +1622,7 @@ runtime_internal_inputs!(
         AttachMobIngress,
         AttachSessionIngress,
         AuthorizeSupervisor,
+        AuthorizeDeferredSessionSystemContextAppend,
         BindSupervisor,
         BoundaryComplete,
         BoundaryContinue,
@@ -660,8 +1642,6 @@ runtime_internal_inputs!(
         ConsumeInput,
         ConsumeOnAccept,
         DetachIngress,
-        DrainExitedClean,
-        DrainExitedRespawnable,
         EnterExtraction,
         ExtractionFailed,
         ExtractionStart,
@@ -699,9 +1679,23 @@ runtime_internal_inputs!(
         ProgressReportedOp,
         QueueAccepted,
         RecordBoundarySeq,
+        RecordLiveChannelStatus,
+        RecordLiveChannelRequestRejected,
+        RecordLiveCloseClosed,
+        RecordLiveCommandAccepted,
+        RecordLiveCommandRejected,
+        RecordLiveRefreshQueued,
+        RecordMobEventStreamOpened,
+        RecordMobEventStreamTerminated,
+        RecordSessionEventStreamOpened,
+        RecordSessionEventStreamTerminated,
+        RecoverAdmittedInput,
+        PrioritizeInput,
+        DeferInputBehindBacklog,
         PublishLocalEndpoint,
         RecoverableFailure,
         RecoverInputLifecycle,
+        RecoverRuntimeAuthority,
         RegisterOp,
         RegisterPendingOps,
         RemoveDirectPeerEndpoint,
@@ -709,6 +1703,10 @@ runtime_internal_inputs!(
         RequestFiniteSwitchTurn,
         RequestUntilChangedSwitchTurn,
         RequestWaitAll,
+        ResolveLiveOpenAdmission,
+        ResolveMobEventStreamClose,
+        ResolveSessionEventStreamClose,
+        ResolveStagedRollback,
         RetireCompletedOp,
         RetireRequestedOp,
         RetryRequested,
@@ -754,6 +1752,86 @@ runtime_internal_inputs!(
         TimeBudgetExceeded,
         ToolCallsResolved,
         TurnLimitReached,
+        AdmitSurfaceRequest,
+        AbandonDeferredSessionPromotion,
+        AdvanceAgentCompletionCursor,
+        AdvanceRuntimeInjectedCompletionCursor,
+        AdvanceRuntimeObservedCompletionCursor,
+        AuthorizeDeferredSessionMachineArchivedResume,
+        AuthorizeStoredInputStateSeed,
+        AuthorizeSupervisorMobPeerOverlay,
+        BeginDeferredSessionArchive,
+        BeginDeferredSessionPromotion,
+        CancelSurfaceRequest,
+        ClassifyInputTerminality,
+        ClassifyOperationTerminality,
+        ClassifyOperationPublicResult,
+        ClassifyOperationTransitionIdempotence,
+        ClassifyOperationCompletionFeed,
+        ClassifyOperationCompletionWake,
+        ClassifyOperationDurability,
+        ClassifyRecoveredInputDurability,
+        ClassifyRecoveredOperationRecord,
+        ClassifyRuntimeLifecycleDurability,
+        ClassifyRuntimeLifecycleState,
+        ClassifyRuntimeLoopQueueAdmission,
+        ClassifySurfaceRequestTerminal,
+        ClearSessionLlmState,
+        ClearTurnToolOverlay,
+        CollectCompletedOp,
+        DropDeferredSession,
+        EvictCompletedOp,
+        FinishDeferredSessionArchive,
+        FinishDeferredSessionPromotion,
+        FinishSurfaceRequestUnpublished,
+        GrantMobOperatorManageMob,
+        HydrateSessionLlmState,
+        NormalizeRecoveredInputLifecycle,
+        PeerResponseRejected,
+        PublishOrCancelSurfaceRequest,
+        PublishSurfaceRequest,
+        RecordLiveWebrtcAnswerAccepted,
+        RecordLiveWebrtcTokenIssued,
+        RecordLiveWebsocketTokenIssued,
+        RecoverCompletionConsumerCursors,
+        RecoverCompletionFeedEntry,
+        RecoverOpRecord,
+        RecoverOpsCompletionCursor,
+        RegisterAcceptedIdempotency,
+        ReplaceDeferredToolAuthorityCatalog,
+        ReplaceFilterToolAuthorityCatalog,
+        RequestSupervisorTrustPublish,
+        ResolveAdmissionIdempotency,
+        ResolveAdmissionPlan,
+        ResolveAdmissionValidation,
+        ResolveInputPublicLifecycle,
+        ResolveInputPublicTerminalOutcome,
+        ResolveLiveBoundaryContextReceipt,
+        ResolveLiveWebrtcAnswerAdmission,
+        ResolveLiveWebsocketTokenAdmission,
+        ResolveMobOperatorCreateAuthority,
+        ResolveOpLifecycleTransitionRejection,
+        ResolvePeerIngressDequeue,
+        ResolvePeerIngressReceive,
+        ResolveRuntimeCompletionCleanup,
+        ResolveRuntimeCompletionResult,
+        ResolveRuntimeCompletionWaitFailure,
+        ResolveRuntimeOpsLifecycleDurability,
+        ResolveSupervisorAuthorizeAdmission,
+        ResolveSupervisorBindAdmission,
+        ResolveSupervisorBridgeCommandAdmission,
+        ResolveUserInterruptPublicResult,
+        ResolveWaitAllAdmission,
+        RestoreDeferredSessionArchive,
+        RestoreMobOperatorAuthority,
+        SetMobOperatorCreateAuthority,
+        SetMobOperatorProfileMutation,
+        SetMobOperatorSpawnProfilesInMob,
+        SetTurnToolOverlay,
+        StageDeferredSession,
+        SurfaceSetRemovalTimeout,
+        UpdateDeferredSessionKeepAlive,
+        UpdateDeferredSessionLlmIdentity,
     ]
 );
 
@@ -781,8 +1859,16 @@ pub fn dsl_mob_machine_production_schema() -> MachineSchema {
 pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            NamedTypeBinding::string_enum(
+                "CancelAllWorkRejectReasonKind",
+                &["MobNotRunning", "MemberNotFound", "StaleFenceToken"],
+            ),
             NamedTypeBinding::string_enum("CollectionPolicyKind", &["All", "Any", "Quorum"]),
             NamedTypeBinding::string_enum("DependencyMode", &["All", "Any"]),
+            NamedTypeBinding::string_enum(
+                "EventSubscriptionRejectReasonKind",
+                &["MemberNotFound", "NoSessionBinding"],
+            ),
             NamedTypeBinding::u64("FenceToken"),
             NamedTypeBinding::string_enum(
                 "FlowFrameReducerCommandKind",
@@ -802,13 +1888,41 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("AgentIdentity"),
             NamedTypeBinding::string("AgentRuntimeId"),
             NamedTypeBinding::string("BranchId"),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_struct(
                 "ExternalPeerEdge",
                 "crate::catalog::dsl::mob_machine::ExternalPeerEdge",
+                vec![
+                    TypePathStructField::named("local", "AgentIdentity"),
+                    TypePathStructField::named("endpoint", "ExternalPeerEndpoint"),
+                ],
             ),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_struct(
                 "ExternalPeerEndpoint",
                 "crate::catalog::dsl::mob_machine::ExternalPeerEndpoint",
+                vec![
+                    TypePathStructField::named("name", "PeerName"),
+                    TypePathStructField::named("peer_id", "PeerId"),
+                    TypePathStructField::named("address", "PeerAddress"),
+                    TypePathStructField::named("signing_key", "PeerSigningKey"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "MemberPeerEndpoint",
+                "crate::catalog::dsl::mob_machine::MemberPeerEndpoint",
+                vec![
+                    TypePathStructField::named("name", "PeerName"),
+                    TypePathStructField::named("peer_id", "PeerId"),
+                    TypePathStructField::named("address", "PeerAddress"),
+                    TypePathStructField::named("signing_key", "PeerSigningKey"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "ExternalPeerKey",
+                "crate::catalog::dsl::mob_machine::ExternalPeerKey",
+                vec![
+                    TypePathStructField::named("local", "AgentIdentity"),
+                    TypePathStructField::named("name", "PeerName"),
+                ],
             ),
             NamedTypeBinding::string("FlowNodeId"),
             NamedTypeBinding::string_enum("FlowNodeKind", &["Step", "Loop"]),
@@ -853,7 +1967,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Canceled",
                 ],
             ),
-            NamedTypeBinding::string("FrameNodeKey"),
+            NamedTypeBinding::string_enum("FlowRunPublicResultClassKind", &["Failure", "Success"]),
             NamedTypeBinding::string("FrameId"),
             NamedTypeBinding::string_enum("FrameScope", &["Root", "Body"]),
             NamedTypeBinding::string_enum(
@@ -922,10 +2036,119 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("MobId"),
+            NamedTypeBinding::string_enum(
+                "MobLifecycleJournalKind",
+                &[
+                    "Completed",
+                    "Destroying",
+                    "DestroyStorageFinalizing",
+                    "MemberSpawned",
+                    "MemberRetired",
+                    "Reset",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobSpawnManyFailureObservationKind",
+                &[
+                    "ProfileNotFound",
+                    "MemberNotFound",
+                    "MemberAlreadyExists",
+                    "NotExternallyAddressable",
+                    "InvalidTransition",
+                    "WiringError",
+                    "SupervisorRotationIncomplete",
+                    "BridgeCommandRejected",
+                    "MemberRestoreFailed",
+                    "KickoffWaitTimedOut",
+                    "ReadyWaitTimedOut",
+                    "DefinitionError",
+                    "FlowNotFound",
+                    "FlowFailed",
+                    "RunNotFound",
+                    "RunCanceled",
+                    "FlowTurnTimedOut",
+                    "FrameDepthLimitExceeded",
+                    "FrameAtomicPersistenceUnavailable",
+                    "SpecRevisionConflict",
+                    "SchemaValidation",
+                    "InsufficientTargets",
+                    "TopologyViolation",
+                    "BridgeDeliveryRejected",
+                    "SupervisorEscalation",
+                    "UnsupportedForMode",
+                    "MissingMemberCapability",
+                    "ResetBarrier",
+                    "StorageError",
+                    "SessionError",
+                    "CommsError",
+                    "CallbackPending",
+                    "StaleFenceToken",
+                    "StaleEventCursor",
+                    "WorkNotFound",
+                    "Internal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobSpawnManyFailureCauseKind",
+                &[
+                    "ProfileNotFound",
+                    "MemberNotFound",
+                    "MemberAlreadyExists",
+                    "NotExternallyAddressable",
+                    "InvalidTransition",
+                    "WiringError",
+                    "BridgeCommandRejected",
+                    "MemberRestoreFailed",
+                    "KickoffWaitTimedOut",
+                    "ReadyWaitTimedOut",
+                    "DefinitionError",
+                    "FlowNotFound",
+                    "FlowFailed",
+                    "RunNotFound",
+                    "RunCanceled",
+                    "FlowTurnTimedOut",
+                    "FrameDepthLimitExceeded",
+                    "FrameAtomicPersistenceUnavailable",
+                    "SpecRevisionConflict",
+                    "SchemaValidation",
+                    "InsufficientTargets",
+                    "TopologyViolation",
+                    "BridgeDeliveryRejected",
+                    "SupervisorEscalation",
+                    "UnsupportedForMode",
+                    "MissingMemberCapability",
+                    "ResetBarrier",
+                    "StorageError",
+                    "SessionError",
+                    "CommsError",
+                    "CallbackPending",
+                    "StaleFenceToken",
+                    "StaleEventCursor",
+                    "WorkNotFound",
+                    "Internal",
+                ],
+            ),
+            NamedTypeBinding::type_path(
+                "MobToolCallerProvenance",
+                "meerkat_core::service::MobToolCallerProvenance",
+            ),
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
+            NamedTypeBinding::string_enum(
+                "MemberWaitClassificationKind",
+                &["RuntimeMaterialPresent", "MissingRuntimeMaterial"],
+            ),
             NamedTypeBinding::string_enum(
                 "MobPhase",
                 &["Running", "Stopped", "Completed", "Destroyed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SubmitWorkRejectReasonKind",
+                &[
+                    "MobNotRunning",
+                    "MemberNotFound",
+                    "StaleFenceToken",
+                    "NotExternallyAddressable",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "NodeRunStatus",
@@ -940,13 +2163,29 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("RunId"),
-            NamedTypeBinding::string("RunStepKey"),
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("StepId"),
+            NamedTypeBinding::type_path(
+                "OpaquePrincipalToken",
+                "meerkat_core::service::OpaquePrincipalToken",
+            ),
             NamedTypeBinding::string_enum(
                 "StepRunStatus",
                 &["Dispatched", "Completed", "Failed", "Skipped", "Canceled"],
             ),
+            NamedTypeBinding::string_enum(
+                "SpawnPolicyRuntimeMode",
+                &["AutonomousHost", "TurnDriven"],
+            ),
+            NamedTypeBinding::type_path(
+                "SupervisorProtocolVersion",
+                "crate::catalog::dsl::mob_machine::SupervisorProtocolVersion",
+            ),
+            NamedTypeBinding::string_enum(
+                "RespawnTopologyRestoreResultKind",
+                &["Completed", "TopologyRestoreFailed"],
+            ),
+            NamedTypeBinding::string("RespawnTopologyPeerId"),
             NamedTypeBinding::string("WiringEdge"),
             NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
             NamedTypeBinding::string("WorkId"),
@@ -975,6 +2214,14 @@ runtime_internal_inputs!(
         AuthorizeFlowFrameReducerCommand,
         AuthorizeFlowRunReducerCommand,
         AuthorizeLoopIterationReducerCommand,
+        AuthorizeSpawnProfile,
+        ClassifyFlowRunTerminality,
+        ClassifyFlowStepTerminality,
+        ClassifyFlowFrameTerminalStatus,
+        ClassifyFlowRunPublicResult,
+        BindOwnerBridgeSession,
+        ClassifyMemberWait,
+        ClassifySpawnManyFailure,
         CreateFrameSeed,
         CreateLoopSeed,
         CreateRunSeed,
@@ -988,9 +2235,32 @@ runtime_internal_inputs!(
         RecordLoopBodyFrameCompleted,
         RecordLoopUntilConditionFailed,
         RecordLoopUntilConditionMet,
+        RequestPendingSessionIngressDetachForMobDestroy,
+        RetireAbsent,
+        ResolveCancelAllWorkRejection,
+        ResolveSubmitWorkRejection,
+        SubscribeStructuralEvents,
+        RegisterMemberPeer,
+        ResolveSpawnPolicy,
         StartupMarkReady,
         SessionIngressDetachFailedForMobDestroy,
         SessionIngressDetachedForMobDestroy,
+        AuthorizeMobEventRouterMemberSubscription,
+        AuthorizeMobEventRouterMemberRemoval,
+        PollEventsStrict,
+        AuthorizeMemberPeerOverlay,
+        AuthorizeMemberPeerRebind,
+        AuthorizeMemberTrustWiring,
+        AuthorizeMemberTrustUnwiring,
+        AuthorizeMemberTrustCleanup,
+        AuthorizeMemberTrustCleanupObserved,
+        AuthorizeExternalPeerReciprocalTrust,
+        ProvisionSupervisorAuthority,
+        ClearSupervisorPendingRotation,
+        RecordSupervisorPendingRotation,
+        CommitSupervisorRotation,
+        ClearSupervisorAuthorityForDestroy,
+        RestoreSupervisorAuthorityAfterDestroyRollback,
     ]
 );
 
@@ -1017,6 +2287,7 @@ pub fn schedule_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),
             NamedTypeBinding::string_enum("OverlapPolicy", &["AllowConcurrent", "SkipIfRunning"]),
+            NamedTypeBinding::string("ScheduleId"),
             NamedTypeBinding::string_enum(
                 "ScheduleLifecycleState",
                 &["Active", "Paused", "Deleted"],
@@ -1035,7 +2306,46 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
             NamedTypeBinding::string("ClaimToken"),
-            NamedTypeBinding::string("DeliveryReceipt"),
+            NamedTypeBinding::string("SessionId"),
+            NamedTypeBinding::string_enum(
+                "DeliveryReceiptStage",
+                &[
+                    "Planned",
+                    "Claimed",
+                    "DispatchStarted",
+                    "DispatchAccepted",
+                    "AwaitingCompletion",
+                    "Completed",
+                    "Skipped",
+                    "Misfired",
+                    "Superseded",
+                    "DeliveryFailed",
+                    "LeaseExpired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DeliveryCompletionFailureReason",
+                &[
+                    "CompletionFutureFailed",
+                    "RuntimeCompletionChannelClosed",
+                    "RuntimeCompletionAuthorityUnavailable",
+                    "RuntimeCompletionHandleMissing",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DeliveryFailureReason",
+                &[
+                    "TargetMaterializationFailed",
+                    "TargetMissing",
+                    "TargetBusy",
+                    "RuntimeRejected",
+                    "MobRejected",
+                    "TransportError",
+                    "InternalError",
+                ],
+            ),
+            NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
+            NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string_enum(
                 "OccurrenceFailureClass",
                 &[
@@ -1049,7 +2359,64 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "InternalError",
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "OccurrenceTargetProbeOutcome",
+                &["Ready", "Busy", "Missing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OccurrenceLifecycleInputVariant",
+                &[
+                    "PlanOccurrence",
+                    "SyncTargetSnapshot",
+                    "RecordReceipt",
+                    "ClassifyDue",
+                    "Claim",
+                    "DispatchStarted",
+                    "AwaitCompletion",
+                    "Complete",
+                    "ResolveRuntimeCompletion",
+                    "ResolveDeliveryCompletionFailure",
+                    "ResolveDeliveryFailure",
+                    "ResolveTargetProbe",
+                    "ResolveDueMisfire",
+                    "Supersede",
+                    "LeaseExpired",
+                    "ReleaseLeaseForPausedSchedule",
+                    "ClassifyTransitionFailure",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OccurrenceTransitionFailureClassKind",
+                &[
+                    "PlanRejected",
+                    "TargetSyncRejected",
+                    "ReceiptRecordRejected",
+                    "DueClassificationRejected",
+                    "ClaimRejected",
+                    "NotPendingForClaim",
+                    "NotClaimed",
+                    "NotDispatching",
+                    "NotLeaseHolding",
+                    "NotLiveForTerminal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OccurrenceTransitionFailureRefusalKind",
+                &["NoMatchingTransition", "GuardRejected"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeCompletionOutcome",
+                &[
+                    "Completed",
+                    "CallbackPending",
+                    "Cancelled",
+                    "Abandoned",
+                    "FinalizationFailed",
+                    "RuntimeTerminated",
+                ],
+            ),
             NamedTypeBinding::string("OccurrenceId"),
+            NamedTypeBinding::string_enum("OverlapPolicy", &["AllowConcurrent", "SkipIfRunning"]),
             NamedTypeBinding::string_enum(
                 "OccurrenceLifecycleState",
                 &[
@@ -1129,8 +2496,24 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("WorkItemKey"),
-            NamedTypeBinding::string("WorkEdgeKey"),
-            NamedTypeBinding::string("WorkDependencyPathKey"),
+            NamedTypeBinding::type_path_struct(
+                "WorkEdgeKey",
+                "crate::catalog::dsl::workgraph_lifecycle::WorkEdgeKey",
+                vec![
+                    TypePathStructField::named("kind", "WorkEdgeKind"),
+                    TypePathStructField::named("from_item_key", "WorkItemKey"),
+                    TypePathStructField::named("to_item_key", "WorkItemKey"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "WorkDependencyPathKey",
+                "crate::catalog::dsl::workgraph_lifecycle::WorkDependencyPathKey",
+                vec![
+                    TypePathStructField::named("kind", "WorkEdgeKind"),
+                    TypePathStructField::named("from_item_key", "WorkItemKey"),
+                    TypePathStructField::named("to_item_key", "WorkItemKey"),
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "WorkEdgeKind",
                 &["Blocks", "Parent", "Related", "Supersedes", "DerivedFrom"],
@@ -1148,6 +2531,30 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "WorkOwnerKind",
                 &["Principal", "Agent", "Session", "Mob", "Label"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkGraphErrorKind",
+                &[
+                    "NotFound",
+                    "StaleRevision",
+                    "Conflict",
+                    "InvalidTransition",
+                    "InvalidInput",
+                    "InvalidTimestampMillis",
+                    "UnsupportedBackend",
+                    "Store",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkGraphPublicErrorClass",
+                &[
+                    "NotFound",
+                    "Conflict",
+                    "InvalidTransition",
+                    "InvalidArguments",
+                    "CapabilityUnavailable",
+                    "StoreError",
+                ],
             ),
             NamedTypeBinding::type_path_struct(
                 "WorkOwnerKey",

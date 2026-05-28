@@ -5,7 +5,8 @@
     clippy::panic,
     clippy::implicit_clone,
     clippy::unnecessary_cast,
-    clippy::redundant_clone
+    clippy::redundant_clone,
+    clippy::zero_sized_map_values
 )]
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
@@ -94,6 +95,62 @@ impl From<&str> for BranchId {
 impl std::fmt::Display for BranchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CancelAllWorkRejectReasonKind {
+    #[default]
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+}
+impl CancelAllWorkRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobNotRunning => "MobNotRunning",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::StaleFenceToken => "StaleFenceToken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CancelAllWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            other => Err(format!(
+                "invalid CancelAllWorkRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CancelAllWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CancelAllWorkRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -200,7 +257,60 @@ impl std::fmt::Display for DependencyMode {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum EventSubscriptionRejectReasonKind {
+    #[default]
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "NoSessionBinding")]
+    NoSessionBinding,
+}
+impl EventSubscriptionRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MemberNotFound => "MemberNotFound",
+            Self::NoSessionBinding => "NoSessionBinding",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for EventSubscriptionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "NoSessionBinding" => Ok(Self::NoSessionBinding),
+            other => Err(format!(
+                "invalid EventSubscriptionRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for EventSubscriptionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for EventSubscriptionRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type ExternalPeerEdge = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerEdge;
+pub type ExternalPeerKey = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerKey;
 #[derive(
     Debug,
     Clone,
@@ -379,6 +489,58 @@ impl std::convert::TryFrom<String> for FlowNodeKind {
     }
 }
 impl std::fmt::Display for FlowNodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FlowRunPublicResultClassKind {
+    #[default]
+    #[serde(rename = "Failure")]
+    Failure,
+    #[serde(rename = "Success")]
+    Success,
+}
+impl FlowRunPublicResultClassKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Failure => "Failure",
+            Self::Success => "Success",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FlowRunPublicResultClassKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Failure" => Ok(Self::Failure),
+            "Success" => Ok(Self::Success),
+            other => Err(format!(
+                "invalid FlowRunPublicResultClassKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FlowRunPublicResultClassKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FlowRunPublicResultClassKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -615,34 +777,6 @@ impl From<&str> for FrameId {
     }
 }
 impl std::fmt::Display for FrameId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct FrameNodeKey(pub String);
-impl From<String> for FrameNodeKey {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for FrameNodeKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for FrameNodeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -1229,6 +1363,59 @@ impl std::fmt::Display for MemberLifecycleKind {
         f.write_str(self.as_str())
     }
 }
+pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberWaitClassificationKind {
+    #[default]
+    #[serde(rename = "RuntimeMaterialPresent")]
+    RuntimeMaterialPresent,
+    #[serde(rename = "MissingRuntimeMaterial")]
+    MissingRuntimeMaterial,
+}
+impl MemberWaitClassificationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RuntimeMaterialPresent => "RuntimeMaterialPresent",
+            Self::MissingRuntimeMaterial => "MissingRuntimeMaterial",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberWaitClassificationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RuntimeMaterialPresent" => Ok(Self::RuntimeMaterialPresent),
+            "MissingRuntimeMaterial" => Ok(Self::MissingRuntimeMaterial),
+            other => Err(format!(
+                "invalid MemberWaitClassificationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberWaitClassificationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberWaitClassificationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1255,6 +1442,72 @@ impl From<&str> for MobId {
 impl std::fmt::Display for MobId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobLifecycleJournalKind {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Destroying")]
+    Destroying,
+    #[serde(rename = "DestroyStorageFinalizing")]
+    DestroyStorageFinalizing,
+    #[serde(rename = "MemberSpawned")]
+    MemberSpawned,
+    #[serde(rename = "MemberRetired")]
+    MemberRetired,
+    #[serde(rename = "Reset")]
+    Reset,
+}
+impl MobLifecycleJournalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Destroying => "Destroying",
+            Self::DestroyStorageFinalizing => "DestroyStorageFinalizing",
+            Self::MemberSpawned => "MemberSpawned",
+            Self::MemberRetired => "MemberRetired",
+            Self::Reset => "Reset",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobLifecycleJournalKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Destroying" => Ok(Self::Destroying),
+            "DestroyStorageFinalizing" => Ok(Self::DestroyStorageFinalizing),
+            "MemberSpawned" => Ok(Self::MemberSpawned),
+            "MemberRetired" => Ok(Self::MemberRetired),
+            "Reset" => Ok(Self::Reset),
+            other => Err(format!("invalid MobLifecycleJournalKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobLifecycleJournalKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobLifecycleJournalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -1307,6 +1560,379 @@ impl std::fmt::Display for MobMemberState {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobSpawnManyFailureCauseKind {
+    #[default]
+    #[serde(rename = "ProfileNotFound")]
+    ProfileNotFound,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "MemberAlreadyExists")]
+    MemberAlreadyExists,
+    #[serde(rename = "NotExternallyAddressable")]
+    NotExternallyAddressable,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "WiringError")]
+    WiringError,
+    #[serde(rename = "BridgeCommandRejected")]
+    BridgeCommandRejected,
+    #[serde(rename = "MemberRestoreFailed")]
+    MemberRestoreFailed,
+    #[serde(rename = "KickoffWaitTimedOut")]
+    KickoffWaitTimedOut,
+    #[serde(rename = "ReadyWaitTimedOut")]
+    ReadyWaitTimedOut,
+    #[serde(rename = "DefinitionError")]
+    DefinitionError,
+    #[serde(rename = "FlowNotFound")]
+    FlowNotFound,
+    #[serde(rename = "FlowFailed")]
+    FlowFailed,
+    #[serde(rename = "RunNotFound")]
+    RunNotFound,
+    #[serde(rename = "RunCanceled")]
+    RunCanceled,
+    #[serde(rename = "FlowTurnTimedOut")]
+    FlowTurnTimedOut,
+    #[serde(rename = "FrameDepthLimitExceeded")]
+    FrameDepthLimitExceeded,
+    #[serde(rename = "FrameAtomicPersistenceUnavailable")]
+    FrameAtomicPersistenceUnavailable,
+    #[serde(rename = "SpecRevisionConflict")]
+    SpecRevisionConflict,
+    #[serde(rename = "SchemaValidation")]
+    SchemaValidation,
+    #[serde(rename = "InsufficientTargets")]
+    InsufficientTargets,
+    #[serde(rename = "TopologyViolation")]
+    TopologyViolation,
+    #[serde(rename = "BridgeDeliveryRejected")]
+    BridgeDeliveryRejected,
+    #[serde(rename = "SupervisorEscalation")]
+    SupervisorEscalation,
+    #[serde(rename = "UnsupportedForMode")]
+    UnsupportedForMode,
+    #[serde(rename = "MissingMemberCapability")]
+    MissingMemberCapability,
+    #[serde(rename = "ResetBarrier")]
+    ResetBarrier,
+    #[serde(rename = "StorageError")]
+    StorageError,
+    #[serde(rename = "SessionError")]
+    SessionError,
+    #[serde(rename = "CommsError")]
+    CommsError,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+    #[serde(rename = "StaleEventCursor")]
+    StaleEventCursor,
+    #[serde(rename = "WorkNotFound")]
+    WorkNotFound,
+    #[serde(rename = "Internal")]
+    Internal,
+}
+impl MobSpawnManyFailureCauseKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProfileNotFound => "ProfileNotFound",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::MemberAlreadyExists => "MemberAlreadyExists",
+            Self::NotExternallyAddressable => "NotExternallyAddressable",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::WiringError => "WiringError",
+            Self::BridgeCommandRejected => "BridgeCommandRejected",
+            Self::MemberRestoreFailed => "MemberRestoreFailed",
+            Self::KickoffWaitTimedOut => "KickoffWaitTimedOut",
+            Self::ReadyWaitTimedOut => "ReadyWaitTimedOut",
+            Self::DefinitionError => "DefinitionError",
+            Self::FlowNotFound => "FlowNotFound",
+            Self::FlowFailed => "FlowFailed",
+            Self::RunNotFound => "RunNotFound",
+            Self::RunCanceled => "RunCanceled",
+            Self::FlowTurnTimedOut => "FlowTurnTimedOut",
+            Self::FrameDepthLimitExceeded => "FrameDepthLimitExceeded",
+            Self::FrameAtomicPersistenceUnavailable => "FrameAtomicPersistenceUnavailable",
+            Self::SpecRevisionConflict => "SpecRevisionConflict",
+            Self::SchemaValidation => "SchemaValidation",
+            Self::InsufficientTargets => "InsufficientTargets",
+            Self::TopologyViolation => "TopologyViolation",
+            Self::BridgeDeliveryRejected => "BridgeDeliveryRejected",
+            Self::SupervisorEscalation => "SupervisorEscalation",
+            Self::UnsupportedForMode => "UnsupportedForMode",
+            Self::MissingMemberCapability => "MissingMemberCapability",
+            Self::ResetBarrier => "ResetBarrier",
+            Self::StorageError => "StorageError",
+            Self::SessionError => "SessionError",
+            Self::CommsError => "CommsError",
+            Self::CallbackPending => "CallbackPending",
+            Self::StaleFenceToken => "StaleFenceToken",
+            Self::StaleEventCursor => "StaleEventCursor",
+            Self::WorkNotFound => "WorkNotFound",
+            Self::Internal => "Internal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobSpawnManyFailureCauseKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ProfileNotFound" => Ok(Self::ProfileNotFound),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "MemberAlreadyExists" => Ok(Self::MemberAlreadyExists),
+            "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "WiringError" => Ok(Self::WiringError),
+            "BridgeCommandRejected" => Ok(Self::BridgeCommandRejected),
+            "MemberRestoreFailed" => Ok(Self::MemberRestoreFailed),
+            "KickoffWaitTimedOut" => Ok(Self::KickoffWaitTimedOut),
+            "ReadyWaitTimedOut" => Ok(Self::ReadyWaitTimedOut),
+            "DefinitionError" => Ok(Self::DefinitionError),
+            "FlowNotFound" => Ok(Self::FlowNotFound),
+            "FlowFailed" => Ok(Self::FlowFailed),
+            "RunNotFound" => Ok(Self::RunNotFound),
+            "RunCanceled" => Ok(Self::RunCanceled),
+            "FlowTurnTimedOut" => Ok(Self::FlowTurnTimedOut),
+            "FrameDepthLimitExceeded" => Ok(Self::FrameDepthLimitExceeded),
+            "FrameAtomicPersistenceUnavailable" => Ok(Self::FrameAtomicPersistenceUnavailable),
+            "SpecRevisionConflict" => Ok(Self::SpecRevisionConflict),
+            "SchemaValidation" => Ok(Self::SchemaValidation),
+            "InsufficientTargets" => Ok(Self::InsufficientTargets),
+            "TopologyViolation" => Ok(Self::TopologyViolation),
+            "BridgeDeliveryRejected" => Ok(Self::BridgeDeliveryRejected),
+            "SupervisorEscalation" => Ok(Self::SupervisorEscalation),
+            "UnsupportedForMode" => Ok(Self::UnsupportedForMode),
+            "MissingMemberCapability" => Ok(Self::MissingMemberCapability),
+            "ResetBarrier" => Ok(Self::ResetBarrier),
+            "StorageError" => Ok(Self::StorageError),
+            "SessionError" => Ok(Self::SessionError),
+            "CommsError" => Ok(Self::CommsError),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            "StaleEventCursor" => Ok(Self::StaleEventCursor),
+            "WorkNotFound" => Ok(Self::WorkNotFound),
+            "Internal" => Ok(Self::Internal),
+            other => Err(format!(
+                "invalid MobSpawnManyFailureCauseKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobSpawnManyFailureCauseKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobSpawnManyFailureCauseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobSpawnManyFailureObservationKind {
+    #[default]
+    #[serde(rename = "ProfileNotFound")]
+    ProfileNotFound,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "MemberAlreadyExists")]
+    MemberAlreadyExists,
+    #[serde(rename = "NotExternallyAddressable")]
+    NotExternallyAddressable,
+    #[serde(rename = "InvalidTransition")]
+    InvalidTransition,
+    #[serde(rename = "WiringError")]
+    WiringError,
+    #[serde(rename = "SupervisorRotationIncomplete")]
+    SupervisorRotationIncomplete,
+    #[serde(rename = "BridgeCommandRejected")]
+    BridgeCommandRejected,
+    #[serde(rename = "MemberRestoreFailed")]
+    MemberRestoreFailed,
+    #[serde(rename = "KickoffWaitTimedOut")]
+    KickoffWaitTimedOut,
+    #[serde(rename = "ReadyWaitTimedOut")]
+    ReadyWaitTimedOut,
+    #[serde(rename = "DefinitionError")]
+    DefinitionError,
+    #[serde(rename = "FlowNotFound")]
+    FlowNotFound,
+    #[serde(rename = "FlowFailed")]
+    FlowFailed,
+    #[serde(rename = "RunNotFound")]
+    RunNotFound,
+    #[serde(rename = "RunCanceled")]
+    RunCanceled,
+    #[serde(rename = "FlowTurnTimedOut")]
+    FlowTurnTimedOut,
+    #[serde(rename = "FrameDepthLimitExceeded")]
+    FrameDepthLimitExceeded,
+    #[serde(rename = "FrameAtomicPersistenceUnavailable")]
+    FrameAtomicPersistenceUnavailable,
+    #[serde(rename = "SpecRevisionConflict")]
+    SpecRevisionConflict,
+    #[serde(rename = "SchemaValidation")]
+    SchemaValidation,
+    #[serde(rename = "InsufficientTargets")]
+    InsufficientTargets,
+    #[serde(rename = "TopologyViolation")]
+    TopologyViolation,
+    #[serde(rename = "BridgeDeliveryRejected")]
+    BridgeDeliveryRejected,
+    #[serde(rename = "SupervisorEscalation")]
+    SupervisorEscalation,
+    #[serde(rename = "UnsupportedForMode")]
+    UnsupportedForMode,
+    #[serde(rename = "MissingMemberCapability")]
+    MissingMemberCapability,
+    #[serde(rename = "ResetBarrier")]
+    ResetBarrier,
+    #[serde(rename = "StorageError")]
+    StorageError,
+    #[serde(rename = "SessionError")]
+    SessionError,
+    #[serde(rename = "CommsError")]
+    CommsError,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+    #[serde(rename = "StaleEventCursor")]
+    StaleEventCursor,
+    #[serde(rename = "WorkNotFound")]
+    WorkNotFound,
+    #[serde(rename = "Internal")]
+    Internal,
+}
+impl MobSpawnManyFailureObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProfileNotFound => "ProfileNotFound",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::MemberAlreadyExists => "MemberAlreadyExists",
+            Self::NotExternallyAddressable => "NotExternallyAddressable",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::WiringError => "WiringError",
+            Self::SupervisorRotationIncomplete => "SupervisorRotationIncomplete",
+            Self::BridgeCommandRejected => "BridgeCommandRejected",
+            Self::MemberRestoreFailed => "MemberRestoreFailed",
+            Self::KickoffWaitTimedOut => "KickoffWaitTimedOut",
+            Self::ReadyWaitTimedOut => "ReadyWaitTimedOut",
+            Self::DefinitionError => "DefinitionError",
+            Self::FlowNotFound => "FlowNotFound",
+            Self::FlowFailed => "FlowFailed",
+            Self::RunNotFound => "RunNotFound",
+            Self::RunCanceled => "RunCanceled",
+            Self::FlowTurnTimedOut => "FlowTurnTimedOut",
+            Self::FrameDepthLimitExceeded => "FrameDepthLimitExceeded",
+            Self::FrameAtomicPersistenceUnavailable => "FrameAtomicPersistenceUnavailable",
+            Self::SpecRevisionConflict => "SpecRevisionConflict",
+            Self::SchemaValidation => "SchemaValidation",
+            Self::InsufficientTargets => "InsufficientTargets",
+            Self::TopologyViolation => "TopologyViolation",
+            Self::BridgeDeliveryRejected => "BridgeDeliveryRejected",
+            Self::SupervisorEscalation => "SupervisorEscalation",
+            Self::UnsupportedForMode => "UnsupportedForMode",
+            Self::MissingMemberCapability => "MissingMemberCapability",
+            Self::ResetBarrier => "ResetBarrier",
+            Self::StorageError => "StorageError",
+            Self::SessionError => "SessionError",
+            Self::CommsError => "CommsError",
+            Self::CallbackPending => "CallbackPending",
+            Self::StaleFenceToken => "StaleFenceToken",
+            Self::StaleEventCursor => "StaleEventCursor",
+            Self::WorkNotFound => "WorkNotFound",
+            Self::Internal => "Internal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobSpawnManyFailureObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ProfileNotFound" => Ok(Self::ProfileNotFound),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "MemberAlreadyExists" => Ok(Self::MemberAlreadyExists),
+            "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            "InvalidTransition" => Ok(Self::InvalidTransition),
+            "WiringError" => Ok(Self::WiringError),
+            "SupervisorRotationIncomplete" => Ok(Self::SupervisorRotationIncomplete),
+            "BridgeCommandRejected" => Ok(Self::BridgeCommandRejected),
+            "MemberRestoreFailed" => Ok(Self::MemberRestoreFailed),
+            "KickoffWaitTimedOut" => Ok(Self::KickoffWaitTimedOut),
+            "ReadyWaitTimedOut" => Ok(Self::ReadyWaitTimedOut),
+            "DefinitionError" => Ok(Self::DefinitionError),
+            "FlowNotFound" => Ok(Self::FlowNotFound),
+            "FlowFailed" => Ok(Self::FlowFailed),
+            "RunNotFound" => Ok(Self::RunNotFound),
+            "RunCanceled" => Ok(Self::RunCanceled),
+            "FlowTurnTimedOut" => Ok(Self::FlowTurnTimedOut),
+            "FrameDepthLimitExceeded" => Ok(Self::FrameDepthLimitExceeded),
+            "FrameAtomicPersistenceUnavailable" => Ok(Self::FrameAtomicPersistenceUnavailable),
+            "SpecRevisionConflict" => Ok(Self::SpecRevisionConflict),
+            "SchemaValidation" => Ok(Self::SchemaValidation),
+            "InsufficientTargets" => Ok(Self::InsufficientTargets),
+            "TopologyViolation" => Ok(Self::TopologyViolation),
+            "BridgeDeliveryRejected" => Ok(Self::BridgeDeliveryRejected),
+            "SupervisorEscalation" => Ok(Self::SupervisorEscalation),
+            "UnsupportedForMode" => Ok(Self::UnsupportedForMode),
+            "MissingMemberCapability" => Ok(Self::MissingMemberCapability),
+            "ResetBarrier" => Ok(Self::ResetBarrier),
+            "StorageError" => Ok(Self::StorageError),
+            "SessionError" => Ok(Self::SessionError),
+            "CommsError" => Ok(Self::CommsError),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            "StaleEventCursor" => Ok(Self::StaleEventCursor),
+            "WorkNotFound" => Ok(Self::WorkNotFound),
+            "Internal" => Ok(Self::Internal),
+            other => Err(format!(
+                "invalid MobSpawnManyFailureObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobSpawnManyFailureObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobSpawnManyFailureObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1377,6 +2003,89 @@ impl std::fmt::Display for NodeRunStatus {
         f.write_str(self.as_str())
     }
 }
+pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
+pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
+pub type PeerSigningKey = meerkat_machine_schema::catalog::dsl::mob_machine::PeerSigningKey;
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct RespawnTopologyPeerId(pub String);
+impl From<String> for RespawnTopologyPeerId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RespawnTopologyPeerId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RespawnTopologyPeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RespawnTopologyRestoreResultKind {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "TopologyRestoreFailed")]
+    TopologyRestoreFailed,
+}
+impl RespawnTopologyRestoreResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::TopologyRestoreFailed => "TopologyRestoreFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RespawnTopologyRestoreResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "TopologyRestoreFailed" => Ok(Self::TopologyRestoreFailed),
+            other => Err(format!(
+                "invalid RespawnTopologyRestoreResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RespawnTopologyRestoreResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RespawnTopologyRestoreResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1417,34 +2126,6 @@ impl std::fmt::Display for RunId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct RunStepKey(pub String);
-impl From<String> for RunStepKey {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for RunStepKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for RunStepKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub struct SessionId(pub String);
 impl From<String> for SessionId {
     fn from(value: String) -> Self {
@@ -1459,6 +2140,56 @@ impl From<&str> for SessionId {
 impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SpawnPolicyRuntimeMode {
+    #[default]
+    #[serde(rename = "AutonomousHost")]
+    AutonomousHost,
+    #[serde(rename = "TurnDriven")]
+    TurnDriven,
+}
+impl SpawnPolicyRuntimeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AutonomousHost => "AutonomousHost",
+            Self::TurnDriven => "TurnDriven",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SpawnPolicyRuntimeMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AutonomousHost" => Ok(Self::AutonomousHost),
+            "TurnDriven" => Ok(Self::TurnDriven),
+            other => Err(format!("invalid SpawnPolicyRuntimeMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SpawnPolicyRuntimeMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SpawnPolicyRuntimeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -1551,6 +2282,68 @@ impl std::fmt::Display for StepRunStatus {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SubmitWorkRejectReasonKind {
+    #[default]
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "MemberNotFound")]
+    MemberNotFound,
+    #[serde(rename = "StaleFenceToken")]
+    StaleFenceToken,
+    #[serde(rename = "NotExternallyAddressable")]
+    NotExternallyAddressable,
+}
+impl SubmitWorkRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobNotRunning => "MobNotRunning",
+            Self::MemberNotFound => "MemberNotFound",
+            Self::StaleFenceToken => "StaleFenceToken",
+            Self::NotExternallyAddressable => "NotExternallyAddressable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SubmitWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "MemberNotFound" => Ok(Self::MemberNotFound),
+            "StaleFenceToken" => Ok(Self::StaleFenceToken),
+            "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
+            other => Err(format!(
+                "invalid SubmitWorkRejectReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SubmitWorkRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SubmitWorkRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type SupervisorProtocolVersion =
+    meerkat_machine_schema::catalog::dsl::mob_machine::SupervisorProtocolVersion;
 #[derive(
     Debug,
     Clone,
@@ -1728,10 +2521,14 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub phase: Phase,
+    pub destroy_admitted: bool,
     pub live_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub externally_addressable_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub runtime_fence_tokens: std::collections::BTreeMap<AgentRuntimeId, FenceToken>,
+    pub identity_runtime_generations: std::collections::BTreeMap<AgentIdentity, Generation>,
+    pub identity_runtime_fence_tokens: std::collections::BTreeMap<AgentIdentity, FenceToken>,
     pub active_run_count: u64,
+    pub flow_authority_schema_version: u64,
     pub run_status: std::collections::BTreeMap<RunId, FlowRunStatus>,
     pub run_ordered_steps: std::collections::BTreeMap<RunId, Vec<StepId>>,
     pub run_tracked_steps: std::collections::BTreeMap<RunId, std::collections::BTreeSet<StepId>>,
@@ -1739,10 +2536,8 @@ pub struct State {
         RunId,
         std::collections::BTreeMap<StepId, Option<StepRunStatus>>,
     >,
-    pub run_step_status_flat: std::collections::BTreeMap<RunStepKey, StepRunStatus>,
     pub run_output_recorded:
         std::collections::BTreeMap<RunId, std::collections::BTreeMap<StepId, bool>>,
-    pub run_step_condition_results_flat: std::collections::BTreeMap<RunStepKey, Option<bool>>,
     pub run_step_condition_results:
         std::collections::BTreeMap<RunId, std::collections::BTreeMap<StepId, Option<bool>>>,
     pub run_step_has_conditions:
@@ -1763,16 +2558,11 @@ pub struct State {
         std::collections::BTreeMap<RunId, std::collections::BTreeMap<StepId, u64>>,
     pub run_step_target_terminal_failure_counts:
         std::collections::BTreeMap<RunId, std::collections::BTreeMap<StepId, u64>>,
-    pub run_output_recorded_flat: std::collections::BTreeMap<RunStepKey, bool>,
-    pub run_step_target_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
-    pub run_step_target_success_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
-    pub run_step_target_terminal_failure_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
     pub run_target_retry_counts:
         std::collections::BTreeMap<RunId, std::collections::BTreeMap<String, u64>>,
-    pub run_target_retry_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
     pub run_failure_count: std::collections::BTreeMap<RunId, u64>,
     pub run_consecutive_failure_count: std::collections::BTreeMap<RunId, u64>,
-    pub run_escalation_threshold: std::collections::BTreeMap<RunId, u32>,
+    pub run_escalation_threshold: std::collections::BTreeMap<RunId, u64>,
     pub run_max_step_retries: std::collections::BTreeMap<RunId, u32>,
     pub run_ready_frames: std::collections::BTreeMap<RunId, Vec<FrameId>>,
     pub run_ready_frame_membership:
@@ -1784,8 +2574,8 @@ pub struct State {
     pub run_pending_body_frame_loop_membership_flat: std::collections::BTreeSet<LoopInstanceId>,
     pub run_active_node_count: std::collections::BTreeMap<RunId, u64>,
     pub run_active_frame_count: std::collections::BTreeMap<RunId, u64>,
-    pub run_last_granted_frame: std::collections::BTreeMap<RunId, FrameId>,
-    pub run_last_granted_loop: std::collections::BTreeMap<RunId, LoopInstanceId>,
+    pub run_last_granted_frame: std::collections::BTreeMap<RunId, Option<FrameId>>,
+    pub run_last_granted_loop: std::collections::BTreeMap<RunId, Option<LoopInstanceId>>,
     pub run_max_active_nodes: std::collections::BTreeMap<RunId, u64>,
     pub run_max_active_frames: std::collections::BTreeMap<RunId, u64>,
     pub run_max_frame_depth: std::collections::BTreeMap<RunId, u64>,
@@ -1814,8 +2604,7 @@ pub struct State {
     pub frame_ready_queue: std::collections::BTreeMap<FrameId, Vec<FlowNodeId>>,
     pub frame_output_recorded:
         std::collections::BTreeMap<FrameId, std::collections::BTreeMap<FlowNodeId, bool>>,
-    pub frame_output_recorded_flat: std::collections::BTreeMap<FrameNodeKey, bool>,
-    pub frame_last_admitted_node: std::collections::BTreeMap<FrameId, FlowNodeId>,
+    pub frame_last_admitted_node: std::collections::BTreeMap<FrameId, Option<FlowNodeId>>,
     pub frame_node_condition_results:
         std::collections::BTreeMap<FrameId, std::collections::BTreeMap<FlowNodeId, Option<bool>>>,
     pub frame_node_branches: std::collections::BTreeMap<
@@ -1849,9 +2638,45 @@ pub struct State {
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
     pub external_peer_edges: std::collections::BTreeSet<ExternalPeerEdge>,
+    pub external_peer_edges_by_key: std::collections::BTreeMap<ExternalPeerKey, ExternalPeerEdge>,
+    pub supervisor_authority_peer_id: Option<PeerId>,
+    pub supervisor_authority_signing_key: Option<PeerSigningKey>,
+    pub supervisor_authority_epoch: Option<u64>,
+    pub supervisor_authority_protocol_version: Option<SupervisorProtocolVersion>,
+    pub supervisor_pending_authority_peer_id: Option<PeerId>,
+    pub supervisor_pending_authority_signing_key: Option<PeerSigningKey>,
+    pub supervisor_pending_authority_epoch: Option<u64>,
+    pub supervisor_pending_authority_protocol_version: Option<SupervisorProtocolVersion>,
+    pub supervisor_pending_authority_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+    pub owner_bridge_session_id: Option<SessionId>,
+    pub owner_bridge_destroy_on_archive: bool,
+    pub implicit_delegation_mob: bool,
     pub identity_to_runtime: std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
     pub member_session_bindings: std::collections::BTreeMap<AgentIdentity, SessionId>,
+    pub member_profile_names: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_runtime_modes: std::collections::BTreeMap<AgentIdentity, SpawnPolicyRuntimeMode>,
+    pub member_peer_ids: std::collections::BTreeMap<AgentIdentity, PeerId>,
+    pub member_peer_endpoints: std::collections::BTreeMap<AgentIdentity, MemberPeerEndpoint>,
     pub pending_session_ingress_detach_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
+    pub spawn_policy_enabled: bool,
+    pub spawn_policy_revision: u64,
+    pub spawn_policy_resolution_revision: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub spawn_policy_resolution_profiles: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_policy_resolution_runtime_modes:
+        std::collections::BTreeMap<AgentIdentity, Option<SpawnPolicyRuntimeMode>>,
+    pub spawn_policy_resolution_absent: std::collections::BTreeSet<AgentIdentity>,
+    pub spawn_profile_authority_profile_names: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_models: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_material_digests: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_tool_config_digests:
+        std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_skills_digests: std::collections::BTreeMap<AgentIdentity, String>,
+    pub spawn_profile_authority_provider_params_digests:
+        std::collections::BTreeMap<AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_output_schema_digests:
+        std::collections::BTreeMap<AgentIdentity, Option<String>>,
+    pub spawn_profile_authority_external_addressable:
+        std::collections::BTreeMap<AgentIdentity, bool>,
     pub topology_epoch: u64,
 }
 impl Default for State {
@@ -1868,13 +2693,19 @@ pub mod inputs {
         pub run_id: RunId,
         pub step_ids: std::collections::BTreeSet<StepId>,
         pub ordered_steps: Vec<StepId>,
+        pub step_status: std::collections::BTreeMap<StepId, Option<StepRunStatus>>,
+        pub output_recorded: std::collections::BTreeMap<StepId, bool>,
+        pub step_condition_results: std::collections::BTreeMap<StepId, Option<bool>>,
         pub step_has_conditions: std::collections::BTreeMap<StepId, bool>,
         pub step_dependencies: std::collections::BTreeMap<StepId, Vec<StepId>>,
         pub step_dependency_modes: std::collections::BTreeMap<StepId, DependencyMode>,
         pub step_branches: std::collections::BTreeMap<StepId, Option<BranchId>>,
         pub step_collection_policies: std::collections::BTreeMap<StepId, CollectionPolicyKind>,
         pub step_quorum_thresholds: std::collections::BTreeMap<StepId, u32>,
-        pub escalation_threshold: u32,
+        pub step_target_counts: std::collections::BTreeMap<StepId, u64>,
+        pub step_target_success_counts: std::collections::BTreeMap<StepId, u64>,
+        pub step_target_terminal_failure_counts: std::collections::BTreeMap<StepId, u64>,
+        pub escalation_threshold: u64,
         pub max_step_retries: u32,
         pub max_active_nodes: u64,
         pub max_active_frames: u64,
@@ -1885,13 +2716,19 @@ pub mod inputs {
         pub run_id: RunId,
         pub step_ids: std::collections::BTreeSet<StepId>,
         pub ordered_steps: Vec<StepId>,
+        pub step_status: std::collections::BTreeMap<StepId, Option<StepRunStatus>>,
+        pub output_recorded: std::collections::BTreeMap<StepId, bool>,
+        pub step_condition_results: std::collections::BTreeMap<StepId, Option<bool>>,
         pub step_has_conditions: std::collections::BTreeMap<StepId, bool>,
         pub step_dependencies: std::collections::BTreeMap<StepId, Vec<StepId>>,
         pub step_dependency_modes: std::collections::BTreeMap<StepId, DependencyMode>,
         pub step_branches: std::collections::BTreeMap<StepId, Option<BranchId>>,
         pub step_collection_policies: std::collections::BTreeMap<StepId, CollectionPolicyKind>,
         pub step_quorum_thresholds: std::collections::BTreeMap<StepId, u32>,
-        pub escalation_threshold: u32,
+        pub step_target_counts: std::collections::BTreeMap<StepId, u64>,
+        pub step_target_success_counts: std::collections::BTreeMap<StepId, u64>,
+        pub step_target_terminal_failure_counts: std::collections::BTreeMap<StepId, u64>,
+        pub escalation_threshold: u64,
         pub max_step_retries: u32,
         pub max_active_nodes: u64,
         pub max_active_frames: u64,
@@ -1914,6 +2751,9 @@ pub mod inputs {
         pub node_loop_ids: std::collections::BTreeMap<FlowNodeId, LoopId>,
         pub node_status: std::collections::BTreeMap<FlowNodeId, NodeRunStatus>,
         pub ready_queue: Vec<FlowNodeId>,
+        pub output_recorded: std::collections::BTreeMap<FlowNodeId, bool>,
+        pub node_condition_results: std::collections::BTreeMap<FlowNodeId, Option<bool>>,
+        pub last_admitted_node: Option<FlowNodeId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateLoopSeed {
@@ -1944,7 +2784,6 @@ pub mod inputs {
         pub run_id: RunId,
         pub command: FlowRunReducerCommandKind,
         pub step_id: Option<StepId>,
-        pub run_step_key: Option<RunStepKey>,
         pub step_status: Option<StepRunStatus>,
         pub target_count: Option<u64>,
         pub frame_id: Option<FrameId>,
@@ -1957,7 +2796,6 @@ pub mod inputs {
         pub frame_id: FrameId,
         pub command: FlowFrameReducerCommandKind,
         pub node_id: Option<FlowNodeId>,
-        pub frame_node_key: Option<FrameNodeKey>,
         pub node_status: Option<NodeRunStatus>,
         pub terminal_status: Option<FrameStatus>,
     }
@@ -1975,14 +2813,56 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FlowStatus {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyFlowRunTerminality {
+        pub run_id: RunId,
+        pub status: FlowRunStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyFlowStepTerminality {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub status: StepRunStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyFlowFrameTerminalStatus {
+        pub frame_id: FrameId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyFlowRunPublicResult {
+        pub run_id: RunId,
+        pub status: FlowRunStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Spawn {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+        pub profile_material_digest: String,
         pub external_addressable: bool,
-        pub bridge_session_id: SessionId,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub bridge_session_id: Option<SessionId>,
         pub replacing: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSpawnProfile {
+        pub agent_identity: AgentIdentity,
+        pub profile_name: String,
+        pub model: String,
+        pub profile_material_digest: String,
+        pub tool_config_digest: String,
+        pub skills_digest: String,
+        pub provider_params_digest: Option<String>,
+        pub output_schema_digest: Option<String>,
+        pub external_addressable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifySpawnManyFailure {
+        pub observation: MobSpawnManyFailureObservationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyMemberWait {
+        pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
@@ -1998,8 +2878,18 @@ pub mod inputs {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
         pub agent_identity: AgentIdentity,
+        pub generation: Generation,
         pub releasing: Option<SessionId>,
-        pub session_id: SessionId,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireAbsent {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestPendingSessionIngressDetachForMobDestroy {
+        pub mob_id: MobId,
+        pub agent_runtime_id: AgentRuntimeId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Respawn {
@@ -2008,8 +2898,20 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RetireAll {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindOwnerBridgeSession {
+        pub bridge_session_id: SessionId,
+        pub destroy_on_owner_archive: bool,
+        pub implicit_delegation_mob: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WireMembers {
         pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WireMembersWithTrust {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireMembers {
@@ -2017,11 +2919,110 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WireExternalPeer {
+        pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RegisterMemberPeer {
+        pub agent_identity: AgentIdentity,
+        pub peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberPeerRebind {
+        pub agent_identity: AgentIdentity,
+        pub expected_peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberPeerOverlay {
+        pub agent_identity: AgentIdentity,
+        pub expected_peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustWiring {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustUnwiring {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustCleanup {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberTrustCleanupObserved {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub a_peer_id: PeerId,
+        pub b_identity: AgentIdentity,
+        pub b_peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExternalPeerReciprocalTrust {
+        pub key: ExternalPeerKey,
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireExternalPeer {
+        pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ProvisionSupervisorAuthority {
+        pub peer_id: PeerId,
+        pub signing_key: PeerSigningKey,
+        pub epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClearSupervisorPendingRotation {
+        pub current_peer_id: PeerId,
+        pub current_epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordSupervisorPendingRotation {
+        pub current_peer_id: PeerId,
+        pub current_epoch: u64,
+        pub pending_peer_id: PeerId,
+        pub pending_signing_key: PeerSigningKey,
+        pub pending_epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+        pub accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitSupervisorRotation {
+        pub current_peer_id: PeerId,
+        pub current_epoch: u64,
+        pub next_peer_id: PeerId,
+        pub next_signing_key: PeerSigningKey,
+        pub next_epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClearSupervisorAuthorityForDestroy {
+        pub current_peer_id: PeerId,
+        pub current_signing_key: PeerSigningKey,
+        pub current_epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreSupervisorAuthorityAfterDestroyRollback {
+        pub peer_id: PeerId,
+        pub signing_key: PeerSigningKey,
+        pub epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+        pub pending_peer_id: Option<PeerId>,
+        pub pending_signing_key: Option<PeerSigningKey>,
+        pub pending_epoch: Option<u64>,
+        pub pending_protocol_version: Option<SupervisorProtocolVersion>,
+        pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionIngressDetachedForMobDestroy {
@@ -2036,9 +3037,17 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubmitWork {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub work_id: WorkId,
+        pub origin: WorkOrigin,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSubmitWorkRejection {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
         pub origin: WorkOrigin,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2047,6 +3056,13 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelAllWork {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveCancelAllWorkRejection {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
     }
@@ -2071,25 +3087,74 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberStatus {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SubscribeAgentEvents {}
+    pub struct SubscribeAgentEvents {
+        pub agent_identity: AgentIdentity,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SubscribeAllAgentEvents {}
+    pub struct SubscribeAllAgentEvents {
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SubscribeMobEvents {}
+    pub struct SubscribeMobEvents {
+        pub initial_cursor: u64,
+        pub channel_capacity: u64,
+        pub poll_interval_ms: u64,
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SubscribeStructuralEvents {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+        pub explicit_after_cursor: bool,
+        pub batch_limit: u64,
+        pub channel_capacity: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberSubscription {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberRemoval {
+        pub agent_identity: AgentIdentity,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PollEvents {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PollEventsStrict {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+        pub limit: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplayAllEvents {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RecordOperatorActionProvenance {}
+    pub struct RecordOperatorActionProvenance {
+        pub tool_name: String,
+        pub principal_token: OpaquePrincipalToken,
+        pub caller_provenance: Option<MobToolCallerProvenance>,
+        pub audit_invocation_id: Option<String>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct GetMember {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SetSpawnPolicy {}
+    pub struct SetSpawnPolicy {
+        pub enabled: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSpawnPolicy {
+        pub agent_identity: AgentIdentity,
+        pub revision: u64,
+        pub profile_name: Option<String>,
+        pub runtime_mode: Option<SpawnPolicyRuntimeMode>,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Shutdown {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ForceCancel {}
+    pub struct ForceCancel {
+        pub agent_identity: AgentIdentity,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkPending {
         pub member_id: String,
@@ -2140,21 +3205,52 @@ pub enum Input {
     AuthorizeLoopIterationReducerCommand(inputs::AuthorizeLoopIterationReducerCommand),
     CancelFlow(inputs::CancelFlow),
     FlowStatus(inputs::FlowStatus),
+    ClassifyFlowRunTerminality(inputs::ClassifyFlowRunTerminality),
+    ClassifyFlowStepTerminality(inputs::ClassifyFlowStepTerminality),
+    ClassifyFlowFrameTerminalStatus(inputs::ClassifyFlowFrameTerminalStatus),
+    ClassifyFlowRunPublicResult(inputs::ClassifyFlowRunPublicResult),
     Spawn(inputs::Spawn),
+    AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
+    ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
+    ClassifyMemberWait(inputs::ClassifyMemberWait),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
+    RetireAbsent(inputs::RetireAbsent),
+    RequestPendingSessionIngressDetachForMobDestroy(
+        inputs::RequestPendingSessionIngressDetachForMobDestroy,
+    ),
     Respawn(inputs::Respawn),
     RetireAll(inputs::RetireAll),
+    BindOwnerBridgeSession(inputs::BindOwnerBridgeSession),
     WireMembers(inputs::WireMembers),
+    WireMembersWithTrust(inputs::WireMembersWithTrust),
     UnwireMembers(inputs::UnwireMembers),
     WireExternalPeer(inputs::WireExternalPeer),
+    RegisterMemberPeer(inputs::RegisterMemberPeer),
+    AuthorizeMemberPeerRebind(inputs::AuthorizeMemberPeerRebind),
+    AuthorizeMemberPeerOverlay(inputs::AuthorizeMemberPeerOverlay),
+    AuthorizeMemberTrustWiring(inputs::AuthorizeMemberTrustWiring),
+    AuthorizeMemberTrustUnwiring(inputs::AuthorizeMemberTrustUnwiring),
+    AuthorizeMemberTrustCleanup(inputs::AuthorizeMemberTrustCleanup),
+    AuthorizeMemberTrustCleanupObserved(inputs::AuthorizeMemberTrustCleanupObserved),
+    AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
+    ProvisionSupervisorAuthority(inputs::ProvisionSupervisorAuthority),
+    ClearSupervisorPendingRotation(inputs::ClearSupervisorPendingRotation),
+    RecordSupervisorPendingRotation(inputs::RecordSupervisorPendingRotation),
+    CommitSupervisorRotation(inputs::CommitSupervisorRotation),
+    ClearSupervisorAuthorityForDestroy(inputs::ClearSupervisorAuthorityForDestroy),
+    RestoreSupervisorAuthorityAfterDestroyRollback(
+        inputs::RestoreSupervisorAuthorityAfterDestroyRollback,
+    ),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
     SessionIngressDetachFailedForMobDestroy(inputs::SessionIngressDetachFailedForMobDestroy),
     SubmitWork(inputs::SubmitWork),
+    ResolveSubmitWorkRejection(inputs::ResolveSubmitWorkRejection),
     CancelWork(inputs::CancelWork),
     CancelAllWork(inputs::CancelAllWork),
+    ResolveCancelAllWorkRejection(inputs::ResolveCancelAllWorkRejection),
     Stop(inputs::Stop),
     Resume(inputs::Resume),
     Complete(inputs::Complete),
@@ -2168,11 +3264,16 @@ pub enum Input {
     SubscribeAgentEvents(inputs::SubscribeAgentEvents),
     SubscribeAllAgentEvents(inputs::SubscribeAllAgentEvents),
     SubscribeMobEvents(inputs::SubscribeMobEvents),
+    SubscribeStructuralEvents(inputs::SubscribeStructuralEvents),
+    AuthorizeMobEventRouterMemberSubscription(inputs::AuthorizeMobEventRouterMemberSubscription),
+    AuthorizeMobEventRouterMemberRemoval(inputs::AuthorizeMobEventRouterMemberRemoval),
     PollEvents(inputs::PollEvents),
+    PollEventsStrict(inputs::PollEventsStrict),
     ReplayAllEvents(inputs::ReplayAllEvents),
     RecordOperatorActionProvenance(inputs::RecordOperatorActionProvenance),
     GetMember(inputs::GetMember),
     SetSpawnPolicy(inputs::SetSpawnPolicy),
+    ResolveSpawnPolicy(inputs::ResolveSpawnPolicy),
     Shutdown(inputs::Shutdown),
     ForceCancel(inputs::ForceCancel),
     KickoffMarkPending(inputs::KickoffMarkPending),
@@ -2203,16 +3304,51 @@ impl Input {
             }
             Self::CancelFlow(_) => InputKind::CancelFlow,
             Self::FlowStatus(_) => InputKind::FlowStatus,
+            Self::ClassifyFlowRunTerminality(_) => InputKind::ClassifyFlowRunTerminality,
+            Self::ClassifyFlowStepTerminality(_) => InputKind::ClassifyFlowStepTerminality,
+            Self::ClassifyFlowFrameTerminalStatus(_) => InputKind::ClassifyFlowFrameTerminalStatus,
+            Self::ClassifyFlowRunPublicResult(_) => InputKind::ClassifyFlowRunPublicResult,
             Self::Spawn(_) => InputKind::Spawn,
+            Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
+            Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
+            Self::ClassifyMemberWait(_) => InputKind::ClassifyMemberWait,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
+            Self::RetireAbsent(_) => InputKind::RetireAbsent,
+            Self::RequestPendingSessionIngressDetachForMobDestroy(_) => {
+                InputKind::RequestPendingSessionIngressDetachForMobDestroy
+            }
             Self::Respawn(_) => InputKind::Respawn,
             Self::RetireAll(_) => InputKind::RetireAll,
+            Self::BindOwnerBridgeSession(_) => InputKind::BindOwnerBridgeSession,
             Self::WireMembers(_) => InputKind::WireMembers,
+            Self::WireMembersWithTrust(_) => InputKind::WireMembersWithTrust,
             Self::UnwireMembers(_) => InputKind::UnwireMembers,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
+            Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
+            Self::AuthorizeMemberPeerRebind(_) => InputKind::AuthorizeMemberPeerRebind,
+            Self::AuthorizeMemberPeerOverlay(_) => InputKind::AuthorizeMemberPeerOverlay,
+            Self::AuthorizeMemberTrustWiring(_) => InputKind::AuthorizeMemberTrustWiring,
+            Self::AuthorizeMemberTrustUnwiring(_) => InputKind::AuthorizeMemberTrustUnwiring,
+            Self::AuthorizeMemberTrustCleanup(_) => InputKind::AuthorizeMemberTrustCleanup,
+            Self::AuthorizeMemberTrustCleanupObserved(_) => {
+                InputKind::AuthorizeMemberTrustCleanupObserved
+            }
+            Self::AuthorizeExternalPeerReciprocalTrust(_) => {
+                InputKind::AuthorizeExternalPeerReciprocalTrust
+            }
             Self::UnwireExternalPeer(_) => InputKind::UnwireExternalPeer,
+            Self::ProvisionSupervisorAuthority(_) => InputKind::ProvisionSupervisorAuthority,
+            Self::ClearSupervisorPendingRotation(_) => InputKind::ClearSupervisorPendingRotation,
+            Self::RecordSupervisorPendingRotation(_) => InputKind::RecordSupervisorPendingRotation,
+            Self::CommitSupervisorRotation(_) => InputKind::CommitSupervisorRotation,
+            Self::ClearSupervisorAuthorityForDestroy(_) => {
+                InputKind::ClearSupervisorAuthorityForDestroy
+            }
+            Self::RestoreSupervisorAuthorityAfterDestroyRollback(_) => {
+                InputKind::RestoreSupervisorAuthorityAfterDestroyRollback
+            }
             Self::SessionIngressDetachedForMobDestroy(_) => {
                 InputKind::SessionIngressDetachedForMobDestroy
             }
@@ -2220,8 +3356,10 @@ impl Input {
                 InputKind::SessionIngressDetachFailedForMobDestroy
             }
             Self::SubmitWork(_) => InputKind::SubmitWork,
+            Self::ResolveSubmitWorkRejection(_) => InputKind::ResolveSubmitWorkRejection,
             Self::CancelWork(_) => InputKind::CancelWork,
             Self::CancelAllWork(_) => InputKind::CancelAllWork,
+            Self::ResolveCancelAllWorkRejection(_) => InputKind::ResolveCancelAllWorkRejection,
             Self::Stop(_) => InputKind::Stop,
             Self::Resume(_) => InputKind::Resume,
             Self::Complete(_) => InputKind::Complete,
@@ -2235,11 +3373,20 @@ impl Input {
             Self::SubscribeAgentEvents(_) => InputKind::SubscribeAgentEvents,
             Self::SubscribeAllAgentEvents(_) => InputKind::SubscribeAllAgentEvents,
             Self::SubscribeMobEvents(_) => InputKind::SubscribeMobEvents,
+            Self::SubscribeStructuralEvents(_) => InputKind::SubscribeStructuralEvents,
+            Self::AuthorizeMobEventRouterMemberSubscription(_) => {
+                InputKind::AuthorizeMobEventRouterMemberSubscription
+            }
+            Self::AuthorizeMobEventRouterMemberRemoval(_) => {
+                InputKind::AuthorizeMobEventRouterMemberRemoval
+            }
             Self::PollEvents(_) => InputKind::PollEvents,
+            Self::PollEventsStrict(_) => InputKind::PollEventsStrict,
             Self::ReplayAllEvents(_) => InputKind::ReplayAllEvents,
             Self::RecordOperatorActionProvenance(_) => InputKind::RecordOperatorActionProvenance,
             Self::GetMember(_) => InputKind::GetMember,
             Self::SetSpawnPolicy(_) => InputKind::SetSpawnPolicy,
+            Self::ResolveSpawnPolicy(_) => InputKind::ResolveSpawnPolicy,
             Self::Shutdown(_) => InputKind::Shutdown,
             Self::ForceCancel(_) => InputKind::ForceCancel,
             Self::KickoffMarkPending(_) => InputKind::KickoffMarkPending,
@@ -2267,21 +3414,48 @@ pub enum InputKind {
     AuthorizeLoopIterationReducerCommand,
     CancelFlow,
     FlowStatus,
+    ClassifyFlowRunTerminality,
+    ClassifyFlowStepTerminality,
+    ClassifyFlowFrameTerminalStatus,
+    ClassifyFlowRunPublicResult,
     Spawn,
+    AuthorizeSpawnProfile,
+    ClassifySpawnManyFailure,
+    ClassifyMemberWait,
     EnsureMember,
     Reconcile,
     Retire,
+    RetireAbsent,
+    RequestPendingSessionIngressDetachForMobDestroy,
     Respawn,
     RetireAll,
+    BindOwnerBridgeSession,
     WireMembers,
+    WireMembersWithTrust,
     UnwireMembers,
     WireExternalPeer,
+    RegisterMemberPeer,
+    AuthorizeMemberPeerRebind,
+    AuthorizeMemberPeerOverlay,
+    AuthorizeMemberTrustWiring,
+    AuthorizeMemberTrustUnwiring,
+    AuthorizeMemberTrustCleanup,
+    AuthorizeMemberTrustCleanupObserved,
+    AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
+    ProvisionSupervisorAuthority,
+    ClearSupervisorPendingRotation,
+    RecordSupervisorPendingRotation,
+    CommitSupervisorRotation,
+    ClearSupervisorAuthorityForDestroy,
+    RestoreSupervisorAuthorityAfterDestroyRollback,
     SessionIngressDetachedForMobDestroy,
     SessionIngressDetachFailedForMobDestroy,
     SubmitWork,
+    ResolveSubmitWorkRejection,
     CancelWork,
     CancelAllWork,
+    ResolveCancelAllWorkRejection,
     Stop,
     Resume,
     Complete,
@@ -2295,11 +3469,16 @@ pub enum InputKind {
     SubscribeAgentEvents,
     SubscribeAllAgentEvents,
     SubscribeMobEvents,
+    SubscribeStructuralEvents,
+    AuthorizeMobEventRouterMemberSubscription,
+    AuthorizeMobEventRouterMemberRemoval,
     PollEvents,
+    PollEventsStrict,
     ReplayAllEvents,
     RecordOperatorActionProvenance,
     GetMember,
     SetSpawnPolicy,
+    ResolveSpawnPolicy,
     Shutdown,
     ForceCancel,
     KickoffMarkPending,
@@ -2322,9 +3501,17 @@ pub mod signals {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RetireMember {
+        pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
-        pub session_id: SessionId,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitDestroyMemberRetire {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveRuntimeRetired {
@@ -2332,11 +3519,27 @@ pub mod signals {
         pub fence_token: FenceToken,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveMemberRetirementArchived {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveDestroyMemberRetirementArchived {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResetMember {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+        pub profile_name: String,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
         pub external_addressable: bool,
         pub session_id: SessionId,
     }
@@ -2346,8 +3549,15 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+        pub profile_name: String,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
         pub external_addressable: bool,
         pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRespawnTopologyRestore {
+        pub agent_identity: AgentIdentity,
+        pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DestroyMob {
@@ -2358,6 +3568,86 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterMember {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub profile_name: String,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub external_addressable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberSessionBinding {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub bridge_session_id: SessionId,
+        pub replacing: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterMemberReset {
+        pub agent_identity: AgentIdentity,
+        pub previous_agent_runtime_id: AgentRuntimeId,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterMemberRetired {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberKickoff {
+        pub member_id: String,
+        pub phase: KickoffPhase,
+        pub error: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterWiring {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterUnwire {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverExternalPeerWiring {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverExternalPeerUnwire {
+        pub key: ExternalPeerKey,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSupervisorAuthority {
+        pub peer_id: PeerId,
+        pub signing_key: PeerSigningKey,
+        pub epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+        pub pending_peer_id: Option<PeerId>,
+        pub pending_signing_key: Option<PeerSigningKey>,
+        pub pending_epoch: Option<u64>,
+        pub pending_protocol_version: Option<SupervisorProtocolVersion>,
+        pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOwnerBridgeSession {
+        pub bridge_session_id: SessionId,
+        pub destroy_on_owner_archive: bool,
+        pub implicit_delegation_mob: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberRestoreFailure {
+        pub agent_identity: AgentIdentity,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitDestroyCleanup {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitDestroyStorageFinalizing {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkCompleted {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2411,11 +3701,29 @@ pub mod signals {
 pub enum Signal {
     ObserveRuntimeReady(signals::ObserveRuntimeReady),
     RetireMember(signals::RetireMember),
+    AdmitDestroyMemberRetire(signals::AdmitDestroyMemberRetire),
     ObserveRuntimeRetired(signals::ObserveRuntimeRetired),
+    ObserveMemberRetirementArchived(signals::ObserveMemberRetirementArchived),
+    ObserveDestroyMemberRetirementArchived(signals::ObserveDestroyMemberRetirementArchived),
     ResetMember(signals::ResetMember),
     RespawnMember(signals::RespawnMember),
+    ResolveRespawnTopologyRestore(signals::ResolveRespawnTopologyRestore),
     DestroyMob(signals::DestroyMob),
     ObserveRuntimeDestroyed(signals::ObserveRuntimeDestroyed),
+    RecoverRosterMember(signals::RecoverRosterMember),
+    RecoverMemberSessionBinding(signals::RecoverMemberSessionBinding),
+    RecoverRosterMemberReset(signals::RecoverRosterMemberReset),
+    RecoverRosterMemberRetired(signals::RecoverRosterMemberRetired),
+    RecoverMemberKickoff(signals::RecoverMemberKickoff),
+    RecoverRosterWiring(signals::RecoverRosterWiring),
+    RecoverRosterUnwire(signals::RecoverRosterUnwire),
+    RecoverExternalPeerWiring(signals::RecoverExternalPeerWiring),
+    RecoverExternalPeerUnwire(signals::RecoverExternalPeerUnwire),
+    RecoverSupervisorAuthority(signals::RecoverSupervisorAuthority),
+    RecoverOwnerBridgeSession(signals::RecoverOwnerBridgeSession),
+    RecoverMemberRestoreFailure(signals::RecoverMemberRestoreFailure),
+    AdmitDestroyCleanup(signals::AdmitDestroyCleanup),
+    AdmitDestroyStorageFinalizing(signals::AdmitDestroyStorageFinalizing),
     MarkCompleted(signals::MarkCompleted),
     StartRun(signals::StartRun),
     FinishRun(signals::FinishRun),
@@ -2443,11 +3751,31 @@ impl Signal {
         match self {
             Self::ObserveRuntimeReady(_) => SignalKind::ObserveRuntimeReady,
             Self::RetireMember(_) => SignalKind::RetireMember,
+            Self::AdmitDestroyMemberRetire(_) => SignalKind::AdmitDestroyMemberRetire,
             Self::ObserveRuntimeRetired(_) => SignalKind::ObserveRuntimeRetired,
+            Self::ObserveMemberRetirementArchived(_) => SignalKind::ObserveMemberRetirementArchived,
+            Self::ObserveDestroyMemberRetirementArchived(_) => {
+                SignalKind::ObserveDestroyMemberRetirementArchived
+            }
             Self::ResetMember(_) => SignalKind::ResetMember,
             Self::RespawnMember(_) => SignalKind::RespawnMember,
+            Self::ResolveRespawnTopologyRestore(_) => SignalKind::ResolveRespawnTopologyRestore,
             Self::DestroyMob(_) => SignalKind::DestroyMob,
             Self::ObserveRuntimeDestroyed(_) => SignalKind::ObserveRuntimeDestroyed,
+            Self::RecoverRosterMember(_) => SignalKind::RecoverRosterMember,
+            Self::RecoverMemberSessionBinding(_) => SignalKind::RecoverMemberSessionBinding,
+            Self::RecoverRosterMemberReset(_) => SignalKind::RecoverRosterMemberReset,
+            Self::RecoverRosterMemberRetired(_) => SignalKind::RecoverRosterMemberRetired,
+            Self::RecoverMemberKickoff(_) => SignalKind::RecoverMemberKickoff,
+            Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
+            Self::RecoverRosterUnwire(_) => SignalKind::RecoverRosterUnwire,
+            Self::RecoverExternalPeerWiring(_) => SignalKind::RecoverExternalPeerWiring,
+            Self::RecoverExternalPeerUnwire(_) => SignalKind::RecoverExternalPeerUnwire,
+            Self::RecoverSupervisorAuthority(_) => SignalKind::RecoverSupervisorAuthority,
+            Self::RecoverOwnerBridgeSession(_) => SignalKind::RecoverOwnerBridgeSession,
+            Self::RecoverMemberRestoreFailure(_) => SignalKind::RecoverMemberRestoreFailure,
+            Self::AdmitDestroyCleanup(_) => SignalKind::AdmitDestroyCleanup,
+            Self::AdmitDestroyStorageFinalizing(_) => SignalKind::AdmitDestroyStorageFinalizing,
             Self::MarkCompleted(_) => SignalKind::MarkCompleted,
             Self::StartRun(_) => SignalKind::StartRun,
             Self::FinishRun(_) => SignalKind::FinishRun,
@@ -2476,11 +3804,29 @@ impl Signal {
 pub enum SignalKind {
     ObserveRuntimeReady,
     RetireMember,
+    AdmitDestroyMemberRetire,
     ObserveRuntimeRetired,
+    ObserveMemberRetirementArchived,
+    ObserveDestroyMemberRetirementArchived,
     ResetMember,
     RespawnMember,
+    ResolveRespawnTopologyRestore,
     DestroyMob,
     ObserveRuntimeDestroyed,
+    RecoverRosterMember,
+    RecoverMemberSessionBinding,
+    RecoverRosterMemberReset,
+    RecoverRosterMemberRetired,
+    RecoverMemberKickoff,
+    RecoverRosterWiring,
+    RecoverRosterUnwire,
+    RecoverExternalPeerWiring,
+    RecoverExternalPeerUnwire,
+    RecoverSupervisorAuthority,
+    RecoverOwnerBridgeSession,
+    RecoverMemberRestoreFailure,
+    AdmitDestroyCleanup,
+    AdmitDestroyStorageFinalizing,
     MarkCompleted,
     StartRun,
     FinishRun,
@@ -2512,15 +3858,52 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
-        pub generation: Generation,
+        pub generation: Option<Generation>,
         pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnProfileAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub profile_name: String,
+        pub model: String,
+        pub profile_material_digest: String,
+        pub tool_config_digest: String,
+        pub skills_digest: String,
+        pub provider_params_digest: Option<String>,
+        pub output_schema_digest: Option<String>,
+        pub external_addressable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeIngress {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub generation: Option<Generation>,
+        pub session_id: SessionId,
         pub work_id: WorkId,
         pub origin: WorkOrigin,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestPeerRuntimeIngress {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Option<Generation>,
+        pub work_id: WorkId,
+        pub origin: WorkOrigin,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SubmitWorkRejected {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub origin: WorkOrigin,
+        pub reason: SubmitWorkRejectReasonKind,
+        pub expected_fence_token: Option<FenceToken>,
+        pub actual_fence_token: Option<FenceToken>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelAllWorkRejected {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub reason: CancelAllWorkRejectReasonKind,
+        pub expected_fence_token: Option<FenceToken>,
+        pub actual_fence_token: Option<FenceToken>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeRetire {
@@ -2531,9 +3914,30 @@ pub mod effects {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PendingSpawnOperationOwnerAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestSessionIngressDetachForMobDestroy {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AppendLifecycleJournal {
+        pub kind: MobLifecycleJournalKind,
+        pub agent_identity: Option<AgentIdentity>,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AppendOperatorActionProvenance {
+        pub tool_name: String,
+        pub principal_token: OpaquePrincipalToken,
+        pub caller_provenance: Option<MobToolCallerProvenance>,
+        pub audit_invocation_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitMemberLifecycleNotice {
@@ -2547,6 +3951,38 @@ pub mod effects {
     pub struct AppendFailureLedger {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FlowTerminalized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowRunTerminal {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowRunNonTerminal {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowStepTerminal {
+        pub run_id: RunId,
+        pub step_id: StepId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowStepNonTerminal {
+        pub run_id: RunId,
+        pub step_id: StepId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowFrameTerminalStatusClassified {
+        pub frame_id: FrameId,
+        pub terminal_status: FrameStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowFrameTerminalStatusUnavailable {
+        pub frame_id: FrameId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowRunPublicResultClassified {
+        pub run_id: RunId,
+        pub result: FlowRunPublicResultClassKind,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EscalateSupervisor {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2576,6 +4012,35 @@ pub mod effects {
         pub intent: KickoffIntent,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnPolicyResolutionRecorded {
+        pub agent_identity: AgentIdentity,
+        pub revision: u64,
+        pub profile_name: Option<String>,
+        pub runtime_mode: Option<SpawnPolicyRuntimeMode>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnerBridgeSessionBound {
+        pub bridge_session_id: SessionId,
+        pub destroy_on_owner_archive: bool,
+        pub implicit_delegation_mob: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RespawnTopologyRestoreResolved {
+        pub agent_identity: AgentIdentity,
+        pub result: RespawnTopologyRestoreResultKind,
+        pub failed_peer_ids: Vec<RespawnTopologyPeerId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnManyFailureClassified {
+        pub observation: MobSpawnManyFailureObservationKind,
+        pub cause: MobSpawnManyFailureCauseKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberWaitClassified {
+        pub agent_identity: AgentIdentity,
+        pub result: MemberWaitClassificationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -2587,6 +4052,97 @@ pub mod effects {
         pub new_session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionProvisionOperationOwnerAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberTrustWiringRequested {
+        pub edge: WiringEdge,
+        pub a_peer_id: PeerId,
+        pub b_peer_id: PeerId,
+        pub a_endpoint: MemberPeerEndpoint,
+        pub b_endpoint: MemberPeerEndpoint,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberTrustUnwiringRequested {
+        pub edge: WiringEdge,
+        pub a_peer_id: PeerId,
+        pub b_peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WiringTrustRepairRequested {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerTrustWiringRequested {
+        pub edge: ExternalPeerEdge,
+        pub local_peer_id: PeerId,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerTrustUnwiringRequested {
+        pub edge: ExternalPeerEdge,
+        pub local_peer_id: PeerId,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerTrustRepairRequested {
+        pub edge: ExternalPeerEdge,
+        pub local_peer_id: PeerId,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberPeerRegistered {
+        pub agent_identity: AgentIdentity,
+        pub peer_id: PeerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberPeerRebindAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub peer_id: PeerId,
+        pub peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberPeerOverlayAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub peer_id: PeerId,
+        pub peer_overlay_endpoints: std::collections::BTreeSet<MemberPeerEndpoint>,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerReciprocalTrustRequested {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
+        pub peer_endpoint: MemberPeerEndpoint,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PersistSupervisorAuthority {
+        pub peer_id: PeerId,
+        pub signing_key: PeerSigningKey,
+        pub epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+        pub pending_peer_id: Option<PeerId>,
+        pub pending_signing_key: Option<PeerSigningKey>,
+        pub pending_epoch: Option<u64>,
+        pub pending_protocol_version: Option<SupervisorProtocolVersion>,
+        pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeleteSupervisorAuthority {
+        pub peer_id: PeerId,
+        pub signing_key: PeerSigningKey,
+        pub epoch: u64,
+        pub protocol_version: SupervisorProtocolVersion,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitWiringLifecycleNotice {
         pub kind: WiringLifecycleKind,
         pub edge: WiringEdge,
@@ -2596,20 +4152,92 @@ pub mod effects {
         pub kind: WiringLifecycleKind,
         pub edge: ExternalPeerEdge,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeAgentEventSubscription {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectAgentEventSubscription {
+        pub agent_identity: AgentIdentity,
+        pub reason: EventSubscriptionRejectReasonKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeAllAgentEventSubscription {
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectAllAgentEventSubscription {
+        pub reason: EventSubscriptionRejectReasonKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouter {
+        pub initial_cursor: u64,
+        pub channel_capacity: u64,
+        pub poll_interval_ms: u64,
+        pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberSubscription {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMobEventRouterMemberRemoval {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeStructuralEventSubscription {
+        pub after_cursor: u64,
+        pub explicit_after_cursor: bool,
+        pub batch_limit: u64,
+        pub channel_capacity: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectStructuralEventSubscription {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeStrictEventPoll {
+        pub after_cursor: u64,
+        pub limit: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectStrictEventPoll {
+        pub after_cursor: u64,
+        pub latest_cursor: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
     RequestRuntimeBinding(effects::RequestRuntimeBinding),
+    SpawnProfileAuthorized(effects::SpawnProfileAuthorized),
     RequestRuntimeIngress(effects::RequestRuntimeIngress),
+    RequestPeerRuntimeIngress(effects::RequestPeerRuntimeIngress),
+    SubmitWorkRejected(effects::SubmitWorkRejected),
+    CancelAllWorkRejected(effects::CancelAllWorkRejected),
     RequestRuntimeRetire(effects::RequestRuntimeRetire),
     RequestRuntimeDestroy(effects::RequestRuntimeDestroy),
+    PendingSpawnOperationOwnerAuthorized(effects::PendingSpawnOperationOwnerAuthorized),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
+    AppendLifecycleJournal(effects::AppendLifecycleJournal),
+    AppendOperatorActionProvenance(effects::AppendOperatorActionProvenance),
     EmitMemberLifecycleNotice(effects::EmitMemberLifecycleNotice),
     EmitRunLifecycleNotice(effects::EmitRunLifecycleNotice),
     EmitFlowRunNotice(effects::EmitFlowRunNotice),
     AppendFailureLedger(effects::AppendFailureLedger),
     FlowTerminalized(effects::FlowTerminalized),
+    FlowRunTerminal(effects::FlowRunTerminal),
+    FlowRunNonTerminal(effects::FlowRunNonTerminal),
+    FlowStepTerminal(effects::FlowStepTerminal),
+    FlowStepNonTerminal(effects::FlowStepNonTerminal),
+    FlowFrameTerminalStatusClassified(effects::FlowFrameTerminalStatusClassified),
+    FlowFrameTerminalStatusUnavailable(effects::FlowFrameTerminalStatusUnavailable),
+    FlowRunPublicResultClassified(effects::FlowRunPublicResultClassified),
     EscalateSupervisor(effects::EscalateSupervisor),
     NotifyCoordinator(effects::NotifyCoordinator),
     ExposePendingSpawn(effects::ExposePendingSpawn),
@@ -2619,23 +4247,66 @@ pub enum Effect {
     PersistKickoffUpdate(effects::PersistKickoffUpdate),
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
+    SpawnPolicyResolutionRecorded(effects::SpawnPolicyResolutionRecorded),
+    OwnerBridgeSessionBound(effects::OwnerBridgeSessionBound),
+    RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
+    SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
+    MemberWaitClassified(effects::MemberWaitClassified),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
+    SessionProvisionOperationOwnerAuthorized(effects::SessionProvisionOperationOwnerAuthorized),
+    MemberTrustWiringRequested(effects::MemberTrustWiringRequested),
+    MemberTrustUnwiringRequested(effects::MemberTrustUnwiringRequested),
+    WiringTrustRepairRequested(effects::WiringTrustRepairRequested),
+    ExternalPeerTrustWiringRequested(effects::ExternalPeerTrustWiringRequested),
+    ExternalPeerTrustUnwiringRequested(effects::ExternalPeerTrustUnwiringRequested),
+    ExternalPeerTrustRepairRequested(effects::ExternalPeerTrustRepairRequested),
+    MemberPeerRegistered(effects::MemberPeerRegistered),
+    MemberPeerRebindAuthorized(effects::MemberPeerRebindAuthorized),
+    MemberPeerOverlayAuthorized(effects::MemberPeerOverlayAuthorized),
+    ExternalPeerReciprocalTrustRequested(effects::ExternalPeerReciprocalTrustRequested),
+    PersistSupervisorAuthority(effects::PersistSupervisorAuthority),
+    DeleteSupervisorAuthority(effects::DeleteSupervisorAuthority),
     EmitWiringLifecycleNotice(effects::EmitWiringLifecycleNotice),
     EmitExternalPeerWiringLifecycleNotice(effects::EmitExternalPeerWiringLifecycleNotice),
+    AuthorizeAgentEventSubscription(effects::AuthorizeAgentEventSubscription),
+    RejectAgentEventSubscription(effects::RejectAgentEventSubscription),
+    AuthorizeAllAgentEventSubscription(effects::AuthorizeAllAgentEventSubscription),
+    RejectAllAgentEventSubscription(effects::RejectAllAgentEventSubscription),
+    AuthorizeMobEventRouter(effects::AuthorizeMobEventRouter),
+    AuthorizeMobEventRouterMemberSubscription(effects::AuthorizeMobEventRouterMemberSubscription),
+    AuthorizeMobEventRouterMemberRemoval(effects::AuthorizeMobEventRouterMemberRemoval),
+    AuthorizeStructuralEventSubscription(effects::AuthorizeStructuralEventSubscription),
+    RejectStructuralEventSubscription(effects::RejectStructuralEventSubscription),
+    AuthorizeStrictEventPoll(effects::AuthorizeStrictEventPoll),
+    RejectStrictEventPoll(effects::RejectStrictEventPoll),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     RequestRuntimeBinding,
+    SpawnProfileAuthorized,
     RequestRuntimeIngress,
+    RequestPeerRuntimeIngress,
+    SubmitWorkRejected,
+    CancelAllWorkRejected,
     RequestRuntimeRetire,
     RequestRuntimeDestroy,
+    PendingSpawnOperationOwnerAuthorized,
     RequestSessionIngressDetachForMobDestroy,
+    AppendLifecycleJournal,
+    AppendOperatorActionProvenance,
     EmitMemberLifecycleNotice,
     EmitRunLifecycleNotice,
     EmitFlowRunNotice,
     AppendFailureLedger,
     FlowTerminalized,
+    FlowRunTerminal,
+    FlowRunNonTerminal,
+    FlowStepTerminal,
+    FlowStepNonTerminal,
+    FlowFrameTerminalStatusClassified,
+    FlowFrameTerminalStatusUnavailable,
+    FlowRunPublicResultClassified,
     EscalateSupervisor,
     NotifyCoordinator,
     ExposePendingSpawn,
@@ -2645,19 +4316,230 @@ pub enum EffectKind {
     PersistKickoffUpdate,
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
+    SpawnPolicyResolutionRecorded,
+    OwnerBridgeSessionBound,
+    RespawnTopologyRestoreResolved,
+    SpawnManyFailureClassified,
+    MemberWaitClassified,
     WiringGraphChanged,
     MemberSessionBindingChanged,
+    SessionProvisionOperationOwnerAuthorized,
+    MemberTrustWiringRequested,
+    MemberTrustUnwiringRequested,
+    WiringTrustRepairRequested,
+    ExternalPeerTrustWiringRequested,
+    ExternalPeerTrustUnwiringRequested,
+    ExternalPeerTrustRepairRequested,
+    MemberPeerRegistered,
+    MemberPeerRebindAuthorized,
+    MemberPeerOverlayAuthorized,
+    ExternalPeerReciprocalTrustRequested,
+    PersistSupervisorAuthority,
+    DeleteSupervisorAuthority,
     EmitWiringLifecycleNotice,
     EmitExternalPeerWiringLifecycleNotice,
+    AuthorizeAgentEventSubscription,
+    RejectAgentEventSubscription,
+    AuthorizeAllAgentEventSubscription,
+    RejectAllAgentEventSubscription,
+    AuthorizeMobEventRouter,
+    AuthorizeMobEventRouterMemberSubscription,
+    AuthorizeMobEventRouterMemberRemoval,
+    AuthorizeStructuralEventSubscription,
+    RejectStructuralEventSubscription,
+    AuthorizeStrictEventPoll,
+    RejectStrictEventPoll,
 }
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
+    ClassifyFlowRunTerminalityTerminalRunning,
+    ClassifyFlowRunTerminalityNonTerminalRunning,
+    ClassifyFlowStepTerminalityTerminalRunning,
+    ClassifyFlowStepTerminalityNonTerminalRunning,
+    ClassifyFlowFrameTerminalStatusFailedRunning,
+    ClassifyFlowFrameTerminalStatusFailedStopped,
+    ClassifyFlowFrameTerminalStatusFailedCompleted,
+    ClassifyFlowFrameTerminalStatusCanceledRunning,
+    ClassifyFlowFrameTerminalStatusCanceledStopped,
+    ClassifyFlowFrameTerminalStatusCanceledCompleted,
+    ClassifyFlowFrameTerminalStatusCompletedRunning,
+    ClassifyFlowFrameTerminalStatusCompletedStopped,
+    ClassifyFlowFrameTerminalStatusCompletedCompleted,
+    ClassifyFlowFrameTerminalStatusUnavailableRunning,
+    ClassifyFlowFrameTerminalStatusUnavailableStopped,
+    ClassifyFlowFrameTerminalStatusUnavailableCompleted,
+    ClassifyFlowRunPublicResultSuccessRunning,
+    ClassifyFlowRunPublicResultFailureRunning,
+    ClassifyMemberWaitRuntimeMaterialPresentRunning,
+    ClassifyMemberWaitRuntimeMaterialPresentStopped,
+    ClassifyMemberWaitRuntimeMaterialPresentCompleted,
+    ClassifyMemberWaitRuntimeMaterialPresentDestroyed,
+    ClassifyMemberWaitMissingRuntimeMaterialRunning,
+    ClassifyMemberWaitMissingRuntimeMaterialStopped,
+    ClassifyMemberWaitMissingRuntimeMaterialCompleted,
+    ClassifyMemberWaitMissingRuntimeMaterialDestroyed,
+    ClassifySpawnManyFailureProfileNotFoundRunning,
+    ClassifySpawnManyFailureProfileNotFoundStopped,
+    ClassifySpawnManyFailureProfileNotFoundCompleted,
+    ClassifySpawnManyFailureProfileNotFoundDestroyed,
+    ClassifySpawnManyFailureMemberNotFoundRunning,
+    ClassifySpawnManyFailureMemberNotFoundStopped,
+    ClassifySpawnManyFailureMemberNotFoundCompleted,
+    ClassifySpawnManyFailureMemberNotFoundDestroyed,
+    ClassifySpawnManyFailureMemberAlreadyExistsRunning,
+    ClassifySpawnManyFailureMemberAlreadyExistsStopped,
+    ClassifySpawnManyFailureMemberAlreadyExistsCompleted,
+    ClassifySpawnManyFailureMemberAlreadyExistsDestroyed,
+    ClassifySpawnManyFailureNotExternallyAddressableRunning,
+    ClassifySpawnManyFailureNotExternallyAddressableStopped,
+    ClassifySpawnManyFailureNotExternallyAddressableCompleted,
+    ClassifySpawnManyFailureNotExternallyAddressableDestroyed,
+    ClassifySpawnManyFailureInvalidTransitionRunning,
+    ClassifySpawnManyFailureInvalidTransitionStopped,
+    ClassifySpawnManyFailureInvalidTransitionCompleted,
+    ClassifySpawnManyFailureInvalidTransitionDestroyed,
+    ClassifySpawnManyFailureWiringErrorRunning,
+    ClassifySpawnManyFailureWiringErrorStopped,
+    ClassifySpawnManyFailureWiringErrorCompleted,
+    ClassifySpawnManyFailureWiringErrorDestroyed,
+    ClassifySpawnManyFailureBridgeCommandRejectedRunning,
+    ClassifySpawnManyFailureBridgeCommandRejectedStopped,
+    ClassifySpawnManyFailureBridgeCommandRejectedCompleted,
+    ClassifySpawnManyFailureBridgeCommandRejectedDestroyed,
+    ClassifySpawnManyFailureMemberRestoreFailedRunning,
+    ClassifySpawnManyFailureMemberRestoreFailedStopped,
+    ClassifySpawnManyFailureMemberRestoreFailedCompleted,
+    ClassifySpawnManyFailureMemberRestoreFailedDestroyed,
+    ClassifySpawnManyFailureKickoffWaitTimedOutRunning,
+    ClassifySpawnManyFailureKickoffWaitTimedOutStopped,
+    ClassifySpawnManyFailureKickoffWaitTimedOutCompleted,
+    ClassifySpawnManyFailureKickoffWaitTimedOutDestroyed,
+    ClassifySpawnManyFailureReadyWaitTimedOutRunning,
+    ClassifySpawnManyFailureReadyWaitTimedOutStopped,
+    ClassifySpawnManyFailureReadyWaitTimedOutCompleted,
+    ClassifySpawnManyFailureReadyWaitTimedOutDestroyed,
+    ClassifySpawnManyFailureDefinitionErrorRunning,
+    ClassifySpawnManyFailureDefinitionErrorStopped,
+    ClassifySpawnManyFailureDefinitionErrorCompleted,
+    ClassifySpawnManyFailureDefinitionErrorDestroyed,
+    ClassifySpawnManyFailureFlowNotFoundRunning,
+    ClassifySpawnManyFailureFlowNotFoundStopped,
+    ClassifySpawnManyFailureFlowNotFoundCompleted,
+    ClassifySpawnManyFailureFlowNotFoundDestroyed,
+    ClassifySpawnManyFailureFlowFailedRunning,
+    ClassifySpawnManyFailureFlowFailedStopped,
+    ClassifySpawnManyFailureFlowFailedCompleted,
+    ClassifySpawnManyFailureFlowFailedDestroyed,
+    ClassifySpawnManyFailureRunNotFoundRunning,
+    ClassifySpawnManyFailureRunNotFoundStopped,
+    ClassifySpawnManyFailureRunNotFoundCompleted,
+    ClassifySpawnManyFailureRunNotFoundDestroyed,
+    ClassifySpawnManyFailureRunCanceledRunning,
+    ClassifySpawnManyFailureRunCanceledStopped,
+    ClassifySpawnManyFailureRunCanceledCompleted,
+    ClassifySpawnManyFailureRunCanceledDestroyed,
+    ClassifySpawnManyFailureFlowTurnTimedOutRunning,
+    ClassifySpawnManyFailureFlowTurnTimedOutStopped,
+    ClassifySpawnManyFailureFlowTurnTimedOutCompleted,
+    ClassifySpawnManyFailureFlowTurnTimedOutDestroyed,
+    ClassifySpawnManyFailureFrameDepthLimitExceededRunning,
+    ClassifySpawnManyFailureFrameDepthLimitExceededStopped,
+    ClassifySpawnManyFailureFrameDepthLimitExceededCompleted,
+    ClassifySpawnManyFailureFrameDepthLimitExceededDestroyed,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableRunning,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableStopped,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableCompleted,
+    ClassifySpawnManyFailureFrameAtomicPersistenceUnavailableDestroyed,
+    ClassifySpawnManyFailureSpecRevisionConflictRunning,
+    ClassifySpawnManyFailureSpecRevisionConflictStopped,
+    ClassifySpawnManyFailureSpecRevisionConflictCompleted,
+    ClassifySpawnManyFailureSpecRevisionConflictDestroyed,
+    ClassifySpawnManyFailureSchemaValidationRunning,
+    ClassifySpawnManyFailureSchemaValidationStopped,
+    ClassifySpawnManyFailureSchemaValidationCompleted,
+    ClassifySpawnManyFailureSchemaValidationDestroyed,
+    ClassifySpawnManyFailureInsufficientTargetsRunning,
+    ClassifySpawnManyFailureInsufficientTargetsStopped,
+    ClassifySpawnManyFailureInsufficientTargetsCompleted,
+    ClassifySpawnManyFailureInsufficientTargetsDestroyed,
+    ClassifySpawnManyFailureTopologyViolationRunning,
+    ClassifySpawnManyFailureTopologyViolationStopped,
+    ClassifySpawnManyFailureTopologyViolationCompleted,
+    ClassifySpawnManyFailureTopologyViolationDestroyed,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedRunning,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedStopped,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted,
+    ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed,
+    ClassifySpawnManyFailureSupervisorEscalationRunning,
+    ClassifySpawnManyFailureSupervisorEscalationStopped,
+    ClassifySpawnManyFailureSupervisorEscalationCompleted,
+    ClassifySpawnManyFailureSupervisorEscalationDestroyed,
+    ClassifySpawnManyFailureUnsupportedForModeRunning,
+    ClassifySpawnManyFailureUnsupportedForModeStopped,
+    ClassifySpawnManyFailureUnsupportedForModeCompleted,
+    ClassifySpawnManyFailureUnsupportedForModeDestroyed,
+    ClassifySpawnManyFailureMissingMemberCapabilityRunning,
+    ClassifySpawnManyFailureMissingMemberCapabilityStopped,
+    ClassifySpawnManyFailureMissingMemberCapabilityCompleted,
+    ClassifySpawnManyFailureMissingMemberCapabilityDestroyed,
+    ClassifySpawnManyFailureResetBarrierRunning,
+    ClassifySpawnManyFailureResetBarrierStopped,
+    ClassifySpawnManyFailureResetBarrierCompleted,
+    ClassifySpawnManyFailureResetBarrierDestroyed,
+    ClassifySpawnManyFailureStorageErrorRunning,
+    ClassifySpawnManyFailureStorageErrorStopped,
+    ClassifySpawnManyFailureStorageErrorCompleted,
+    ClassifySpawnManyFailureStorageErrorDestroyed,
+    ClassifySpawnManyFailureSessionErrorRunning,
+    ClassifySpawnManyFailureSessionErrorStopped,
+    ClassifySpawnManyFailureSessionErrorCompleted,
+    ClassifySpawnManyFailureSessionErrorDestroyed,
+    ClassifySpawnManyFailureCommsErrorRunning,
+    ClassifySpawnManyFailureCommsErrorStopped,
+    ClassifySpawnManyFailureCommsErrorCompleted,
+    ClassifySpawnManyFailureCommsErrorDestroyed,
+    ClassifySpawnManyFailureCallbackPendingRunning,
+    ClassifySpawnManyFailureCallbackPendingStopped,
+    ClassifySpawnManyFailureCallbackPendingCompleted,
+    ClassifySpawnManyFailureCallbackPendingDestroyed,
+    ClassifySpawnManyFailureStaleFenceTokenRunning,
+    ClassifySpawnManyFailureStaleFenceTokenStopped,
+    ClassifySpawnManyFailureStaleFenceTokenCompleted,
+    ClassifySpawnManyFailureStaleFenceTokenDestroyed,
+    ClassifySpawnManyFailureStaleEventCursorRunning,
+    ClassifySpawnManyFailureStaleEventCursorStopped,
+    ClassifySpawnManyFailureStaleEventCursorCompleted,
+    ClassifySpawnManyFailureStaleEventCursorDestroyed,
+    ClassifySpawnManyFailureWorkNotFoundRunning,
+    ClassifySpawnManyFailureWorkNotFoundStopped,
+    ClassifySpawnManyFailureWorkNotFoundCompleted,
+    ClassifySpawnManyFailureWorkNotFoundDestroyed,
+    ClassifySpawnManyFailureInternalRunning,
+    ClassifySpawnManyFailureInternalStopped,
+    ClassifySpawnManyFailureInternalCompleted,
+    ClassifySpawnManyFailureInternalDestroyed,
     SpawnRunningFresh,
+    SpawnRunningFreshPeerOnly,
     SpawnRunningReplacing,
+    AuthorizeSpawnProfileRunning,
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
+    RecoverRosterMemberRunning,
+    RecoverRosterMemberAddressabilityRunning,
+    RecoverMemberSessionBindingFreshRunning,
+    RecoverMemberSessionBindingReplacingRunning,
+    RecoverMemberSessionBindingAlreadyCurrentRunning,
+    RecoverRosterMemberResetRunning,
+    RecoverRosterMemberRetiredRunning,
+    RecoverRosterMemberRetiredAlreadyAbsent,
+    RecoverMemberKickoffPending,
+    RecoverMemberKickoffStarting,
+    RecoverMemberKickoffCallbackPending,
+    RecoverMemberKickoffStarted,
+    RecoverMemberKickoffFailed,
+    RecoverMemberKickoffCancelled,
     ReconcileRunning,
     ReconcileStopped,
     ReconcileCompleted,
@@ -2687,11 +4569,46 @@ pub enum TransitionId {
     KickoffClearStopped,
     KickoffClearCompleted,
     SubmitWorkRunningExternal,
+    SubmitWorkRunningExternalPeerOnly,
     SubmitWorkRunningInternal,
+    SubmitWorkRunningInternalPeerOnly,
+    ResolveSubmitWorkRejectionStopped,
+    ResolveSubmitWorkRejectionCompleted,
+    ResolveSubmitWorkRejectionDestroyed,
+    ResolveSubmitWorkRejectionMemberNotFound,
+    ResolveSubmitWorkRejectionCurrentRuntimeNotLive,
+    ResolveSubmitWorkRejectionStaleFenceToken,
+    ResolveSubmitWorkRejectionRetiringAsMemberNotFound,
+    ResolveSubmitWorkRejectionNotExternallyAddressable,
+    ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable,
     RetireMember,
+    RetireMemberPeerOnly,
+    AdmitDestroyMemberRetireLiveRunning,
+    AdmitDestroyMemberRetireLiveStopped,
+    AdmitDestroyMemberRetirePeerOnlyRunning,
+    AdmitDestroyMemberRetirePeerOnlyStopped,
+    AdmitDestroyMemberRetireAlreadyRetiringRunning,
+    AdmitDestroyMemberRetireAlreadyRetiringStopped,
     ObserveRuntimeRetired,
+    ObserveMemberRetirementArchivedLive,
+    ObserveMemberRetirementArchivedLiveStopped,
+    ObserveMemberRetirementArchivedRetired,
+    ObserveMemberRetirementArchivedRetiredStopped,
+    ObserveMemberRetirementArchivedStaleRuntime,
+    ObserveMemberRetirementArchivedStaleRuntimeStopped,
+    ObserveMemberRetirementArchivedAlreadyCleared,
+    ObserveMemberRetirementArchivedAlreadyClearedStopped,
+    ObserveDestroyMemberRetirementArchivedLiveRunning,
+    ObserveDestroyMemberRetirementArchivedLiveStopped,
+    ObserveDestroyMemberRetirementArchivedRetiredRunning,
+    ObserveDestroyMemberRetirementArchivedRetiredStopped,
     ResetMember,
     RespawnMember,
+    ResolveRespawnTopologyRestoreCompleted,
+    ResolveRespawnTopologyRestoreFailed,
+    RecoverMemberRestoreFailureRunning,
+    AdmitDestroyCleanup,
+    AdmitDestroyStorageFinalizing,
     MarkCompleted,
     DestroyMob,
     ObserveRuntimeDestroyed,
@@ -2703,27 +4620,121 @@ pub enum TransitionId {
     SetSpawnPolicyStopped,
     SetSpawnPolicyCompleted,
     SetSpawnPolicyDestroyed,
+    ResolveSpawnPolicyAdmitted,
+    ResolveSpawnPolicyNoMatch,
+    BindOwnerBridgeSessionRunning,
+    RecoverOwnerBridgeSessionRunning,
+    RecoverOwnerBridgeSessionAlreadyCurrent,
     StopRunning,
     ResumeStopped,
     CompleteRunning,
     ResetToRunning,
     WireMembersRunning,
+    WireMembersWithTrustRunning,
+    WireMembersWithTrustAlreadyWired,
+    WireMembersAlreadyWired,
+    RecoverRosterWiringRunning,
+    RecoverRosterWiringAlreadyRecovered,
+    RecoverRosterUnwireRunning,
+    RecoverRosterUnwireAlreadyAbsent,
     UnwireMembersRunning,
+    UnwireMembersAlreadyAbsent,
     WireExternalPeerRunning,
+    WireExternalPeerAlreadyWired,
+    RegisterMemberPeerRunning,
+    AuthorizeMemberPeerRebindRunning,
+    AuthorizeMemberPeerOverlayRunning,
+    AuthorizeMemberTrustWiringRunning,
+    AuthorizeMemberTrustUnwiringRunning,
+    AuthorizeMemberTrustCleanupRunning,
+    AuthorizeMemberTrustCleanupObservedRunning,
+    AuthorizeExternalPeerReciprocalTrustRunning,
+    RecoverExternalPeerWiringRunning,
+    RecoverExternalPeerWiringAlreadyRecovered,
+    RecoverExternalPeerUnwireRunning,
+    RecoverExternalPeerUnwireAlreadyAbsent,
     UnwireExternalPeerRunning,
+    UnwireExternalPeerAlreadyAbsent,
+    ProvisionSupervisorAuthorityRunning,
+    ProvisionSupervisorAuthorityStopped,
+    ProvisionSupervisorAuthorityCompleted,
+    ProvisionSupervisorAuthorityDestroyed,
+    RecoverSupervisorAuthorityRunning,
+    RecoverSupervisorAuthorityStopped,
+    RecoverSupervisorAuthorityCompleted,
+    RecoverSupervisorAuthorityDestroyed,
+    ClearSupervisorPendingRotationRunning,
+    ClearSupervisorPendingRotationStopped,
+    ClearSupervisorPendingRotationCompleted,
+    RecordSupervisorPendingRotationRunning,
+    RecordSupervisorPendingRotationStopped,
+    RecordSupervisorPendingRotationCompleted,
+    CommitSupervisorRotationRunning,
+    CommitSupervisorRotationStopped,
+    CommitSupervisorRotationCompleted,
+    ClearSupervisorAuthorityForDestroy,
+    RestoreSupervisorAuthorityAfterDestroyRollback,
     ForceCancelRunning,
     SubscribeAgentEventsRunning,
     SubscribeAgentEventsStopped,
     SubscribeAgentEventsCompleted,
     SubscribeAgentEventsDestroyed,
+    SubscribeAgentEventsMissingMemberRunning,
+    SubscribeAgentEventsMissingMemberStopped,
+    SubscribeAgentEventsMissingMemberCompleted,
+    SubscribeAgentEventsMissingMemberDestroyed,
+    SubscribeAgentEventsMissingSessionRunning,
+    SubscribeAgentEventsMissingSessionStopped,
+    SubscribeAgentEventsMissingSessionCompleted,
+    SubscribeAgentEventsMissingSessionDestroyed,
+    SubscribeAgentEventsRuntimeNotLiveRunning,
+    SubscribeAgentEventsRuntimeNotLiveStopped,
+    SubscribeAgentEventsRuntimeNotLiveCompleted,
+    SubscribeAgentEventsRuntimeNotLiveDestroyed,
     SubscribeAllAgentEventsRunning,
     SubscribeAllAgentEventsStopped,
     SubscribeAllAgentEventsCompleted,
     SubscribeAllAgentEventsDestroyed,
+    SubscribeAllAgentEventsNoSessionBindingsRunning,
+    SubscribeAllAgentEventsNoSessionBindingsStopped,
+    SubscribeAllAgentEventsNoSessionBindingsCompleted,
+    SubscribeAllAgentEventsNoSessionBindingsDestroyed,
     SubscribeMobEventsRunning,
     SubscribeMobEventsStopped,
     SubscribeMobEventsCompleted,
     SubscribeMobEventsDestroyed,
+    SubscribeStructuralEventsRunning,
+    SubscribeStructuralEventsStopped,
+    SubscribeStructuralEventsCompleted,
+    SubscribeStructuralEventsDestroyed,
+    SubscribeStructuralEventsStaleRunning,
+    SubscribeStructuralEventsStaleStopped,
+    SubscribeStructuralEventsStaleCompleted,
+    SubscribeStructuralEventsStaleDestroyed,
+    PollEventsStrictRunning,
+    PollEventsStrictStopped,
+    PollEventsStrictCompleted,
+    PollEventsStrictDestroyed,
+    PollEventsStrictStaleRunning,
+    PollEventsStrictStaleStopped,
+    PollEventsStrictStaleCompleted,
+    PollEventsStrictStaleDestroyed,
+    AuthorizeMobEventRouterMemberSubscriptionRunning,
+    AuthorizeMobEventRouterMemberSubscriptionStopped,
+    AuthorizeMobEventRouterMemberSubscriptionCompleted,
+    AuthorizeMobEventRouterMemberSubscriptionDestroyed,
+    AuthorizeMobEventRouterMemberRemovalMissingRunning,
+    AuthorizeMobEventRouterMemberRemovalMissingStopped,
+    AuthorizeMobEventRouterMemberRemovalMissingCompleted,
+    AuthorizeMobEventRouterMemberRemovalMissingDestroyed,
+    AuthorizeMobEventRouterMemberRemovalUnboundRunning,
+    AuthorizeMobEventRouterMemberRemovalUnboundStopped,
+    AuthorizeMobEventRouterMemberRemovalUnboundCompleted,
+    AuthorizeMobEventRouterMemberRemovalUnboundDestroyed,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveRunning,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveStopped,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveCompleted,
+    AuthorizeMobEventRouterMemberRemovalRuntimeNotLiveDestroyed,
     ShutdownRunning,
     ShutdownStopped,
     ShutdownCompleted,
@@ -2765,8 +4776,11 @@ pub enum TransitionId {
     AuthorizeFlowRunReducerCommandConditionPassed,
     AuthorizeFlowRunReducerCommandConditionRejected,
     AuthorizeFlowRunReducerCommandFailStep,
+    AuthorizeFlowRunReducerCommandFailStepEscalating,
     AuthorizeFlowRunReducerCommandSkipStep,
     AuthorizeFlowRunReducerCommandProjectFrameStepStatus,
+    AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed,
+    AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating,
     AuthorizeFlowRunReducerCommandCancelStep,
     AuthorizeFlowRunReducerCommandRegisterTargets,
     AuthorizeFlowRunReducerCommandRecordTargetSuccess,
@@ -2790,7 +4804,9 @@ pub enum TransitionId {
     AuthorizeFlowFrameReducerCommandFailNode,
     AuthorizeFlowFrameReducerCommandSkipNode,
     AuthorizeFlowFrameReducerCommandCancelNode,
-    AuthorizeFlowFrameReducerCommandSealFrame,
+    AuthorizeFlowFrameReducerCommandSealFrameRunning,
+    AuthorizeFlowFrameReducerCommandSealFrameStopped,
+    AuthorizeFlowFrameReducerCommandSealFrameCompleted,
     AuthorizeLoopIterationReducerCommandBodyFrameStarted,
     AuthorizeLoopIterationReducerCommandBodyFrameCompleted,
     AuthorizeLoopIterationReducerCommandBodyFrameFailed,
@@ -2808,18 +4824,29 @@ pub enum TransitionId {
     RetireRunningPreservingBinding,
     RetireRunningNoBinding,
     RetireStoppedReleasing,
+    RequestPendingSessionIngressDetachForMobDestroyRunning,
+    RequestPendingSessionIngressDetachForMobDestroyStopped,
     SessionIngressDetachedForMobDestroyRunning,
     SessionIngressDetachedForMobDestroyStopped,
     SessionIngressDetachFailedForMobDestroyRunning,
     SessionIngressDetachFailedForMobDestroyStopped,
     RetireStoppedPreservingBinding,
     RetireStoppedNoBinding,
+    RetireAbsentRunning,
+    RetireAbsentStopped,
     RetireAllRunning,
     RetireAllStopped,
+    RetireAllCompleted,
     CompleteSpawnRunning,
     DestroyFromAny,
     RespawnRunning,
     CancelAllWorkRunning,
+    ResolveCancelAllWorkRejectionStopped,
+    ResolveCancelAllWorkRejectionCompleted,
+    ResolveCancelAllWorkRejectionDestroyed,
+    ResolveCancelAllWorkRejectionMemberNotFound,
+    ResolveCancelAllWorkRejectionCurrentRuntimeNotLive,
+    ResolveCancelAllWorkRejectionStaleFenceToken,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2893,17 +4920,19 @@ pub mod helpers {
 pub fn initial_state() -> State {
     State {
         phase: Phase::Running,
+        destroy_admitted: false,
         live_runtime_ids: Default::default(),
         externally_addressable_runtime_ids: Default::default(),
         runtime_fence_tokens: Default::default(),
+        identity_runtime_generations: Default::default(),
+        identity_runtime_fence_tokens: Default::default(),
         active_run_count: 0,
+        flow_authority_schema_version: 7,
         run_status: Default::default(),
         run_ordered_steps: Default::default(),
         run_tracked_steps: Default::default(),
         run_step_status: Default::default(),
-        run_step_status_flat: Default::default(),
         run_output_recorded: Default::default(),
-        run_step_condition_results_flat: Default::default(),
         run_step_condition_results: Default::default(),
         run_step_has_conditions: Default::default(),
         run_step_dependencies: Default::default(),
@@ -2914,12 +4943,7 @@ pub fn initial_state() -> State {
         run_step_target_counts: Default::default(),
         run_step_target_success_counts: Default::default(),
         run_step_target_terminal_failure_counts: Default::default(),
-        run_output_recorded_flat: Default::default(),
-        run_step_target_counts_flat: Default::default(),
-        run_step_target_success_counts_flat: Default::default(),
-        run_step_target_terminal_failure_counts_flat: Default::default(),
         run_target_retry_counts: Default::default(),
-        run_target_retry_counts_flat: Default::default(),
         run_failure_count: Default::default(),
         run_consecutive_failure_count: Default::default(),
         run_escalation_threshold: Default::default(),
@@ -2952,7 +4976,6 @@ pub fn initial_state() -> State {
         frame_node_status: Default::default(),
         frame_ready_queue: Default::default(),
         frame_output_recorded: Default::default(),
-        frame_output_recorded_flat: Default::default(),
         frame_last_admitted_node: Default::default(),
         frame_node_condition_results: Default::default(),
         frame_node_branches: Default::default(),
@@ -2983,9 +5006,40 @@ pub fn initial_state() -> State {
         member_state_markers: Default::default(),
         wiring_edges: Default::default(),
         external_peer_edges: Default::default(),
+        external_peer_edges_by_key: Default::default(),
+        supervisor_authority_peer_id: None,
+        supervisor_authority_signing_key: None,
+        supervisor_authority_epoch: None,
+        supervisor_authority_protocol_version: None,
+        supervisor_pending_authority_peer_id: None,
+        supervisor_pending_authority_signing_key: None,
+        supervisor_pending_authority_epoch: None,
+        supervisor_pending_authority_protocol_version: None,
+        supervisor_pending_authority_accepted_peer_ids: Default::default(),
+        owner_bridge_session_id: None,
+        owner_bridge_destroy_on_archive: false,
+        implicit_delegation_mob: false,
         identity_to_runtime: Default::default(),
         member_session_bindings: Default::default(),
+        member_profile_names: Default::default(),
+        member_runtime_modes: Default::default(),
+        member_peer_ids: Default::default(),
+        member_peer_endpoints: Default::default(),
         pending_session_ingress_detach_runtime_ids: Default::default(),
+        spawn_policy_enabled: false,
+        spawn_policy_revision: 0,
+        spawn_policy_resolution_revision: Default::default(),
+        spawn_policy_resolution_profiles: Default::default(),
+        spawn_policy_resolution_runtime_modes: Default::default(),
+        spawn_policy_resolution_absent: Default::default(),
+        spawn_profile_authority_profile_names: Default::default(),
+        spawn_profile_authority_models: Default::default(),
+        spawn_profile_authority_material_digests: Default::default(),
+        spawn_profile_authority_tool_config_digests: Default::default(),
+        spawn_profile_authority_skills_digests: Default::default(),
+        spawn_profile_authority_provider_params_digests: Default::default(),
+        spawn_profile_authority_output_schema_digests: Default::default(),
+        spawn_profile_authority_external_addressable: Default::default(),
         topology_epoch: 0,
     }
 }

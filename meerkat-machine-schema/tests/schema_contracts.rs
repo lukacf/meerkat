@@ -11,6 +11,7 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     dsl_occurrence_lifecycle_machine as occurrence_lifecycle_machine,
     dsl_schedule_lifecycle_machine as schedule_lifecycle_machine,
+    dsl_workgraph_lifecycle_machine as workgraph_lifecycle_machine,
 };
 use meerkat_machine_schema::identity::{
     ActorId, CompositionDriverId, CompositionId, EffectVariantId, EnumTypeId, EnumVariantId,
@@ -48,9 +49,16 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // lifecycle and gets its own canonical machine per
             // dogma §1 "one semantic fact, one owner".
             "AuthMachine",
+            // Approval lifecycle owns approval status/result truth.
+            "ApprovalLifecycleMachine",
             // WorkGraph: realm-scoped commitment graph lifecycle,
             // readiness, claim state, and topology validation.
             "WorkGraphLifecycleMachine",
+            // Work attention owns goal/attention queue lifecycle.
+            "WorkAttentionLifecycleMachine",
+            // Pending continuation: public run-pending admission and
+            // NoPendingBoundary terminality belong to generated authority.
+            "PendingContinuationAdmissionMachine",
         ]
     );
 
@@ -64,6 +72,52 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             "{absorbed} should be absorbed into canonical kernels, not published separately"
         );
     }
+}
+
+#[test]
+fn workgraph_machine_state_wire_retains_topology_projection_fields() {
+    let value = serde_json::json!({
+        "lifecycle_phase": "open",
+        "revision": 1,
+        "unresolved_blocker_count": 0,
+        "topology_item_keys": [],
+        "claim_owner_key": null,
+        "claimed_at_utc_ms": null,
+        "lease_expires_at_utc_ms": null,
+        "due_at_utc_ms": null,
+        "not_before_utc_ms": null,
+        "snoozed_until_utc_ms": null,
+        "terminal_at_utc_ms": null,
+        "evidence_count": 0
+    });
+
+    let state = serde_json::from_value::<
+        meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphLifecycleMachineState,
+    >(value)
+    .expect("mainline WorkGraph topology projection fields must deserialize");
+
+    assert_eq!(state.unresolved_blocker_count, 0);
+    assert!(state.topology_item_keys.is_empty());
+}
+
+#[test]
+fn workgraph_refresh_eligibility_input_uses_scalar_unresolved_blocker_count() {
+    let schema = workgraph_lifecycle_machine();
+    let refresh = schema
+        .inputs
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "RefreshEligibility")
+        .expect("RefreshEligibility input");
+
+    let field_names = refresh
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(field_names, vec!["unresolved_blocker_count"]);
+
+    assert_eq!(refresh.fields[0].ty, TypeRef::U64);
 }
 
 #[test]
@@ -143,6 +197,7 @@ fn canonical_composition_registry_contains_kernel_seam_and_schedule_perimeter_en
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
             "auth_lease_bundle",
+            "workgraph_attention_bundle",
         ]
     );
 }
@@ -366,6 +421,7 @@ fn kernel_seam_retains_coverage_metadata() {
             "schedule_runtime_bundle",
             "schedule_mob_bundle",
             "auth_lease_bundle",
+            "workgraph_attention_bundle",
         ]
     );
 }
@@ -406,11 +462,14 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "InterruptCurrentRun",
         "CancelAfterBoundary",
         "ReconfigureSessionLlmIdentity",
+        "ResolvePeerIngressReceive",
+        "ResolvePeerIngressDequeue",
         "StagePersistentFilter",
         "RequestDeferredTools",
         "SurfaceStageAdd",
         "SurfaceStageRemove",
         "SurfaceStageReload",
+        "SurfaceSetRemovalTimeout",
         "SurfaceMarkPendingSucceeded",
         "SurfaceMarkPendingFailed",
         "SurfaceSnapshotAligned",
@@ -440,6 +499,8 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "SubmitOpEvent",
         "EnqueueClassifiedEntry",
         "PeerIngressClassified",
+        "PeerIngressReceiveResolved",
+        "PeerIngressDequeueResolved",
         "SpawnDrainTask",
         "EmitExternalToolDelta",
         "CommittedVisibleSetPublished",
@@ -520,24 +581,37 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         "RequestDeferredToolsAttached",
         "RequestDeferredToolsRunning",
         "BoundaryAppliedPublish",
+        "SurfaceStageAddIdle",
         "SurfaceStageAddAttached",
         "SurfaceStageAddRunning",
+        "SurfaceStageRemoveIdle",
         "SurfaceStageRemoveAttached",
         "SurfaceStageRemoveRunning",
+        "SurfaceSetRemovalTimeoutIdle",
+        "SurfaceSetRemovalTimeoutAttached",
+        "SurfaceSetRemovalTimeoutRunning",
+        "SurfaceStageReloadIdle",
         "SurfaceStageReloadAttached",
         "SurfaceStageReloadRunning",
+        "SurfaceApplyBoundaryAddIdle",
         "SurfaceApplyBoundaryAddAttached",
         "SurfaceApplyBoundaryAddRunning",
+        "SurfaceApplyBoundaryReloadIdle",
         "SurfaceApplyBoundaryReloadAttached",
         "SurfaceApplyBoundaryReloadRunning",
+        "SurfaceApplyBoundaryRemoveDrainingIdle",
         "SurfaceApplyBoundaryRemoveDrainingAttached",
         "SurfaceApplyBoundaryRemoveDrainingRunning",
+        "SurfaceApplyBoundaryRemoveNoopIdle",
         "SurfaceApplyBoundaryRemoveNoopAttached",
         "SurfaceApplyBoundaryRemoveNoopRunning",
+        "SurfaceMarkPendingSucceededAddIdle",
         "SurfaceMarkPendingSucceededAddAttached",
         "SurfaceMarkPendingSucceededAddRunning",
+        "SurfaceMarkPendingSucceededReloadIdle",
         "SurfaceMarkPendingSucceededReloadAttached",
         "SurfaceMarkPendingSucceededReloadRunning",
+        "SurfaceFinalizeRemovalCleanIdle",
         "SurfaceFinalizeRemovalCleanAttached",
         "SurfaceFinalizeRemovalCleanRunning",
         "PublishCommittedVisibleSetAttached",
@@ -1475,6 +1549,8 @@ mod handoff_binding {
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            comms_trust_authority: None,
+            durable_marker: None,
             rust,
         }
     }
@@ -1535,6 +1611,48 @@ mod handoff_binding {
     }
 
     #[test]
+    fn ack_required_closure_requires_feedback_input() {
+        let mut protocol = handle_bridge_protocol(ok_handle_binding());
+        protocol.allowed_feedback_inputs = vec![];
+        let composition = composition_with_protocol(protocol);
+
+        let err = composition
+            .validate()
+            .expect_err("AckRequired without feedback must be rejected");
+        match err {
+            CompositionSchemaError::InvalidHandoffClosurePolicy { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("AckRequired"),
+                    "error detail should name AckRequired, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffClosurePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_only_closure_rejects_feedback_inputs() {
+        let mut protocol = handle_bridge_protocol(ok_handle_binding());
+        protocol.closure_policy = ClosurePolicy::PublicationOnly;
+        let composition = composition_with_protocol(protocol);
+
+        let err = composition
+            .validate()
+            .expect_err("PublicationOnly with feedback must be rejected");
+        match err {
+            CompositionSchemaError::InvalidHandoffClosurePolicy { protocol, detail } => {
+                assert_eq!(protocol, "test_handoff");
+                assert!(
+                    detail.contains("PublicationOnly"),
+                    "error detail should name PublicationOnly, got {detail}"
+                );
+            }
+            other => panic!("expected InvalidHandoffClosurePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_against_rejects_protocol_without_machine_owned_disposition() {
         let binding = ProtocolRustBinding {
             module_path: "crate-x/src/generated/proto.rs".into(),
@@ -1564,8 +1682,10 @@ mod handoff_binding {
             correlation_fields: vec![],
             obligation_fields: vec![],
             allowed_feedback_inputs: vec![],
-            closure_policy: ClosurePolicy::AckRequired,
+            closure_policy: ClosurePolicy::PublicationOnly,
             liveness_annotation: None,
+            comms_trust_authority: None,
+            durable_marker: None,
             rust: binding,
         };
         let composition = composition_with_protocol(protocol);
@@ -1797,6 +1917,8 @@ mod handoff_binding {
                 }],
                 closure_policy: ClosurePolicy::AckRequired,
                 liveness_annotation: None,
+                comms_trust_authority: None,
+                durable_marker: None,
                 rust: ProtocolRustBinding {
                     module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1871,10 +1993,11 @@ mod canonical_handoff_parity {
 
     #[test]
     fn meerkat_wait_all_satisfied_mirrors_runtime_struct() {
-        // The canonical `WaitAllSatisfied` effect must name the two
+        // The canonical `WaitAllSatisfied` effect must name the three
         // fields the runtime's hand-written `WaitAllSatisfied` struct
         // in `meerkat-core/src/ops_lifecycle.rs` exposes:
         //   pub wait_request_id: WaitRequestId,
+        //   pub run_id: RunId,
         //   pub operation_ids: Vec<OperationId>,
         // Drift in either direction silently desyncs the canonical
         // `ops_barrier_satisfaction` handoff obligation.
@@ -1892,21 +2015,31 @@ mod canonical_handoff_parity {
             "canonical effect lost `wait_request_id` field — runtime struct has it"
         );
         assert!(
+            field_names.contains("run_id"),
+            "canonical effect lost `run_id` field — runtime struct has it"
+        );
+        assert!(
             field_names.contains("operation_ids"),
             "canonical effect lost `operation_ids` field — runtime struct has it"
         );
         assert_eq!(
             field_names.len(),
-            2,
+            3,
             "canonical effect gained extra fields not present on runtime struct — audit both"
         );
         // Type-shape parity: operation_ids must render as a sequence
-        // of OperationId, wait_request_id as the typed newtype.
+        // of OperationId, wait_request_id and run_id as typed newtypes.
         let wait_request = effect.field_named("wait_request_id").expect("field");
         assert_eq!(
             wait_request.ty,
             TypeRef::Named(NamedTypeId::parse("WaitRequestId").expect("valid NamedTypeId")),
             "canonical wait_request_id must be `WaitRequestId` typed"
+        );
+        let run_id = effect.field_named("run_id").expect("field");
+        assert_eq!(
+            run_id.ty,
+            TypeRef::Named(NamedTypeId::parse("RunId").expect("valid NamedTypeId")),
+            "canonical run_id must be `RunId` typed"
         );
         let operation_ids = effect.field_named("operation_ids").expect("field");
         assert!(

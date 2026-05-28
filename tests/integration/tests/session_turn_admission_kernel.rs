@@ -77,6 +77,7 @@ fn prepared_meerkat_state() -> KernelState {
                     ),
                     (field("fence_token"), named_u64("FenceToken", 3)),
                     (field("generation"), named_u64("Generation", 1)),
+                    (field("runtime_epoch_id"), KernelValue::None),
                     (field("session_id"), named_string("SessionId", "session-1")),
                 ]),
             },

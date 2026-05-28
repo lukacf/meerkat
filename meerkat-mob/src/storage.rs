@@ -7,7 +7,7 @@ use crate::store::SqliteMobStores;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
     InMemoryMobSpecStore, InMemoryRealmProfileStore, MobEventStore, MobRunStore,
-    MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore,
+    MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore, authority_validating_mob_run_store,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -19,15 +19,15 @@ use std::sync::Arc;
 /// store (for meerkat sessions). Each mob has its own isolated storage.
 pub struct MobStorage {
     /// Event store for mob structural events.
-    pub events: Arc<dyn MobEventStore>,
+    pub(crate) events: Arc<dyn MobEventStore>,
     /// Flow run persistence store.
-    pub runs: Arc<dyn MobRunStore>,
+    pub(crate) runs: Arc<dyn MobRunStore>,
     /// Flow spec persistence store.
-    pub specs: Arc<dyn MobSpecStore>,
+    pub(crate) specs: Arc<dyn MobSpecStore>,
     /// Runtime metadata store for supervisor authority and compatibility projections.
-    pub runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+    pub(crate) runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
     /// Realm-scoped reusable profile store.
-    pub realm_profiles: Option<Arc<dyn RealmProfileStore>>,
+    pub(crate) realm_profiles: Option<Arc<dyn RealmProfileStore>>,
 }
 
 impl MobStorage {
@@ -46,7 +46,7 @@ impl MobStorage {
     /// Create in-memory run/spec stores for flow persistence.
     pub fn in_memory_flow_stores() -> (Arc<dyn MobRunStore>, Arc<dyn MobSpecStore>) {
         (
-            Arc::new(InMemoryMobRunStore::new()),
+            authority_validating_mob_run_store(Arc::new(InMemoryMobRunStore::new())),
             Arc::new(InMemoryMobSpecStore::new()),
         )
     }
@@ -101,11 +101,25 @@ impl MobStorage {
     ) -> Self {
         Self {
             events,
-            runs,
+            runs: authority_validating_mob_run_store(runs),
             specs,
             runtime_metadata,
             realm_profiles: None,
         }
+    }
+
+    /// Attach the realm-scoped reusable profile store used by mob runtimes.
+    pub fn with_realm_profile_store(
+        mut self,
+        realm_profiles: Option<Arc<dyn RealmProfileStore>>,
+    ) -> Self {
+        self.realm_profiles = realm_profiles;
+        self
+    }
+
+    /// Return whether the structural event log is empty.
+    pub async fn is_event_log_empty(&self) -> Result<bool, crate::store::MobStoreError> {
+        Ok(self.events.latest_cursor().await? == 0)
     }
 
     /// Create a storage bundle backed by a single SQLite database file.
@@ -117,7 +131,7 @@ impl MobStorage {
         let stores = SqliteMobStores::open(path)?;
         Ok(Self {
             events: Arc::new(stores.event_store()),
-            runs: Arc::new(stores.run_store()),
+            runs: authority_validating_mob_run_store(Arc::new(stores.run_store())),
             specs: Arc::new(stores.spec_store()),
             runtime_metadata: Arc::new(stores.runtime_metadata_store()),
             realm_profiles: Some(Arc::new(stores.realm_profile_store())),
@@ -147,9 +161,270 @@ impl std::fmt::Debug for MobStorage {
 mod tests {
     use super::*;
     use crate::event::{MobEventKind, NewMobEvent};
-    use crate::ids::{MobId, RunId};
-    use crate::run::{MobRun, MobRunStatus};
-    use chrono::Utc;
+    use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+    use crate::run::{
+        FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
+        MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
+    };
+    use crate::store::MobStoreError;
+    use std::sync::Mutex;
+
+    struct ForgedRunStore {
+        run: Mutex<Option<MobRun>>,
+    }
+
+    impl ForgedRunStore {
+        fn new(run: Option<MobRun>) -> Self {
+            Self {
+                run: Mutex::new(run),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MobRunStore for ForgedRunStore {
+        async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
+            *self.run.lock().expect("forged run mutex") = Some(run);
+            Ok(())
+        }
+
+        async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
+            Ok(self
+                .run
+                .lock()
+                .expect("forged run mutex")
+                .as_ref()
+                .filter(|run| &run.run_id == run_id)
+                .cloned())
+        }
+
+        async fn list_runs(
+            &self,
+            mob_id: &MobId,
+            flow_id: Option<&FlowId>,
+        ) -> Result<Vec<MobRun>, MobStoreError> {
+            Ok(self
+                .run
+                .lock()
+                .expect("forged run mutex")
+                .as_ref()
+                .filter(|run| &run.mob_id == mob_id)
+                .filter(|run| flow_id.is_none_or(|flow_id| &run.flow_id == flow_id))
+                .cloned()
+                .into_iter()
+                .collect())
+        }
+
+        async fn cas_flow_state_with_authority(
+            &self,
+            _run_id: &RunId,
+            _expected: &crate::run::flow_run::State,
+            _next: &crate::run::flow_run::State,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        async fn cas_run_snapshot_with_authority(
+            &self,
+            _run_id: &RunId,
+            _expected_status: MobRunStatus,
+            _expected_flow_state: &crate::run::flow_run::State,
+            _next_status: MobRunStatus,
+            _next_flow_state: &crate::run::flow_run::State,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        async fn append_step_entry_with_authority(
+            &self,
+            _run_id: &RunId,
+            _entry: StepLedgerEntry,
+            _authority: MobRunProvenanceAuthority,
+        ) -> Result<(), MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        async fn append_step_entry_if_absent_with_authority(
+            &self,
+            _run_id: &RunId,
+            _entry: StepLedgerEntry,
+            _authority: MobRunProvenanceAuthority,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        async fn append_failure_entry_with_authority(
+            &self,
+            _run_id: &RunId,
+            _entry: FailureLedgerEntry,
+            _authority: MobRunProvenanceAuthority,
+        ) -> Result<(), MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        async fn cas_frame_state_with_authority(
+            &self,
+            _run_id: &RunId,
+            _frame_id: &FrameId,
+            _expected: Option<&FrameSnapshot>,
+            _next: FrameSnapshot,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_grant_node_slot_with_authority(
+            &self,
+            _run_id: &RunId,
+            _expected_run_state: &crate::run::flow_run::State,
+            _next_run_state: crate::run::flow_run::State,
+            _frame_id: &FrameId,
+            _expected_frame: &FrameSnapshot,
+            _next_frame: FrameSnapshot,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_complete_step_and_record_output_with_authority(
+            &self,
+            _run_id: &RunId,
+            _frame_id: &FrameId,
+            _expected_frame: &FrameSnapshot,
+            _next_frame: FrameSnapshot,
+            _step_output_key: String,
+            _step_output: serde_json::Value,
+            _loop_context: Option<(&LoopId, u64)>,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_start_loop_with_authority(
+            &self,
+            _run_id: &RunId,
+            _loop_instance_id: &LoopInstanceId,
+            _expected_run_state: &crate::run::flow_run::State,
+            _next_run_state: crate::run::flow_run::State,
+            _frame_id: &FrameId,
+            _expected_frame: &FrameSnapshot,
+            _next_frame: FrameSnapshot,
+            _initial_loop: LoopSnapshot,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_loop_request_body_frame_with_authority(
+            &self,
+            _run_id: &RunId,
+            _loop_instance_id: &LoopInstanceId,
+            _expected_loop: &LoopSnapshot,
+            _next_loop: LoopSnapshot,
+            _expected_run_state: &crate::run::flow_run::State,
+            _next_run_state: crate::run::flow_run::State,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_grant_body_frame_start_with_authority(
+            &self,
+            _run_id: &RunId,
+            _loop_instance_id: &LoopInstanceId,
+            _expected_loop: &LoopSnapshot,
+            _next_loop: LoopSnapshot,
+            _frame_id: &FrameId,
+            _initial_frame: FrameSnapshot,
+            _ledger_entry: LoopIterationLedgerEntry,
+            _expected_run_state: &crate::run::flow_run::State,
+            _next_run_state: crate::run::flow_run::State,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_complete_body_frame_with_authority(
+            &self,
+            _run_id: &RunId,
+            _loop_instance_id: &LoopInstanceId,
+            _expected_loop: &LoopSnapshot,
+            _next_loop: LoopSnapshot,
+            _frame_id: &FrameId,
+            _expected_frame: &FrameSnapshot,
+            _next_frame: FrameSnapshot,
+            _expected_run_state: &crate::run::flow_run::State,
+            _next_run_state: crate::run::flow_run::State,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_complete_loop_with_authority(
+            &self,
+            _run_id: &RunId,
+            _loop_instance_id: &LoopInstanceId,
+            _expected_loop: &LoopSnapshot,
+            _next_loop: LoopSnapshot,
+            _frame_id: &FrameId,
+            _expected_frame: &FrameSnapshot,
+            _next_frame: FrameSnapshot,
+            _expected_run_state: &crate::run::flow_run::State,
+            _next_run_state: crate::run::flow_run::State,
+            _authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            Err(MobStoreError::Internal(
+                "not implemented in forged store".into(),
+            ))
+        }
+    }
+
+    fn forged_status_run() -> MobRun {
+        let mut run = MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            crate::FlowId::from("flow"),
+            [StepId::from("step-1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run");
+        run.status = MobRunStatus::Completed;
+        run
+    }
 
     #[tokio::test]
     async fn test_in_memory_storage_creates_working_stores() {
@@ -171,25 +446,15 @@ mod tests {
     #[tokio::test]
     async fn test_in_memory_flow_stores_create_working_run_and_spec_stores() {
         let (runs, specs) = MobStorage::in_memory_flow_stores();
-        let run = MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: crate::FlowId::from("flow"),
-            status: MobRunStatus::Pending,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        };
+        let run = MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            crate::FlowId::from("flow"),
+            [StepId::from("step-1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run");
         runs.create_run(run.clone()).await.unwrap();
         assert!(runs.get_run(&run.run_id).await.unwrap().is_some());
 
@@ -210,6 +475,52 @@ model = "test"
     }
 
     #[tokio::test]
+    async fn custom_run_store_rejects_forged_lifecycle_projection() {
+        let forged = forged_status_run();
+        let storage = MobStorage::custom(
+            Arc::new(InMemoryMobEventStore::new()),
+            Arc::new(ForgedRunStore::new(Some(forged.clone()))),
+            Arc::new(InMemoryMobSpecStore::new()),
+        );
+
+        let read_error = storage
+            .runs
+            .get_run(&forged.run_id)
+            .await
+            .expect_err("custom store read must reject forged run projection");
+        assert!(
+            read_error
+                .to_string()
+                .contains("not authorized by MobMachine"),
+            "unexpected custom read error: {read_error}"
+        );
+
+        let list_error = storage
+            .runs
+            .list_runs(&forged.mob_id, None)
+            .await
+            .expect_err("custom store list must reject forged run projection");
+        assert!(
+            list_error
+                .to_string()
+                .contains("not authorized by MobMachine"),
+            "unexpected custom list error: {list_error}"
+        );
+
+        let write_error = storage
+            .runs
+            .create_run(forged)
+            .await
+            .expect_err("custom store create must reject forged run projection");
+        assert!(
+            write_error
+                .to_string()
+                .contains("not authorized by MobMachine"),
+            "unexpected custom create error: {write_error}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_persistent_storage_uses_shared_database_for_all_stores() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("mob.db");
@@ -222,25 +533,15 @@ model = "test"
         };
         storage.events.append(event).await.unwrap();
 
-        let run = MobRun {
-            run_id: RunId::new(),
-            mob_id: MobId::from("mob"),
-            flow_id: crate::FlowId::from("flow"),
-            status: MobRunStatus::Pending,
-            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
-            activation_params: serde_json::json!({}),
-            created_at: Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-            frames: std::collections::BTreeMap::new(),
-            loops: std::collections::BTreeMap::new(),
-            loop_iteration_ledger: Vec::new(),
-            schema_version: 4,
-            root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
-            flow_authority_inputs: Vec::new(),
-        };
+        let run = MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("mob"),
+            crate::FlowId::from("flow"),
+            [StepId::from("step-1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run");
         storage.runs.create_run(run.clone()).await.unwrap();
         assert!(storage.runs.get_run(&run.run_id).await.unwrap().is_some());
 

@@ -316,19 +316,6 @@ impl InprocRegistry {
         found
     }
 
-    /// Count live registrations for a canonical pubkey across all namespaces.
-    pub(crate) fn pubkey_registration_count_any_namespace(&self, pubkey: &PubKey) -> usize {
-        if pubkey.is_zero() {
-            return 0;
-        }
-        self.state
-            .read()
-            .namespaces
-            .values()
-            .filter(|namespace_state| namespace_state.peers.contains_key(pubkey))
-            .count()
-    }
-
     /// Look up an inproc peer name by public key.
     pub fn get_name_by_pubkey(&self, pubkey: &PubKey) -> Option<String> {
         self.get_name_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)
@@ -725,7 +712,16 @@ pub enum InprocSendError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::classify::test_support;
     use crate::inbox::Inbox;
+    use crate::trust::TrustedPeers;
+
+    fn classified_inbox() -> (Inbox, crate::InboxSender) {
+        Inbox::new_classified(test_support::classification_context(
+            TrustedPeers::new(),
+            false,
+        ))
+    }
 
     fn make_keypair() -> Keypair {
         Keypair::generate()
@@ -743,7 +739,7 @@ mod tests {
         let registry = InprocRegistry::new();
         let keypair = make_keypair();
         let pubkey = keypair.public_key();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
 
         registry.register("test-agent", pubkey, sender);
 
@@ -763,7 +759,7 @@ mod tests {
     #[test]
     fn test_registry_rejects_zero_pubkey_registration() {
         let registry = InprocRegistry::new();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
         let zero_pubkey = PubKey::new([0u8; 32]);
 
         registry.register("zero-agent", zero_pubkey, sender);
@@ -779,8 +775,8 @@ mod tests {
         let registry = InprocRegistry::new();
         let valid_keypair = make_keypair();
         let valid_pubkey = valid_keypair.public_key();
-        let (_, valid_sender) = Inbox::new();
-        let (_, zero_sender) = Inbox::new();
+        let (_, valid_sender) = classified_inbox();
+        let (_, zero_sender) = classified_inbox();
         let zero_pubkey = PubKey::new([0u8; 32]);
 
         registry.register("stable-agent", valid_pubkey, valid_sender);
@@ -803,7 +799,7 @@ mod tests {
         let registry = InprocRegistry::new();
         let keypair = make_keypair();
         let pubkey = keypair.public_key();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
 
         registry.register("test-agent", pubkey, sender);
         assert!(registry.contains(&pubkey));
@@ -824,8 +820,8 @@ mod tests {
         let registry = InprocRegistry::new();
         let keypair = make_keypair();
         let pubkey = keypair.public_key();
-        let (_, sender1) = Inbox::new();
-        let (_, sender2) = Inbox::new();
+        let (_, sender1) = classified_inbox();
+        let (_, sender2) = classified_inbox();
 
         // Register with first name
         registry.register("agent-v1", pubkey, sender1);
@@ -847,8 +843,8 @@ mod tests {
         let pubkey1 = keypair1.public_key();
         let keypair2 = make_keypair();
         let pubkey2 = keypair2.public_key();
-        let (_, sender1) = Inbox::new();
-        let (_, sender2) = Inbox::new();
+        let (_, sender1) = classified_inbox();
+        let (_, sender2) = classified_inbox();
 
         // Register first agent
         registry.register("my-agent", pubkey1, sender1);
@@ -880,8 +876,8 @@ mod tests {
         let pubkey_old = keypair_old.public_key();
         let keypair_new = make_keypair();
         let pubkey_new = keypair_new.public_key();
-        let (_, sender_old) = Inbox::new();
-        let (_, sender_new) = Inbox::new();
+        let (_, sender_old) = classified_inbox();
+        let (_, sender_new) = classified_inbox();
 
         // Step 1: Old runtime registers
         registry.register("agent", pubkey_old, sender_old);
@@ -921,7 +917,7 @@ mod tests {
 
         for i in 0..3 {
             let keypair = make_keypair();
-            let (_, sender) = Inbox::new();
+            let (_, sender) = classified_inbox();
             registry.register(format!("agent-{i}"), keypair.public_key(), sender);
         }
 
@@ -937,7 +933,7 @@ mod tests {
         let registry = InprocRegistry::new();
         let keypair = make_keypair();
         let pubkey = keypair.public_key();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
         registry.register("agent-a", pubkey, sender);
 
         let peers = registry.peers();
@@ -952,7 +948,7 @@ mod tests {
 
         for i in 0..3 {
             let keypair = make_keypair();
-            let (_, sender) = Inbox::new();
+            let (_, sender) = classified_inbox();
             registry.register(format!("agent-{i}"), keypair.public_key(), sender);
         }
 
@@ -967,7 +963,7 @@ mod tests {
 
         // Set up receiver
         let receiver_keypair = make_keypair();
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         registry.register("receiver", receiver_keypair.public_key(), sender);
 
         // Set up sender
@@ -986,10 +982,10 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify message was received
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
 
-        match &items[0] {
+        match &items[0].item {
             InboxItem::External { envelope } => {
                 assert_eq!(envelope.from, sender_keypair.public_key());
                 assert_eq!(envelope.to, receiver_keypair.public_key());
@@ -1032,7 +1028,7 @@ mod tests {
 
         // Set up receiver but drop the inbox
         let receiver_keypair = make_keypair();
-        let (inbox, sender) = Inbox::new();
+        let (inbox, sender) = classified_inbox();
         registry.register("receiver", receiver_keypair.public_key(), sender);
         drop(inbox); // Close the inbox
 
@@ -1055,7 +1051,7 @@ mod tests {
     async fn test_registry_namespace_isolation_for_lookup_and_send() {
         let registry = InprocRegistry::new();
         let receiver_keypair = make_keypair();
-        let (mut inbox, sender) = Inbox::new();
+        let (mut inbox, sender) = classified_inbox();
         registry.register_with_meta_in_namespace(
             "realm-a",
             "receiver",
@@ -1102,7 +1098,7 @@ mod tests {
         );
         assert!(matches!(wrong_ns, Err(InprocSendError::PeerNotFound(_))));
 
-        let items = inbox.try_drain();
+        let items = inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
     }
 
@@ -1113,8 +1109,8 @@ mod tests {
         let target_pubkey = target_keypair.public_key();
         let shadow_keypair = make_keypair();
         let shadow_pubkey = shadow_keypair.public_key();
-        let (mut target_inbox, target_sender) = Inbox::new();
-        let (mut shadow_inbox, shadow_sender) = Inbox::new();
+        let (mut target_inbox, target_sender) = classified_inbox();
+        let (mut shadow_inbox, shadow_sender) = classified_inbox();
 
         registry.register_with_meta_in_namespace(
             "",
@@ -1146,10 +1142,10 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        assert_eq!(shadow_inbox.try_drain().len(), 0);
-        let items = target_inbox.try_drain();
+        assert_eq!(shadow_inbox.try_drain_classified().len(), 0);
+        let items = target_inbox.try_drain_classified();
         assert_eq!(items.len(), 1);
-        let InboxItem::External { envelope } = &items[0] else {
+        let InboxItem::External { envelope } = &items[0].item else {
             panic!("expected external envelope");
         };
         assert_eq!(envelope.to, target_pubkey);
@@ -1161,8 +1157,8 @@ mod tests {
         let sender_keypair = make_keypair();
         let target_keypair = make_keypair();
         let target_pubkey = target_keypair.public_key();
-        let (mut alpha_inbox, alpha_sender) = Inbox::new();
-        let (mut beta_inbox, beta_sender) = Inbox::new();
+        let (mut alpha_inbox, alpha_sender) = classified_inbox();
+        let (mut beta_inbox, beta_sender) = classified_inbox();
 
         registry.register_with_meta_in_namespace(
             "realm-alpha",
@@ -1192,8 +1188,8 @@ mod tests {
         );
 
         assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
-        assert!(alpha_inbox.try_drain().is_empty());
-        assert!(beta_inbox.try_drain().is_empty());
+        assert!(alpha_inbox.try_drain_classified().is_empty());
+        assert!(beta_inbox.try_drain_classified().is_empty());
     }
 
     #[test]
@@ -1201,8 +1197,8 @@ mod tests {
         let registry = InprocRegistry::new();
         let kp_a = make_keypair();
         let kp_b = make_keypair();
-        let (_, sender_a) = Inbox::new();
-        let (_, sender_b) = Inbox::new();
+        let (_, sender_a) = classified_inbox();
+        let (_, sender_b) = classified_inbox();
 
         registry.register_with_meta_in_namespace(
             "realm-a",
@@ -1239,7 +1235,7 @@ mod tests {
 
         // Register a peer
         let keypair = make_keypair();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
         registry.register("global-test", keypair.public_key(), sender);
 
         // Verify it's accessible
@@ -1254,7 +1250,7 @@ mod tests {
         let registry = InprocRegistry::new();
         let keypair = make_keypair();
         let pubkey = keypair.public_key();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
 
         let meta = PeerMeta::default()
             .with_description("Reviews code for style issues")
@@ -1274,7 +1270,7 @@ mod tests {
         let registry = InprocRegistry::new();
         let keypair = make_keypair();
         let pubkey = keypair.public_key();
-        let (_, sender) = Inbox::new();
+        let (_, sender) = classified_inbox();
 
         registry.register("plain-agent", pubkey, sender);
 
@@ -1293,7 +1289,7 @@ mod tests {
 
         // Register "ambassador" in namespace "mob:alpha" with key A
         let key_a = make_keypair();
-        let (_inbox_a, sender_a) = Inbox::new();
+        let (_inbox_a, sender_a) = classified_inbox();
         registry.register_with_meta_in_namespace(
             "mob:alpha",
             "ambassador",
@@ -1304,7 +1300,7 @@ mod tests {
 
         // Register "ambassador" (same name!) in namespace "mob:beta" with key B
         let key_b = make_keypair();
-        let (_inbox_b, sender_b) = Inbox::new();
+        let (_inbox_b, sender_b) = classified_inbox();
         registry.register_with_meta_in_namespace(
             "mob:beta",
             "ambassador",
@@ -1355,8 +1351,8 @@ mod tests {
         let sender_kp = make_keypair();
         let target_key = make_keypair();
         let target_pubkey = target_key.public_key();
-        let (mut inbox_a, sender_a) = Inbox::new();
-        let (mut inbox_b, sender_b) = Inbox::new();
+        let (mut inbox_a, sender_a) = classified_inbox();
+        let (mut inbox_b, sender_b) = classified_inbox();
 
         registry.register_with_meta_in_namespace(
             "mob:alpha",
@@ -1391,11 +1387,11 @@ mod tests {
             "same name/pubkey across namespaces must fail closed instead of picking a namespace: {result:?}"
         );
         assert!(
-            inbox_a.try_drain().is_empty(),
+            inbox_a.try_drain_classified().is_empty(),
             "must not deliver to the first duplicate namespace"
         );
         assert!(
-            inbox_b.try_drain().is_empty(),
+            inbox_b.try_drain_classified().is_empty(),
             "must not deliver to the second duplicate namespace"
         );
     }
@@ -1406,8 +1402,8 @@ mod tests {
         let sender_kp = make_keypair();
         let target_key = make_keypair();
         let target_pubkey = target_key.public_key();
-        let (mut alpha_inbox, alpha_sender) = Inbox::new();
-        let (mut beta_inbox, beta_sender) = Inbox::new();
+        let (mut alpha_inbox, alpha_sender) = classified_inbox();
+        let (mut beta_inbox, beta_sender) = classified_inbox();
 
         registry.register_with_meta_in_namespace(
             "mob:alpha",
@@ -1442,11 +1438,11 @@ mod tests {
             "duplicate pubkey across namespaces must fail closed even when display names differ: {result:?}"
         );
         assert!(
-            alpha_inbox.try_drain().is_empty(),
+            alpha_inbox.try_drain_classified().is_empty(),
             "must not deliver to the named namespace when canonical pubkey is ambiguous"
         );
         assert!(
-            beta_inbox.try_drain().is_empty(),
+            beta_inbox.try_drain_classified().is_empty(),
             "must not deliver to the differently named duplicate namespace"
         );
     }
@@ -1457,8 +1453,8 @@ mod tests {
         let sender_kp = make_keypair();
         let target_key = make_keypair();
         let target_pubkey = target_key.public_key();
-        let (mut alpha_inbox, alpha_sender) = Inbox::new();
-        let (mut beta_inbox, beta_sender) = Inbox::new();
+        let (mut alpha_inbox, alpha_sender) = classified_inbox();
+        let (mut beta_inbox, beta_sender) = classified_inbox();
         let envelope_id = Uuid::new_v4();
 
         registry.register_with_meta_in_namespace(
@@ -1495,11 +1491,11 @@ mod tests {
             "duplicate pubkey across namespaces must fail closed on send_cross_namespace_with_id: {result:?}"
         );
         assert!(
-            alpha_inbox.try_drain().is_empty(),
+            alpha_inbox.try_drain_classified().is_empty(),
             "must not deliver the caller-chosen envelope id to the named namespace"
         );
         assert!(
-            beta_inbox.try_drain().is_empty(),
+            beta_inbox.try_drain_classified().is_empty(),
             "must not deliver the caller-chosen envelope id to the differently named duplicate namespace"
         );
     }

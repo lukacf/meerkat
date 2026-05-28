@@ -476,6 +476,7 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
                     inproc_namespace: inproc_namespace.clone(),
                     listen_tcp: Some(listen_tcp),
                     auth: config.comms.auth,
+                    require_peer_auth: config.comms.require_peer_auth,
                     event_listen_tcp,
                     ..Default::default()
                 };
@@ -502,6 +503,7 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
                     inproc_namespace: inproc_namespace.clone(),
                     listen_uds: Some(std::path::PathBuf::from(address)),
                     auth: config.comms.auth,
+                    require_peer_auth: config.comms.require_peer_auth,
                     event_listen_tcp,
                     ..Default::default()
                 };
@@ -705,6 +707,29 @@ mod tests {
     }
 
     #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+    async fn add_generated_peer_projection_trust(
+        runtime: Arc<CommsRuntime>,
+        peer: meerkat_core::comms::TrustedPeerDescriptor,
+        context: &'static str,
+    ) {
+        let endpoint = meerkat_runtime::meerkat_machine::dsl::PeerEndpoint::from(&peer);
+        let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let session_id = meerkat_core::SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{context}: prepare bindings failed: {error}"));
+        bindings
+            .install_peer_comms_on(runtime.as_ref())
+            .unwrap_or_else(|error| panic!("{context}: install peer-comms handle failed: {error}"));
+        let comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = runtime;
+        machine
+            .stage_add_direct_peer_endpoint(&session_id, endpoint, comms_runtime)
+            .await
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+    }
+
+    #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn sdk_tcp_runtime_fails_closed_before_session_machine_handle() {
         use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
@@ -714,10 +739,11 @@ mod tests {
         let suffix = meerkat_core::SessionId::new().to_string();
         let sender_name = format!("sdk-pre-authority-sender-{suffix}");
         let receiver_name = format!("sdk-pre-authority-receiver-{suffix}");
-        let sender = CommsRuntime::inproc_only(&sender_name).expect("sender runtime");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).expect("sender runtime"));
         let mut config = Config::default();
         config.comms.mode = CommsRuntimeMode::Tcp;
         config.comms.address = Some("127.0.0.1:0".to_string());
+        config.comms.require_peer_auth = false;
 
         let receiver = build_comms_runtime_from_config(&config, temp.path(), &receiver_name, None)
             .await
@@ -732,8 +758,8 @@ mod tests {
             "fixture must prove the pre-handle ingress path is closed"
         );
 
-        CoreCommsRuntime::add_trusted_peer(
-            &sender,
+        add_generated_peer_projection_trust(
+            Arc::clone(&sender),
             trusted_descriptor(
                 &receiver_name,
                 receiver.public_key(),
@@ -742,29 +768,16 @@ mod tests {
                     receiver_name.clone(),
                 ),
             ),
+            "sender trusts receiver",
         )
-        .await
-        .expect("sender trusts receiver");
-        CoreCommsRuntime::add_trusted_peer(
-            &receiver,
-            trusted_descriptor(
-                &sender_name,
-                sender.public_key(),
-                meerkat_core::comms::PeerAddress::new(
-                    meerkat_core::comms::PeerTransport::Inproc,
-                    sender_name.clone(),
-                ),
-            ),
-        )
-        .await
-        .expect("receiver trusts sender");
+        .await;
 
         let result = CoreCommsRuntime::send(
-            &sender,
+            sender.as_ref(),
             CommsCommand::PeerMessage {
                 blocks: None,
                 to: peer_route(&receiver_name, receiver.public_key()),
-                body: "must not pass sdk compatibility classifier".to_string(),
+                body: "must not pass sdk local ingress classifier".to_string(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )

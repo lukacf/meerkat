@@ -886,6 +886,16 @@ pub struct BridgeDeliveryResponse {
     pub outcome: BridgeDeliveryOutcome,
 }
 
+/// Generated MobMachine peer overlay handoff carried with peer wiring commands.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeMobPeerOverlayHandoff {
+    pub recipient_peer_id: String,
+    pub topology_epoch: u64,
+    pub peer_specs: Vec<BridgePeerSpec>,
+}
+
 /// Peer wiring command payload.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -895,6 +905,7 @@ pub struct BridgePeerWiringPayload {
     pub epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
     pub peer_spec: BridgePeerSpec,
+    pub mob_peer_overlay: BridgeMobPeerOverlayHandoff,
 }
 
 /// Response to a retire command.
@@ -1012,17 +1023,34 @@ mod tests {
     }
 
     fn sample_wiring_payload() -> BridgePeerWiringPayload {
+        let peer_spec = BridgePeerSpec {
+            name: "member-b".to_string(),
+            peer_id: "peer-xyz".to_string(),
+            address: "tcp://127.0.0.1:7001".to_string(),
+            pubkey: [0u8; 32],
+        };
         BridgePeerWiringPayload {
             supervisor: sample_peer_spec(),
             epoch: 7,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-            peer_spec: BridgePeerSpec {
-                name: "member-b".to_string(),
-                peer_id: "peer-xyz".to_string(),
-                address: "tcp://127.0.0.1:7001".to_string(),
-                pubkey: [0u8; 32],
+            mob_peer_overlay: BridgeMobPeerOverlayHandoff {
+                recipient_peer_id: sample_peer_spec().peer_id,
+                topology_epoch: 11,
+                peer_specs: vec![peer_spec.clone()],
             },
+            peer_spec,
         }
+    }
+
+    fn valid_trusted_peer(name: &str, seed: u8, address: &str) -> TrustedPeerDescriptor {
+        let pubkey = [seed; 32];
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name.to_string(),
+            PeerId::from_ed25519_pubkey(&pubkey).as_str(),
+            pubkey,
+            address,
+        )
+        .expect("valid trusted peer descriptor")
     }
 
     // -----------------------------------------------------------------------
@@ -1042,6 +1070,41 @@ mod tests {
             value, reencoded,
             "BridgeCommand round-trip must preserve wire shape"
         );
+    }
+
+    #[test]
+    fn bridge_peer_wiring_payload_carries_generated_mob_overlay_handoff() {
+        let peer = valid_trusted_peer("member-b", 2, "tcp://127.0.0.1:7001");
+        let external = valid_trusted_peer("external", 3, "tcp://127.0.0.1:7002");
+        let payload = BridgePeerWiringPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 7,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            peer_spec: peer.clone().into(),
+            mob_peer_overlay: BridgeMobPeerOverlayHandoff {
+                recipient_peer_id: "recipient-peer".to_string(),
+                topology_epoch: 13,
+                peer_specs: vec![peer.into(), external.into()],
+            },
+        };
+
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        assert_eq!(value["mob_peer_overlay"]["topology_epoch"], json!(13));
+        assert_eq!(
+            value["mob_peer_overlay"]["recipient_peer_id"],
+            json!("recipient-peer")
+        );
+        assert_eq!(
+            value["mob_peer_overlay"]["peer_specs"]
+                .as_array()
+                .expect("overlay array")
+                .len(),
+            2
+        );
+        let decoded: BridgePeerWiringPayload =
+            serde_json::from_value(value).expect("decode payload");
+        assert_eq!(decoded.mob_peer_overlay.topology_epoch, 13);
+        assert_eq!(decoded.mob_peer_overlay.peer_specs.len(), 2);
     }
 
     #[test]

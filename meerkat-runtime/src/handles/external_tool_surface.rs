@@ -30,15 +30,26 @@ impl RuntimeExternalToolSurfaceHandle {
     }
 
     /// Construct a handle backed by an ephemeral DSL authority.
+    #[allow(clippy::expect_used)]
     pub fn ephemeral() -> Self {
-        let state = mm_dsl::MeerkatMachineState {
-            lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
-            ..Default::default()
-        };
-        let shared = Arc::new(std::sync::Mutex::new(
-            mm_dsl::MeerkatMachineAuthority::from_state(state),
-        ));
-        Self::new(Arc::new(HandleDslAuthority::from_shared(shared)))
+        let dsl = Arc::new(HandleDslAuthority::ephemeral());
+        dsl.apply_signal(
+            mm_dsl::MeerkatMachineSignal::Initialize,
+            "RuntimeExternalToolSurfaceHandle::ephemeral initialize",
+        )
+        .expect(
+            "generated MeerkatMachine authority must initialize ephemeral external tool surface",
+        );
+        // intra-machine: no route; dispatcher not applicable (handle targets the
+        // meerkat DSL directly, not a CompositionDispatcher seam)
+        dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                session_id: mm_dsl::SessionId::from("ephemeral-external-tool-surface"),
+            },
+            "RuntimeExternalToolSurfaceHandle::ephemeral attach",
+        )
+        .expect("generated MeerkatMachine authority must attach ephemeral external tool surface");
+        Self::new(dsl)
     }
 }
 
@@ -117,6 +128,11 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         input: ExternalToolSurfaceInput,
     ) -> Result<ExternalToolSurfaceTransition, DslTransitionError> {
         match input {
+            ExternalToolSurfaceInput::SetRemovalTimeout { timeout_ms } => self
+                .apply_input_with_effects(
+                    mm_dsl::MeerkatMachineInput::SurfaceSetRemovalTimeout { timeout_ms },
+                    "ExternalToolSurfaceHandle::set_removal_timeout",
+                ),
             ExternalToolSurfaceInput::StageAdd { surface_id, now_ms } => self
                 .apply_input_with_effects(
                     mm_dsl::MeerkatMachineInput::SurfaceStageAdd { surface_id, now_ms },
@@ -501,7 +517,8 @@ mod tests {
             lifecycle_phase: phase,
             ..Default::default()
         };
-        let authority = mm_dsl::MeerkatMachineAuthority::from_state(state);
+        let authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("test MeerkatMachine state must be recoverable");
         let shared = Arc::new(Mutex::new(authority));
         RuntimeExternalToolSurfaceHandle::new(Arc::new(HandleDslAuthority::from_shared(shared)))
     }
@@ -517,7 +534,8 @@ mod tests {
             surface_id.to_owned(),
             mm_dsl::ExternalToolSurfaceBaseState::Active,
         );
-        let authority = mm_dsl::MeerkatMachineAuthority::from_state(state);
+        let authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("test MeerkatMachine state must be recoverable");
         let shared = Arc::new(Mutex::new(authority));
         RuntimeExternalToolSurfaceHandle::new(Arc::new(HandleDslAuthority::from_shared(shared)))
     }
@@ -548,6 +566,17 @@ mod tests {
         let beta = handle.surface_snapshot("beta").expect("beta snapshot");
         assert_eq!(beta.staged_op, ExternalToolSurfaceStagedOp::Add);
         assert_eq!(beta.staged_intent_sequence, Some(3));
+    }
+
+    #[test]
+    fn ephemeral_handle_accepts_surface_inputs_after_generated_attach() {
+        let handle = RuntimeExternalToolSurfaceHandle::ephemeral();
+
+        handle.stage_add("alpha".to_owned(), 10).expect("stage add");
+
+        let snapshot = handle.surface_snapshot("alpha").expect("add snapshot");
+        assert_eq!(snapshot.staged_op, ExternalToolSurfaceStagedOp::Add);
+        assert_eq!(snapshot.staged_intent_sequence, Some(1));
     }
 
     #[test]
@@ -586,6 +615,52 @@ mod tests {
         );
         assert_eq!(snapshot.staged_op, ExternalToolSurfaceStagedOp::Reload);
         assert_eq!(snapshot.staged_intent_sequence, Some(1));
+    }
+
+    #[test]
+    fn removal_timeout_is_set_through_generated_surface_input() {
+        let handle = handle_with_active_surface("alpha");
+
+        handle
+            .apply_surface_input(ExternalToolSurfaceInput::SetRemovalTimeout { timeout_ms: 5 })
+            .expect("set generated removal timeout");
+        handle
+            .stage_remove("alpha".to_owned(), 100)
+            .expect("stage remove");
+        let staged_sequence = handle
+            .surface_snapshot("alpha")
+            .and_then(|entry| entry.staged_intent_sequence)
+            .expect("staged remove sequence");
+        handle
+            .apply_boundary("alpha".to_owned(), 100, staged_sequence, 7)
+            .expect("apply remove boundary");
+
+        let removing = handle.surface_snapshot("alpha").expect("removing alpha");
+        assert_eq!(removing.removal_draining_since_ms, Some(100));
+        assert_eq!(removing.removal_timeout_at_ms, Some(105));
+        assert_eq!(removing.removal_applied_at_turn, Some(7));
+
+        let saturated = handle_with_active_surface("omega");
+        saturated
+            .apply_surface_input(ExternalToolSurfaceInput::SetRemovalTimeout {
+                timeout_ms: u64::MAX,
+            })
+            .expect("set saturated generated removal timeout");
+        saturated
+            .stage_remove("omega".to_owned(), 100)
+            .expect("stage saturated remove");
+        let saturated_sequence = saturated
+            .surface_snapshot("omega")
+            .and_then(|entry| entry.staged_intent_sequence)
+            .expect("staged saturated remove sequence");
+        saturated
+            .apply_boundary("omega".to_owned(), 100, saturated_sequence, 8)
+            .expect("apply saturated remove boundary");
+
+        let removing = saturated
+            .surface_snapshot("omega")
+            .expect("removing saturated omega");
+        assert_eq!(removing.removal_timeout_at_ms, Some(u64::MAX));
     }
 
     #[test]

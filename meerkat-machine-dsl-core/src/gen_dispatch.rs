@@ -18,13 +18,20 @@ pub(crate) enum FieldPrefix {
 pub fn generate(def: &MachineDef) -> TokenStream {
     let state_name = state_struct_name(def);
     let input_name = &def.inputs.name;
+    let input_variant_name = format_ident!("{}Variant", input_name);
     let phase_name = &def.phase_enum.name;
     let effect_name = &def.effects.name;
     let machine_name = &def.name;
 
     let transition_name = format_ident!("{}Transition", machine_name);
     let error_name = format_ident!("{}TransitionError", machine_name);
+    let trigger_name = format_ident!("{}TransitionTrigger", machine_name);
     let authority_name = format_ident!("{}Authority", machine_name);
+    let authority_snapshot_name = format_ident!("{}AuthoritySnapshot", machine_name);
+    let prepared_authority_name = format_ident!("{}PreparedAuthority", machine_name);
+    let prepared_commit_error_name = format_ident!("{}PreparedCommitError", machine_name);
+    let prepared_commit_effect_error_name =
+        format_ident!("{}PreparedCommitEffectError", machine_name);
     let mutator_trait = format_ident!("{}Mutator", machine_name);
 
     let input_transitions: Vec<_> = def
@@ -38,14 +45,41 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         .filter(|t| matches!(t.trigger.kind, TriggerKindDef::Signal))
         .collect();
 
-    let input_arms = gen_match_arms(def, &input_transitions, input_name, &error_name);
+    let input_arms = gen_match_arms(
+        def,
+        &input_transitions,
+        input_name,
+        &error_name,
+        &input_variant_name,
+        quote! { #trigger_name::Input },
+    );
 
     let has_signals = !def.signals.variants.is_empty() && !signal_transitions.is_empty();
     let signal_name = &def.signals.name;
+    let signal_variant_name = format_ident!("{}Variant", signal_name);
     let signal_arms = if has_signals {
-        gen_match_arms(def, &signal_transitions, signal_name, &error_name)
+        gen_match_arms(
+            def,
+            &signal_transitions,
+            signal_name,
+            &error_name,
+            &signal_variant_name,
+            quote! { #trigger_name::Signal },
+        )
     } else {
         TokenStream::new()
+    };
+    let signal_trigger_variant = if def.signals.variants.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! { Signal(#signal_variant_name), }
+    };
+    let signal_trigger_display = if def.signals.variants.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! {
+            Self::Signal(variant) => write!(f, "signal::{variant}"),
+        }
     };
 
     let invariant_checks: Vec<_> = def
@@ -59,6 +93,22 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             }
         })
         .collect();
+    let recovered_state_validations: Vec<_> = def
+        .invariants
+        .iter()
+        .map(|inv| {
+            let inv_name_str = inv.name.to_string();
+            let check = gen_expr(&inv.expr, FieldPrefix::AuthorityState);
+            quote! {
+                if !(#check) {
+                    return Err(#error_name::RecoveredStateInvariantRejected {
+                        phase: self.state.phase(),
+                        invariant: #inv_name_str,
+                    });
+                }
+            }
+        })
+        .collect();
 
     let helpers: Vec<_> = def.helpers.iter().map(gen_helper).collect();
 
@@ -66,20 +116,35 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         quote! {
             pub fn apply_signal(&mut self, signal: #signal_name) -> Result<#transition_name, #error_name> {
                 let from_phase = self.state.phase();
+                let signal_variant = signal.variant();
                 let mut effects = Vec::new();
 
                 match signal {
                     #signal_arms
                     #[allow(unreachable_patterns)]
                     _ => return Err(#error_name::NoMatchingTransition {
-                        phase: format!("{:?}", from_phase),
-                        trigger: format!("{:?}", signal),
+                        phase: from_phase,
+                        trigger: #trigger_name::Signal(signal_variant),
                     }),
                 }
 
                 let to_phase = self.state.phase();
                 #(#invariant_checks)*
-                Ok(#transition_name { from_phase, to_phase, effects })
+                Ok(#transition_name {
+                    from_phase,
+                    to_phase,
+                    effects,
+                    _origin: sealed::TransitionOrigin,
+                })
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+    let prepared_signal_method = if has_signals {
+        quote! {
+            pub fn apply_signal(&mut self, signal: #signal_name) -> Result<#transition_name, #error_name> {
+                self.authority.apply_signal(signal)
             }
         }
     } else {
@@ -94,7 +159,18 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         pub struct #transition_name {
             pub from_phase: #phase_name,
             pub to_phase: #phase_name,
-            pub effects: Vec<#effect_name>,
+            effects: Vec<#effect_name>,
+            _origin: sealed::TransitionOrigin,
+        }
+
+        impl #transition_name {
+            pub fn effects(&self) -> &[#effect_name] {
+                &self.effects
+            }
+
+            pub fn into_effects(self) -> Vec<#effect_name> {
+                self.effects
+            }
         }
 
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +180,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             /// the current phase. Shell callers should treat this as a hard
             /// error: firing the wrong input for the current phase is a
             /// programming mistake.
-            NoMatchingTransition { phase: String, trigger: String },
+            NoMatchingTransition { phase: #phase_name, trigger: #trigger_name },
             /// A transition is declared for this `(phase, trigger)` pair
             /// but every candidate transition's guard(s) evaluated false.
             /// Typed signal that the input was *rejected on state*, not
@@ -113,17 +189,43 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             /// observed `TurnCommitted` event, expecting the DSL to drop
             /// duplicates) should treat this as a successful no-op rather
             /// than an error.
-            GuardRejected { phase: String, trigger: String },
+            GuardRejected { phase: #phase_name, trigger: #trigger_name },
+            /// A recovered authority state violated a generated invariant
+            /// before any transition was attempted.
+            RecoveredStateInvariantRejected { phase: #phase_name, invariant: &'static str },
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum #trigger_name {
+            Input(#input_variant_name),
+            #signal_trigger_variant
+        }
+
+        impl std::fmt::Display for #trigger_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::Input(variant) => write!(f, "input::{variant}"),
+                    #signal_trigger_display
+                }
+            }
         }
 
         impl std::fmt::Display for #error_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
                     Self::NoMatchingTransition { phase, trigger } => {
-                        write!(f, "no matching transition from phase {} for {}", phase, trigger)
+                        write!(f, "no matching transition from phase {:?} for {}", phase, trigger)
                     }
                     Self::GuardRejected { phase, trigger } => {
-                        write!(f, "guard rejected transition from phase {} for {}", phase, trigger)
+                        write!(f, "guard rejected transition from phase {:?} for {}", phase, trigger)
+                    }
+                    Self::RecoveredStateInvariantRejected { phase, invariant } => {
+                        write!(
+                            f,
+                            "recovered authority state violated invariant '{}' in phase {:?}",
+                            invariant,
+                            phase
+                        )
                     }
                 }
             }
@@ -131,7 +233,58 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
         impl std::error::Error for #error_name {}
 
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum #prepared_commit_error_name {
+            /// A generated prepared-authority commit was attempted after the
+            /// live authority moved away from the prepared base state.
+            BaseChanged { current_phase: #phase_name, base_phase: #phase_name },
+        }
+
+        impl std::fmt::Display for #prepared_commit_error_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::BaseChanged { current_phase, base_phase } => {
+                        write!(
+                            f,
+                            "prepared authority base changed before commit (base {:?}, current {:?})",
+                            base_phase,
+                            current_phase
+                        )
+                    }
+                }
+            }
+        }
+
+        impl std::error::Error for #prepared_commit_error_name {}
+
+        #[derive(Debug)]
+        pub enum #prepared_commit_effect_error_name<E> {
+            Commit(#prepared_commit_error_name),
+            Effect(E),
+        }
+
+        impl<E: std::fmt::Display> std::fmt::Display for #prepared_commit_effect_error_name<E> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::Commit(error) => write!(f, "{error}"),
+                    Self::Effect(error) => write!(f, "{error}"),
+                }
+            }
+        }
+
+        impl<E: std::error::Error + 'static> std::error::Error for #prepared_commit_effect_error_name<E> {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                match self {
+                    Self::Commit(error) => Some(error),
+                    Self::Effect(error) => Some(error),
+                }
+            }
+        }
+
         mod sealed {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub struct TransitionOrigin;
+
             pub trait Sealed {}
         }
 
@@ -140,18 +293,149 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         }
 
         pub struct #authority_name {
-            pub state: #state_name,
+            state: #state_name,
+            authority_owner_token: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        }
+
+        pub struct #prepared_authority_name {
+            base_state: #state_name,
+            authority: #authority_name,
+        }
+
+        #[derive(Clone, Debug)]
+        pub struct #authority_snapshot_name {
+            state: #state_name,
+        }
+
+        impl #authority_snapshot_name {
+            pub fn state(&self) -> &#state_name {
+                &self.state
+            }
         }
 
         impl sealed::Sealed for #authority_name {}
+        impl sealed::Sealed for #prepared_authority_name {}
+
+        impl #prepared_authority_name {
+            pub fn state(&self) -> &#state_name {
+                self.authority.state()
+            }
+
+            #prepared_signal_method
+
+            fn validate_commit_base(
+                &self,
+                live: &#authority_name,
+            ) -> Result<(), #prepared_commit_error_name> {
+                if live.state != self.base_state {
+                    return Err(#prepared_commit_error_name::BaseChanged {
+                        current_phase: live.state.phase(),
+                        base_phase: self.base_state.phase(),
+                    });
+                }
+                Ok(())
+            }
+
+            fn commit_into_unchecked(self, live: &mut #authority_name) {
+                live.state = self.authority.state;
+            }
+
+            fn commit_into(
+                self,
+                live: &mut #authority_name,
+            ) -> Result<(), #prepared_commit_error_name> {
+                self.validate_commit_base(live)?;
+                self.commit_into_unchecked(live);
+                Ok(())
+            }
+        }
+
+        impl #mutator_trait for #prepared_authority_name {
+            fn apply(&mut self, input: #input_name) -> Result<#transition_name, #error_name> {
+                self.authority.apply(input)
+            }
+        }
 
         impl #authority_name {
             pub fn new() -> Self {
-                Self { state: #state_name::default() }
+                Self {
+                    state: #state_name::default(),
+                    authority_owner_token: std::sync::Arc::new(()),
+                }
             }
 
-            pub fn from_state(state: #state_name) -> Self {
-                Self { state }
+            pub fn state(&self) -> &#state_name {
+                &self.state
+            }
+
+            pub fn recover_from_state(state: #state_name) -> Result<Self, #error_name> {
+                let authority = Self {
+                    state,
+                    authority_owner_token: std::sync::Arc::new(()),
+                };
+                authority.validate_recovered_state()?;
+                Ok(authority)
+            }
+
+            fn validate_recovered_state(&self) -> Result<(), #error_name> {
+                #(#recovered_state_validations)*
+                Ok(())
+            }
+
+            pub fn fork(&self) -> Self {
+                Self {
+                    state: self.state.clone(),
+                    authority_owner_token: std::sync::Arc::new(()),
+                }
+            }
+
+            pub fn prepare_authority(&self) -> #prepared_authority_name {
+                #prepared_authority_name {
+                    base_state: self.state.clone(),
+                    authority: self.fork(),
+                }
+            }
+
+            pub fn commit_prepared_authority(
+                &mut self,
+                prepared: #prepared_authority_name,
+            ) -> Result<(), #prepared_commit_error_name> {
+                prepared.commit_into(self)
+            }
+
+            pub async fn commit_prepared_authority_after<T, E, F, Fut>(
+                &mut self,
+                prepared: #prepared_authority_name,
+                effect: F,
+            ) -> Result<T, #prepared_commit_effect_error_name<E>>
+            where
+                F: FnOnce() -> Fut,
+                Fut: std::future::Future<Output = Result<T, E>>,
+            {
+                prepared
+                    .validate_commit_base(self)
+                    .map_err(#prepared_commit_effect_error_name::Commit)?;
+                let result = effect()
+                    .await
+                    .map_err(#prepared_commit_effect_error_name::Effect)?;
+                prepared.commit_into_unchecked(self);
+                Ok(result)
+            }
+
+            pub fn generated_authority_owner_token(
+                &self,
+            ) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
+                std::sync::Arc::clone(&self.authority_owner_token)
+            }
+
+            pub fn snapshot(&self) -> #authority_snapshot_name {
+                #authority_snapshot_name {
+                    state: self.state.clone(),
+                }
+            }
+
+            pub fn restore_snapshot(&mut self, snapshot: #authority_snapshot_name) {
+                self.state = snapshot.state;
             }
 
             #(#helpers)*
@@ -162,6 +446,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         impl #mutator_trait for #authority_name {
             fn apply(&mut self, input: #input_name) -> Result<#transition_name, #error_name> {
                 let from_phase = self.state.phase();
+                let input_variant = input.variant();
                 #[allow(unused_mut)]
                 let mut effects = Vec::new();
 
@@ -169,14 +454,19 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     #input_arms
                     #[allow(unreachable_patterns)]
                     _ => return Err(#error_name::NoMatchingTransition {
-                        phase: format!("{:?}", from_phase),
-                        trigger: format!("{:?}", input),
+                        phase: from_phase,
+                        trigger: #trigger_name::Input(input_variant),
                     }),
                 }
 
                 let to_phase = self.state.phase();
                 #(#invariant_checks)*
-                Ok(#transition_name { from_phase, to_phase, effects })
+                Ok(#transition_name {
+                    from_phase,
+                    to_phase,
+                    effects,
+                    _origin: sealed::TransitionOrigin,
+                })
             }
         }
     }
@@ -187,6 +477,8 @@ fn gen_match_arms(
     transitions: &[&TransitionDef],
     enum_name: &Ident,
     error_name: &Ident,
+    variant_enum_name: &Ident,
+    trigger_ctor: TokenStream,
 ) -> TokenStream {
     let mut groups: Vec<(&Ident, Vec<&&TransitionDef>)> = Vec::new();
     for t in transitions {
@@ -208,7 +500,8 @@ fn gen_match_arms(
                 quote! { { #(#bindings),* } }
             };
 
-            let body = gen_transition_chain(def, transitions, error_name);
+            let trigger = quote! { #trigger_ctor(#variant_enum_name::#variant) };
+            let body = gen_transition_chain(def, transitions, error_name, trigger);
 
             quote! {
                 #enum_name::#variant #binding_pattern => {
@@ -225,6 +518,7 @@ fn gen_transition_chain(
     def: &MachineDef,
     transitions: &[&&TransitionDef],
     error_name: &Ident,
+    trigger: TokenStream,
 ) -> TokenStream {
     if transitions.len() == 1 {
         let t = transitions[0];
@@ -236,14 +530,13 @@ fn gen_transition_chain(
                 .collect();
             let combined = quote! { #(#guard_exprs)&&* };
             let body = gen_transition_body(def, t);
-            let variant_str = t.trigger.variant.to_string();
             quote! {
                 if #combined {
                     #body
                 } else {
                     return Err(#error_name::GuardRejected {
-                        phase: format!("{:?}", from_phase),
-                        trigger: #variant_str.to_string(),
+                        phase: from_phase,
+                        trigger: #trigger,
                     });
                 }
             }
@@ -272,11 +565,10 @@ fn gen_transition_chain(
         }
         let last_has_guard = transitions.last().is_none_or(|t| t.has_guards());
         if last_has_guard {
-            let variant_str = transitions[0].trigger.variant.to_string();
             arms.push(quote! { else {
                 return Err(#error_name::GuardRejected {
-                    phase: format!("{:?}", from_phase),
-                    trigger: #variant_str.to_string(),
+                    phase: from_phase,
+                    trigger: #trigger,
                 });
             } });
         }
@@ -325,6 +617,7 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
     match expr {
         ExprDef::Bool(v) => quote! { #v },
         ExprDef::U64(v) => quote! { #v },
+        ExprDef::U64Max => quote! { u64::MAX },
         ExprDef::StringLit(s) => quote! { #s.to_string() },
         ExprDef::None => quote! { None },
         ExprDef::Some(inner) => {
@@ -348,6 +641,37 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
         }
         ExprDef::NamedVariant { enum_name, variant } => {
             quote! { #enum_name::#variant }
+        }
+        ExprDef::FieldAccess { base, field } => {
+            let base = gen_expr(base, prefix);
+            quote! { #base.#field.clone() }
+        }
+        ExprDef::EnumVariantIs {
+            value,
+            enum_name,
+            variant,
+            tuple_variant,
+        } => {
+            let value = gen_expr(value, prefix);
+            if *tuple_variant {
+                quote! { matches!(#value, #enum_name::#variant(..)) }
+            } else {
+                quote! { matches!(#value, #enum_name::#variant) }
+            }
+        }
+        ExprDef::EnumStringSetPayload {
+            value,
+            enum_name,
+            variant,
+            ..
+        } => {
+            let value = gen_expr(value, prefix);
+            quote! {
+                match #value {
+                    #enum_name::#variant(payload) => payload.clone(),
+                    _ => std::collections::BTreeSet::new(),
+                }
+            }
         }
         ExprDef::Not(inner) => {
             let e = gen_expr(inner, prefix);
@@ -413,7 +737,12 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
         }
         ExprDef::Len(inner) => {
             let e = gen_expr(inner, prefix);
-            quote! { #e.len() }
+            quote! { #e.len() as u64 }
+        }
+        ExprDef::Count { collection, value } => {
+            let collection = gen_expr(collection, prefix);
+            let value = gen_expr(value, prefix);
+            quote! { #collection.iter().filter(|candidate| *candidate == &#value).count() as u64 }
         }
         ExprDef::MapGet { map, key } => {
             let m = gen_expr(map, prefix);

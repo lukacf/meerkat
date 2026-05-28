@@ -8,12 +8,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthMachine`
 
 ### Code Anchors
-- `auth_lease_handle`: `meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, expiring, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
-- `oauth_flow_handle`: `meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, refreshing, and reauth required phases
+- `auth_lease_handle`: `meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
+- `oauth_flow_handle`: `meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases
 
 ### Scenarios
-- `acquire_expire_refresh_complete` — lease transitions through valid, expiring, refreshing, and back to valid on successful refresh
-- `reauth_release_and_publication` — reauth required from valid/expiring/refreshing, release lease, emit lifecycle event, and wake refresh loop publication
+- `acquire_expire_refresh_complete` — lease transitions through valid, expiring, expired, refreshing, and back to valid on successful refresh
+- `reauth_release_and_publication` — reauth required from valid/expiring/expired/refreshing, observe credential freshness for released state, release lease, emit lifecycle event, and wake refresh loop publication
 - `oauth_browser_flow_lifecycle` — OAuth browser flow admit, verify, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
 - `oauth_device_flow_lifecycle` — OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
 
@@ -24,10 +24,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MarkExpiring`
   - anchors: `auth_lease_handle`, `oauth_flow_handle`
   - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
+- `ObserveCredentialFreshnessValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessExpiringFromValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessExpiredFromValid`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessExpiredFromExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessRefreshing`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessReauthRequired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ObserveCredentialFreshnessReleased`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
 - `BeginRefreshFromValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `BeginRefreshFromExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `BeginRefreshFromExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `CompleteRefresh`
@@ -45,19 +75,115 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MarkReauthRequiredFromExpiring`
   - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
+- `MarkReauthRequiredFromExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
 - `MarkReauthRequiredFromRefreshing`
   - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `ClearCredentialLifecycle`
-  - anchors: `auth_lease_handle`, `oauth_flow_handle`
-  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ReleaseCredentialLifecycleWithOAuth`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ReleaseCredentialLifecycleWithoutOAuth`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotValid`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotRefreshing`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotReauthRequired`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreAuthoritySnapshotReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `RestoreAuthoritySnapshotReleased`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `RestoreOAuthBrowserFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthBrowserFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `RestoreOAuthDeviceFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `RestoreOAuthDevicePollReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 - `AdmitOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
 - `AdmitOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `AdmitOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
 - `AdmitOAuthBrowserFlowRefreshing`
@@ -66,10 +192,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitOAuthBrowserFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
+- `ReopenReleasedForOAuthBrowserFlowAdmission`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
 - `VerifyOAuthBrowserFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
 - `VerifyOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `VerifyOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
 - `VerifyOAuthBrowserFlowRefreshing`
@@ -84,6 +216,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ConsumeOAuthBrowserFlowExpiring`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
+- `ConsumeOAuthBrowserFlowExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
 - `ConsumeOAuthBrowserFlowRefreshing`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
@@ -94,6 +229,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
 - `ExpireOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ExpireOAuthBrowserFlowExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_browser_flow_lifecycle`
 - `ExpireOAuthBrowserFlowRefreshing`
@@ -108,16 +246,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitOAuthDeviceFlowExpiring`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `AdmitOAuthDeviceFlowExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 - `AdmitOAuthDeviceFlowRefreshing`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `AdmitOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `ReopenReleasedForOAuthDeviceFlowAdmission`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`, `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
+- `ConfirmOAuthDurableAdmissionReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
 - `VerifyOAuthDeviceFlowValid`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `VerifyOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `VerifyOAuthDeviceFlowExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `VerifyOAuthDeviceFlowRefreshing`
@@ -132,6 +294,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginOAuthDevicePollExpiring`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `BeginOAuthDevicePollExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 - `BeginOAuthDevicePollRefreshing`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
@@ -142,6 +307,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `FinishOAuthDevicePollExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `FinishOAuthDevicePollExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `FinishOAuthDevicePollRefreshing`
@@ -156,6 +324,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ConsumeOAuthDeviceFlowExpiring`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `ConsumeOAuthDeviceFlowExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 - `ConsumeOAuthDeviceFlowRefreshing`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
@@ -166,6 +337,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `ExpireOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ExpireOAuthDeviceFlowExpired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
 - `ExpireOAuthDeviceFlowRefreshing`
@@ -184,7 +358,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `reauth_release_and_publication`
 
 ### Invariants
-- `(none)`
+- `oauth_flow_membership_consistent`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`, `oauth_device_flow_lifecycle`
 
 
 <!-- GENERATED_COVERAGE_END -->

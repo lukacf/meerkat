@@ -8,10 +8,10 @@ use mdm_tux::machines::kennel_target_control::{
     self, Effect as ControlEffect, Event as ControlEvent, State as ControlState,
 };
 use mdm_tux::{
-    ClaimGrant, KennelPayload, KennelTargetState, LeaseTerminationReason, LeaseView, ListScope,
-    ProviderKind, SignedKennelEnvelope, TargetListEntry, TargetRegistrationRejectReason,
-    DEFAULT_OPENAI_MODEL, build_signed_envelope, load_or_generate_keypair, read_envelope, verify_envelope,
-    write_envelope,
+    ClaimGrant, ExampleGeneratedCommsTrustRouter, KennelPayload, KennelTargetState,
+    LeaseTerminationReason, LeaseView, ListScope, ProviderKind, SignedKennelEnvelope,
+    TargetListEntry, TargetRegistrationRejectReason, DEFAULT_OPENAI_MODEL, build_signed_envelope,
+    load_or_generate_keypair, read_envelope, verify_envelope, write_envelope,
 };
 use meerkat_mob::definition::{BackendConfig, ExternalBackendConfig, WiringRules};
 use meerkat_mob::{
@@ -141,13 +141,12 @@ async fn main() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
         let local_addr = listener.local_addr()?;
         let kp = hive_comms_runtime.router_arc().keypair_arc();
-        let tp = hive_comms_runtime.trusted_peers_shared();
         let inbox = hive_comms_runtime.router_arc().inbox_sender().clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (kp, tp, sender) = (kp.clone(), tp.clone(), inbox.clone());
+                let (kp, sender) = (kp.clone(), inbox.clone());
                 tokio::spawn(async move {
-                    let _ = meerkat_comms::handle_connection(stream, true, &kp, &tp, &sender).await;
+                    let _ = meerkat_comms::handle_connection(stream, true, &kp, &sender).await;
                 });
             }
         });
@@ -159,17 +158,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&hive_dir).await?;
     let session_dir = hive_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-
-    // Add a sentinel peer so comms tools are never gated out at build time.
-    // Real peers are added dynamically when targets register.
-    hive_comms_runtime
-        .register_trusted_peer(meerkat_comms::TrustedPeer {
-            name: "__sentinel__".into(),
-            pubkey: hive_comms_runtime.public_key(),
-            addr: "inproc://sentinel".into(),
-            meta: meerkat_comms::PeerMeta::default(),
-        })
-        .await?;
 
     // ── Hive agent: AgentFactory + Config ───────────────────────────────────
     let hive_factory = meerkat::AgentFactory::new(&session_dir)
@@ -306,19 +294,33 @@ async fn main() -> anyhow::Result<()> {
     // ── Enable comms drain on hive session ────────────────────────────────
     // The hive session uses the factory's shared comms runtime (no comms_name),
     // so keep_alive / update_peer_ingress_context can't be set through the
-    // normal turn/start path. Wire the drain explicitly so the hive receives
-    // incoming peer requests/responses between turns.
-    if let Some(ref sid) = hive_session_id {
-        let uuid = uuid::Uuid::parse_str(sid).expect("hive session id is valid uuid");
-        let session_id = meerkat_core::types::SessionId(uuid);
+    // normal turn/start path. Eagerly attach the drain so target registration
+    // can mutate trust only through the session's generated machine owner.
+    let hive_session_id_typed = hive_session_id
+        .as_ref()
+        .map(|sid| uuid::Uuid::parse_str(sid).map(meerkat_core::types::SessionId))
+        .transpose()
+        .context("hive session id is valid uuid")?;
+    if let Some(ref session_id) = hive_session_id_typed {
         hive_runtime
-            .enable_comms_drain(
-                &session_id,
+            .enable_autonomous_comms_drain(
+                session_id,
                 Arc::clone(&hive_comms_runtime) as Arc<dyn meerkat_core::agent::CommsRuntime>,
             )
-            .await;
-        eprintln!("[kennel] hive comms drain enabled for {sid}");
+            .await
+            .map_err(|error| anyhow::anyhow!("enable hive comms drain: {}", error.message))?;
+        eprintln!("[kennel] hive comms drain enabled for {session_id}");
     }
+    let hive_comms_trust =
+        hive_session_id_typed
+            .clone()
+            .map(|session_id| {
+                Arc::new(ExampleGeneratedCommsTrustRouter::new(
+                    hive_runtime.runtime_adapter(),
+                    session_id,
+                    Arc::clone(&hive_comms_runtime),
+                ))
+            });
 
     // ── Create hive mob (external backend) ────────────────────────────────
     let hive_mob_id: Option<MobId> = if enable_experimental_hive_mob {
@@ -404,6 +406,7 @@ async fn main() -> anyhow::Result<()> {
         let hive_rpc_addr = hive_rpc_addr.clone();
         let hive_comms_addr_c = hive_comms_addr.clone();
         let hive_sid = hive_session_id.clone();
+        let hive_comms_trust = hive_comms_trust.clone();
         let mob_state = Arc::clone(&hive_mob_state_for_kennel);
         let mob_id = hive_mob_id.clone();
         let hive_comms = Arc::clone(&hive_comms_runtime);
@@ -418,6 +421,7 @@ async fn main() -> anyhow::Result<()> {
                 hive_sid,
                 mob_state,
                 mob_id,
+                hive_comms_trust,
                 hive_comms,
             )
             .await
@@ -445,6 +449,7 @@ async fn handle_connection(
     hive_session_id: Option<String>,
     hive_mob_state: Arc<MobMcpState>,
     hive_mob_id: Option<MobId>,
+    hive_comms_trust: Option<Arc<ExampleGeneratedCommsTrustRouter>>,
     hive_comms_runtime: Arc<meerkat_comms::CommsRuntime>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
@@ -503,6 +508,20 @@ async fn handle_connection(
                     &kennel_id,
                 )? {
                     RegisterTargetOutcome::Registered { post_ack_effects } => {
+                        let Some(hive_comms_trust) = hive_comms_trust.as_ref() else {
+                            anyhow::bail!(
+                                "generated hive comms trust authority unavailable for target registration"
+                            );
+                        };
+                        hive_comms_trust
+                            .add_trusted_peer(meerkat_comms::TrustedPeer {
+                                name: name.clone(),
+                                pubkey: target_pubkey,
+                                addr: direct_addr.clone(),
+                                meta: meerkat_comms::PeerMeta::default(),
+                            })
+                            .await?;
+
                         let reply = build_signed_envelope(
                             &keypair,
                             &kennel_id,
@@ -525,17 +544,6 @@ async fn handle_connection(
                             );
                         }
                         session_kind = Some(SessionKind::Target(target_id.clone()));
-
-                        // Always update trusted peer on (re-)registration so the
-                        // hive has the target's current comms address.
-                        hive_comms_runtime
-                            .register_trusted_peer(meerkat_comms::TrustedPeer {
-                                name: name.clone(),
-                                pubkey: target_pubkey,
-                                addr: direct_addr.clone(),
-                                meta: meerkat_comms::PeerMeta::default(),
-                            })
-                            .await?;
 
                         // Spawn target as external mob member in the hive fleet.
                         // RuntimeBinding::External carries the real target identity

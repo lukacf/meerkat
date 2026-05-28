@@ -22,6 +22,8 @@ path = "src/bin/kennel.rs"
 meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store", "mcp", "session-store", "schedule", "skills"] }
 meerkat-core  = { path = "../../meerkat-core" }
 meerkat-comms = { path = "../../meerkat-comms" }
+meerkat-machine-dsl = { path = "../../meerkat-machine-dsl" }
+meerkat-machine-schema = { path = "../../meerkat-machine-schema" }
 meerkat-mcp   = { path = "../../meerkat-mcp" }
 meerkat-mob     = { path = "../../meerkat-mob" }
 meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
@@ -41,6 +43,7 @@ crossterm     = "0.29"
 anyhow        = "1"
 dirs          = "5"
 gethostname   = "1"
+indexmap      = "2"
 parking_lot   = "0.12"
 tracing       = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

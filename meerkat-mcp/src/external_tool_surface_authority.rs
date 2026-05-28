@@ -1,12 +1,9 @@
-//! Compatibility projection for the retired standalone ExternalToolSurface path.
+//! Typed MCP external-tool surface protocol shapes.
 //!
-//! This module provides typed enums and a sealed mutator trait that enforces
-//! all mutations of this projection flow through one encoded transition table.
-//! Production MCP router construction no longer uses this table for surface
-//! legality; normal flows route through the catalog-backed
-//! `RuntimeExternalToolSurfaceHandle` and generated MeerkatMachine DSL. This
-//! module remains as a compatibility/test fixture while old shell projections
-//! are unwound.
+//! Production MCP lifecycle legality is owned by the generated MeerkatMachine
+//! surface handle. The handwritten transition table that used to back the
+//! standalone path is compiled only for tests as a compatibility fixture while
+//! older projection tests are unwound.
 //!
 //! The transition table encoded here mirrors the surface lifecycle shape that
 //! used to be standalone-owned:
@@ -20,17 +17,20 @@
 //! - 6 effects: ScheduleSurfaceCompletion, RefreshVisibleSurfaceSet,
 //!   EmitExternalToolDelta, CloseSurfaceConnection, RejectSurfaceCall
 
+#[cfg(test)]
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
+use meerkat_core::ExternalToolSurfaceFailureCause as CoreExternalToolSurfaceFailureCause;
+#[cfg(test)]
 use meerkat_core::{
     ExternalToolSurfaceBaseState as CoreExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation as CoreExternalToolSurfaceDeltaOperation,
     ExternalToolSurfaceDeltaPhase as CoreExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot,
-    ExternalToolSurfaceFailureCause as CoreExternalToolSurfaceFailureCause,
-    ExternalToolSurfaceGlobalPhase,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase,
     ExternalToolSurfacePendingOp as CoreExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
     ExternalToolSurfaceStagedOp as CoreExternalToolSurfaceStagedOp,
 };
@@ -169,11 +169,10 @@ pub enum ExternalToolSurfacePhase {
 // Typed input enum
 // ---------------------------------------------------------------------------
 
-/// Typed inputs for the ExternalToolSurface machine.
+/// Typed inputs for the generated ExternalToolSurface owner.
 ///
-/// Shell code classifies raw commands into these typed inputs, then calls
-/// [`ExternalToolSurfaceAuthority::apply`]. The authority decides transition
-/// legality.
+/// Shell code classifies raw commands into these typed inputs, then routes
+/// them through the bound generated surface handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalToolSurfaceInput {
     StageAdd {
@@ -231,8 +230,8 @@ pub enum ExternalToolSurfaceInput {
 
 /// Effects emitted by ExternalToolSurface transitions.
 ///
-/// Shell code receives these from [`ExternalToolSurfaceAuthority::apply`] and
-/// is responsible for executing the side effects (spawning tasks, closing
+/// Shell code receives these from the bound generated surface handle and is
+/// responsible for executing the side effects (spawning tasks, closing
 /// connections, emitting events, rebuilding caches).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalToolSurfaceEffect {
@@ -291,7 +290,7 @@ impl std::error::Error for ExternalToolSurfaceError {}
 // Transition result
 // ---------------------------------------------------------------------------
 
-/// Successful transition outcome from the ExternalToolSurface authority.
+/// Successful transition outcome from the ExternalToolSurface owner.
 #[derive(Debug)]
 pub struct ExternalToolSurfaceTransition {
     /// Name of the transition that fired (for diagnostics/tracing).
@@ -308,7 +307,7 @@ pub struct ExternalToolSurfaceTransition {
 
 /// Removal timing information for a surface in `Removing` state.
 ///
-/// Authority-owned data that drives the clean-vs-forced removal decision.
+/// Owner-provided data that drives the clean-vs-forced removal decision.
 #[derive(Debug, Clone, Copy)]
 pub struct RemovalTimingInfo {
     pub draining_since: Instant,
@@ -321,6 +320,7 @@ pub struct RemovalTimingInfo {
 /// All per-surface lifecycle truth lives here. Shell code may read these
 /// fields (for cache rebuilding, diagnostics) but must never write them
 /// directly.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct ExternalToolSurfaceFields {
     known_surfaces: BTreeSet<SurfaceId>,
@@ -342,6 +342,7 @@ struct ExternalToolSurfaceFields {
     removal_timing: HashMap<SurfaceId, RemovalTimingInfo>,
 }
 
+#[cfg(test)]
 impl ExternalToolSurfaceFields {
     fn new() -> Self {
         Self {
@@ -412,6 +413,7 @@ impl ExternalToolSurfaceFields {
 // Sealed mutator trait
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 mod sealed {
     pub trait Sealed {}
 }
@@ -421,6 +423,7 @@ mod sealed {
 /// Only [`ExternalToolSurfaceAuthority`] implements this. Production semantic
 /// decisions live in the generated MeerkatMachine runtime handle; this trait is
 /// intentionally kept local to the compatibility projection.
+#[cfg(test)]
 pub trait ExternalToolSurfaceMutator: sealed::Sealed {
     /// Apply a typed input to the current machine state.
     ///
@@ -441,6 +444,7 @@ pub trait ExternalToolSurfaceMutator: sealed::Sealed {
 /// Holds projection global phase + per-surface field maps and delegates
 /// mutations through the encoded transition table. Do not use this as a
 /// production surface legality owner.
+#[cfg(test)]
 pub struct ExternalToolSurfaceAuthority {
     phase: ExternalToolSurfacePhase,
     fields: ExternalToolSurfaceFields,
@@ -449,10 +453,13 @@ pub struct ExternalToolSurfaceAuthority {
 }
 
 /// Default removal timeout duration (30 seconds).
+#[cfg(test)]
 const DEFAULT_AUTHORITY_REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
 impl sealed::Sealed for ExternalToolSurfaceAuthority {}
 
+#[cfg(test)]
 impl ExternalToolSurfaceAuthority {
     /// Create a new authority in the initial Operating phase with empty state.
     pub fn new() -> Self {
@@ -1774,6 +1781,7 @@ impl ExternalToolSurfaceAuthority {
     }
 }
 
+#[cfg(test)]
 fn map_base_state(state: SurfaceBaseState) -> CoreExternalToolSurfaceBaseState {
     match state {
         SurfaceBaseState::Absent => CoreExternalToolSurfaceBaseState::Absent,
@@ -1783,6 +1791,7 @@ fn map_base_state(state: SurfaceBaseState) -> CoreExternalToolSurfaceBaseState {
     }
 }
 
+#[cfg(test)]
 fn map_pending_op(op: PendingSurfaceOp) -> CoreExternalToolSurfacePendingOp {
     match op {
         PendingSurfaceOp::None => CoreExternalToolSurfacePendingOp::None,
@@ -1791,6 +1800,7 @@ fn map_pending_op(op: PendingSurfaceOp) -> CoreExternalToolSurfacePendingOp {
     }
 }
 
+#[cfg(test)]
 fn map_staged_op(op: StagedSurfaceOp) -> CoreExternalToolSurfaceStagedOp {
     match op {
         StagedSurfaceOp::None => CoreExternalToolSurfaceStagedOp::None,
@@ -1800,6 +1810,7 @@ fn map_staged_op(op: StagedSurfaceOp) -> CoreExternalToolSurfaceStagedOp {
     }
 }
 
+#[cfg(test)]
 fn map_delta_operation(op: SurfaceDeltaOperation) -> CoreExternalToolSurfaceDeltaOperation {
     match op {
         SurfaceDeltaOperation::None => CoreExternalToolSurfaceDeltaOperation::None,
@@ -1809,6 +1820,7 @@ fn map_delta_operation(op: SurfaceDeltaOperation) -> CoreExternalToolSurfaceDelt
     }
 }
 
+#[cfg(test)]
 fn map_delta_phase(phase: SurfaceDeltaPhase) -> CoreExternalToolSurfaceDeltaPhase {
     match phase {
         SurfaceDeltaPhase::None => CoreExternalToolSurfaceDeltaPhase::None,
@@ -1820,12 +1832,14 @@ fn map_delta_phase(phase: SurfaceDeltaPhase) -> CoreExternalToolSurfaceDeltaPhas
     }
 }
 
+#[cfg(test)]
 impl Default for ExternalToolSurfaceAuthority {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl ExternalToolSurfaceMutator for ExternalToolSurfaceAuthority {
     fn apply(
         &mut self,

@@ -618,18 +618,16 @@ pub struct LiveStatusResult {
 
 /// Status of a `live/refresh` request relative to the adapter pump.
 ///
-/// R4-5 (P3): the refresh path is asynchronous — `LiveAdapterHost::send_command`
-/// returns when the command has been queued on the adapter's mpsc channel,
-/// not when the adapter pump has applied the resulting `session.update`. The
+/// R4-5 (P3): the refresh path is asynchronous — host queue acceptance happens
+/// before the adapter pump has applied the resulting `session.update`. The
 /// realtime stream is the source of truth for the actual refresh outcome
 /// (failures surface as `LiveAdapterObservation::Error`).
 ///
-/// Today every refresh path is `Queued`. The enum is `#[non_exhaustive]` so
-/// a future revision can add `AppliedSync` (e.g. when a oneshot ack from the
-/// adapter pump back through the command channel lands, or when a refresh
-/// is detected as a no-op against the currently-applied snapshot) without
-/// breaking the wire shape. SDK consumers route on the string value and
-/// treat unknown values as "outcome unknown — observe the realtime stream".
+/// Today generated runtime authority emits only `Queued`. The enum is
+/// `#[non_exhaustive]` so a future generated contract can add a typed status
+/// without changing the object shape. SDK consumers must route on the string
+/// value and fail closed for values outside the generated contract they were
+/// built with.
 ///
 /// Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
 /// place this typed status alongside the back-compat `refresh_enqueued`
@@ -640,10 +638,9 @@ pub struct LiveStatusResult {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveRefreshStatus {
-    /// The host has accepted the refresh command onto the adapter's mpsc
-    /// queue. The adapter pump applies the `session.update` asynchronously;
-    /// callers that need the actual outcome must observe the adapter's
-    /// realtime stream.
+    /// The host has accepted the refresh command onto the adapter queue. The
+    /// adapter pump applies the `session.update` asynchronously; callers that
+    /// need the actual outcome must observe the adapter's realtime stream.
     Queued,
 }
 
@@ -660,20 +657,61 @@ pub enum LiveRefreshStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveRefreshResult {
-    /// Typed refresh status. Today: always [`LiveRefreshStatus::Queued`].
+    /// Typed refresh status emitted by generated runtime authority.
+    /// Today: always [`LiveRefreshStatus::Queued`].
     pub status: LiveRefreshStatus,
-    /// Back-compat mirror of the legacy untyped reply field. Always `true`
-    /// when paired with `status: queued`. New code should route on `status`.
+    /// Back-compat mirror of the generated queued-authority result. Always
+    /// `true` when paired with `status: queued`. New code should route on
+    /// `status`.
     pub refresh_enqueued: bool,
 }
 
 impl LiveRefreshResult {
-    /// Construct a `Queued` result — the only outcome the host's
-    /// `send_command` path produces today.
+    /// Project the generated `Queued` authority result to the wire shape.
     pub fn queued() -> Self {
         Self {
             status: LiveRefreshStatus::Queued,
             refresh_enqueued: true,
+        }
+    }
+}
+
+/// Typed public result class for `live/close`.
+///
+/// Today generated runtime authority emits only `Closed`. The enum is
+/// `#[non_exhaustive]` so future generated contracts can add explicit result
+/// classes without changing the object shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveCloseStatus {
+    /// The host has accepted the close handoff and released channel transport
+    /// resources on a best-effort basis.
+    Closed,
+}
+
+/// Response payload for `live/close`.
+///
+/// The boolean `closed` field is preserved for back-compat alongside the typed
+/// `status` discriminator. New code should route on `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveCloseResult {
+    /// Typed close status emitted by generated runtime authority.
+    /// Today: always [`LiveCloseStatus::Closed`].
+    pub status: LiveCloseStatus,
+    /// Back-compat mirror of the generated close-authority result. Always
+    /// `true` when paired with `status: closed`.
+    pub closed: bool,
+}
+
+impl LiveCloseResult {
+    /// Project the generated `Closed` authority result to the wire shape.
+    pub fn closed() -> Self {
+        Self {
+            status: LiveCloseStatus::Closed,
+            closed: true,
         }
     }
 }
@@ -2355,8 +2393,8 @@ mod tests {
     /// R4-5 (P3): the typed `LiveRefreshResult` round-trips through JSON
     /// preserving both the new typed `status` discriminator and the legacy
     /// `refresh_enqueued: true` back-compat field. The `status: queued`
-    /// shape mirrors the only outcome `LiveAdapterHost::send_command`
-    /// produces today.
+    /// shape mirrors the generated authority result after host queue
+    /// acceptance.
     #[test]
     fn live_refresh_result_queued_round_trip() {
         let v = LiveRefreshResult::queued();
@@ -2387,6 +2425,16 @@ mod tests {
             Some(&serde_json::Value::String("queued".into())),
             "typed `status: queued` must be present alongside the legacy field"
         );
+    }
+
+    #[test]
+    fn live_close_result_closed_round_trip() {
+        let v = LiveCloseResult::closed();
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["status"], "closed");
+        assert_eq!(j["closed"], serde_json::Value::Bool(true));
+        let back: LiveCloseResult = serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
     }
 
     // R5-3 (P3) — explicit Unknown variant fail-loud regression tests for

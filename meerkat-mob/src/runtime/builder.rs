@@ -1908,6 +1908,7 @@ impl MobBuilder {
             next_spawn_ticket: 0,
             next_fence_token: std::sync::atomic::AtomicU64::new(1),
             pending_spawns: PendingSpawnLineage::new(),
+            pending_spawn_cleanup_anchors: BTreeMap::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             next_peer_delivery_ticket: 0,

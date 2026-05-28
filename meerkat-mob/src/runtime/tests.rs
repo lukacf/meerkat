@@ -775,6 +775,14 @@ impl MockSessionService {
         self.sessions.read().await.len()
     }
 
+    async fn session_id_for_comms_name(&self, comms_name: &str) -> Option<SessionId> {
+        self.session_comms_names
+            .read()
+            .await
+            .iter()
+            .find_map(|(session_id, name)| (name == comms_name).then(|| session_id.clone()))
+    }
+
     async fn live_session_clone(&self, session_id: &SessionId) -> Option<Session> {
         self.live_session_data.read().await.get(session_id).cloned()
     }
@@ -4404,6 +4412,37 @@ fn test_comms_name(profile: &str, agent_identity: &str) -> String {
 
 fn test_comms_name_for(mob_id: &MobId, profile: &str, agent_identity: &str) -> String {
     format!("{mob_id}/{profile}/{agent_identity}")
+}
+
+struct SpawnProvisionedCommandDelayGuard;
+
+impl SpawnProvisionedCommandDelayGuard {
+    fn set(delay_ms: u64) -> Self {
+        super::actor::SPAWN_PROVISIONED_COMMAND_DELAY_MS.store(delay_ms, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for SpawnProvisionedCommandDelayGuard {
+    fn drop(&mut self) {
+        super::actor::SPAWN_PROVISIONED_COMMAND_DELAY_MS.store(0, Ordering::Relaxed);
+    }
+}
+
+async fn wait_for_session_id_for_comms_name(
+    service: &MockSessionService,
+    comms_name: &str,
+) -> SessionId {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(session_id) = service.session_id_for_comms_name(comms_name).await {
+                break session_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for session {comms_name}"))
 }
 
 async fn test_peer_route<C>(comms: &C, name: &str) -> PeerRoute
@@ -10809,7 +10848,7 @@ async fn test_respawn_ignores_machine_local_edge_to_retired_peer() {
 }
 
 #[tokio::test]
-async fn test_respawn_archive_failure_returns_cleanup_ambiguous_report() {
+async fn test_respawn_archive_failure_retains_retry_anchor_and_can_retry() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = MeerkatId::from("respawn-ambiguous");
     let member_ref = handle
@@ -10830,44 +10869,48 @@ async fn test_respawn_archive_failure_returns_cleanup_ambiguous_report() {
     let error = handle
         .respawn(AgentIdentity::from(member_id.as_str()), None)
         .await
-        .expect_err("respawn should surface ambiguous cleanup when archive fails");
+        .expect_err("respawn should surface cleanup failure when archive fails");
 
-    let report = match error {
-        crate::runtime::handle::MobRespawnError::PreviousMemberCleanupAmbiguous { report } => {
-            report
-        }
-        other => panic!("expected PreviousMemberCleanupAmbiguous, got {other:?}"),
-    };
+    assert!(
+        matches!(
+            error,
+            crate::runtime::handle::MobRespawnError::Mob(MobError::Internal(ref message))
+                if message.contains("ArchiveSession")
+        ),
+        "session-bound respawn should retain the cleanup anchor and return the archive failure directly: {error:?}"
+    );
+    let retained = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("archive failure should retain retiring member for retry");
+    assert_eq!(
+        retained.agent_runtime_id,
+        original_snapshot.agent_runtime_id
+    );
+    assert_eq!(retained.fence_token, original_snapshot.fence_token);
+    assert_eq!(retained.state, crate::roster::MemberState::Retiring);
+    assert_eq!(
+        handle.list_members_including_retiring().await.len(),
+        1,
+        "failed cleanup must leave exactly the retained retiring member, not a replacement"
+    );
 
-    assert_eq!(report.identity, AgentIdentity::from(member_id.as_str()));
-    assert_eq!(report.agent_runtime_id, original_snapshot.agent_runtime_id);
-    assert_eq!(report.fence_token, original_snapshot.fence_token);
-    assert!(
-        report.retire_attempted,
-        "respawn should have attempted retire"
-    );
-    assert!(
-        report
-            .retire_error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("ArchiveSession")),
-        "cleanup report should capture the archive failure: {:?}",
-        report.retire_error
-    );
-    assert!(
-        !report.confirmatory_observation_attempted,
-        "current respawn ambiguity path should not claim a confirmatory probe"
-    );
-    assert!(
-        !report.destroy_attempted,
-        "current respawn ambiguity path should not claim a force-destroy"
-    );
-    assert!(
-        handle
-            .get_member(&AgentIdentity::from(member_id.as_str()))
-            .await
-            .is_none(),
-        "ambiguous cleanup must not create a replacement member"
+    service.clear_archive_failure(&old_session_id).await;
+    let receipt = handle
+        .respawn(
+            AgentIdentity::from(member_id.as_str()),
+            Some("retry replacement".into()),
+        )
+        .await
+        .expect("respawn retry should clean up the old session and spawn replacement");
+    assert_eq!(receipt.identity, AgentIdentity::from(member_id.as_str()));
+    let replacement = handle
+        .member_status(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("replacement status");
+    assert_ne!(
+        replacement.agent_runtime_id, original_snapshot.agent_runtime_id,
+        "successful retry must rotate the runtime binding"
     );
 }
 
@@ -14891,14 +14934,13 @@ async fn test_retire_archive_failure_is_not_silent() {
         "retire must return Err when ArchiveSession fails"
     );
 
-    // Member is removed from roster unconditionally (finally block).
-    assert!(
-        handle
-            .get_member(&AgentIdentity::from("w-1"))
-            .await
-            .is_none(),
-        "retire must remove roster entry even when archive fails"
-    );
+    // Critical archive failure retains the retiring roster entry so cleanup can
+    // be retried without losing the member/session anchor.
+    let retained = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("archive failure should retain retry anchor");
+    assert_eq!(retained.state, crate::roster::MemberState::Retiring);
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
         events
@@ -17627,8 +17669,8 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         "spawn rollback should remove leaked trust edges"
     );
 
-    // Retire best-effort cleanup invariants: retire succeeds and removes
-    // roster entry even when archive is fault-injected.
+    // Retire cleanup invariants: archive failure is surfaced and retains the
+    // retiring roster entry so the cleanup can be retried.
     let (retire_handle, retire_service) = create_test_mob(sample_definition()).await;
     let sid_r1 = retire_handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("r-1"), None)
@@ -17651,12 +17693,23 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         retire_result.is_err(),
         "retire must return Err when ArchiveSession fails"
     );
+    let retained = retire_handle
+        .get_member(&AgentIdentity::from("r-1"))
+        .await
+        .expect("retire must retain roster entry when archive fails");
+    assert_eq!(retained.state, crate::roster::MemberState::Retiring);
+
+    retire_service.clear_archive_failure(&sid_r1).await;
+    retire_handle
+        .retire(AgentIdentity::from("r-1"))
+        .await
+        .expect("retire retry should complete archive cleanup");
     assert!(
         retire_handle
             .get_member(&AgentIdentity::from("r-1"))
             .await
             .is_none(),
-        "retire must remove roster entry even when archive fails"
+        "successful retry must remove roster entry"
     );
     let r2 = retire_handle
         .get_member(&AgentIdentity::from("r-2"))
@@ -19783,6 +19836,129 @@ async fn test_stop_fails_pending_spawns_and_cleans_up_provisioned_session() {
         service.active_session_count().await,
         0,
         "canceled pending spawn should retire any provisioned session during cleanup"
+    );
+}
+
+#[tokio::test]
+async fn test_stop_pending_spawn_archive_failure_retains_cleanup_anchor_for_retry() {
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let agent_identity = MeerkatId::from("w-stop-archive-fail");
+    let comms_name = test_comms_name("worker", agent_identity.as_str());
+    service
+        .set_archive_failure_for_comms_name(&comms_name)
+        .await;
+
+    let pending_spawn = {
+        let handle = handle.clone();
+        let agent_identity = agent_identity.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), agent_identity, None)
+                .await
+        })
+    };
+    let session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
+
+    let stop_error = handle
+        .stop()
+        .await
+        .expect_err("stop should fail closed while pending spawn archive cleanup is ambiguous");
+    assert!(
+        stop_error
+            .to_string()
+            .contains("pending spawn cleanup incomplete"),
+        "stop should expose pending spawn cleanup failure, got: {stop_error}"
+    );
+    assert_eq!(
+        handle.status().await.unwrap(),
+        MobState::Running,
+        "failed stop must not commit the mob into Stopped"
+    );
+
+    let spawn_error = pending_spawn
+        .await
+        .expect("spawn join")
+        .expect_err("pending spawn should fail once stop begins");
+    assert!(
+        spawn_error.to_string().contains("mob is stopping"),
+        "spawn should receive stop cancellation reason, got: {spawn_error}"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        1,
+        "archive failure must keep the provisioned session available for retry"
+    );
+
+    service.clear_archive_failure(&session_id).await;
+    handle
+        .stop()
+        .await
+        .expect("retrying stop should drain retained pending-spawn cleanup anchor");
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "retry should archive the previously ambiguous pending-spawn session"
+    );
+}
+
+#[tokio::test]
+async fn test_member_pending_spawn_archive_failure_retains_cleanup_anchor_for_retry() {
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let agent_identity = MeerkatId::from("w-retire-pending-archive-fail");
+    let comms_name = test_comms_name("worker", agent_identity.as_str());
+    service
+        .set_archive_failure_for_comms_name(&comms_name)
+        .await;
+
+    let pending_spawn = {
+        let handle = handle.clone();
+        let agent_identity = agent_identity.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), agent_identity, None)
+                .await
+        })
+    };
+    let session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
+
+    let retire_error = handle
+        .retire(AgentIdentity::from(agent_identity.as_str()))
+        .await
+        .expect_err("retire should fail before roster mutation when pending cleanup is ambiguous");
+    assert!(
+        retire_error
+            .to_string()
+            .contains("pending spawn cleanup incomplete"),
+        "retire should expose pending spawn cleanup failure, got: {retire_error}"
+    );
+    let spawn_error = pending_spawn
+        .await
+        .expect("spawn join")
+        .expect_err("pending spawn should fail once retire cancels it");
+    assert!(
+        spawn_error.to_string().contains("retire command received"),
+        "spawn should receive retire cancellation reason, got: {spawn_error}"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        1,
+        "archive failure must keep the provisioned session available for member retry"
+    );
+
+    service.clear_archive_failure(&session_id).await;
+    handle
+        .retire(AgentIdentity::from(agent_identity.as_str()))
+        .await
+        .expect(
+            "retry should drain cleanup anchor and treat the canceled pending member as retired",
+        );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "member retry should archive the previously ambiguous pending-spawn session"
     );
 }
 
@@ -27669,11 +27845,10 @@ async fn test_retire_sends_required_peer_retired_notifications() {
 // Disposal pipeline integration tests
 // -----------------------------------------------------------------------
 
-/// Verifies that roster removal happens even when multiple cleanup steps fail.
-/// This tests the structural guarantee that roster removal is in the "finally"
-/// block of dispose_member, outside the policy-driven loop.
+/// Verifies that critical archive failure retains the retry anchor even when
+/// best-effort peer cleanup also fails.
 #[tokio::test]
-async fn test_dispose_member_removes_roster_even_when_steps_fail() {
+async fn test_dispose_member_retains_roster_when_archive_fails() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     // Configure w-1's comms to fail both send and trust removal.
     service
@@ -27718,13 +27893,23 @@ async fn test_dispose_member_removes_roster_even_when_steps_fail() {
         "retire must return Err when ArchiveSession fails, regardless of other step failures"
     );
 
-    // The structural guarantee: member is gone from roster regardless.
+    let retained = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("critical archive failure must retain member for cleanup retry");
+    assert_eq!(retained.state, crate::roster::MemberState::Retiring);
+
+    service.clear_archive_failure(&sid_w1).await;
+    handle
+        .retire(AgentIdentity::from("w-1"))
+        .await
+        .expect("retry should finish archive cleanup");
     assert!(
         handle
             .get_member(&AgentIdentity::from("w-1"))
             .await
             .is_none(),
-        "roster removal must be unconditional — member must be gone even when all steps fail"
+        "successful retry should remove the roster entry"
     );
 }
 
@@ -28585,14 +28770,11 @@ async fn test_retire_returns_err_when_archive_fails() {
         "retire must return Err when ArchiveSession fails — got Ok"
     );
 
-    // Roster removal is unconditional (finally block) even when we return Err.
-    assert!(
-        handle
-            .get_member(&AgentIdentity::from("w-1"))
-            .await
-            .is_none(),
-        "roster entry must be removed even when retire returns Err"
-    );
+    let retained = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("archive failure should retain retry anchor");
+    assert_eq!(retained.state, crate::roster::MemberState::Retiring);
 
     // Retire event was persisted before disposal (event-first).
     let events = handle.events().replay_all().await.expect("replay");
@@ -28602,6 +28784,30 @@ async fn test_retire_returns_err_when_archive_fails() {
             .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
         "retire event must persist regardless of archive outcome"
     );
+}
+
+#[tokio::test]
+async fn test_retire_stale_routed_effect_does_not_drop_actor() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let adapter = service.enable_runtime_adapter();
+    adapter.unregister_session(&session_id).await;
+
+    handle
+        .retire(AgentIdentity::from("w-1"))
+        .await
+        .expect("retire should complete through archive even when routed retire is stale");
+
+    handle
+        .stop()
+        .await
+        .expect("mob actor must remain alive after stale routed retire cleanup");
 }
 
 /// Comms failures (NotifyPeers, RemoveTrustEdges) during retirement remain

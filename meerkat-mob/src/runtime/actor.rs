@@ -72,6 +72,9 @@ const MAX_PARALLEL_PEER_RETIRE_NOTIFICATIONS: usize = 64;
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 1024;
 #[cfg(test)]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
+#[cfg(test)]
+pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 fn observed_runtime_id(signal: &mob_dsl::MobMachineSignal) -> Option<&mob_dsl::AgentRuntimeId> {
     match signal {
@@ -349,6 +352,15 @@ pub(super) struct PendingSpawnProgress {
     pub(super) operation_id: Option<meerkat_core::ops::OperationId>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct PendingSpawnCleanupAnchor {
+    spawn_ticket: u64,
+    agent_identity: MeerkatId,
+    session_id: meerkat_core::types::SessionId,
+    operation_id: meerkat_core::ops::OperationId,
+    reason: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct RestoreWiringPlan {
     local_peers: Vec<MeerkatId>,
@@ -370,6 +382,9 @@ struct RespawnSnapshot {
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
+    /// The old member is already in a partial-retire state and respawn should
+    /// retry cleanup instead of re-admitting the original Respawn transition.
+    cleanup_retry: bool,
 }
 
 struct FinalizeSpawnOutcome {
@@ -437,6 +452,7 @@ pub(super) struct MobActor {
     /// Uses `AtomicU64` so `&self` methods (batch finalization) can issue tokens.
     pub(super) next_fence_token: std::sync::atomic::AtomicU64,
     pub(super) pending_spawns: PendingSpawnLineage,
+    pub(super) pending_spawn_cleanup_anchors: BTreeMap<u64, PendingSpawnCleanupAnchor>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) next_peer_delivery_ticket: PeerDeliveryId,
@@ -3440,18 +3456,25 @@ impl MobActor {
                 } => {
                     let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
                         Ok(()) => {
-                            let canceled = self.cancel_pending_spawns_for_member(
-                                &agent_identity,
-                                "retire command received",
-                            );
-                            if canceled > 0 {
-                                tracing::info!(
-                                    agent_identity = %agent_identity,
-                                    canceled,
-                                    "retire canceled pending spawn lineage before roster retirement"
-                                );
+                            match self
+                                .cancel_pending_spawns_for_member(
+                                    &agent_identity,
+                                    "retire command received",
+                                )
+                                .await
+                            {
+                                Ok(canceled) => {
+                                    if canceled > 0 {
+                                        tracing::info!(
+                                            agent_identity = %agent_identity,
+                                            canceled,
+                                            "retire canceled pending spawn lineage before roster retirement"
+                                        );
+                                    }
+                                    self.handle_retire(agent_identity).await
+                                }
+                                Err(error) => Err(error),
                             }
-                            self.handle_retire(agent_identity).await
                         }
                         Err(error) => Err(error),
                     };
@@ -3746,27 +3769,31 @@ impl MobActor {
                         "stop_command_admission",
                     ) {
                         Ok(()) => {
-                            self.fail_all_pending_spawns("mob is stopping").await;
-                            self.cancel_pending_peer_deliveries("mob is stopping").await;
-                            self.notify_orchestrator_lifecycle(format!(
-                                "Mob '{}' is stopping.",
-                                self.definition.id
-                            ))
-                            .await;
-                            // Cancel checkpointer gates before stopping host loops so
-                            // in-flight saves that complete after the loop stops don't
-                            // race with subsequent external cleanup (e.g. DML deletes).
-                            self.provisioner.cancel_all_checkpointers().await;
-                            let mut stop_result: Result<(), MobError> = Ok(());
-                            let loop_result = self.stop_all_autonomous_members().await;
-                            if let Err(error) = loop_result {
-                                tracing::warn!(
-                                    mob_id = %self.definition.id,
-                                    error = %error,
-                                    "stop encountered autonomous loop cleanup error"
-                                );
-                                if stop_result.is_ok() {
-                                    stop_result = Err(error);
+                            let mut stop_result =
+                                self.fail_all_pending_spawns("mob is stopping").await;
+                            if stop_result.is_ok() {
+                                self.cancel_pending_peer_deliveries("mob is stopping").await;
+                                self.notify_orchestrator_lifecycle(format!(
+                                    "Mob '{}' is stopping.",
+                                    self.definition.id
+                                ))
+                                .await;
+                                // Cancel checkpointer gates before stopping host loops so
+                                // in-flight saves that complete after the loop stops don't
+                                // race with subsequent external cleanup (e.g. DML deletes).
+                                self.provisioner.cancel_all_checkpointers().await;
+                            }
+                            if stop_result.is_ok() {
+                                let loop_result = self.stop_all_autonomous_members().await;
+                                if let Err(error) = loop_result {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        error = %error,
+                                        "stop encountered autonomous loop cleanup error"
+                                    );
+                                    if stop_result.is_ok() {
+                                        stop_result = Err(error);
+                                    }
                                 }
                             }
                             if stop_result.is_ok() {
@@ -3867,12 +3894,14 @@ impl MobActor {
                         MobState::Completed,
                         "complete_command_admission",
                     ) {
-                        Ok(()) => {
-                            self.fail_all_pending_spawns("mob is completing").await;
-                            self.cancel_pending_peer_deliveries("mob is completing")
-                                .await;
-                            self.handle_complete().await
-                        }
+                        Ok(()) => match self.fail_all_pending_spawns("mob is completing").await {
+                            Ok(()) => {
+                                self.cancel_pending_peer_deliveries("mob is completing")
+                                    .await;
+                                self.handle_complete().await
+                            }
+                            Err(error) => Err(error),
+                        },
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -3900,7 +3929,10 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.fail_all_pending_spawns("mob is resetting").await;
+                    if let Err(error) = self.fail_all_pending_spawns("mob is resetting").await {
+                        let _ = reply_tx.send(Err(error));
+                        continue;
+                    }
                     self.cancel_pending_peer_deliveries("mob is resetting")
                         .await;
                     let result = self.handle_reset(prior_state).await;
@@ -4092,11 +4124,17 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.fail_all_pending_spawns("mob runtime is shutting down")
+                    let mut result = self
+                        .fail_all_pending_spawns("mob runtime is shutting down")
                         .await;
-                    self.cancel_pending_peer_deliveries("mob runtime is shutting down")
-                        .await;
-                    let mut result: Result<(), MobError> = Ok(());
+                    if result.is_err() {
+                        let _ = reply_tx.send(result);
+                        continue;
+                    }
+                    if result.is_ok() {
+                        self.cancel_pending_peer_deliveries("mob runtime is shutting down")
+                            .await;
+                    }
                     if let Err(error) = self.cancel_all_flow_tasks().await {
                         tracing::warn!(error = %error, "shutdown flow cancellation encountered errors");
                         if result.is_ok() {
@@ -4163,7 +4201,98 @@ impl MobActor {
         }
     }
 
-    async fn fail_all_pending_spawns(&mut self, reason: &str) {
+    fn pending_spawn_cleanup_anchor_for_slot(
+        slot: &super::pending_spawn_lineage::PendingSpawnSlot,
+        reason: &str,
+    ) -> Option<PendingSpawnCleanupAnchor> {
+        let snapshot = {
+            let progress = slot
+                .spawn
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            progress
+                .bridge_session_id
+                .clone()
+                .zip(progress.operation_id.clone())
+        };
+        snapshot.map(|(session_id, operation_id)| PendingSpawnCleanupAnchor {
+            spawn_ticket: slot.ticket,
+            agent_identity: slot.spawn.agent_identity.clone(),
+            session_id,
+            operation_id,
+            reason: reason.to_string(),
+        })
+    }
+
+    async fn cleanup_pending_spawn_anchor(
+        &self,
+        anchor: &PendingSpawnCleanupAnchor,
+    ) -> Result<(), MobError> {
+        self.provisioner
+            .abort_member_provision(
+                &MemberRef::from_bridge_session_id(anchor.session_id.clone()),
+                &anchor.operation_id,
+                &anchor.reason,
+            )
+            .await
+    }
+
+    fn pending_spawn_cleanup_error(context: &str, errors: Vec<String>) -> MobError {
+        MobError::Internal(format!(
+            "{context}: pending spawn cleanup incomplete: {}",
+            errors.join("; ")
+        ))
+    }
+
+    async fn drain_pending_spawn_cleanup_anchors(&mut self, context: &str) -> Result<(), MobError> {
+        if self.pending_spawn_cleanup_anchors.is_empty() {
+            return Ok(());
+        }
+
+        let anchors = self
+            .pending_spawn_cleanup_anchors
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut errors = Vec::new();
+        for anchor in anchors {
+            match self.cleanup_pending_spawn_anchor(&anchor).await {
+                Ok(()) => {
+                    self.pending_spawn_cleanup_anchors
+                        .remove(&anchor.spawn_ticket);
+                    tracing::info!(
+                        spawn_ticket = anchor.spawn_ticket,
+                        agent_identity = %anchor.agent_identity,
+                        operation_id = %anchor.operation_id,
+                        "retried pending spawn cleanup anchor successfully"
+                    );
+                }
+                Err(error) => {
+                    errors.push(format!(
+                        "{} ticket {} operation {}: {error}",
+                        anchor.agent_identity, anchor.spawn_ticket, anchor.operation_id
+                    ));
+                    tracing::warn!(
+                        spawn_ticket = anchor.spawn_ticket,
+                        agent_identity = %anchor.agent_identity,
+                        operation_id = %anchor.operation_id,
+                        error = %error,
+                        "pending spawn cleanup anchor still failed"
+                    );
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::pending_spawn_cleanup_error(context, errors))
+        }
+    }
+
+    async fn fail_all_pending_spawns(&mut self, reason: &str) -> Result<(), MobError> {
+        self.drain_pending_spawn_cleanup_anchors(reason).await?;
         if self.pending_spawns.is_empty() {
             if let Some(message) = self.pending_spawn_alignment_violation() {
                 tracing::error!(
@@ -4172,9 +4301,10 @@ impl MobActor {
                     "pending spawn alignment violated with no local pending slots to drain"
                 );
             }
-            return;
+            return Ok(());
         }
 
+        let mut cleanup_errors = Vec::new();
         for slot in self.pending_spawns.drain_all() {
             let spawn_ticket = slot.ticket;
             let agent_identity = slot.spawn.agent_identity.clone();
@@ -4192,7 +4322,9 @@ impl MobActor {
                     "lifecycle transition cleared pending spawn",
                 );
             }
-            self.abort_pending_spawn_slot(&slot, reason).await;
+            if let Err(error) = self.abort_pending_spawn_slot(&slot, reason).await {
+                cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
+            }
             slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
@@ -4210,49 +4342,47 @@ impl MobActor {
                 "pending spawn alignment still violated after lifecycle drain"
             );
         }
+        if !cleanup_errors.is_empty() {
+            return Err(Self::pending_spawn_cleanup_error(reason, cleanup_errors));
+        }
+        self.drain_pending_spawn_cleanup_anchors(reason).await?;
+        Ok(())
     }
 
     async fn abort_pending_spawn_slot(
-        &self,
+        &mut self,
         slot: &super::pending_spawn_lineage::PendingSpawnSlot,
         reason: &str,
-    ) {
-        let snapshot = {
-            let progress = slot
-                .spawn
-                .progress
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            progress
-                .bridge_session_id
-                .clone()
-                .zip(progress.operation_id.clone())
+    ) -> Result<(), MobError> {
+        let Some(anchor) = Self::pending_spawn_cleanup_anchor_for_slot(slot, reason) else {
+            return Ok(());
         };
-        if let Some((session_id, operation_id)) = snapshot
-            && let Err(error) = self
-                .provisioner
-                .abort_member_provision(
-                    &MemberRef::from_bridge_session_id(session_id),
-                    &operation_id,
-                    reason,
-                )
-                .await
-        {
+        if let Err(error) = self.cleanup_pending_spawn_anchor(&anchor).await {
+            self.pending_spawn_cleanup_anchors
+                .insert(anchor.spawn_ticket, anchor.clone());
             tracing::warn!(
-                spawn_ticket = slot.ticket,
-                agent_identity = %slot.spawn.agent_identity,
-                operation_id = %operation_id,
+                spawn_ticket = anchor.spawn_ticket,
+                agent_identity = %anchor.agent_identity,
+                operation_id = %anchor.operation_id,
                 error = %error,
-                "failed to abort pending member provision during lifecycle drain"
+                "failed to abort pending member provision during lifecycle drain; retained cleanup anchor"
             );
+            return Err(MobError::Internal(format!(
+                "pending spawn cleanup failed for '{}': {error}",
+                anchor.agent_identity
+            )));
         }
+        self.pending_spawn_cleanup_anchors
+            .remove(&anchor.spawn_ticket);
+        Ok(())
     }
 
-    fn cancel_pending_spawns_for_member(
+    async fn cancel_pending_spawns_for_member(
         &mut self,
         agent_identity: &MeerkatId,
         reason: &str,
-    ) -> usize {
+    ) -> Result<usize, MobError> {
+        self.drain_pending_spawn_cleanup_anchors(reason).await?;
         let slots = self.pending_spawns.take_for_member(agent_identity);
         if slots.is_empty() {
             if let Some(message) = self.pending_spawn_alignment_violation() {
@@ -4263,7 +4393,7 @@ impl MobActor {
                     "pending spawn alignment violated while canceling member-specific pending spawns"
                 );
             }
-            return 0;
+            return Ok(0);
         }
         let canceled = slots.len();
 
@@ -4275,51 +4405,12 @@ impl MobActor {
             );
         }
 
-        let pending_abortions = slots
-            .iter()
-            .map(|slot| {
-                (
-                    slot.ticket,
-                    slot.spawn.agent_identity.clone(),
-                    slot.spawn.progress.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let provisioner = self.provisioner.clone();
-        let reason_owned = reason.to_string();
-        tokio::spawn(async move {
-            for (spawn_ticket, agent_identity, progress) in pending_abortions {
-                let snapshot = {
-                    let progress = progress
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    progress
-                        .bridge_session_id
-                        .clone()
-                        .zip(progress.operation_id.clone())
-                };
-                if let Some((session_id, operation_id)) = snapshot
-                    && let Err(error) = provisioner
-                        .abort_member_provision(
-                            &MemberRef::from_bridge_session_id(session_id),
-                            &operation_id,
-                            &reason_owned,
-                        )
-                        .await
-                {
-                    tracing::warn!(
-                        spawn_ticket,
-                        agent_identity = %agent_identity,
-                        operation_id = %operation_id,
-                        error = %error,
-                        "failed to abort pending member provision during member-specific cancellation"
-                    );
-                }
-            }
-        });
-
+        let mut cleanup_errors = Vec::new();
         for slot in slots {
             let spawn_ticket = slot.ticket;
+            if let Err(error) = self.abort_pending_spawn_slot(&slot, reason).await {
+                cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
+            }
             slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
@@ -4336,7 +4427,11 @@ impl MobActor {
                 "pending spawn alignment violated after member-specific cancellation"
             );
         }
-        canceled
+        if cleanup_errors.is_empty() {
+            Ok(canceled)
+        } else {
+            Err(Self::pending_spawn_cleanup_error(reason, cleanup_errors))
+        }
     }
 
     fn customize_spawn_spec(
@@ -4934,6 +5029,14 @@ impl MobActor {
                     progress.bridge_session_id = Some(bridge_session_id);
                     progress.operation_id = Some(spawn_receipt.operation_id.clone());
                 }
+                #[cfg(test)]
+                {
+                    let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
                 if spawn_runtime_mode == crate::MobRuntimeMode::AutonomousHost
                     && let Err(capability_error) =
                         Self::ensure_autonomous_dispatch_capability_for_provisioner(
@@ -4992,8 +5095,16 @@ impl MobActor {
                 error = %error,
                 "pending spawn alignment check failed after enqueue; canceling all pending spawns"
             );
-            self.fail_all_pending_spawns("pending spawn alignment violated after enqueue")
-                .await;
+            if let Err(cleanup_error) = self
+                .fail_all_pending_spawns("pending spawn alignment violated after enqueue")
+                .await
+            {
+                tracing::error!(
+                    spawn_ticket,
+                    error = %cleanup_error,
+                    "pending spawn cleanup failed after enqueue alignment violation"
+                );
+            }
             return;
         }
 
@@ -5014,8 +5125,15 @@ impl MobActor {
                 error = %error,
                 "pending spawn alignment check failed before spawn completion batch"
             );
-            self.fail_all_pending_spawns("pending spawn alignment violated before spawn batch")
-                .await;
+            if let Err(cleanup_error) = self
+                .fail_all_pending_spawns("pending spawn alignment violated before spawn batch")
+                .await
+            {
+                tracing::error!(
+                    error = %cleanup_error,
+                    "pending spawn cleanup failed after pre-batch alignment violation"
+                );
+            }
             return;
         }
 
@@ -5116,8 +5234,15 @@ impl MobActor {
                 error = %error,
                 "pending spawn alignment check failed after spawn completion batch"
             );
-            self.fail_all_pending_spawns("pending spawn alignment violated after spawn batch")
-                .await;
+            if let Err(cleanup_error) = self
+                .fail_all_pending_spawns("pending spawn alignment violated after spawn batch")
+                .await
+            {
+                tracing::error!(
+                    error = %cleanup_error,
+                    "pending spawn cleanup failed after spawn batch alignment violation"
+                );
+            }
         }
     }
 
@@ -5305,7 +5430,7 @@ impl MobActor {
             self.fail_all_pending_spawns(
                 "pending spawn alignment violated while staging inline policy spawn",
             )
-            .await;
+            .await?;
             return Err(error);
         }
 
@@ -5383,7 +5508,7 @@ impl MobActor {
             self.fail_all_pending_spawns(
                 "pending spawn alignment violated after inline policy spawn completion",
             )
-            .await;
+            .await?;
             return Err(error);
         }
 
@@ -7936,8 +8061,9 @@ impl MobActor {
     }
 
     ///
-    /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
-    /// pipeline (policy-driven), then unconditional roster removal.
+    /// Mark-then-cleanup: event first, mark Retiring, disposal pipeline
+    /// (policy-driven), then roster removal only after critical archive cleanup
+    /// succeeds.
     async fn handle_retire(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
         self.cancel_peer_deliveries_for_member(&agent_identity, "member is retiring")
@@ -8184,68 +8310,79 @@ impl MobActor {
             session_id: session_id_for_route,
         };
 
-        // MobMachine admits the command before the event projection records
-        // retirement. The actual transition is still applied after the durable
-        // event append so crash recovery keeps its event-first ordering.
-        self.preview_dsl_input(retire_input.clone(), "handle_retire_inner_admission")?;
-
-        // Append retire event (event-first for crash recovery).
         let retire_event_already_present = self
             .retire_event_exists(agent_identity, &entry.member_ref)
             .await?;
-        if !retire_event_already_present {
-            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
-                .await?;
-        }
-
-        let effects = self
-            .apply_dsl_input_collect_effects(retire_input, "handle_retire_inner_mark_retiring")?;
-        let mut detach_obligations =
-            crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
-                &effects,
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let cleanup_retry = retire_event_already_present
+            || entry.state == crate::roster::MemberState::Retiring
+            || matches!(
+                self.dsl_authority
+                    .state
+                    .member_state_markers
+                    .get(&dsl_runtime_id),
+                Some(mob_dsl::MobMemberState::Retiring)
             );
-        if let (Some(obligation), Some(session_id)) = (detach_obligations.pop(), detach_session_id)
-        {
-            self.detach_session_ingress_for_mob_destroy(&session_id, obligation)
-                .await?;
-        }
 
-        // #31 Wave D (D-trust-reconciliation subsystem 4): flip the roster
-        // entry's state to `Retiring` so live readers of
-        // `list_members()` / `member_status()` observe the retiring state
-        // during the disposal window (notify peers, archive session).
-        // The canonical removal still runs in the finally block of
-        // `dispose_member`. Without this explicit flip the
-        // `RosterEntry.state` stayed `Active` right up to removal because
-        // the `MemberRetired` event projection is "remove-by-identity",
-        // not "mark-retiring" — there was a lost observability seam for
-        // the in-flight-retire window.
-        {
-            let mut roster = self.roster.write().await;
-            roster.mark_retiring_by_identity(&entry.agent_identity);
-        }
-
-        // Flush routed effects *before* the disposal pipeline tears down
-        // the runtime session. The `Retire` DSL input above emits a
-        // `RequestRuntimeRetire` routed effect that the `MeerkatConsumer
-        // Surface` delivers as a `Retire` input on the meerkat DSL
-        // authority; that authority lives behind the session registered
-        // with the shared `MeerkatMachine`. `dispose_member` →
-        // `dispose_stop_host_loop` → `teardown_autonomous_runtime` calls
-        // `adapter.unregister_session`, so if the routed effect hasn't
-        // been drained yet, the consumer surface fails with
-        // `ConsumerRefused { reason: "session is not registered" }` and
-        // the actor task crashes. Drain the pending queue at the natural
-        // async boundary here — before the disposal pipeline runs — so
-        // the routed-effect delivery observes the session in its
-        // pre-teardown state.
-        if let Err(error) = self.flush_routed_effects().await {
-            tracing::warn!(
+        if cleanup_retry {
+            tracing::debug!(
                 mob_id = %self.definition.id,
                 agent_identity = %agent_identity,
-                %error,
-                "pre-disposal routed-effect flush failed; proceeding with disposal"
+                "retrying member retire cleanup from retained roster anchor"
             );
+            let mut roster = self.roster.write().await;
+            roster.mark_retiring_by_identity(&entry.agent_identity);
+        } else {
+            // MobMachine admits the command before the event projection records
+            // retirement. The actual transition is still applied after the durable
+            // event append so crash recovery keeps its event-first ordering.
+            self.preview_dsl_input(retire_input.clone(), "handle_retire_inner_admission")?;
+
+            // Append retire event (event-first for crash recovery).
+            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
+                .await?;
+
+            let effects = self.apply_dsl_input_collect_effects(
+                retire_input,
+                "handle_retire_inner_mark_retiring",
+            )?;
+            let mut detach_obligations =
+                crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
+                    &effects,
+                );
+            if let (Some(obligation), Some(session_id)) =
+                (detach_obligations.pop(), detach_session_id)
+            {
+                self.detach_session_ingress_for_mob_destroy(&session_id, obligation)
+                    .await?;
+            }
+
+            // #31 Wave D (D-trust-reconciliation subsystem 4): flip the roster
+            // entry's state to `Retiring` so live readers of
+            // `list_members()` / `member_status()` observe the retiring state
+            // during the disposal window (notify peers, archive session).
+            {
+                let mut roster = self.roster.write().await;
+                roster.mark_retiring_by_identity(&entry.agent_identity);
+            }
+
+            // Flush routed effects *before* the disposal pipeline tears down
+            // the runtime session. If this fails because the runtime registration
+            // has already disappeared, disposal's archive path still performs the
+            // machine-authoritative retire-before-unregister sequence when
+            // possible. Drop the stale per-session routed effect so the actor does
+            // not die after returning a typed lifecycle result to the caller.
+            if let Err(error) = self.flush_routed_effects().await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    %error,
+                    "pre-disposal routed-effect flush failed; proceeding with disposal"
+                );
+                if let Some(session_id) = entry.member_ref.bridge_session_id() {
+                    self.discard_pending_routed_effects_for_session(session_id);
+                }
+            }
         }
 
         // Snapshot context and run disposal pipeline.
@@ -8302,10 +8439,13 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_respawn preflight")
             .map_err(MobRespawnError::from)?;
 
-        let canceled = self.cancel_pending_spawns_for_member(
-            &agent_identity,
-            "respawn command superseded pending spawn",
-        );
+        let canceled = self
+            .cancel_pending_spawns_for_member(
+                &agent_identity,
+                "respawn command superseded pending spawn",
+            )
+            .await
+            .map_err(MobRespawnError::from)?;
         if canceled > 0 {
             tracing::info!(
                 agent_identity = %agent_identity,
@@ -8348,6 +8488,15 @@ impl MobActor {
                 },
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
+            let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+            let cleanup_retry = entry.state == crate::roster::MemberState::Retiring
+                || matches!(
+                    self.dsl_authority
+                        .state
+                        .member_state_markers
+                        .get(&dsl_runtime_id),
+                    Some(mob_dsl::MobMemberState::Retiring)
+                );
             RespawnSnapshot {
                 profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,
@@ -8358,6 +8507,7 @@ impl MobActor {
                 restore_wiring,
                 binding,
                 effective_profile_override: entry.effective_profile_override,
+                cleanup_retry,
             }
         };
 
@@ -8420,13 +8570,17 @@ impl MobActor {
         } = replacement_spec;
         let replacement_labels = replacement_labels.unwrap_or_default();
 
-        self.preview_dsl_input(
-            mob_dsl::MobMachineInput::Respawn {
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&snapshot.old_runtime_id),
-            },
-            "handle_respawn_admission",
-        )
-        .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
+        if !snapshot.cleanup_retry {
+            self.preview_dsl_input(
+                mob_dsl::MobMachineInput::Respawn {
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                        &snapshot.old_runtime_id,
+                    ),
+                },
+                "handle_respawn_admission",
+            )
+            .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
+        }
 
         let replacement_generation = snapshot.generation.next();
 
@@ -8614,10 +8768,17 @@ impl MobActor {
                 error = %error,
                 "pending spawn alignment violated while staging respawn replacement"
             );
-            self.fail_all_pending_spawns(
-                "pending spawn alignment violated while staging respawn replacement",
-            )
-            .await;
+            if let Err(cleanup_error) = self
+                .fail_all_pending_spawns(
+                    "pending spawn alignment violated while staging respawn replacement",
+                )
+                .await
+            {
+                return Err(MobRespawnError::SpawnAfterRetire {
+                    identity: AgentIdentity::from(agent_identity.as_str()),
+                    reason: cleanup_error.to_string(),
+                });
+            }
             return Err(MobRespawnError::SpawnAfterRetire {
                 identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
@@ -8815,10 +8976,29 @@ impl MobActor {
             }
         }
 
-        // Finally: unconditional, outside policy control.
+        let archive_failed = report
+            .skipped
+            .iter()
+            .any(|(step, _)| *step == DisposalStep::ArchiveSession)
+            || matches!(
+                report.aborted_at.as_ref(),
+                Some((DisposalStep::ArchiveSession, _))
+            );
+
+        // Finally: edge-lock cleanup is unconditional, but roster removal is
+        // gated on critical archive success so retry has a concrete member
+        // anchor to operate on.
         self.dispose_prune_edge_locks(ctx).await;
-        self.dispose_remove_from_roster(ctx).await;
-        report.roster_removed = true;
+        if archive_failed {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %ctx.agent_identity,
+                "retaining retiring roster entry after ArchiveSession failure for retry"
+            );
+        } else {
+            self.dispose_remove_from_roster(ctx).await;
+            report.roster_removed = true;
+        }
         report
     }
 
@@ -9594,7 +9774,15 @@ impl MobActor {
             report.push_error(format!("destroy marker append failed: {error}"));
             return Err(MobDestroyError::Incomplete { report });
         }
-        self.fail_all_pending_spawns("mob is destroying").await;
+        self.fail_all_pending_spawns("mob is destroying")
+            .await
+            .map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "pending spawn cleanup during destroy failed",
+                    error,
+                )
+            })?;
         self.cancel_pending_peer_deliveries("mob is destroying")
             .await;
         if destroy_input_needed && self.has_orchestrator {
@@ -10830,7 +11018,7 @@ impl MobActor {
     async fn retire_all_members(&mut self, context: &str) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("retire_all_members preflight")?;
         let pending_reason = format!("{context}: draining pending spawns before bulk retirement");
-        self.fail_all_pending_spawns(&pending_reason).await;
+        self.fail_all_pending_spawns(&pending_reason).await?;
         self.ensure_pending_spawn_alignment("retire_all_members after pending drain")?;
         self.cancel_pending_peer_deliveries("all members are retiring")
             .await;

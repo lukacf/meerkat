@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.27] - 2026-05-28
+
+Meerkat 0.6.27 hardens mob lifecycle cleanup when session-bound members fail
+or pending spawns are cancelled.
+
+### Fixed
+
+- **Mob cleanup retry anchors** (#742) — keeps respawn and retire cleanup
+  anchors retryable after archive/unregister failures, tracks pending-spawn
+  cancellation cleanup as a retryable lifecycle operation, and fails lifecycle
+  commands closed when archive cleanup is ambiguous instead of dropping roster
+  truth early.
+
 ## [0.6.26] - 2026-05-27
 
 Meerkat 0.6.26 fixes runtime-backed mob session continuity after transcript

@@ -112,7 +112,7 @@ rkat run --tools full \
 **Extract structured data** with schema validation and budget controls:
 
 ```bash
-rkat run --model claude-opus-4-7 --tools workspace \
+rkat run --model claude-opus-4-8 --tools workspace \
   --schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
   --max-tokens 4000 \
   "Audit the last 20 commits for security issues. Check each changed file."
@@ -274,7 +274,7 @@ Use an agent as a processing component in your service -- typed output, budget-l
 
 ```rust
 let mut agent = AgentBuilder::new()
-    .model("claude-opus-4-7")
+    .model("claude-opus-4-8")
     .system_prompt("You are an incident triage system.")
     .output_schema(OutputSchema::new(triage_schema)?)
     .budget(BudgetLimits::default().with_max_tokens(2000))
@@ -326,7 +326,7 @@ result = await client.create_session(
     f"Analyze these CI failures. Create a small mob for investigation, "
     f"scope shell access to the worker members, collect the findings, "
     f"and return structured JSON.\n\n{ci_log}",
-    model="claude-opus-4-7",
+    model="claude-opus-4-8",
     enable_shell=True,
     enable_mob=True,
     auth_binding={"realm": "ci", "binding": "default_anthropic"},
@@ -356,7 +356,7 @@ Mobs are definition/profile driven. Define the team structure and let the agent 
   "id": "audit-team",
   "profiles": {
     "analyst": {
-      "model": "claude-opus-4-7",
+      "model": "claude-opus-4-8",
       "peer_description": "Analyzes code for error handling gaps, security issues, and test coverage.",
       "tools": { "shell": true, "builtins": true, "comms": true }
     },
@@ -387,13 +387,13 @@ import * as wasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 import { MeerkatRuntime } from "@rkat/web";
 
 const runtime = await MeerkatRuntime.init(wasm, {
-  model: "claude-opus-4-7",
+  model: "claude-opus-4-8",
   anthropicBaseUrl: "https://proxy.example.com/anthropic",
   anthropicApiKey: "proxy"
 });
 
 const session = runtime.createSession({
-  model: "claude-opus-4-7",
+  model: "claude-opus-4-8",
   authBinding: { realm: "dev", binding: "default_anthropic" }
 });
 
@@ -443,7 +443,7 @@ export RKAT_AZURE_OPENAI_ENDPOINT=https://example.openai.azure.com/
 ```toml
 # .rkat/config.toml (project) or ~/.rkat/config.toml (user)
 [agent]
-model = "claude-opus-4-7"
+model = "claude-opus-4-8"
 max_tokens = 4096
 
 [provider_tools.anthropic]

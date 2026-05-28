@@ -31,7 +31,7 @@ id = "pipeline"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-7"
+model = "claude-opus-4-8"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -145,7 +145,7 @@ id = "cicd-pipeline"
 orchestrator = "coordinator"
 
 [profiles.coordinator]
-model = "claude-opus-4-7"
+model = "claude-opus-4-8"
 skills = ["pipeline-coordinator"]
 peer_description = "Pipeline coordinator -- drives sequential stage execution"
 external_addressable = true

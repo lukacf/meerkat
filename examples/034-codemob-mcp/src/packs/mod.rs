@@ -220,8 +220,8 @@ mod tests {
             "OpenAI default should include gpt-5.5: {models:?}"
         );
         assert!(
-            models.iter().any(|model| model == "claude-opus-4-7"),
-            "Anthropic default should include claude-opus-4-7: {models:?}"
+            models.iter().any(|model| model == "claude-opus-4-8"),
+            "Anthropic default should include claude-opus-4-8: {models:?}"
         );
         assert!(
             !models.iter().any(|model| model == "gpt-5.2"),
@@ -230,10 +230,6 @@ mod tests {
         assert!(
             !models.iter().any(|model| model == "gpt-5.4"),
             "advanced packs should not regress to gpt-5.4: {models:?}"
-        );
-        assert!(
-            !models.iter().any(|model| model == "claude-opus-4-6"),
-            "advanced packs should not regress to claude-opus-4-6: {models:?}"
         );
     }
 

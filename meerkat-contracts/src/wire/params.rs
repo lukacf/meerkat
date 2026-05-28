@@ -218,7 +218,7 @@ mod tests {
 
         let params = CoreCreateParams {
             prompt: "hello".to_string(),
-            model: Some("claude-opus-4-6".to_string()),
+            model: Some("claude-opus-4-8".to_string()),
             provider: Some(Provider::Anthropic),
             max_tokens: Some(1024),
             system_prompt: Some("You are helpful.".to_string()),

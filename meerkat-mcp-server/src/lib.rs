@@ -5156,7 +5156,7 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-6".to_string()),
+                model: Some("claude-opus-4-8".to_string()),
                 max_tokens: Some(4096),
                 provider: None,
                 output_schema: None,
@@ -5208,7 +5208,7 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-6".to_string()),
+                model: Some("claude-opus-4-8".to_string()),
                 max_tokens: Some(4096),
                 provider: None,
                 output_schema: None,
@@ -5661,7 +5661,7 @@ mod tests {
             &state.runtime_adapter,
             &session_id,
             CreateSessionRequest {
-                model: "claude-opus-4-6".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -5783,7 +5783,7 @@ mod tests {
             &state.runtime_adapter,
             &session_id,
             CreateSessionRequest {
-                model: "claude-opus-4-6".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
                 render_metadata: None,
                 system_prompt: None,
@@ -5903,7 +5903,7 @@ mod tests {
         session
             .set_session_metadata(meerkat::SessionMetadata {
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model: "claude-opus-4-6".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 2,
                 provider: Provider::Other,
@@ -5990,7 +5990,7 @@ mod tests {
         session
             .set_session_metadata(meerkat::SessionMetadata {
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model: "claude-opus-4-6".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 max_tokens: 4096,
                 structured_output_retries: 2,
                 provider: Provider::Other,

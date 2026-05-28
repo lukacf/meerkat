@@ -185,7 +185,7 @@ Cancellation only affects uncommitted work:
   port = 8080
 
   [agent]
-  model = "claude-opus-4-6"
+  model = "claude-opus-4-8"
   max_tokens_per_turn = 8192
 
   [tools]
@@ -231,7 +231,7 @@ Create and run a new session.
 {
   "prompt": "Your prompt here",
   "system_prompt": "Optional system prompt",
-  "model": "claude-opus-4-6",
+  "model": "claude-opus-4-8",
   "provider": "anthropic",
   "max_tokens": 4096,
   "output_schema": {
@@ -283,7 +283,7 @@ Create and run a new session.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="config default">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.5"`).
+  Model name (e.g. `"claude-opus-4-8"`, `"gpt-5.5"`).
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="inferred from model">
@@ -766,11 +766,11 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "providers": [
     {
       "provider": "anthropic",
-      "default_model_id": "claude-opus-4-7",
+      "default_model_id": "claude-opus-4-8",
       "models": [
         {
-          "id": "claude-opus-4-7",
-          "display_name": "Claude Opus 4.7",
+          "id": "claude-opus-4-8",
+          "display_name": "Claude Opus 4.8",
           "tier": "recommended",
           "context_window": 1000000,
           "max_output_tokens": 128000,

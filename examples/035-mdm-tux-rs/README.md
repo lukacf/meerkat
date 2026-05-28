@@ -147,12 +147,12 @@ the smoke startup and the TUX command:
 ```bash
 MDM_HIVE_MODEL=gemini-3.1-pro-preview MDM_HIVE_PROVIDER=gemini \
 MDM_TARGET_A_MODEL=gpt-5.5 MDM_TARGET_A_PROVIDER=openai \
-MDM_TARGET_B_MODEL=claude-opus-4-7 MDM_TARGET_B_PROVIDER=anthropic \
+MDM_TARGET_B_MODEL=claude-opus-4-8 MDM_TARGET_B_PROVIDER=anthropic \
 make docker-smoke
 
 MDM_HIVE_MODEL=gemini-3.1-pro-preview MDM_HIVE_PROVIDER=gemini \
 MDM_TARGET_A_MODEL=gpt-5.5 MDM_TARGET_A_PROVIDER=openai \
-MDM_TARGET_B_MODEL=claude-opus-4-7 MDM_TARGET_B_PROVIDER=anthropic \
+MDM_TARGET_B_MODEL=claude-opus-4-8 MDM_TARGET_B_PROVIDER=anthropic \
 make docker-tux
 ```
 
@@ -165,7 +165,7 @@ tmux session, and verifies four end-to-end effects: Hive `send_request` to
 target-a, direct target-b shell control, target-b to target-a peer delivery, and
 a scheduled target-a wakeup. Unless overridden, the suite exercises all three
 providers: Hive on `gemini-3.1-pro-preview`, target-a on `gpt-5.5`, and
-target-b on `claude-opus-4-7`.
+target-b on `claude-opus-4-8`.
 
 `docker-architecture-suite` uses the same provider defaults and credentials but
 runs a longer stress pass through TUX. It verifies target-to-target delegation,

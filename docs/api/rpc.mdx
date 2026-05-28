@@ -399,7 +399,7 @@ Only `prompt` is required. All other fields are optional and fall back to config
 </ParamField>
 
 <ParamField body="model" type="string | null" default="claude-sonnet-4-6">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.5"`).
+  Model name (e.g. `"claude-opus-4-8"`, `"gpt-5.5"`).
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="inferred from model">
@@ -1253,11 +1253,11 @@ Return the curated model catalog with provider profiles, capability metadata, an
     "providers": [
       {
         "provider": "anthropic",
-        "default_model_id": "claude-opus-4-7",
+        "default_model_id": "claude-opus-4-8",
         "models": [
           {
-            "id": "claude-opus-4-7",
-            "display_name": "Claude Opus 4.7",
+            "id": "claude-opus-4-8",
+            "display_name": "Claude Opus 4.8",
             "tier": "recommended",
             "context_window": 1000000,
             "max_output_tokens": 128000,

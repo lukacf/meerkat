@@ -1319,7 +1319,7 @@ mod tests {
                 "read_file".to_string(),
             ])),
             tool_filter_witnesses: Default::default(),
-            model: "claude-opus-4-6".into(),
+            model: "claude-opus-4-8".into(),
             provider_params: Some(serde_json::json!({"thinking_budget": 8192})),
         };
         let json = serde_json::to_string(&snapshot).unwrap();

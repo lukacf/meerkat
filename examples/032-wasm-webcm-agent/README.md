@@ -39,7 +39,7 @@ Use `./examples.sh --clean` to force a fresh download/rebuild.
 ```
 Browser Tab
 ├── Meerkat Mob (4 agents, comms-wired)
-│   ├── Alpha Meerkat (orchestrator) → claude-opus-4-7
+│   ├── Alpha Meerkat (orchestrator) → claude-opus-4-8
 │   ├── Planner → gpt-5.5
 │   ├── Coder → gpt-5.3-codex
 │   └── Reviewer → gemini-3.5-flash

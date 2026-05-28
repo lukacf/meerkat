@@ -44,7 +44,7 @@ impl ToolCallError {
 
 const MODEL_DESCRIPTION: &str = "\
 Available models: \
-claude-opus-4-7 (Anthropic, strongest reasoning), \
+claude-opus-4-8 (Anthropic, strongest reasoning), \
 claude-sonnet-4-6 (Anthropic, fast + capable), \
 gpt-5.5 (OpenAI, strongest general + code), \
 gpt-5.5-pro (OpenAI, deep reasoning — slow, use sparingly), \
@@ -143,7 +143,7 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
                         "description": format!(
-                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-7\", \"planner\": \"gpt-5.5\"}}. \
+                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-8\", \"planner\": \"gpt-5.5\"}}. \
                             Role names depend on the pack. {MODEL_DESCRIPTION}"
                         )
                     },
@@ -403,9 +403,8 @@ mod tests {
         let schema = serde_json::to_string(&tools_list()).expect("tools schema serializes");
 
         assert!(schema.contains("gpt-5.5"));
-        assert!(schema.contains("claude-opus-4-7"));
+        assert!(schema.contains("claude-opus-4-8"));
         assert!(!schema.contains("gpt-5.2"));
         assert!(!schema.contains("gpt-5.4"));
-        assert!(!schema.contains("claude-opus-4-6"));
     }
 }

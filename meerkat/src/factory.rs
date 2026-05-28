@@ -6080,7 +6080,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "anthropic_api".to_string(),
                 auth_profile: "anthropic_key".to_string(),
-                default_model: Some("claude-opus-4-7".to_string()),
+                default_model: Some("claude-opus-4-8".to_string()),
                 policy: Default::default(),
             },
         );

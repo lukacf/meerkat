@@ -91,7 +91,7 @@ describe("E2E Smoke: TypeScript SDK package", { skip: !binaryPath }, () => {
         id: "coding_swarm",
         orchestrator: { profile: "lead" },
         profiles: {
-          lead: { model: "claude-opus-4-6" },
+          lead: { model: "claude-opus-4-8" },
           worker: { model: "claude-sonnet-4-6" },
         },
       },

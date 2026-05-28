@@ -74,7 +74,7 @@ The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around t
 
 Current release-line notes: `runtime_version()` and package compatibility
 should match `0.6.23`; browser-facing examples should use the current catalog
-defaults (`gpt-5.5`, `claude-opus-4-7`, `gemini-3.5-flash`) unless a test is
+defaults (`gpt-5.5`, `claude-opus-4-8`, `gemini-3.5-flash`) unless a test is
 deliberately pinning another model. WASM mob flows use the same current
 identity-first mob runtime, including helper/fork/respawn controls and
 runtime-committed session projection behavior.

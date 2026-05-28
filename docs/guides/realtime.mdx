@@ -23,7 +23,7 @@ Use this guide when you want to:
 
 ## Mental model
 
-A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-7`, OpenAI `gpt-5.5`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime-2`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
+A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-8`, OpenAI `gpt-5.5`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime-2`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
 
 ```text
         +--------------------------+

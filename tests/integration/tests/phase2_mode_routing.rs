@@ -309,7 +309,7 @@ impl MobSessionService for MockSessionService {
 async fn test_phase2_external_turn_routing_by_runtime_mode() {
     let service = Arc::new(MockSessionService::default());
     let mut definition = MobDefinition::from_toml(
-        "[mob]\nid = \"phase2-routing\"\norchestrator = \"lead\"\n\n[profiles.lead]\nmodel = \"claude-opus-4-6\"\nexternal_addressable = true\n\n[profiles.lead.tools]\nbuiltins = true\ncomms = true\nmob = true\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
+        "[mob]\nid = \"phase2-routing\"\norchestrator = \"lead\"\n\n[profiles.lead]\nmodel = \"claude-opus-4-8\"\nexternal_addressable = true\n\n[profiles.lead.tools]\nbuiltins = true\ncomms = true\nmob = true\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
     )
     .expect("phase2 mob definition");
     definition.id = MobId::from("phase2-routing");

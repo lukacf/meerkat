@@ -181,7 +181,7 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
     fn infer(m: &str) -> Provider {
         Provider::infer_from_model(m).unwrap_or(Provider::Other)
     }
-    assert_eq!(infer("claude-opus-4-6"), Provider::Anthropic);
+    assert_eq!(infer("claude-opus-4-8"), Provider::Anthropic);
     assert_eq!(infer("gpt-5.4"), Provider::OpenAI);
     assert_eq!(infer("gemini-3.5-flash"), Provider::Gemini);
     assert_eq!(infer("unknown"), Provider::Other);

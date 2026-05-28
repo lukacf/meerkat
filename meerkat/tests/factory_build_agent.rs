@@ -2734,7 +2734,7 @@ async fn hot_swap_scopes_resolve_to_session_auth_binding() {
     let factory = temp_factory(&temp);
     let config = Config::default();
     let identity = SessionLlmIdentity {
-        model: "claude-opus-4-7".to_string(),
+        model: "claude-opus-4-8".to_string(),
         provider: Provider::Anthropic,
         self_hosted_server_id: None,
         provider_params: None,

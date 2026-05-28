@@ -7,9 +7,9 @@
 //!
 //! This replaces the previous heuristic-driven approach (struct-per-bucket with
 //! `schemars::schema_for!`). The old structs advertised capabilities across
-//! broad model groups (e.g. "opus 4.6 bucket" served both Opus 4.6 and 4.7;
+//! broad model groups (e.g. "opus 4 bucket" served Opus 4.7 and 4.8;
 //! "standard" served everything else), flattening real differences such as
-//! Opus 4.7's `xhigh` effort tier or Sonnet 4.5's 1M context beta.
+//! Opus 4.8's `xhigh` effort tier or Sonnet 4.5's 1M context beta.
 //!
 //! Public callers must cross the typed [`crate::Provider`] boundary before
 //! reading capability truth; raw row iteration is intentionally crate-private:
@@ -44,7 +44,7 @@ use crate::model_profile::catalog::ModelTier;
 #[derive(Debug, Clone, Copy)]
 pub struct ModelCapabilities {
     // ── Identity ──────────────────────────────────────────────────────
-    /// Model identifier (e.g. `"claude-opus-4-7"`).
+    /// Model identifier (e.g. `"claude-opus-4-8"`).
     pub id: &'static str,
     /// Typed provider that owns this capability row.
     pub provider: Provider,

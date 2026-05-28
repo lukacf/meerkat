@@ -1594,7 +1594,7 @@ mod tests {
         });
         roundtrip(SwitchTurnControlResult::AwaitingApproval {
             approval_id: ApprovalId::new(),
-            target_model: ModelId::new("claude-opus-4-7"),
+            target_model: ModelId::new("claude-opus-4-8"),
             duration: SwitchTurnDuration::UntilChanged,
             reason: SwitchTurnApprovalReason::UntilChangedFromModelOrigin,
         });

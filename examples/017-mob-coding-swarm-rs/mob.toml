@@ -9,7 +9,7 @@ id = "coding_swarm"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-7"
+model = "claude-opus-4-8"
 skills = ["orchestrator"]
 peer_description = "Orchestrator — breaks down tasks, assigns work, reviews results"
 external_addressable = true

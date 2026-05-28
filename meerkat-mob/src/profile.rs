@@ -143,7 +143,7 @@ pub enum ProfileSource {
 /// communication properties for a class of mob members.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    /// LLM model name (e.g. "claude-opus-4-6").
+    /// LLM model name (e.g. "claude-opus-4-8").
     pub model: String,
     /// Skill references to load for this profile.
     #[serde(default)]
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn test_profile_serde_roundtrip() {
         let profile = Profile {
-            model: "claude-opus-4-6".to_string(),
+            model: "claude-opus-4-8".to_string(),
             skills: vec!["orchestrator-skill".to_string()],
             tools: ToolConfig {
                 builtins: true,
@@ -371,7 +371,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
     #[test]
     fn profile_binding_inline_roundtrip() {
         let profile = Profile {
-            model: "claude-opus-4-6".to_string(),
+            model: "claude-opus-4-8".to_string(),
             ..Profile {
                 model: String::new(),
                 skills: vec![],
@@ -388,7 +388,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
         let binding = ProfileBinding::Inline(profile.clone());
         let json = serde_json::to_string(&binding).unwrap();
         let parsed: ProfileBinding = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.as_inline().unwrap().model, "claude-opus-4-6");
+        assert_eq!(parsed.as_inline().unwrap().model, "claude-opus-4-8");
     }
 
     #[test]

@@ -73,7 +73,9 @@ pub fn run() -> Result<()> {
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
         Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),
-        Commands::AuditGeneratedHeaders => run_audit_generated_headers_command(),
+        Commands::AuditGeneratedHeaders => {
+            run_machine_authority_task(run_audit_generated_headers_command)
+        }
     }
 }
 

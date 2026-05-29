@@ -52,6 +52,16 @@ fn flow_runtime_smoke_concurrency_from_env(value: Option<&str>) -> usize {
         .unwrap_or(4)
 }
 
+fn flow_runtime_smoke_run_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("MEERKAT_FLOW_RUNTIME_SMOKE_RUN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(600),
+    )
+}
+
 fn flow_runtime_smoke_semaphore() -> &'static Arc<Semaphore> {
     static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
     SEMAPHORE.get_or_init(|| {
@@ -2547,7 +2557,7 @@ async fn setup_flow_mob(
 }
 
 async fn wait_for_run_terminal(handle: &MobHandle, run_id: &meerkat_mob::RunId) -> MobRun {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + flow_runtime_smoke_run_timeout();
     loop {
         let run = handle
             .flow_status(run_id.clone())
@@ -2593,6 +2603,13 @@ fn count_loop_iterations(run: &MobRun, loop_id: &str) -> usize {
     run.loop_iteration_ledger
         .iter()
         .filter(|entry| loop_instance_ids.contains(&entry.loop_instance_id))
+        .count()
+}
+
+fn count_loop_step_outputs(run: &MobRun, loop_id: &str, step_id: &str) -> usize {
+    loop_iterations(run, loop_id)
+        .iter()
+        .filter(|iteration| iteration.contains_key(&StepId::from(step_id)))
         .count()
 }
 
@@ -2730,9 +2747,15 @@ async fn e2e_flow_runtime_fanout_parallel_review_loop_smoke() {
         "finalize output should reflect downstream access to loop + sibling state: {finalize:?}"
     );
 
-    assert!(
-        completed_count(&run, "draft") >= 2 && completed_count(&run, "review") >= 2,
-        "loop body steps should complete once per iteration: {run:?}"
+    assert_eq!(
+        count_loop_step_outputs(&run, "review_loop", "draft"),
+        2,
+        "draft loop output should be recorded once per review iteration: {run:?}"
+    );
+    assert_eq!(
+        count_loop_step_outputs(&run, "review_loop", "review"),
+        2,
+        "review loop output should be recorded once per review iteration: {run:?}"
     );
 }
 
@@ -2803,11 +2826,19 @@ async fn e2e_flow_runtime_dual_sibling_loops_join_smoke() {
         Some(&serde_json::json!("joined left-second and right-second")),
         "join should see the last iteration output from both sibling loops"
     );
+    assert_eq!(
+        count_loop_step_outputs(&run, "left_loop", "left"),
+        2,
+        "left loop output should be recorded once per iteration: {run:?}"
+    );
+    assert_eq!(
+        count_loop_step_outputs(&run, "right_loop", "right"),
+        2,
+        "right loop output should be recorded once per iteration: {run:?}"
+    );
     assert!(
-        completed_count(&run, "left") >= 2
-            && completed_count(&run, "right") >= 2
-            && completed_count(&run, "join") >= 1,
-        "step ledger should show both loop bodies and the downstream join completing: {run:?}"
+        completed_count(&run, "join") >= 1,
+        "step ledger should show the downstream join completing: {run:?}"
     );
 }
 

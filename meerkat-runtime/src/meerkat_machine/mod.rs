@@ -43,14 +43,15 @@ use crate::input_state::{
     InputAbandonReason, InputLifecycleState, InputStateSeed, InputTerminalOutcome,
 };
 use crate::meerkat_machine_types::{
-    HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot,
-    MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
-    MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatFormalStateProjection,
-    MeerkatInputsSnapshot, MeerkatLedgerSnapshot, MeerkatMachineCommand,
-    MeerkatMachineCommandError, MeerkatMachineCommandResult, MeerkatMachineRunFailure,
-    MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
-    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmReconfigureHost,
-    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatArchiveSnapshot,
+    MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot,
+    MeerkatControlSnapshot, MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind,
+    MeerkatFormalStateProjection, MeerkatInputsSnapshot, MeerkatLedgerSnapshot,
+    MeerkatMachineCommand, MeerkatMachineCommandError, MeerkatMachineCommandResult,
+    MeerkatMachineRunFailure, MeerkatMachineRunPrepared, MeerkatMachineSpineSnapshot,
+    MeerkatOpsSnapshot, SessionLlmCapabilityDelta, SessionLlmCapabilitySurface,
+    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SessionToolVisibilityDelta,
 };
 use crate::runtime_state::RuntimeState;
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
@@ -2401,6 +2402,17 @@ impl MeerkatMachine {
                 Arc::new(meerkat_core::EpochCursorState::new()),
             ))
         }
+    }
+
+    fn fresh_ops_state() -> (
+        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        meerkat_core::RuntimeEpochId,
+        Arc<meerkat_core::EpochCursorState>,
+    ) {
+        let registry = Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+        let epoch = meerkat_core::RuntimeEpochId::new();
+        let cursors = Arc::new(meerkat_core::EpochCursorState::new());
+        (registry, epoch, cursors)
     }
 
     #[allow(clippy::large_futures)]

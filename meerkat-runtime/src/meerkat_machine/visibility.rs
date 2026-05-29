@@ -508,10 +508,86 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 }
 
 impl MeerkatMachine {
+    pub async fn meerkat_machine_archive_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<MeerkatArchiveSnapshot> {
+        let (driver_handle, control_snapshot, completions_handle) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(session_id)?;
+            let control = entry.control_snapshot();
+            let mut snapshot = control.clone();
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dsl_phase =
+                crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority);
+            let dsl_current_run_id =
+                crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority);
+            let dsl_pre_run_phase =
+                crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority);
+            let publish_control = self.has_runtime_persistence()
+                && crate::meerkat_machine::dsl_authority::should_publish_control_over_dsl(
+                    control.phase,
+                    dsl_phase,
+                    dsl_pre_run_phase,
+                );
+            if !publish_control {
+                snapshot.phase = crate::meerkat_machine::dsl_authority::visible_runtime_phase(
+                    dsl_phase,
+                    dsl_pre_run_phase,
+                );
+                snapshot.current_run_id = dsl_current_run_id;
+                snapshot.pre_run_phase = dsl_pre_run_phase;
+            }
+            (
+                Arc::clone(&entry.driver),
+                snapshot,
+                Arc::clone(&entry.completions),
+            )
+        };
+
+        let completion_waiters = {
+            let completions = completions_handle.lock().await;
+            let snapshot = completions.diagnostic_snapshot();
+            MeerkatCompletionWaitersSnapshot {
+                input_count: snapshot.input_count,
+                waiter_count: snapshot.waiter_count,
+                waiting_inputs: snapshot
+                    .waiting_inputs
+                    .into_iter()
+                    .map(|entry| MeerkatCompletionWaiterSnapshot {
+                        input_id: entry.input_id,
+                        waiter_count: entry.waiter_count,
+                    })
+                    .collect(),
+            }
+        };
+
+        let (queue, steer_queue) = {
+            let driver = driver_handle.lock().await;
+            let ingress = driver.driver_ingress();
+            (ingress.queue(), ingress.steer_queue())
+        };
+
+        Some(MeerkatArchiveSnapshot {
+            control: MeerkatControlSnapshot {
+                phase: control_snapshot.phase,
+                current_run_id: control_snapshot.current_run_id,
+                pre_run_phase: control_snapshot.pre_run_phase,
+            },
+            queue,
+            steer_queue,
+            completion_waiters,
+        })
+    }
+
     pub async fn meerkat_machine_spine_snapshot(
         &self,
         session_id: &SessionId,
     ) -> Option<MeerkatMachineSpineSnapshot> {
+        tracing::info!(%session_id, "meerkat_machine_spine_snapshot start");
         let (
             driver_handle,
             control_snapshot,
@@ -525,8 +601,10 @@ impl MeerkatMachine {
             formal_pre_run_phase,
             formal_visibility_authority_catalogs,
         ) = {
+            tracing::info!(%session_id, "meerkat_machine_spine_snapshot reading session entry");
             let sessions = self.sessions.read().await;
             let entry = sessions.get(session_id)?;
+            tracing::info!(%session_id, "meerkat_machine_spine_snapshot locking dsl authority");
             // DSL is the transition authority for live states. Persistent
             // sessions hold `control_projection` as the machine-published
             // lifecycle barrier for run-return and terminal boundaries until
@@ -538,6 +616,7 @@ impl MeerkatMachine {
                 .dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tracing::info!(%session_id, "meerkat_machine_spine_snapshot locked dsl authority");
             let dsl_phase =
                 crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority);
             let dsl_current_run_id =
@@ -583,8 +662,10 @@ impl MeerkatMachine {
                 formal_visibility_authority_catalogs,
             )
         };
+        tracing::info!(%session_id, "meerkat_machine_spine_snapshot locking completions");
         let completion_waiters = {
             let completions = completions_handle.lock().await;
+            tracing::info!(%session_id, "meerkat_machine_spine_snapshot locked completions");
             let snapshot = completions.diagnostic_snapshot();
             MeerkatCompletionWaitersSnapshot {
                 input_count: snapshot.input_count,
@@ -599,6 +680,7 @@ impl MeerkatMachine {
                     .collect(),
             }
         };
+        tracing::info!(%session_id, "meerkat_machine_spine_snapshot reading drain");
         let drain = {
             let sessions = self.sessions.read().await;
             if let Some(entry) = sessions.get(session_id) {
@@ -639,7 +721,9 @@ impl MeerkatMachine {
                 }
             }
         };
+        tracing::info!(%session_id, "meerkat_machine_spine_snapshot locking driver");
         let driver = driver_handle.lock().await;
+        tracing::info!(%session_id, "meerkat_machine_spine_snapshot locked driver");
         let driver_kind = match &*driver {
             DriverEntry::Ephemeral(_) => MeerkatDriverKind::Ephemeral,
             DriverEntry::Persistent(_) => MeerkatDriverKind::Persistent,

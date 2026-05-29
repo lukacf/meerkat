@@ -484,8 +484,21 @@ impl MobOpsAdapter {
         member_ref: &MemberRef,
         message: impl Into<String>,
     ) -> Result<(), MobError> {
+        tracing::debug!(
+            member_ref = ?member_ref,
+            "MobOpsAdapter::report_member_progress resolving member key"
+        );
         let member_key = Self::require_member_key(member_ref, "report progress for")?;
+        tracing::debug!(
+            member_key = ?member_key,
+            "MobOpsAdapter::report_member_progress resolving display name"
+        );
         let display_name = self.display_name_for_key(&member_key, "report progress")?;
+        tracing::debug!(
+            member_key = ?member_key,
+            display_name,
+            "MobOpsAdapter::report_member_progress resolving active operation"
+        );
         let operation_id = self
             .resolve_or_register_active_operation_id_for_key(
                 &member_key,
@@ -493,8 +506,23 @@ impl MobOpsAdapter {
                 &display_name,
             )
             .await?;
+        tracing::debug!(
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress resolved active operation"
+        );
         self.ensure_running_before_live_update(&member_key, &operation_id, "report progress")?;
+        tracing::debug!(
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress operation running"
+        );
         let registry = self.registry_for_existing_binding(&member_key, "report progress")?;
+        tracing::debug!(
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress applying progress"
+        );
         match registry.report_progress(
             &operation_id,
             OperationProgressUpdate {
@@ -514,7 +542,59 @@ impl MobOpsAdapter {
                     Err(MobError::Internal(error.to_string()))
                 }
             }
-        }
+        }?;
+        tracing::debug!(
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress applied progress"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn report_member_progress_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        message: impl Into<String>,
+    ) -> Result<(), MobError> {
+        tracing::debug!(
+            member_ref = ?member_ref,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress_for_operation resolving member key"
+        );
+        let member_key = Self::require_member_key(member_ref, "report progress for")?;
+        let registry = self.registry_for_existing_binding(&member_key, "report progress")?;
+        tracing::debug!(
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress_for_operation applying progress"
+        );
+        match registry.report_progress(
+            operation_id,
+            OperationProgressUpdate {
+                message: message.into(),
+                percent: None,
+            },
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::ProgressReported,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(error.to_string()))
+                }
+            }
+        }?;
+        tracing::debug!(
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::report_member_progress_for_operation applied progress"
+        );
+        Ok(())
     }
 
     pub(crate) async fn mark_member_peer_ready(
@@ -523,7 +603,17 @@ impl MobOpsAdapter {
         peer_name: &str,
         trusted_peer: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        tracing::debug!(
+            peer_name,
+            member_ref = ?member_ref,
+            "MobOpsAdapter::mark_member_peer_ready resolving member key"
+        );
         let member_key = Self::require_member_key(member_ref, "mark peer ready for")?;
+        tracing::debug!(
+            peer_name,
+            member_key = ?member_key,
+            "MobOpsAdapter::mark_member_peer_ready resolving active operation"
+        );
         let operation_id = self
             .resolve_or_register_active_operation_id_for_key(
                 &member_key,
@@ -531,8 +621,26 @@ impl MobOpsAdapter {
                 peer_name,
             )
             .await?;
+        tracing::debug!(
+            peer_name,
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::mark_member_peer_ready resolved active operation"
+        );
         self.ensure_running_before_live_update(&member_key, &operation_id, "mark peer ready")?;
+        tracing::debug!(
+            peer_name,
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::mark_member_peer_ready operation running"
+        );
         let registry = self.registry_for_existing_binding(&member_key, "mark peer ready")?;
+        tracing::debug!(
+            peer_name,
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::mark_member_peer_ready applying peer ready"
+        );
         match registry.peer_ready(
             &operation_id,
             OperationPeerHandle {
@@ -553,7 +661,71 @@ impl MobOpsAdapter {
                     Err(MobError::Internal(error.to_string()))
                 }
             }
-        }
+        }?;
+        tracing::debug!(
+            peer_name,
+            member_key = ?member_key,
+            operation_id = %operation_id,
+            "MobOpsAdapter::mark_member_peer_ready applied peer ready"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn mark_member_peer_ready_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        peer_name: &str,
+        trusted_peer: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        tracing::debug!(
+            peer_name,
+            operation_id = %operation_id,
+            member_ref = ?member_ref,
+            "MobOpsAdapter::mark_member_peer_ready_for_operation resolving member key"
+        );
+        let member_key = Self::require_member_key(member_ref, "mark peer ready for")?;
+        tracing::debug!(
+            peer_name,
+            operation_id = %operation_id,
+            member_key = ?member_key,
+            "MobOpsAdapter::mark_member_peer_ready_for_operation getting registry"
+        );
+        let registry = self.registry_for_existing_binding(&member_key, "mark peer ready")?;
+        tracing::debug!(
+            peer_name,
+            operation_id = %operation_id,
+            member_key = ?member_key,
+            "MobOpsAdapter::mark_member_peer_ready_for_operation applying peer ready"
+        );
+        match registry.peer_ready(
+            operation_id,
+            OperationPeerHandle {
+                peer_name: meerkat_core::comms::PeerName::new(peer_name)
+                    .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
+                trusted_peer,
+            },
+        ) {
+            Ok(()) | Err(OpsLifecycleError::AlreadyPeerReady(_)) => Ok(()),
+            Err(error) => {
+                if Self::invalid_transition_is_idempotent(
+                    &registry,
+                    OperationLifecycleAction::PeerReady,
+                    &error,
+                )? {
+                    Ok(())
+                } else {
+                    Err(MobError::Internal(error.to_string()))
+                }
+            }
+        }?;
+        tracing::debug!(
+            peer_name,
+            operation_id = %operation_id,
+            member_key = ?member_key,
+            "MobOpsAdapter::mark_member_peer_ready_for_operation applied peer ready"
+        );
+        Ok(())
     }
 
     pub(crate) async fn mark_member_retired(&self, member_ref: &MemberRef) -> Result<(), MobError> {

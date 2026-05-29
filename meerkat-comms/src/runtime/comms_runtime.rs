@@ -286,7 +286,7 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     fn peer_id(&self) -> Option<PeerId> {
-        Some(self.public_key.to_peer_id())
+        Some(self.peer_id)
     }
 
     fn public_key(&self) -> Option<String> {
@@ -308,7 +308,7 @@ impl CoreCommsRuntime for CommsRuntime {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            None
+            Some(format!("inproc://{}", self.participant_name()))
         }
     }
 
@@ -1288,6 +1288,7 @@ impl CommsToolMaterial {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct CommsRuntime {
     public_key: PubKey,
+    peer_id: PeerId,
     router: Arc<Router>,
     trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
     inbox: Arc<AsyncMutex<crate::Inbox>>,
@@ -1442,6 +1443,7 @@ impl CommsRuntime {
 
         let runtime = Self {
             public_key,
+            peer_id: public_key.to_peer_id(),
             router: Arc::new(router),
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),
@@ -1544,6 +1546,7 @@ impl CommsRuntime {
         .with_inproc_namespace(namespace.clone());
         let runtime = Self {
             public_key,
+            peer_id: public_key.to_peer_id(),
             router: Arc::new(router),
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),
@@ -1642,6 +1645,7 @@ impl CommsRuntime {
         .with_inproc_namespace(namespace.clone());
         let runtime = Self {
             public_key,
+            peer_id: public_key.to_peer_id(),
             router: Arc::new(router),
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),

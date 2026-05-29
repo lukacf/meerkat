@@ -57,9 +57,11 @@ pub fn resolve_mob_operator_access(
     enable_mob: ToolCategoryOverride,
     persisted_authority_context: Option<MobToolAuthorityContext>,
 ) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
-    if !matches!(enable_mob, ToolCategoryOverride::Disable)
-        && let Some(authority_context) = persisted_authority_context
-    {
+    if matches!(enable_mob, ToolCategoryOverride::Disable) {
+        return (ToolCategoryOverride::Disable, None);
+    }
+
+    if let Some(authority_context) = persisted_authority_context {
         return match restore_mob_operator_authority(&authority_context) {
             Ok(authority_context) => (ToolCategoryOverride::Enable, Some(authority_context)),
             Err(error) => {

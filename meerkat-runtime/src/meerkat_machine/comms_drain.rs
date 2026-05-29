@@ -235,6 +235,39 @@ impl DrainAuthorityState {
 }
 
 impl MeerkatMachine {
+    async fn apply_supervisor_binding_input(
+        &self,
+        session_id: &SessionId,
+        input: crate::meerkat_machine::dsl::MeerkatMachineInput,
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
+    {
+        #[cfg(target_arch = "wasm32")]
+        let mut sessions = self
+            .sessions
+            .try_write()
+            .map_err(|_| SupervisorBindingStageError::SessionRegistryBusy)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut sessions = self.sessions.write().await;
+
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+
+        #[cfg(target_arch = "wasm32")]
+        let mut authority = entry
+            .dsl_authority
+            .try_lock()
+            .map_err(|_| SupervisorBindingStageError::SessionAuthorityBusy)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+            .map_err(SupervisorBindingStageError::Dsl)
+    }
+
     pub async fn update_peer_ingress_context(
         self: &Arc<Self>,
         session_id: &SessionId,
@@ -242,15 +275,12 @@ impl MeerkatMachine {
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
         match self
-            .execute_meerkat_machine_command(
-                Some(Arc::clone(self)),
-                MeerkatMachineCommand::SetPeerIngressContext {
-                    session_id: session_id.clone(),
-                    keep_alive,
-                    comms_runtime,
-                    mob_id: None,
-                },
-            )
+            .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive,
+                comms_runtime,
+                mob_id: None,
+            })
             .await
         {
             Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
@@ -270,15 +300,12 @@ impl MeerkatMachine {
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
         match self
-            .execute_meerkat_machine_command(
-                Some(Arc::clone(self)),
-                MeerkatMachineCommand::SetPeerIngressContext {
-                    session_id: session_id.clone(),
-                    keep_alive,
-                    comms_runtime,
-                    mob_id: None,
-                },
-            )
+            .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive,
+                comms_runtime,
+                mob_id: None,
+            })
             .await
         {
             Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
@@ -301,15 +328,12 @@ impl MeerkatMachine {
         mob_id: crate::meerkat_machine::dsl::MobId,
     ) -> bool {
         match self
-            .execute_meerkat_machine_command(
-                Some(Arc::clone(self)),
-                MeerkatMachineCommand::SetPeerIngressContext {
-                    session_id: session_id.clone(),
-                    keep_alive: true,
-                    comms_runtime: Some(comms_runtime),
-                    mob_id: Some(mob_id),
-                },
-            )
+            .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(comms_runtime),
+                mob_id: Some(mob_id),
+            })
             .await
         {
             Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
@@ -672,14 +696,12 @@ impl MeerkatMachine {
         let pubkey = comms_runtime
             .public_key_bytes()
             .ok_or_else(|| "runtime public_key_bytes unavailable".to_string())?;
-        let descriptor = meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+        Ok(crate::meerkat_machine::dsl::PeerEndpoint::new(
             name,
             peer_id.to_string(),
-            pubkey,
             address,
-        )
-        .map_err(|error| format!("runtime local endpoint descriptor invalid: {error}"))?;
-        Ok(crate::meerkat_machine::dsl::PeerEndpoint::from(&descriptor))
+            pubkey,
+        ))
     }
 
     /// Publish the target runtime's own endpoint into MeerkatMachine before
@@ -689,21 +711,56 @@ impl MeerkatMachine {
         session_id: &SessionId,
         comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
     ) -> Result<(), SupervisorBindingStageError> {
+        tracing::debug!(
+            %session_id,
+            "MeerkatMachine::stage_local_endpoint_for_comms_runtime building endpoint"
+        );
         let endpoint = Self::local_endpoint_for_comms_runtime(comms_runtime)
             .map_err(SupervisorBindingStageError::LocalEndpoint)?;
+        tracing::debug!(
+            %session_id,
+            "MeerkatMachine::stage_local_endpoint_for_comms_runtime built endpoint"
+        );
+        #[cfg(target_arch = "wasm32")]
+        let mut sessions = self
+            .sessions
+            .try_write()
+            .map_err(|_| SupervisorBindingStageError::SessionRegistryBusy)?;
+        #[cfg(not(target_arch = "wasm32"))]
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
             .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        #[cfg(target_arch = "wasm32")]
+        let mut authority = entry
+            .dsl_authority
+            .try_lock()
+            .map_err(|_| SupervisorBindingStageError::SessionAuthorityBusy)?;
+        #[cfg(not(target_arch = "wasm32"))]
         let mut authority = entry
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tracing::debug!(
+            %session_id,
+            "MeerkatMachine::stage_local_endpoint_for_comms_runtime applying endpoint"
+        );
+        if authority.state().local_endpoint.as_ref() == Some(&endpoint) {
+            tracing::debug!(
+                %session_id,
+                "MeerkatMachine::stage_local_endpoint_for_comms_runtime endpoint already applied"
+            );
+            return Ok(());
+        }
         crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut *authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::PublishLocalEndpoint { endpoint },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
+        tracing::debug!(
+            %session_id,
+            "MeerkatMachine::stage_local_endpoint_for_comms_runtime applied endpoint"
+        );
         Ok(())
     }
 
@@ -723,16 +780,8 @@ impl MeerkatMachine {
         epoch: u64,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::BindSupervisor {
                 name,
                 peer_id,
@@ -741,8 +790,7 @@ impl MeerkatMachine {
                 epoch,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition)
+        .await
     }
 
     pub async fn supervisor_trust_publish_freshness_authority(
@@ -796,16 +844,8 @@ impl MeerkatMachine {
         epoch: u64,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeSupervisor {
                 name,
                 peer_id,
@@ -814,8 +854,7 @@ impl MeerkatMachine {
                 epoch,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition)
+        .await
     }
 
     /// Stage a DSL `RequestSupervisorTrustPublish` input.
@@ -833,16 +872,8 @@ impl MeerkatMachine {
         epoch: u64,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::RequestSupervisorTrustPublish {
                 name,
                 peer_id,
@@ -851,8 +882,7 @@ impl MeerkatMachine {
                 epoch,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition)
+        .await
     }
 
     /// Stage a DSL `RevokeSupervisor` input (Wave 3 D Row 21).
@@ -867,20 +897,11 @@ impl MeerkatMachine {
         epoch: u64,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeSupervisor { peer_id, epoch },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(transition)
+        .await
     }
 
     /// Stage a DSL `SupervisorTrustEdgePublished` feedback input (C-F2 /
@@ -900,22 +921,14 @@ impl MeerkatMachine {
         peer_id: String,
         epoch: u64,
     ) -> Result<(), SupervisorBindingStageError> {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublished {
                 peer_id,
                 epoch,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
+        .await?;
         Ok(())
     }
 
@@ -933,23 +946,15 @@ impl MeerkatMachine {
         epoch: u64,
         reason: String,
     ) -> Result<(), SupervisorBindingStageError> {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublishFailed {
                 peer_id,
                 epoch,
                 reason,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
+        .await?;
         Ok(())
     }
 
@@ -964,22 +969,14 @@ impl MeerkatMachine {
         peer_id: String,
         epoch: u64,
     ) -> Result<(), SupervisorBindingStageError> {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevoked {
                 peer_id,
                 epoch,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
+        .await?;
         Ok(())
     }
 
@@ -995,23 +992,15 @@ impl MeerkatMachine {
         epoch: u64,
         reason: String,
     ) -> Result<(), SupervisorBindingStageError> {
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-        let mut authority = entry
-            .dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-            &mut *authority,
+        self.apply_supervisor_binding_input(
+            session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevokeFailed {
                 peer_id,
                 epoch,
                 reason,
             },
         )
-        .map_err(SupervisorBindingStageError::Dsl)?;
+        .await?;
         Ok(())
     }
 }
@@ -1022,6 +1011,12 @@ impl MeerkatMachine {
 pub enum SupervisorBindingStageError {
     /// The session is not registered with the runtime.
     SessionNotRegistered,
+    /// The runtime session registry was already borrowed in a non-reentrant
+    /// WASM turn while staging supervisor binding authority.
+    SessionRegistryBusy,
+    /// The per-session DSL authority was already borrowed in a non-reentrant
+    /// WASM turn while staging supervisor binding authority.
+    SessionAuthorityBusy,
     /// The DSL mutator rejected the transition (e.g. guard failure). The
     /// boxed inner is the typed DSL transition error; callers that need to
     /// distinguish guard rejections from missing-transition failures can
@@ -1036,6 +1031,12 @@ impl std::fmt::Display for SupervisorBindingStageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SessionNotRegistered => write!(f, "session not registered with runtime"),
+            Self::SessionRegistryBusy => {
+                write!(f, "runtime session registry busy during supervisor binding")
+            }
+            Self::SessionAuthorityBusy => {
+                write!(f, "session authority busy during supervisor binding")
+            }
             Self::Dsl(err) => write!(f, "DSL rejected supervisor binding input: {err}"),
             Self::LocalEndpoint(err) => {
                 write!(f, "local endpoint unavailable for supervisor trust: {err}")

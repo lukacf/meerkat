@@ -45,29 +45,31 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         .filter(|t| matches!(t.trigger.kind, TriggerKindDef::Signal))
         .collect();
 
-    let input_arms = gen_match_arms(
+    let (input_arms, input_methods) = gen_input_match_arms_and_methods(
         def,
         &input_transitions,
         input_name,
         &error_name,
         &input_variant_name,
+        effect_name,
         quote! { #trigger_name::Input },
     );
 
     let has_signals = !def.signals.variants.is_empty() && !signal_transitions.is_empty();
     let signal_name = &def.signals.name;
     let signal_variant_name = format_ident!("{}Variant", signal_name);
-    let signal_arms = if has_signals {
-        gen_match_arms(
+    let (signal_arms, signal_methods) = if has_signals {
+        gen_signal_match_arms_and_methods(
             def,
             &signal_transitions,
             signal_name,
             &error_name,
             &signal_variant_name,
+            effect_name,
             quote! { #trigger_name::Signal },
         )
     } else {
-        TokenStream::new()
+        (TokenStream::new(), TokenStream::new())
     };
     let signal_trigger_variant = if def.signals.variants.is_empty() {
         TokenStream::new()
@@ -440,6 +442,10 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
             #(#helpers)*
 
+            #input_methods
+
+            #signal_methods
+
             #signal_method
         }
 
@@ -472,14 +478,15 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     }
 }
 
-fn gen_match_arms(
+fn gen_input_match_arms_and_methods(
     def: &MachineDef,
     transitions: &[&TransitionDef],
     enum_name: &Ident,
     error_name: &Ident,
     variant_enum_name: &Ident,
+    effect_name: &Ident,
     trigger_ctor: TokenStream,
-) -> TokenStream {
+) -> (TokenStream, TokenStream) {
     let mut groups: Vec<(&Ident, Vec<&&TransitionDef>)> = Vec::new();
     for t in transitions {
         let variant = &t.trigger.variant;
@@ -490,28 +497,161 @@ fn gen_match_arms(
         }
     }
 
-    let arms: Vec<_> = groups
-        .iter()
-        .map(|(variant, transitions)| {
-            let binding_pattern = if transitions[0].trigger.bindings.is_empty() {
-                quote! {}
-            } else {
-                let bindings: Vec<_> = transitions[0].trigger.bindings.iter().collect();
-                quote! { { #(#bindings),* } }
-            };
-
-            let trigger = quote! { #trigger_ctor(#variant_enum_name::#variant) };
-            let body = gen_transition_chain(def, transitions, error_name, trigger);
-
-            quote! {
-                #enum_name::#variant #binding_pattern => {
-                    #body
-                }
+    let mut arms = Vec::new();
+    let mut methods = Vec::new();
+    for (variant, transitions) in groups {
+        let method_name = format_ident!("apply_input_{}", variant.to_string().to_lowercase());
+        let bindings: Vec<_> = transitions[0].trigger.bindings.iter().collect();
+        let binding_pattern = if bindings.is_empty() {
+            quote! {}
+        } else {
+            quote! { { #(#bindings),* } }
+        };
+        let call_args = if bindings.is_empty() {
+            quote! {}
+        } else {
+            quote! { , #(#bindings),* }
+        };
+        arms.push(quote! {
+            #enum_name::#variant #binding_pattern => {
+                self.#method_name(from_phase, &mut effects #call_args)?;
             }
-        })
-        .collect();
+        });
 
-    quote! { #(#arms)* }
+        let Some(variant_def) = def
+            .inputs
+            .variants
+            .iter()
+            .find(|candidate| candidate.name == *variant)
+        else {
+            let message = format!("validated input variant '{variant}' should exist");
+            return (quote! { compile_error!(#message); }, quote! {});
+        };
+        let mut params = Vec::new();
+        for binding in &bindings {
+            let Some(field) = variant_def
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == **binding)
+            else {
+                let message = format!(
+                    "validated input binding '{binding}' should exist on variant '{variant}'"
+                );
+                return (quote! { compile_error!(#message); }, quote! {});
+            };
+            let ty = crate::gen_state::gen_type(&field.ty);
+            params.push(quote! { #binding: #ty });
+        }
+        let method_params = if params.is_empty() {
+            quote! {}
+        } else {
+            quote! { , #(#params),* }
+        };
+        let trigger = quote! { #trigger_ctor(#variant_enum_name::#variant) };
+        let body = gen_transition_chain(def, &transitions, error_name, trigger);
+        methods.push(quote! {
+            #[allow(non_snake_case, clippy::ptr_arg, clippy::too_many_arguments)]
+            fn #method_name(
+                &mut self,
+                from_phase: Phase,
+                effects: &mut Vec<#effect_name>
+                #method_params
+            ) -> Result<(), #error_name> {
+                #body
+                Ok(())
+            }
+        });
+    }
+
+    (quote! { #(#arms)* }, quote! { #(#methods)* })
+}
+
+fn gen_signal_match_arms_and_methods(
+    def: &MachineDef,
+    transitions: &[&TransitionDef],
+    enum_name: &Ident,
+    error_name: &Ident,
+    variant_enum_name: &Ident,
+    effect_name: &Ident,
+    trigger_ctor: TokenStream,
+) -> (TokenStream, TokenStream) {
+    let mut groups: Vec<(&Ident, Vec<&&TransitionDef>)> = Vec::new();
+    for t in transitions {
+        let variant = &t.trigger.variant;
+        if let Some(group) = groups.iter_mut().find(|(v, _)| *v == variant) {
+            group.1.push(t);
+        } else {
+            groups.push((variant, vec![t]));
+        }
+    }
+
+    let mut arms = Vec::new();
+    let mut methods = Vec::new();
+    for (variant, transitions) in groups {
+        let method_name = format_ident!("apply_signal_{}", variant.to_string().to_lowercase());
+        let bindings: Vec<_> = transitions[0].trigger.bindings.iter().collect();
+        let binding_pattern = if bindings.is_empty() {
+            quote! {}
+        } else {
+            quote! { { #(#bindings),* } }
+        };
+        let call_args = if bindings.is_empty() {
+            quote! {}
+        } else {
+            quote! { , #(#bindings),* }
+        };
+        arms.push(quote! {
+            #enum_name::#variant #binding_pattern => {
+                self.#method_name(from_phase, &mut effects #call_args)?;
+            }
+        });
+
+        let Some(variant_def) = def
+            .signals
+            .variants
+            .iter()
+            .find(|candidate| candidate.name == *variant)
+        else {
+            let message = format!("validated signal variant '{variant}' should exist");
+            return (quote! { compile_error!(#message); }, quote! {});
+        };
+        let mut params = Vec::new();
+        for binding in &bindings {
+            let Some(field) = variant_def
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == **binding)
+            else {
+                let message = format!(
+                    "validated signal binding '{binding}' should exist on variant '{variant}'"
+                );
+                return (quote! { compile_error!(#message); }, quote! {});
+            };
+            let ty = crate::gen_state::gen_type(&field.ty);
+            params.push(quote! { #binding: #ty });
+        }
+        let method_params = if params.is_empty() {
+            quote! {}
+        } else {
+            quote! { , #(#params),* }
+        };
+        let trigger = quote! { #trigger_ctor(#variant_enum_name::#variant) };
+        let body = gen_transition_chain(def, &transitions, error_name, trigger);
+        methods.push(quote! {
+            #[allow(non_snake_case, clippy::ptr_arg, clippy::too_many_arguments)]
+            fn #method_name(
+                &mut self,
+                from_phase: Phase,
+                effects: &mut Vec<#effect_name>
+                #method_params
+            ) -> Result<(), #error_name> {
+                #body
+                Ok(())
+            }
+        });
+    }
+
+    (quote! { #(#arms)* }, quote! { #(#methods)* })
 }
 
 fn gen_transition_chain(

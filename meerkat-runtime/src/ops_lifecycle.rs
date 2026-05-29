@@ -423,7 +423,7 @@ struct ShellState {
 /// The generated `MeerkatMachineAuthority` does not derive `Debug`, but
 /// `ShellState` requires it. This wrapper delegates to the inner state's
 /// `Debug` impl.
-struct DslAuthority(mm_dsl::MeerkatMachineAuthority);
+struct DslAuthority(Box<mm_dsl::MeerkatMachineAuthority>);
 
 impl std::fmt::Debug for DslAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -437,17 +437,27 @@ impl std::fmt::Debug for DslAuthority {
 /// transitions guard only on `op_statuses.contains_key(operation_id)`, so the
 /// phase stays in `Idle` permanently (they all `to Idle`).
 fn new_ops_dsl_authority() -> DslAuthority {
-    DslAuthority(
+    DslAuthority(Box::new(
         crate::meerkat_machine::dsl_authority::new_initialized_authority(
             "ops lifecycle DSL Initialize must be accepted",
         ),
-    )
+    ))
 }
 
 impl ShellState {
     fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
+        tracing::info!("RuntimeOpsLifecycleRegistry::ShellState creating dsl");
+        let dsl = new_ops_dsl_authority();
+        tracing::info!("RuntimeOpsLifecycleRegistry::ShellState created dsl");
+        let feed_capacity = max_completed.saturating_mul(4).max(1024);
+        tracing::info!(
+            feed_capacity,
+            "RuntimeOpsLifecycleRegistry::ShellState creating feed buffer"
+        );
+        let feed_buffer = Arc::new(FeedBuffer::new(feed_capacity));
+        tracing::info!("RuntimeOpsLifecycleRegistry::ShellState created feed buffer");
         Self {
-            dsl: new_ops_dsl_authority(),
+            dsl,
             records: HashMap::new(),
             pending_wait: None,
             completed_order: VecDeque::new(),
@@ -458,7 +468,7 @@ impl ShellState {
             // Entries are only evicted by buffer capacity, not by consumer cursor,
             // so the buffer must be large enough that consumers drain before
             // the oldest entry is evicted.
-            feed_buffer: Arc::new(FeedBuffer::new(max_completed.saturating_mul(4).max(1024))),
+            feed_buffer,
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
@@ -491,7 +501,7 @@ impl ShellState {
         &mut self,
         input: mm_dsl::MeerkatMachineInput,
     ) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
-        mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map(|_transition| ())
+        mm_dsl::MeerkatMachineMutator::apply(&mut *self.dsl.0, input).map(|_transition| ())
     }
 
     fn dsl_apply_with_effects(
@@ -500,7 +510,7 @@ impl ShellState {
         context: &str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, OpsLifecycleError> {
         let transition =
-            mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map_err(|err| {
+            mm_dsl::MeerkatMachineMutator::apply(&mut *self.dsl.0, input).map_err(|err| {
                 OpsLifecycleError::Internal(format!(
                     "DSL rejected ops transition ({context}): {err:?}"
                 ))
@@ -1346,7 +1356,7 @@ impl ShellState {
         };
         let dsl_operation_id_tokens = self.dsl.0.state().wait_operation_id_tokens.clone();
         let transition = match mm_dsl::MeerkatMachineMutator::apply(
-            &mut self.dsl.0,
+            &mut *self.dsl.0,
             mm_dsl::MeerkatMachineInput::SatisfyWaitAll {
                 wait_request_id: dsl_wait_request_id,
                 run_id: dsl_run_id,
@@ -2015,7 +2025,24 @@ impl Default for RuntimeOpsLifecycleRegistry {
 
 impl RuntimeOpsLifecycleRegistry {
     pub fn new() -> Self {
-        Self::default()
+        let dsl = new_ops_dsl_authority();
+        let feed_capacity = DEFAULT_MAX_COMPLETED.saturating_mul(4).max(1024);
+        let feed_buffer = Arc::new(FeedBuffer::new(feed_capacity));
+        Self {
+            state: RwLock::new(ShellState {
+                dsl,
+                records: HashMap::new(),
+                pending_wait: None,
+                completed_order: VecDeque::new(),
+                max_completed: DEFAULT_MAX_COMPLETED,
+                max_concurrent: None,
+                wait_request_id: None,
+                feed_buffer,
+                persist_tx: None,
+                persist_epoch_id: None,
+                persist_cursor_state: None,
+            }),
+        }
     }
 
     pub fn with_config(config: OpsLifecycleConfig) -> Self {
@@ -4098,9 +4125,9 @@ mod tests {
             machine_state
                 .op_terminal_payload
                 .insert(operation_id_key, "not-json".into());
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = match registry.register_watcher(&operation_id) {
@@ -4158,9 +4185,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_terminal_payload.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = match registry.register_watcher(&operation_id) {
@@ -4197,9 +4224,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_terminal_outcomes.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4248,9 +4275,9 @@ mod tests {
                 .get_mut(&operation_id_key)
                 .expect("generated operation source")
                 .session_id = None;
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4292,9 +4319,9 @@ mod tests {
                 "not-json-operation-id".into(),
                 mm_dsl::OperationStatus::Running,
             );
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4330,9 +4357,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_kinds.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4372,9 +4399,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_statuses.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4437,9 +4464,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_peer_ready.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4472,9 +4499,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_progress_counts.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let err = registry
@@ -4520,9 +4547,9 @@ mod tests {
             let mut machine_state = state.dsl.0.state().clone();
             let operation_id_key = mm_dsl::OperationId::from_domain(&operation_id).0;
             machine_state.op_completion_seq.remove(&operation_id_key);
-            state.dsl = DslAuthority(
+            state.dsl = DslAuthority(Box::new(
                 mm_dsl::MeerkatMachineAuthority::recover_from_state(machine_state).unwrap(),
-            );
+            ));
         }
 
         let cursor_state = meerkat_core::EpochCursorState::new();

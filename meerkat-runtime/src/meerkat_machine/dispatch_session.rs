@@ -4,7 +4,7 @@ use super::*;
 mod user_interrupt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionBindingPreparation {
+pub(super) enum SessionBindingPreparation {
     /// The runtime binding itself is the semantic event: apply
     /// `PrepareBindings` to MeerkatMachine and publish any routed seam signals.
     AuthoritativeRuntimeBinding,
@@ -98,16 +98,74 @@ impl MeerkatMachine {
             .runtime_stop_deferred
     }
 
-    async fn prepare_session_runtime_bindings(
+    pub(super) async fn prepare_session_runtime_bindings(
         &self,
         session_id: SessionId,
         preparation: SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        tracing::debug!(
+            %session_id,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings start"
+        );
         let existing_state = self.existing_session_runtime_state(&session_id).await;
+        tracing::debug!(
+            %session_id,
+            ?existing_state,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings observed existing state"
+        );
         if matches!(existing_state, Some(RuntimeState::Destroyed)) {
             return Err(RuntimeDriverError::Destroyed);
         }
-        let inserted_by_call = self.register_session_inner(session_id.clone()).await?;
+        tracing::debug!(
+            %session_id,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings registering session"
+        );
+        #[cfg(target_arch = "wasm32")]
+        let inserted_by_call = if self.store.is_none() {
+            {
+                tracing::debug!(%session_id, "MeerkatMachine::prepare_session_runtime_bindings attempting storeless existing check lock");
+                let mut sessions = self.sessions.try_write().map_err(|_| {
+                    tracing::warn!(
+                        %session_id,
+                        "storeless session map busy while checking existing registration"
+                    );
+                    RuntimeDriverError::Internal(format!(
+                        "storeless session map busy while registering {session_id}"
+                    ))
+                })?;
+                tracing::debug!(%session_id, "MeerkatMachine::prepare_session_runtime_bindings locked storeless existing check");
+                if let Some(existing) = sessions.get_mut(&session_id) {
+                    tracing::debug!(
+                        %session_id,
+                        "MeerkatMachine::prepare_session_runtime_bindings found existing session"
+                    );
+                    if existing.clear_dead_attachment() {
+                        existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                            ))
+                        })?;
+                    }
+                    false
+                } else {
+                    drop(sessions);
+                    self.register_storeless_session_inner_sync_build_step(session_id.clone())?
+                }
+            }
+        } else {
+            Box::pin(self.register_session_inner(session_id.clone())).await?
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let inserted_by_call = Box::pin(self.register_session_inner(session_id.clone())).await?;
+        tracing::debug!(
+            %session_id,
+            inserted_by_call,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings registered session"
+        );
         let (
             driver_handle,
             epoch_id,
@@ -138,6 +196,12 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             authority.state().session_id.as_ref() != Some(&dsl_session_id)
         };
+        tracing::debug!(
+            %session_id,
+            needs_generated_registration,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings checked generated registration"
+        );
         if needs_generated_registration
             && let Err(reason) = self
                 .stage_session_dsl_input(
@@ -155,11 +219,26 @@ impl MeerkatMachine {
             }
             return Err(RuntimeDriverError::ValidationFailed { reason });
         }
+        tracing::debug!(
+            %session_id,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings prepared generated registration"
+        );
         if preparation == SessionBindingPreparation::AuthoritativeRuntimeBinding {
             let runtime_id = {
+                tracing::debug!(
+                    %session_id,
+                    ?preparation,
+                    "MeerkatMachine::prepare_session_runtime_bindings locking driver for runtime id"
+                );
                 let driver = driver_handle.lock().await;
                 driver.runtime_id().clone()
             };
+            tracing::debug!(
+                %session_id,
+                ?preparation,
+                "MeerkatMachine::prepare_session_runtime_bindings locked driver for runtime id"
+            );
             let agent_runtime_id =
                 crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(&runtime_id);
             let fence_token = crate::meerkat_machine::dsl::FenceToken::from(0);
@@ -186,9 +265,19 @@ impl MeerkatMachine {
                 }
             };
             {
+                tracing::debug!(
+                    %session_id,
+                    ?preparation,
+                    "MeerkatMachine::prepare_session_runtime_bindings locking driver for authoritative projection"
+                );
                 let mut driver = driver_handle.lock().await;
                 machine_prepare_bindings_projection(&mut driver);
             }
+            tracing::debug!(
+                %session_id,
+                ?preparation,
+                "MeerkatMachine::prepare_session_runtime_bindings applied authoritative projection"
+            );
             if let Err(reason) = self
                 .commit_session_dsl_transition(&session_id, staged, "PrepareBindings")
                 .await
@@ -205,9 +294,19 @@ impl MeerkatMachine {
             }
         } else {
             {
+                tracing::debug!(
+                    %session_id,
+                    ?preparation,
+                    "MeerkatMachine::prepare_session_runtime_bindings locking driver for local projection"
+                );
                 let mut driver = driver_handle.lock().await;
                 machine_prepare_bindings_projection(&mut driver);
             }
+            tracing::debug!(
+                %session_id,
+                ?preparation,
+                "MeerkatMachine::prepare_session_runtime_bindings applied local projection"
+            );
         }
         // Share ONE HandleDslAuthority across all 5 handles so their
         // transitions land on the session's real DSL state (same Arc
@@ -231,6 +330,11 @@ impl MeerkatMachine {
         )
         .map_err(RuntimeDriverError::Internal)?;
 
+        tracing::debug!(
+            %session_id,
+            ?preparation,
+            "MeerkatMachine::prepare_session_runtime_bindings assembling bindings"
+        );
         Ok(MeerkatMachineCommandResult::Bindings(
             meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
                 session_id,

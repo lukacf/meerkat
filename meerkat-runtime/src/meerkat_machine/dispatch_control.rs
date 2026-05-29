@@ -254,17 +254,41 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::Retire { runtime_id } => {
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    "MeerkatMachine::Retire command start"
+                );
                 let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command looked up entry"
+                );
 
                 // Acquire the per-session mutation gate to serialize the
                 // full DSL-stage → driver-mutate → DSL-sync span.
                 let gate = self.session_mutation_gate(&session_id).await;
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command locking mutation gate"
+                );
                 let _gate_guard = match gate {
                     Some(ref g) => Some(g.lock().await),
                     None => None,
                 };
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command locked mutation gate"
+                );
 
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command staging DSL"
+                );
                 let staged_dsl = self
                     .stage_session_dsl_transition(
                         &session_id,
@@ -277,8 +301,23 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(RuntimeControlPlaneError::Internal)?;
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command staged DSL"
+                );
 
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command locking driver"
+                );
                 let mut drv = driver.lock().await;
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command locked driver"
+                );
                 let mut report = match machine_retire(&mut drv).await {
                     Ok(report) => report,
                     Err(err) => {
@@ -287,8 +326,19 @@ impl MeerkatMachine {
                     }
                 };
                 drop(drv);
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    inputs_pending_drain = report.inputs_pending_drain,
+                    "MeerkatMachine::Retire command retired driver"
+                );
 
                 let mut commit_error = None;
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command committing DSL"
+                );
                 if let Err(reason) = self
                     .commit_session_dsl_transition_preserving_committed_state(
                         &session_id,
@@ -303,6 +353,11 @@ impl MeerkatMachine {
                         .sync_control_projection_from_dsl_authority();
                     commit_error = Some(reason);
                 }
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    "MeerkatMachine::Retire command committed DSL"
+                );
 
                 if report.inputs_pending_drain > 0 {
                     if let Some(ref tx) = wake_tx

@@ -91,10 +91,35 @@ async fn retire_runtime_session_for_archive(
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+    if runtime_adapter
+        .meerkat_machine_archive_snapshot(session_id)
+        .await
+        .is_some_and(|snapshot| {
+            matches!(
+                snapshot.control.phase,
+                meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+            )
+        })
+    {
+        return Ok(());
+    }
     match meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id).await {
         Ok(_) => Ok(()),
         Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
             runtime_adapter.register_session(session_id.clone()).await;
+            if runtime_adapter
+                .meerkat_machine_archive_snapshot(session_id)
+                .await
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.control.phase,
+                        meerkat_runtime::RuntimeState::Retired
+                            | meerkat_runtime::RuntimeState::Stopped
+                    )
+                })
+            {
+                return Ok(());
+            }
             meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id)
                 .await
                 .map(|_| ())

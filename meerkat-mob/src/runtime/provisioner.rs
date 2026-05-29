@@ -11,7 +11,7 @@ use crate::runtime::handle::MemberSpawnReceipt;
 use crate::tokio;
 use async_trait::async_trait;
 use meerkat_core::PendingSystemContextAppend;
-use meerkat_core::comms::TrustedPeerDescriptor;
+use meerkat_core::comms::{PeerAddress, PeerName, TrustedPeerDescriptor};
 use meerkat_core::event_injector::SubscribableInjector;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::core_executor::{
@@ -45,6 +45,14 @@ use std::collections::HashMap;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type ArchiveSessionFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SessionError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+type ArchiveSessionFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SessionError>> + 'a>>;
 
 #[cfg(feature = "runtime-adapter")]
 const DEFERRED_TURN_EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -254,6 +262,15 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
+    async fn admit_turn_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        req: StartTurnRequest,
+    ) -> Result<(), MobError> {
+        let _ = operation_id;
+        self.admit_turn(member_ref, req).await
+    }
     async fn start_flow_step(
         &self,
         member_ref: &MemberRef,
@@ -280,6 +297,17 @@ pub trait MobProvisioner: Send + Sync {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerDescriptor, MobError>;
+    async fn trusted_peer_spec_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        fallback_name: &str,
+        fallback_peer_id: &str,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        let _ = operation_id;
+        self.trusted_peer_spec(member_ref, fallback_name, fallback_peer_id)
+            .await
+    }
     async fn reconcile_peer_only_trust(
         &self,
         member_ref: &MemberRef,
@@ -376,6 +404,43 @@ impl SessionBackend {
         .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
     }
 
+    fn trusted_peer_spec_from_runtime(
+        fallback_name: &str,
+        runtime: &dyn CoreCommsRuntime,
+    ) -> Result<Option<TrustedPeerDescriptor>, MobError> {
+        let Some(peer_id) = runtime.peer_id() else {
+            return Ok(None);
+        };
+        let Some(pubkey) = runtime.public_key_bytes() else {
+            return Ok(None);
+        };
+        TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer_id, &pubkey).map_err(|error| {
+            MobError::WiringError(format!("invalid peer spec for '{fallback_name}': {error}"))
+        })?;
+        let name = runtime
+            .comms_name()
+            .unwrap_or_else(|| fallback_name.to_string());
+        let name = PeerName::new(name).map_err(|error| {
+            MobError::WiringError(format!(
+                "invalid peer spec for '{fallback_name}': invalid peer name: {error}"
+            ))
+        })?;
+        let address = runtime
+            .advertised_address()
+            .unwrap_or_else(|| format!("inproc://{fallback_name}"));
+        let address = PeerAddress::parse(&address).map_err(|error| {
+            MobError::WiringError(format!(
+                "invalid peer spec for '{fallback_name}': invalid peer address: {error}"
+            ))
+        })?;
+        Ok(Some(TrustedPeerDescriptor {
+            peer_id,
+            name,
+            address,
+            pubkey,
+        }))
+    }
+
     async fn runtime_session_state(
         &self,
         session_id: &SessionId,
@@ -383,6 +448,16 @@ impl SessionBackend {
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             return Ok(None);
         };
+        #[cfg(target_arch = "wasm32")]
+        if let Ok(runtime_sessions) = self.runtime_sessions.try_read()
+            && let Some(existing) = runtime_sessions.get(session_id).cloned()
+        {
+            tracing::debug!(
+                session_id = %session_id,
+                "SessionBackend::runtime_session_state using cached wasm runtime session state"
+            );
+            return Ok(Some(existing));
+        }
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
             if adapter.session_has_executor(session_id).await {
                 return Ok(Some(existing));
@@ -401,10 +476,31 @@ impl SessionBackend {
             // Runtime session registrations are capability bindings. If the
             // adapter lost this session, drop any queued bridge context from
             // the stale binding before reattaching with a fresh sidecar.
-            adapter
-                .ensure_session_with_executor(session_id.clone(), executor)
-                .await
-                .map_err(|error| MobError::Internal(error.to_string()))?;
+            #[cfg(target_arch = "wasm32")]
+            {
+                let adapter = Arc::clone(adapter);
+                let session_id = session_id.clone();
+                let (reply_tx, reply_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let result = adapter
+                        .ensure_session_with_executor(session_id, executor)
+                        .await;
+                    let _ = reply_tx.send(result);
+                });
+                reply_rx
+                    .await
+                    .map_err(|_| {
+                        MobError::Internal("ensure session executor task was canceled".to_string())
+                    })?
+                    .map_err(|error| MobError::Internal(error.to_string()))?;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                adapter
+                    .ensure_session_with_executor(session_id.clone(), executor)
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?;
+            }
             self.runtime_sessions
                 .write()
                 .await
@@ -421,10 +517,31 @@ impl SessionBackend {
             state.clone(),
             Arc::clone(&self.runtime_sessions),
         ));
-        adapter
-            .ensure_session_with_executor(session_id.clone(), executor)
-            .await
-            .map_err(|error| MobError::Internal(error.to_string()))?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let adapter = Arc::clone(adapter);
+            let session_id = session_id.clone();
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                let result = adapter
+                    .ensure_session_with_executor(session_id, executor)
+                    .await;
+                let _ = reply_tx.send(result);
+            });
+            reply_rx
+                .await
+                .map_err(|_| {
+                    MobError::Internal("ensure session executor task was canceled".to_string())
+                })?
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            adapter
+                .ensure_session_with_executor(session_id.clone(), executor)
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+        }
         self.runtime_sessions
             .write()
             .await
@@ -441,8 +558,52 @@ impl SessionBackend {
 
     async fn unregister_runtime_session_binding(&self, session_id: &SessionId) {
         if let Some(adapter) = &self.runtime_adapter {
-            if adapter.contains_session(session_id).await {
-                adapter.unregister_session(session_id).await;
+            #[cfg(target_arch = "wasm32")]
+            if adapter
+                .meerkat_machine_archive_snapshot(session_id)
+                .await
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.control.phase,
+                        meerkat_runtime::RuntimeState::Retired
+                            | meerkat_runtime::RuntimeState::Stopped
+                    ) && snapshot.queue.is_empty()
+                        && snapshot.steer_queue.is_empty()
+                })
+            {
+                tracing::warn!(
+                    %session_id,
+                    "skipping blocking runtime unregister for terminal storeless WASM session"
+                );
+                adapter.discard_terminal_storeless_session(session_id).await;
+                self.remove_runtime_session_state(session_id).await;
+                return;
+            }
+
+            let registered = tokio::time::timeout(
+                Duration::from_secs(2),
+                adapter.contains_session(session_id),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    %session_id,
+                    "timed out checking runtime session registration during mob archive cleanup"
+                );
+                false
+            });
+            if registered
+                && tokio::time::timeout(
+                    Duration::from_secs(2),
+                    adapter.unregister_session(session_id),
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    %session_id,
+                    "timed out unregistering runtime session during mob archive cleanup"
+                );
             }
             self.remove_runtime_session_state(session_id).await;
         }
@@ -456,49 +617,83 @@ impl SessionBackend {
     }
 
     #[cfg(feature = "runtime-adapter")]
-    async fn retire_runtime_before_archive(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), SessionError> {
-        let Some(adapter) = &self.runtime_adapter else {
-            return Ok(());
-        };
-        if !adapter.contains_session(session_id).await {
-            return Ok(());
-        }
-
-        self.cancel_active_runtime_turn_before_retire(session_id)
-            .await?;
-
-        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
-        match meerkat_runtime::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id).await {
-            Ok(_) => {}
-            Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => return Ok(()),
-            Err(error) => {
-                return Err(Self::runtime_archive_error(format!(
-                    "runtime retire before mob archive failed for {session_id}: {error}"
-                )));
+    fn retire_runtime_before_archive<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> ArchiveSessionFuture<'a> {
+        Box::pin(async move {
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::retire_runtime_before_archive start"
+            );
+            let Some(adapter) = &self.runtime_adapter else {
+                return Ok(());
+            };
+            if !adapter.contains_session(session_id).await {
+                return Ok(());
             }
-        }
 
-        self.wait_for_runtime_retire_drain(session_id).await
+            self.cancel_active_runtime_turn_before_retire(session_id)
+                .await?;
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::retire_runtime_before_archive active turn canceled"
+            );
+
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+            let already_terminal = match adapter.meerkat_machine_archive_snapshot(session_id).await
+            {
+                Some(snapshot) => matches!(
+                    snapshot.control.phase,
+                    meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+                ),
+                None => return Ok(()),
+            };
+            if !already_terminal {
+                tracing::info!(
+                    session_id = %session_id,
+                    runtime_id = %runtime_id,
+                    "SessionBackend::retire_runtime_before_archive calling runtime retire"
+                );
+                match adapter.retire_runtime_control_plane(&runtime_id).await {
+                    Ok(_) => {}
+                    Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => return Ok(()),
+                    Err(error) => {
+                        return Err(Self::runtime_archive_error(format!(
+                            "runtime retire before mob archive failed for {session_id}: {error}"
+                        )));
+                    }
+                }
+            }
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::retire_runtime_before_archive runtime retired"
+            );
+
+            self.wait_for_runtime_retire_drain(session_id).await?;
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::retire_runtime_before_archive drain complete"
+            );
+            Ok(())
+        })
     }
 
     #[cfg(not(feature = "runtime-adapter"))]
-    async fn retire_runtime_before_archive(
-        &self,
-        _session_id: &SessionId,
-    ) -> Result<(), SessionError> {
-        Ok(())
+    fn retire_runtime_before_archive<'a>(
+        &'a self,
+        _session_id: &'a SessionId,
+    ) -> ArchiveSessionFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
 
     #[cfg(feature = "runtime-adapter")]
-    fn runtime_run_bound(snapshot: &meerkat_runtime::MeerkatMachineSpineSnapshot) -> bool {
-        snapshot.control.current_run_id.is_some() || snapshot.inputs.current_run_id.is_some()
+    fn runtime_run_bound(snapshot: &meerkat_runtime::MeerkatArchiveSnapshot) -> bool {
+        snapshot.control.current_run_id.is_some()
     }
 
     #[cfg(feature = "runtime-adapter")]
-    fn runtime_turn_cancellable(snapshot: &meerkat_runtime::MeerkatMachineSpineSnapshot) -> bool {
+    fn runtime_turn_cancellable(snapshot: &meerkat_runtime::MeerkatArchiveSnapshot) -> bool {
         snapshot.control.phase == meerkat_runtime::RuntimeState::Running
             && Self::runtime_run_bound(snapshot)
     }
@@ -515,12 +710,28 @@ impl SessionBackend {
         let mut cancel_requested = false;
 
         loop {
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::cancel_active_runtime_turn_before_retire checking registration"
+            );
             if !adapter.contains_session(session_id).await {
                 return Ok(());
             }
-            let Some(snapshot) = adapter.meerkat_machine_spine_snapshot(session_id).await else {
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::cancel_active_runtime_turn_before_retire loading snapshot"
+            );
+            let Some(snapshot) = adapter.meerkat_machine_archive_snapshot(session_id).await else {
                 return Ok(());
             };
+            tracing::info!(
+                session_id = %session_id,
+                phase = ?snapshot.control.phase,
+                control_run = ?snapshot.control.current_run_id,
+                queue_len = snapshot.queue.len(),
+                steer_queue_len = snapshot.steer_queue.len(),
+                "SessionBackend::cancel_active_runtime_turn_before_retire observed snapshot"
+            );
             if snapshot.control.phase != meerkat_runtime::RuntimeState::Running
                 || !Self::runtime_run_bound(&snapshot)
             {
@@ -528,12 +739,25 @@ impl SessionBackend {
             }
 
             if !cancel_requested {
+                tracing::info!(
+                    session_id = %session_id,
+                    "SessionBackend::cancel_active_runtime_turn_before_retire requesting boundary cancel"
+                );
                 if let Err(error) = adapter.cancel_after_boundary(session_id).await {
                     let still_active = adapter
-                        .meerkat_machine_spine_snapshot(session_id)
+                        .meerkat_machine_archive_snapshot(session_id)
                         .await
                         .is_some_and(|snapshot| Self::runtime_turn_cancellable(&snapshot));
                     if still_active {
+                        if matches!(
+                            error,
+                            meerkat_runtime::RuntimeDriverError::NotReady {
+                                state: meerkat_runtime::RuntimeState::Running
+                            }
+                        ) {
+                            cancel_requested = true;
+                            continue;
+                        }
                         return Err(Self::runtime_archive_error(format!(
                             "runtime cancel-before-retire failed for {session_id}: {error}"
                         )));
@@ -548,9 +772,9 @@ impl SessionBackend {
                     "timed out waiting for active runtime turn before mob archive for {session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}",
                     snapshot.control.phase,
                     snapshot.control.current_run_id,
-                    snapshot.inputs.current_run_id,
-                    snapshot.inputs.queue.len(),
-                    snapshot.inputs.steer_queue.len(),
+                    snapshot.control.current_run_id,
+                    snapshot.queue.len(),
+                    snapshot.steer_queue.len(),
                 )));
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -572,11 +796,10 @@ impl SessionBackend {
             if !adapter.contains_session(session_id).await {
                 return Ok(());
             }
-            let Some(snapshot) = adapter.meerkat_machine_spine_snapshot(session_id).await else {
+            let Some(snapshot) = adapter.meerkat_machine_archive_snapshot(session_id).await else {
                 return Ok(());
             };
-            let ingress_quiescent =
-                snapshot.inputs.queue.is_empty() && snapshot.inputs.steer_queue.is_empty();
+            let ingress_quiescent = snapshot.queue.is_empty() && snapshot.steer_queue.is_empty();
             // Retired is machine-owned terminal lifecycle truth for archive
             // purposes. The spine may preserve diagnostic run ids after retire,
             // so unregister must not wait on those ids once ingress is empty.
@@ -585,7 +808,7 @@ impl SessionBackend {
                 meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
             );
             let no_run_bound = snapshot.control.current_run_id.is_none()
-                && snapshot.inputs.current_run_id.is_none();
+                && snapshot.control.current_run_id.is_none();
             let no_completion_waiters = snapshot.completion_waiters.input_count == 0
                 && snapshot.completion_waiters.waiter_count == 0;
             if (ingress_quiescent && (lifecycle_retired || no_run_bound))
@@ -613,9 +836,9 @@ impl SessionBackend {
                     "timed out waiting for runtime retire drain before mob archive for {session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}, completion_inputs={}, completion_waiters={}",
                     snapshot.control.phase,
                     snapshot.control.current_run_id,
-                    snapshot.inputs.current_run_id,
-                    snapshot.inputs.queue.len(),
-                    snapshot.inputs.steer_queue.len(),
+                    snapshot.control.current_run_id,
+                    snapshot.queue.len(),
+                    snapshot.steer_queue.len(),
                     snapshot.completion_waiters.input_count,
                     snapshot.completion_waiters.waiter_count,
                 )));
@@ -624,35 +847,53 @@ impl SessionBackend {
         }
     }
 
-    async fn archive_with_authority_then_unregister(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), SessionError> {
-        self.retire_runtime_before_archive(session_id).await?;
-        match self
-            .session_service
-            .archive_with_mob_lifecycle_authority(session_id)
-            .await
-        {
-            Ok(()) => {
-                self.unregister_runtime_session_binding(session_id).await;
-                Ok(())
-            }
-            Err(SessionError::NotFound { id }) => {
-                if let Some(adapter) = &self.runtime_adapter
-                    && adapter.contains_session(session_id).await
-                {
-                    return Err(SessionError::Agent(
-                        meerkat_core::error::AgentError::InternalError(format!(
-                            "mob archive authority returned NotFound for registered runtime session {session_id}"
-                        )),
-                    ));
+    fn archive_with_authority_then_unregister<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> ArchiveSessionFuture<'a> {
+        Box::pin(async move {
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::archive_with_authority_then_unregister start"
+            );
+            self.retire_runtime_before_archive(session_id).await?;
+            tracing::info!(
+                session_id = %session_id,
+                "SessionBackend::archive_with_authority_then_unregister archiving session service"
+            );
+            match self
+                .session_service
+                .archive_with_mob_lifecycle_authority(session_id)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "SessionBackend::archive_with_authority_then_unregister unregistering runtime binding"
+                    );
+                    self.unregister_runtime_session_binding(session_id).await;
+                    tracing::info!(
+                        session_id = %session_id,
+                        "SessionBackend::archive_with_authority_then_unregister complete"
+                    );
+                    Ok(())
                 }
-                self.unregister_runtime_session_binding(session_id).await;
-                Err(SessionError::NotFound { id })
+                Err(SessionError::NotFound { id }) => {
+                    if let Some(adapter) = &self.runtime_adapter
+                        && adapter.contains_session(session_id).await
+                    {
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "mob archive authority returned NotFound for registered runtime session {session_id}"
+                            )),
+                        ));
+                    }
+                    self.unregister_runtime_session_binding(session_id).await;
+                    Err(SessionError::NotFound { id })
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        }
+        })
     }
 
     async fn execute_runtime_input(
@@ -703,6 +944,12 @@ impl SessionBackend {
                 return Err(MobError::Internal(error));
             }
         };
+        tracing::debug!(
+            session_id = %session_id,
+            input_id = %requested_input_id,
+            has_handle = handle.is_some(),
+            "SessionBackend::admit_runtime_input accepted input with completion"
+        );
 
         if let Some(state) = state.as_ref()
             && queued_context
@@ -800,7 +1047,6 @@ impl SessionBackend {
         let state = self.runtime_session_state(session_id).await?;
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
-        let mut context_input_id = requested_input_id.clone();
         let (queued_event_tx, deferred_delivery) =
             defer_turn_events_until_machine_completion(session_id, event_tx);
 
@@ -812,77 +1058,122 @@ impl SessionBackend {
             false
         };
 
-        let (outcome, handle) = match adapter
-            .accept_input_with_completion(&adapter_session_id, input)
-            .await
+        #[cfg(target_arch = "wasm32")]
         {
-            Ok(result) => result,
-            Err(err) => {
-                if let Some(state) = state.as_ref()
-                    && queued_context
+            // Browser WASM runs the mob actor and runtime adapter on the same
+            // single-thread executor. Polling this admission while the actor
+            // command is still active starves the spawned runtime task, so the
+            // standalone browser substrate schedules admission across the
+            // actor boundary. Native runtime-backed paths keep the stricter
+            // synchronous admission result below.
+            let input = Box::new(input);
+            let adapter = Arc::clone(adapter);
+            let task_session_id = adapter_session_id.clone();
+            let task_input_id = requested_input_id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = MeerkatMachine::accept_boxed_input_with_completion(
+                    adapter.as_ref(),
+                    &task_session_id,
+                    input,
+                    task_input_id.clone(),
+                )
+                .await
                 {
-                    let _ = state.discard_turn_context(&requested_input_id).await;
+                    tracing::warn!(
+                        session_id = %task_session_id,
+                        input_id = %task_input_id,
+                        %error,
+                        "background WASM runtime input admission failed"
+                    );
                 }
-                let error = err.to_string();
-                if let Some(delivery) = deferred_delivery {
-                    delivery.release();
-                }
-                return Err(MobError::Internal(error));
-            }
-        };
-
-        if let Some(state) = state.as_ref()
-            && queued_context
-        {
-            let canonical_input_id = match &outcome {
-                meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => Some(input_id),
-                meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
-                    Some(existing_id)
-                }
-                _ => None,
-            };
-            if let Some(input_id) = canonical_input_id
-                && input_id != &requested_input_id
-            {
-                let rekeyed = state
-                    .rekey_turn_context(&requested_input_id, input_id.clone())
-                    .await;
-                if rekeyed {
-                    context_input_id = input_id.clone();
-                }
-            }
-        }
-
-        let Some(handle) = handle else {
+            });
             if let Some(state) = state.as_ref()
                 && queued_context
             {
-                let _ = state.discard_turn_context(&context_input_id).await;
+                let _ = state.discard_turn_context(&requested_input_id).await;
             }
             if let Some(delivery) = deferred_delivery {
                 delivery.release();
             }
-            return Ok(());
-        };
+            Ok(())
+        }
 
-        if let Some(state) = state
-            && queued_context
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            tokio::spawn(async move {
-                let _completion = handle.wait().await;
-                let _ = state.discard_turn_context(&context_input_id).await;
+            let mut context_input_id = requested_input_id.clone();
+            let accept_result = adapter
+                .accept_input_with_completion(&adapter_session_id, input)
+                .await;
+
+            let (outcome, handle) = match accept_result {
+                Ok(result) => result,
+                Err(err) => {
+                    if let Some(state) = state.as_ref()
+                        && queued_context
+                    {
+                        let _ = state.discard_turn_context(&requested_input_id).await;
+                    }
+                    let error = err.to_string();
+                    if let Some(delivery) = deferred_delivery {
+                        delivery.release();
+                    }
+                    return Err(MobError::Internal(error));
+                }
+            };
+
+            if let Some(state) = state.as_ref()
+                && queued_context
+            {
+                let canonical_input_id = match &outcome {
+                    meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => Some(input_id),
+                    meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                        Some(existing_id)
+                    }
+                    _ => None,
+                };
+                if let Some(input_id) = canonical_input_id
+                    && input_id != &requested_input_id
+                {
+                    let rekeyed = state
+                        .rekey_turn_context(&requested_input_id, input_id.clone())
+                        .await;
+                    if rekeyed {
+                        context_input_id = input_id.clone();
+                    }
+                }
+            }
+
+            let Some(handle) = handle else {
+                if let Some(state) = state.as_ref()
+                    && queued_context
+                {
+                    let _ = state.discard_turn_context(&context_input_id).await;
+                }
                 if let Some(delivery) = deferred_delivery {
                     delivery.release();
                 }
-            });
-        } else if let Some(delivery) = deferred_delivery {
-            tokio::spawn(async move {
-                let _completion = handle.wait().await;
-                delivery.release();
-            });
-        }
+                return Ok(());
+            };
 
-        Ok(())
+            if let Some(state) = state
+                && queued_context
+            {
+                tokio::spawn(async move {
+                    let _completion = handle.wait().await;
+                    let _ = state.discard_turn_context(&context_input_id).await;
+                    if let Some(delivery) = deferred_delivery {
+                        delivery.release();
+                    }
+                });
+            } else if let Some(delivery) = deferred_delivery {
+                tokio::spawn(async move {
+                    let _completion = handle.wait().await;
+                    delivery.release();
+                });
+            }
+
+            Ok(())
+        }
     }
 }
 
@@ -1629,23 +1920,61 @@ impl MobProvisioner for SessionBackend {
             // MobMachine::Spawn routes the authoritative member runtime id
             // and fence token after the bridge session exists. This call only
             // needs the session-local handle bundle for AgentFactory.
+            tracing::debug!(
+                bridge_session_id = %member_bridge_session_id,
+                "SessionBackend::provision_member preparing local session bindings"
+            );
+            #[cfg(target_arch = "wasm32")]
+            let bindings = {
+                let adapter = Arc::clone(adapter);
+                let bridge_session_id = member_bridge_session_id.clone();
+                let (reply_tx, reply_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let result = adapter
+                        .prepare_local_session_bindings(bridge_session_id)
+                        .await;
+                    let _ = reply_tx.send(result);
+                });
+                reply_rx.await.map_err(|_| {
+                    MobError::Internal(
+                        "prepare local session bindings task was canceled".to_string(),
+                    )
+                })?
+            }
+            .map_err(|e| {
+                MobError::Internal(format!("prepare local session bindings failed: {e}"))
+            })?;
+            #[cfg(not(target_arch = "wasm32"))]
             let bindings = adapter
                 .prepare_local_session_bindings(member_bridge_session_id.clone())
                 .await
                 .map_err(|e| {
                     MobError::Internal(format!("prepare local session bindings failed: {e}"))
                 })?;
+            tracing::debug!(
+                bridge_session_id = %member_bridge_session_id,
+                "SessionBackend::provision_member prepared local session bindings"
+            );
             let ops_registry = Arc::clone(bindings.ops_lifecycle());
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
             prepared_ops_binding = Some((member_bridge_session_id.clone(), ops_registry));
+            tracing::debug!(
+                bridge_session_id = %member_bridge_session_id,
+                "SessionBackend::provision_member stamping eager turn metadata"
+            );
             stamp_eager_session_owned_initial_turn_metadata(&mut req.create_session);
+            tracing::debug!(
+                bridge_session_id = %member_bridge_session_id,
+                "SessionBackend::provision_member stamped eager turn metadata"
+            );
             Some(member_bridge_session_id)
         } else {
             None
         };
+        tracing::debug!("SessionBackend::provision_member creating bridge session");
         let created = match self
             .session_service
             .create_session(req.create_session)
@@ -1662,6 +1991,10 @@ impl MobProvisioner for SessionBackend {
                 return Err(e.into());
             }
         };
+        tracing::debug!(
+            bridge_session_id = %created.session_id,
+            "SessionBackend::provision_member created session service session"
+        );
         let created_bridge_session_id = created.session_id.clone();
         if let Some(admitted_bridge_session_id) = admitted_bridge_session_id.as_ref()
             && admitted_bridge_session_id != &created_bridge_session_id
@@ -1695,8 +2028,16 @@ impl MobProvisioner for SessionBackend {
                 );
                 adapter.unregister_session(pre_id).await;
             }
+            tracing::debug!(
+                bridge_session_id = %created_bridge_session_id,
+                "SessionBackend::provision_member checking runtime session state"
+            );
             self.runtime_session_state(&created_bridge_session_id)
                 .await?;
+            tracing::debug!(
+                bridge_session_id = %created_bridge_session_id,
+                "SessionBackend::provision_member checked runtime session state"
+            );
         }
         match (
             req.owner_bridge_session_id,
@@ -1704,10 +2045,18 @@ impl MobProvisioner for SessionBackend {
             req.generated_self_owned_operation_owner,
         ) {
             (Some(owner_bridge_session_id), Some(registry), None) => {
+                tracing::debug!(
+                    bridge_session_id = %created_bridge_session_id,
+                    "SessionBackend::provision_member binding owner session registry"
+                );
                 self.ops_adapter.bind_session_registry(
                     created_bridge_session_id.clone(),
                     owner_bridge_session_id,
                     registry,
+                );
+                tracing::debug!(
+                    bridge_session_id = %created_bridge_session_id,
+                    "SessionBackend::provision_member bound owner session registry"
                 );
             }
             (None, None, Some(generated_owner_session_id)) => {
@@ -1724,10 +2073,18 @@ impl MobProvisioner for SessionBackend {
                         "generated pending spawn operation owner '{generated_owner_session_id}' did not match created bridge session '{created_bridge_session_id}'"
                     )));
                 }
+                tracing::debug!(
+                    bridge_session_id = %created_bridge_session_id,
+                    "SessionBackend::provision_member binding generated owner session registry"
+                );
                 self.ops_adapter.bind_session_registry(
                     created_bridge_session_id.clone(),
                     generated_owner_session_id,
                     registry,
+                );
+                tracing::debug!(
+                    bridge_session_id = %created_bridge_session_id,
+                    "SessionBackend::provision_member bound generated owner session registry"
                 );
             }
             (None, None, None) => {
@@ -1741,10 +2098,20 @@ impl MobProvisioner for SessionBackend {
                 ));
             }
         }
+        tracing::debug!(
+            bridge_session_id = %created_bridge_session_id,
+            peer_name = %req.peer_name,
+            "SessionBackend::provision_member marking member provisioned"
+        );
         let operation_id = self
             .ops_adapter
             .mark_member_provisioned(&created_bridge_session_id, &req.peer_name)
             .await?;
+        tracing::debug!(
+            bridge_session_id = %created_bridge_session_id,
+            operation_id = %operation_id,
+            "SessionBackend::provision_member marked member provisioned"
+        );
         tracing::debug!(
             bridge_session_id = %created_bridge_session_id,
             "SessionBackend::provision_member created bridge session"
@@ -1807,6 +2174,10 @@ impl MobProvisioner for SessionBackend {
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
+        tracing::debug!(
+            member_ref = ?member_ref,
+            "SessionBackend::retire_member start"
+        );
         let session_id = Self::require_session(member_ref, "retire")?;
         self.archive_with_authority_then_unregister(&session_id)
             .await?;
@@ -1911,10 +2282,29 @@ impl MobProvisioner for SessionBackend {
     ) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "admit turn")?;
         if self.runtime_adapter.is_some() {
+            tracing::debug!(
+                session_id = %session_id,
+                member_ref = ?member_ref,
+                "SessionBackend::admit_turn reporting member progress"
+            );
             self.ops_adapter
                 .report_member_progress(member_ref, "turn dispatched")
                 .await?;
+            tracing::debug!(
+                session_id = %session_id,
+                member_ref = ?member_ref,
+                "SessionBackend::admit_turn reported member progress"
+            );
+            tracing::debug!(
+                session_id = %session_id,
+                "SessionBackend::admit_turn building runtime input"
+            );
             let input = Self::runtime_input_from_turn_request(&req);
+            tracing::debug!(
+                session_id = %session_id,
+                input_id = %input.id(),
+                "SessionBackend::admit_turn admitting runtime input"
+            );
             return self
                 .admit_runtime_input(&session_id, input, req.event_tx)
                 .await;
@@ -1938,6 +2328,56 @@ impl MobProvisioner for SessionBackend {
             }
             () = tokio::task::yield_now() => Ok(()),
         }
+    }
+
+    async fn admit_turn_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        req: StartTurnRequest,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "admit turn")?;
+        if self.runtime_adapter.is_some() {
+            tracing::debug!(
+                session_id = %session_id,
+                member_ref = ?member_ref,
+                operation_id = %operation_id,
+                "SessionBackend::admit_turn_for_operation reporting member progress"
+            );
+            #[cfg(target_arch = "wasm32")]
+            {
+                tracing::debug!(
+                    session_id = %session_id,
+                    member_ref = ?member_ref,
+                    operation_id = %operation_id,
+                    "SessionBackend::admit_turn_for_operation skipping progress report on wasm"
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            self.ops_adapter.report_member_progress_for_operation(
+                member_ref,
+                operation_id,
+                "turn dispatched",
+            )?;
+            tracing::debug!(
+                session_id = %session_id,
+                member_ref = ?member_ref,
+                operation_id = %operation_id,
+                "SessionBackend::admit_turn_for_operation reported member progress"
+            );
+            let input = Self::runtime_input_from_turn_request(&req);
+            tracing::debug!(
+                session_id = %session_id,
+                input_id = %input.id(),
+                operation_id = %operation_id,
+                "SessionBackend::admit_turn_for_operation admitting runtime input"
+            );
+            return self
+                .admit_runtime_input(&session_id, input, req.event_tx)
+                .await;
+        }
+
+        self.admit_turn(member_ref, req).await
     }
 
     async fn start_flow_step(
@@ -2017,10 +2457,75 @@ impl MobProvisioner for SessionBackend {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        let trusted_peer = Self::trusted_peer_spec(fallback_name, fallback_peer_id)?;
+        let trusted_peer = if let Some(session_id) = member_ref.bridge_session_id() {
+            match self.session_service.comms_runtime(session_id).await {
+                Some(runtime) => {
+                    if let Some(spec) =
+                        Self::trusted_peer_spec_from_runtime(fallback_name, &*runtime)?
+                    {
+                        spec
+                    } else {
+                        Self::trusted_peer_spec(fallback_name, fallback_peer_id)?
+                    }
+                }
+                None => Self::trusted_peer_spec(fallback_name, fallback_peer_id)?,
+            }
+        } else {
+            Self::trusted_peer_spec(fallback_name, fallback_peer_id)?
+        };
+        tracing::debug!(
+            fallback_name,
+            "SessionBackend::trusted_peer_spec marking member peer ready"
+        );
         self.ops_adapter
             .mark_member_peer_ready(member_ref, fallback_name, trusted_peer.clone())
             .await?;
+        tracing::debug!(
+            fallback_name,
+            "SessionBackend::trusted_peer_spec marked member peer ready"
+        );
+        Ok(trusted_peer)
+    }
+
+    async fn trusted_peer_spec_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        fallback_name: &str,
+        fallback_peer_id: &str,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        let trusted_peer = if let Some(session_id) = member_ref.bridge_session_id() {
+            match self.session_service.comms_runtime(session_id).await {
+                Some(runtime) => {
+                    if let Some(spec) =
+                        Self::trusted_peer_spec_from_runtime(fallback_name, &*runtime)?
+                    {
+                        spec
+                    } else {
+                        Self::trusted_peer_spec(fallback_name, fallback_peer_id)?
+                    }
+                }
+                None => Self::trusted_peer_spec(fallback_name, fallback_peer_id)?,
+            }
+        } else {
+            Self::trusted_peer_spec(fallback_name, fallback_peer_id)?
+        };
+        tracing::debug!(
+            fallback_name,
+            operation_id = %operation_id,
+            "SessionBackend::trusted_peer_spec_for_operation marking member peer ready"
+        );
+        self.ops_adapter.mark_member_peer_ready_for_operation(
+            member_ref,
+            operation_id,
+            fallback_name,
+            trusted_peer.clone(),
+        )?;
+        tracing::debug!(
+            fallback_name,
+            operation_id = %operation_id,
+            "SessionBackend::trusted_peer_spec_for_operation marked member peer ready"
+        );
         Ok(trusted_peer)
     }
 
@@ -2567,6 +3072,10 @@ impl MobProvisioner for MultiBackendProvisioner {
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
+        tracing::debug!(
+            member_ref = ?member_ref,
+            "CompositeProvisioner::retire_member start"
+        );
         match member_ref {
             MemberRef::BackendPeer {
                 peer_id,
@@ -2759,6 +3268,24 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
     }
 
+    async fn admit_turn_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        req: StartTurnRequest,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => self.start_turn(member_ref, req).await,
+            _ => {
+                self.session
+                    .admit_turn_for_operation(member_ref, operation_id, req)
+                    .await
+            }
+        }
+    }
+
     async fn reconcile_peer_only_trust(
         &self,
         member_ref: &MemberRef,
@@ -2894,6 +3421,47 @@ impl MobProvisioner for MultiBackendProvisioner {
                         .await;
                 }
                 // No bridge — use the real BackendPeer identity directly.
+                let mut spec = self.peer_only_spec(member_ref).await?;
+                spec.name = meerkat_core::comms::PeerName::new(fallback_name.to_string()).map_err(
+                    |error| MobError::WiringError(format!("invalid peer name: {error}")),
+                )?;
+                Ok(spec)
+            }
+        }
+    }
+
+    async fn trusted_peer_spec_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        fallback_name: &str,
+        fallback_peer_id: &str,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                self.session
+                    .trusted_peer_spec_for_operation(
+                        member_ref,
+                        operation_id,
+                        fallback_name,
+                        fallback_peer_id,
+                    )
+                    .await
+            }
+            MemberRef::BackendPeer { session_id, .. } => {
+                if let Some(session_id) = session_id {
+                    return self
+                        .session
+                        .trusted_peer_spec_for_operation(
+                            &MemberRef::Session {
+                                session_id: session_id.clone(),
+                            },
+                            operation_id,
+                            fallback_name,
+                            fallback_peer_id,
+                        )
+                        .await;
+                }
                 let mut spec = self.peer_only_spec(member_ref).await?;
                 spec.name = meerkat_core::comms::PeerName::new(fallback_name.to_string()).map_err(
                     |error| MobError::WiringError(format!("invalid peer name: {error}")),

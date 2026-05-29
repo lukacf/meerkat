@@ -43,6 +43,14 @@ async function main() {
   const server = await startBrowserSmokeServer();
   const browser = await chromium.launch({ headless: !headed });
   const page = await browser.newPage();
+  if (process.env.MEERKAT_BROWSER_LIVE_SMOKE_TIMEOUT_MS) {
+    await page.addInitScript(
+      (timeoutMs) => {
+        globalThis.MEERKAT_BROWSER_LIVE_SMOKE_TIMEOUT_MS = timeoutMs;
+      },
+      process.env.MEERKAT_BROWSER_LIVE_SMOKE_TIMEOUT_MS,
+    );
+  }
 
   page.on('console', (message) => {
     console.log(`[browser:${message.type()}] ${message.text()}`);

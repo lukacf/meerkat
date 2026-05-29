@@ -1,5 +1,30 @@
 use super::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+type AcceptInputWithCompletionFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    (AcceptOutcome, Option<crate::completion::CompletionHandle>),
+                    RuntimeDriverError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+#[cfg(target_arch = "wasm32")]
+type AcceptInputWithCompletionFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    (AcceptOutcome, Option<crate::completion::CompletionHandle>),
+                    RuntimeDriverError,
+                >,
+            > + 'a,
+    >,
+>;
+
 #[cfg(feature = "live")]
 fn dsl_live_channel_status_from_observation(
     status: &meerkat_core::live_adapter::LiveAdapterStatus,
@@ -1559,27 +1584,48 @@ impl MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::AcceptWithCompletion {
-                    session_id: session_id.clone(),
-                    input,
-                    register_completion: true,
-                },
-            )
+        self.accept_input_with_completion_boxed(session_id, input)
             .await
-            .map_err(MeerkatMachine::driver_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::AcceptWithCompletion {
-                outcome,
-                handle,
-                admission_signal: _,
-            } => Ok((outcome, handle)),
-            other => Err(RuntimeDriverError::Internal(format!(
-                "unexpected command result for accept_input_with_completion: {other:?}"
-            ))),
-        }
+    }
+
+    pub fn accept_input_with_completion_boxed<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        input: Input,
+    ) -> AcceptInputWithCompletionFuture<'a> {
+        let input_id = input.id().clone();
+        self.accept_boxed_input_with_completion(session_id, Box::new(input), input_id)
+    }
+
+    pub fn accept_boxed_input_with_completion<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        input: Box<Input>,
+        _input_id: InputId,
+    ) -> AcceptInputWithCompletionFuture<'a> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let input = *input;
+            match self
+                .execute_meerkat_machine_ingress_command(
+                    MeerkatMachineCommand::AcceptWithCompletion {
+                        session_id: session_id.clone(),
+                        input,
+                        register_completion: true,
+                    },
+                )
+                .await?
+            {
+                MeerkatMachineCommandResult::AcceptWithCompletion {
+                    outcome,
+                    handle,
+                    admission_signal: _,
+                } => Ok((outcome, handle)),
+                other => Err(RuntimeDriverError::Internal(format!(
+                    "unexpected command result for accept_input_with_completion: {other:?}"
+                ))),
+            }
+        })
     }
 
     /// Accept an input but intentionally do not wake the runtime loop.
@@ -1646,14 +1692,11 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::PrepareBindings {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await
+        match Box::pin(self.prepare_session_runtime_bindings(
+            session_id.clone(),
+            super::dispatch_session::SessionBindingPreparation::AuthoritativeRuntimeBinding,
+        ))
+        .await
         {
             Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
             Ok(_) => {
@@ -1679,14 +1722,11 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::PrepareLocalSessionBindings {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await
+        match Box::pin(self.prepare_session_runtime_bindings(
+            session_id.clone(),
+            super::dispatch_session::SessionBindingPreparation::LocalSessionResources,
+        ))
+        .await
         {
             Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
             Ok(_) => {

@@ -256,6 +256,9 @@ pub(crate) enum MeerkatMachineCommand {
     RegisterSession {
         session_id: SessionId,
     },
+    // Retained for generated manifest/parity coverage; production call sites
+    // prefer typed unregister helpers.
+    #[cfg_attr(not(test), allow(dead_code))]
     UnregisterSession {
         session_id: SessionId,
     },
@@ -277,6 +280,7 @@ pub(crate) enum MeerkatMachineCommand {
     CommitServiceTurnTerminalReceipt {
         session_id: SessionId,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     ContainsSession {
         session_id: SessionId,
     },
@@ -289,9 +293,15 @@ pub(crate) enum MeerkatMachineCommand {
     OpsLifecycleRegistry {
         session_id: SessionId,
     },
+    // Retained for generated composition contracts; production binding requests
+    // normally enter through typed composition helpers.
+    #[cfg_attr(not(test), allow(dead_code))]
     PrepareBindings {
         session_id: SessionId,
     },
+    // Local bootstrap is a shell mechanic, kept in the command catalog so the
+    // generated classifier can spell that boundary explicitly.
+    #[cfg_attr(not(test), allow(dead_code))]
     PrepareLocalSessionBindings {
         session_id: SessionId,
     },
@@ -1686,6 +1696,19 @@ pub struct MeerkatInputsSnapshot {
     pub current_run_contributors: Vec<InputId>,
     pub post_admission_signal: String,
     pub silent_intent_overrides: Vec<String>,
+}
+
+/// Lightweight lifecycle snapshot used by archive/retire cleanup.
+///
+/// This intentionally avoids the heavier diagnostic regions that are not
+/// needed for archive decisions. Control and input fields still come from the
+/// generated runtime authority/driver projections.
+#[derive(Debug, Clone)]
+pub struct MeerkatArchiveSnapshot {
+    pub control: MeerkatControlSnapshot,
+    pub queue: Vec<InputId>,
+    pub steer_queue: Vec<InputId>,
+    pub completion_waiters: MeerkatCompletionWaitersSnapshot,
 }
 
 /// Snapshot of the canonical input-ledger carrier for one session.

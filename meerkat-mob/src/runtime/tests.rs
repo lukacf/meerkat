@@ -13417,6 +13417,104 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
 }
 
 #[tokio::test]
+async fn test_respawn_broken_wired_member_uses_machine_peer_endpoint_without_live_comms() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid_w1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_w2 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .wire(AgentIdentity::from("w-1"), MeerkatId::from("w-2"))
+        .await
+        .expect("wire members before partial resume");
+    handle.stop().await.expect("stop");
+    service.clear_mob_machine_trust_owner(&sid_w1).await;
+    service.clear_mob_machine_trust_owner(&sid_w2).await;
+    service.archive(&sid_w2).await.expect("archive w-2");
+    service.delete_persisted_session(&sid_w2).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should succeed");
+    let broken = resumed
+        .member_status(&AgentIdentity::from("w-2"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        broken.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+
+    let receipt = resumed
+        .respawn(AgentIdentity::from("w-2"), None)
+        .await
+        .expect("respawn should repair broken wired member");
+    let repaired = resumed
+        .member_status(&AgentIdentity::from("w-2"))
+        .await
+        .expect("repaired member status");
+    let new_sid = repaired
+        .current_bridge_session_id
+        .clone()
+        .expect("respawned worker should have new session");
+    assert_ne!(new_sid, sid_w2);
+    assert_eq!(
+        repaired.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    let (runtime_id, fence_token) = repaired
+        .runtime_identity_fields()
+        .expect("repaired member should have runtime identity");
+    assert_eq!(runtime_id, &receipt.agent_runtime_id);
+    assert_eq!(fence_token, receipt.fence_token);
+    assert!(repaired.error.is_none());
+
+    let trusted_by_w1 = service.trusted_peer_names(&sid_w1).await;
+    assert!(
+        trusted_by_w1.contains(&test_comms_name("worker", "w-2")),
+        "respawn should restore trust from healthy peer to repaired member"
+    );
+    let trusted_by_w2 = service.trusted_peer_names(&new_sid).await;
+    assert!(
+        trusted_by_w2.contains(&test_comms_name("worker", "w-1")),
+        "respawn should restore trust from repaired member to healthy peer"
+    );
+}
+
+#[tokio::test]
 async fn test_resume_restores_persisted_behavior_metadata() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();

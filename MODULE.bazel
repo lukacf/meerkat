@@ -71,7 +71,7 @@ http_archive(
 http_archive(
     name = "python_darwin_arm64",
     build_file_content = '''
-filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
+filegroup(name = "python", srcs = glob(["python/bin/**", "python/include/**", "python/lib/**"]), visibility = ["//visibility:public"])
 exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
 ''',
     sha256 = "6f304f4ec30854611f23316578302235fb517cd970519ecdd11a8c4db87fd843",
@@ -81,7 +81,7 @@ exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
 http_archive(
     name = "python_linux_x86_64",
     build_file_content = '''
-filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
+filegroup(name = "python", srcs = glob(["python/bin/**", "python/include/**", "python/lib/**"]), visibility = ["//visibility:public"])
 exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
 ''',
     sha256 = "fe9a9c32d13870af632cbac3dfc7528ae53597e94472aa4c7d6a42e8166136cd",

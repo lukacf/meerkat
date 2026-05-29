@@ -11,12 +11,12 @@ use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::HandlingMode;
 use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
 use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 
 pub(crate) struct MobSupervisorBridge {
     participant_name: String,
-    authority: RwLock<SupervisorAuthorityRecord>,
+    authority: StdRwLock<SupervisorAuthorityRecord>,
     runtime: RwLock<Arc<meerkat_comms::CommsRuntime>>,
     dsl: RwLock<Arc<meerkat_runtime::HandleDslAuthority>>,
     buffered_candidates: Mutex<VecDeque<PeerInputCandidate>>,
@@ -44,7 +44,7 @@ impl MobSupervisorBridge {
         let (runtime, dsl) = Self::build_runtime(&participant_name, &authority)?;
         Ok(Self {
             participant_name,
-            authority: RwLock::new(authority),
+            authority: StdRwLock::new(authority),
             runtime: RwLock::new(runtime),
             dsl: RwLock::new(dsl),
             buffered_candidates: Mutex::new(VecDeque::new()),
@@ -162,14 +162,20 @@ impl MobSupervisorBridge {
         &self,
         prepared: PreparedSupervisorBridgeRotation,
     ) {
-        *self.authority.write().await = prepared.authority;
+        *self
+            .authority
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = prepared.authority;
         *self.runtime.write().await = prepared.runtime;
         *self.dsl.write().await = prepared.dsl;
         self.buffered_candidates.lock().await.clear();
     }
 
     pub(crate) async fn authority(&self) -> SupervisorAuthorityRecord {
-        self.authority.read().await.clone()
+        self.authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) async fn runtime(&self) -> Arc<meerkat_comms::CommsRuntime> {
@@ -276,11 +282,11 @@ impl MobSupervisorBridge {
     }
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
-        let authority = self.authority().await;
-        let public_key = authority.keypair().public_key();
+        let runtime = self.runtime().await;
+        let public_key = runtime.public_key();
         TrustedPeerDescriptor::unsigned_with_pubkey(
             self.participant_name.clone(),
-            authority.public_peer_id,
+            public_key.to_peer_id().as_str(),
             *public_key.as_bytes(),
             format!("inproc://{}", self.participant_name),
         )

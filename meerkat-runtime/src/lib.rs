@@ -162,14 +162,14 @@ pub use meerkat_machine_types::{
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{
-    MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,
-    MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
-    MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineCatalogInput,
-    MeerkatMachineCommandClassification, MeerkatMachineCommandClassificationRecord,
-    MeerkatMachineCommandVariant, MeerkatMachineFieldlessRuntimeInternalInput,
-    MeerkatMachineRuntimeInternalClassificationRecord, MeerkatMachineRuntimeInternalInput,
-    MeerkatMachineRuntimeInternalReason, MeerkatMachineShellMechanicReason,
-    MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    MeerkatAdmittedInputSnapshot, MeerkatArchiveSnapshot, MeerkatBindingSnapshot,
+    MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
+    MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot,
+    MeerkatMachineCatalogInput, MeerkatMachineCommandClassification,
+    MeerkatMachineCommandClassificationRecord, MeerkatMachineCommandVariant,
+    MeerkatMachineFieldlessRuntimeInternalInput, MeerkatMachineRuntimeInternalClassificationRecord,
+    MeerkatMachineRuntimeInternalInput, MeerkatMachineRuntimeInternalReason,
+    MeerkatMachineShellMechanicReason, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
     canonical_meerkat_machine_command_classifications,
     canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,

@@ -145,6 +145,12 @@ impl MeerkatMachine {
                 input,
                 register_completion,
             } => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    register_completion,
+                    "MeerkatMachine::AcceptWithCompletion loading session entry"
+                );
                 let (driver, completions, wake_tx, effect_tx, boundary_handle) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
@@ -160,13 +166,39 @@ impl MeerkatMachine {
                         entry.boundary_handle(),
                     )
                 };
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    "MeerkatMachine::AcceptWithCompletion loaded session entry"
+                );
 
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    "MeerkatMachine::AcceptWithCompletion resolving mutation gate"
+                );
                 let gate = self.session_mutation_gate(&session_id).await;
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    has_gate = gate.is_some(),
+                    "MeerkatMachine::AcceptWithCompletion resolved mutation gate"
+                );
                 let _gate_guard = match gate {
                     Some(ref g) => Some(g.lock().await),
                     None => None,
                 };
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    "MeerkatMachine::AcceptWithCompletion acquired mutation gate"
+                );
 
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    "MeerkatMachine::AcceptWithCompletion reading runtime state"
+                );
                 let state = self
                     .existing_session_runtime_state(&session_id)
                     .await
@@ -175,6 +207,13 @@ impl MeerkatMachine {
                     .existing_session_visible_runtime_state(&session_id)
                     .await
                     .unwrap_or(RuntimeState::Destroyed);
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input.id(),
+                    runtime_state = ?state,
+                    visible_state = ?visible_state,
+                    "MeerkatMachine::AcceptWithCompletion read runtime state"
+                );
                 Self::reject_visible_terminal_ingress(visible_state)?;
 
                 let active_turn_boundary_available = Self::observe_active_turn_boundary_available(

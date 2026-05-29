@@ -16,6 +16,7 @@ struct RuntimeLifecycleRecoveryObservation {
     fence_token: Option<u64>,
     runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
     runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
+    recovered_from_snapshot: bool,
 }
 
 impl RuntimeLifecycleRecoveryObservation {
@@ -27,6 +28,7 @@ impl RuntimeLifecycleRecoveryObservation {
                 fence_token: None,
                 runtime_generation: None,
                 runtime_epoch_id: None,
+                recovered_from_snapshot: false,
             };
         };
         let binding = snapshot.binding();
@@ -42,8 +44,38 @@ impl RuntimeLifecycleRecoveryObservation {
             runtime_epoch_id: binding
                 .runtime_epoch_id()
                 .map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
+            recovered_from_snapshot: true,
         }
     }
+
+    fn requires_observed_recovery(&self) -> bool {
+        self.recovered_from_snapshot
+            && (self.runtime_state != RuntimeState::Idle
+                || self.agent_runtime_id.is_some()
+                || self.fence_token.is_some()
+                || self.runtime_generation.is_some()
+                || self.runtime_epoch_id.is_some())
+    }
+}
+
+fn fresh_registered_runtime_authority(
+    session_id: &SessionId,
+    context: &'static str,
+) -> Result<crate::meerkat_machine::dsl::MeerkatMachineAuthority, RuntimeDriverError> {
+    let mut authority = super::dsl_authority::new_initialized_authority(context);
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+        },
+    )
+    .map_err(|err| {
+        RuntimeDriverError::Internal(super::dsl_authority::map_error(
+            err,
+            "fresh session registration",
+        ))
+    })?;
+    Ok(authority)
 }
 
 fn runtime_ops_lifecycle_durability_authority_from_effects(
@@ -163,9 +195,205 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
     ) -> Result<bool, RuntimeDriverError> {
+        let storeless = self.store.is_none();
+        tracing::debug!(%session_id, storeless, "MeerkatMachine::register_session_inner start");
+        #[cfg(target_arch = "wasm32")]
+        if storeless {
+            {
+                tracing::debug!(%session_id, "MeerkatMachine::register_session_inner attempting storeless existing check lock");
+                let mut sessions = self.sessions.try_write().map_err(|_| {
+                    tracing::warn!(
+                        %session_id,
+                        "storeless session map busy while checking existing registration"
+                    );
+                    RuntimeDriverError::Internal(format!(
+                        "storeless session map busy while registering {session_id}"
+                    ))
+                })?;
+                tracing::debug!(%session_id, "MeerkatMachine::register_session_inner locked storeless existing check");
+                if let Some(existing) = sessions.get_mut(&session_id) {
+                    tracing::debug!(
+                        %session_id,
+                        "MeerkatMachine::register_session_inner found existing session"
+                    );
+                    if existing.clear_dead_attachment() {
+                        existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                            ))
+                        })?;
+                    }
+                    return Ok(false);
+                }
+            }
+            return self.register_storeless_session_inner_sync_build_step(session_id);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if storeless {
+            return Box::pin(self.register_storeless_session_inner(session_id)).await;
+        }
+        Box::pin(self.register_session_inner_impl(session_id)).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline(never)]
+    #[allow(dead_code)]
+    fn register_storeless_session_inner_sync(
+        &self,
+        session_id: SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        tracing::debug!(%session_id, "MeerkatMachine::register_storeless_session_inner_sync start");
+        {
+            tracing::debug!(%session_id, "MeerkatMachine::register_storeless_session_inner_sync attempting existing check lock");
+            let mut sessions = self.sessions.try_write().map_err(|_| {
+                tracing::warn!(
+                    %session_id,
+                    "storeless session map busy while checking existing registration"
+                );
+                RuntimeDriverError::Internal(format!(
+                    "storeless session map busy while registering {session_id}"
+                ))
+            })?;
+            tracing::debug!(%session_id, "MeerkatMachine::register_storeless_session_inner_sync locked existing check");
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                tracing::debug!(
+                    %session_id,
+                    "MeerkatMachine::register_session_inner found existing session"
+                );
+                if existing.clear_dead_attachment() {
+                    existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                        RuntimeDriverError::Internal(format!(
+                            "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                        ))
+                    })?;
+                }
+                return Ok(false);
+            }
+        }
+        self.register_storeless_session_inner_sync_build_step(session_id)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline(never)]
+    pub(super) fn register_storeless_session_inner_sync_build_step(
+        &self,
+        session_id: SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let (runtime_id, session_entry) = self.make_storeless_session_entry_sync(&session_id)?;
+        self.insert_storeless_session_sync(session_id, runtime_id, session_entry)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline(never)]
+    fn make_storeless_session_entry_sync(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(LogicalRuntimeId, RuntimeSessionEntry), RuntimeDriverError> {
+        let runtime_id = Self::logical_runtime_id(session_id);
+        let recovered_authority =
+            fresh_registered_runtime_authority(session_id, "fresh storeless session registration")?;
+        let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
+        let entry = self.make_driver(
+            runtime_id.clone(),
+            Arc::clone(&dsl_authority),
+            RuntimeState::Idle,
+        );
+        let control_projection = entry.control_projection_handle();
+        let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
+        let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
+        tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+        let session_entry = RuntimeSessionEntry {
+            runtime_id: runtime_id.clone(),
+            mutation_gate: Arc::new(Mutex::new(())),
+            control_projection,
+            driver: Arc::new(Mutex::new(entry)),
+            ops_lifecycle,
+            epoch_id,
+            cursor_state,
+            completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
+            tool_visibility_owner,
+            attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+            provisional_interrupt_handle: None,
+            dsl_authority,
+            drain_slot: CommsDrainSlot::new(),
+        };
+        Ok((runtime_id, session_entry))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline(never)]
+    fn insert_storeless_session_sync(
+        &self,
+        session_id: SessionId,
+        runtime_id: LogicalRuntimeId,
+        session_entry: RuntimeSessionEntry,
+    ) -> Result<bool, RuntimeDriverError> {
+        let mut sessions = self.sessions.try_write().map_err(|_| {
+            tracing::warn!(
+                %session_id,
+                "storeless session map busy while inserting registration"
+            );
+            RuntimeDriverError::Internal(format!(
+                "storeless session map busy while inserting {session_id}"
+            ))
+        })?;
+        tracing::debug!(%session_id, "MeerkatMachine::register_storeless_session_inner_sync locked insert");
+        if let Some(existing) = sessions.get_mut(&session_id) {
+            if existing.clear_dead_attachment() {
+                existing
+                    .stage_generated_executor_exit_observation()
+                    .map_err(|reason| {
+                        RuntimeDriverError::Internal(format!(
+                            "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                        ))
+                    })?;
+            }
+            Ok(false)
+        } else {
+            sessions.insert(session_id, session_entry);
+            tracing::debug!(
+                %runtime_id,
+                "MeerkatMachine::register_session_inner inserted storeless session"
+            );
+            Ok(true)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn register_storeless_session_inner(
+        &self,
+        session_id: SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut sessions = self.sessions.try_write().map_err(|_| {
+                RuntimeDriverError::Internal(format!(
+                    "storeless session map busy while registering {session_id}"
+                ))
+            })?;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                tracing::debug!(
+                    %session_id,
+                    "MeerkatMachine::register_session_inner found existing session"
+                );
+                if existing.clear_dead_attachment() {
+                    existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                        RuntimeDriverError::Internal(format!(
+                            "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                        ))
+                    })?;
+                }
+                return Ok(false);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         {
             let mut sessions = self.sessions.write().await;
             if let Some(existing) = sessions.get_mut(&session_id) {
+                tracing::debug!(
+                    %session_id,
+                    "MeerkatMachine::register_session_inner found existing session"
+                );
                 if existing.clear_dead_attachment() {
                     existing.stage_generated_executor_exit_observation().map_err(|reason| {
                         RuntimeDriverError::Internal(format!(
@@ -178,11 +406,136 @@ impl MeerkatMachine {
         }
 
         let runtime_id = Self::logical_runtime_id(&session_id);
+        let recovered_authority = fresh_registered_runtime_authority(
+            &session_id,
+            "fresh storeless session registration",
+        )?;
+        let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
+        let mut entry = self.make_driver(
+            runtime_id.clone(),
+            Arc::clone(&dsl_authority),
+            RuntimeState::Idle,
+        );
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner recovering storeless driver"
+        );
+        if let Err(err) = entry.as_driver_mut().recover().await {
+            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
+            return Err(err);
+        }
+        let control_projection = entry.control_projection_handle();
+
+        let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
+        let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
+        tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+        let session_entry = RuntimeSessionEntry {
+            runtime_id: runtime_id.clone(),
+            mutation_gate: Arc::new(Mutex::new(())),
+            control_projection,
+            driver: Arc::new(Mutex::new(entry)),
+            ops_lifecycle,
+            epoch_id,
+            cursor_state,
+            completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
+            tool_visibility_owner,
+            attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+            provisional_interrupt_handle: None,
+            dsl_authority,
+            drain_slot: CommsDrainSlot::new(),
+        };
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut sessions = self.sessions.try_write().map_err(|_| {
+                RuntimeDriverError::Internal(format!(
+                    "storeless session map busy while inserting {session_id}"
+                ))
+            })?;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                if existing.clear_dead_attachment() {
+                    existing
+                        .stage_generated_executor_exit_observation()
+                        .map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                            ))
+                        })?;
+                }
+                Ok(false)
+            } else {
+                sessions.insert(session_id, session_entry);
+                tracing::debug!(
+                    %runtime_id,
+                    "MeerkatMachine::register_session_inner inserted storeless session"
+                );
+                Ok(true)
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                if existing.clear_dead_attachment() {
+                    existing
+                        .stage_generated_executor_exit_observation()
+                        .map_err(|reason| {
+                            RuntimeDriverError::Internal(format!(
+                                "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                            ))
+                        })?;
+                }
+                Ok(false)
+            } else {
+                sessions.insert(session_id, session_entry);
+                tracing::debug!(
+                    %runtime_id,
+                    "MeerkatMachine::register_session_inner inserted storeless session"
+                );
+                Ok(true)
+            }
+        }
+    }
+
+    async fn register_session_inner_impl(
+        &self,
+        session_id: SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                tracing::debug!(
+                    %session_id,
+                    "MeerkatMachine::register_session_inner found existing session"
+                );
+                if existing.clear_dead_attachment() {
+                    existing.stage_generated_executor_exit_observation().map_err(|reason| {
+                        RuntimeDriverError::Internal(format!(
+                            "generated MeerkatMachine rejected executor-exit observation: {reason}"
+                        ))
+                    })?;
+                }
+                return Ok(false);
+            }
+        }
+
+        let runtime_id = Self::logical_runtime_id(&session_id);
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner loading durable lifecycle"
+        );
         let recovery_observation = RuntimeLifecycleRecoveryObservation::from_snapshot(
             self.durable_lifecycle_for_registration(&runtime_id).await?,
         );
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner loaded durable lifecycle"
+        );
         let initial_runtime_state = recovery_observation.runtime_state;
-        let dsl_authority = Arc::new(std::sync::Mutex::new(
+        let requires_observed_recovery = recovery_observation.requires_observed_recovery();
+        let recovered_authority = if requires_observed_recovery {
             super::dsl_authority::recover_authority_from_runtime_observation(
                 &session_id,
                 initial_runtime_state,
@@ -199,22 +552,57 @@ impl MeerkatMachine {
                     err,
                     "session registration DSL recovery",
                 ))
-            })?,
-        ));
+            })?
+        } else {
+            fresh_registered_runtime_authority(&session_id, "fresh session registration")?
+        };
+        let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            ?initial_runtime_state,
+            "MeerkatMachine::register_session_inner recovered authority"
+        );
         let mut entry = self.make_driver(
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
             initial_runtime_state,
         );
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner recovering driver"
+        );
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return Err(err);
         }
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner recovered driver"
+        );
         let control_projection = entry.control_projection_handle();
 
-        let (ops_lifecycle, epoch_id, cursor_state) = self
-            .recover_or_create_ops_state(&session_id, &runtime_id)
-            .await?;
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner recovering ops state"
+        );
+        let (ops_lifecycle, epoch_id, cursor_state) = if self.store.is_some()
+            || (requires_observed_recovery && initial_runtime_state != RuntimeState::Idle)
+        {
+            self.recover_or_create_ops_state(&session_id, &runtime_id)
+                .await?
+        } else {
+            Self::fresh_ops_state()
+        };
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            %epoch_id,
+            "MeerkatMachine::register_session_inner recovered ops state"
+        );
 
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
         // Bind the DSL authority into the visibility owner so its staging
@@ -222,7 +610,7 @@ impl MeerkatMachine {
         // `next_staged_visibility_revision` (dogma round 4, wave 2b #12).
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let session_entry = RuntimeSessionEntry {
-            runtime_id,
+            runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
@@ -236,8 +624,18 @@ impl MeerkatMachine {
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
         };
+        tracing::debug!(
+            %session_id,
+            %runtime_id,
+            "MeerkatMachine::register_session_inner inserting session"
+        );
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
+            tracing::debug!(
+                %session_id,
+                %runtime_id,
+                "MeerkatMachine::register_session_inner found existing session before insert"
+            );
             if existing.clear_dead_attachment() {
                 existing
                     .stage_generated_executor_exit_observation()
@@ -250,6 +648,10 @@ impl MeerkatMachine {
             Ok(false)
         } else {
             sessions.insert(session_id, session_entry);
+            tracing::debug!(
+                %runtime_id,
+                "MeerkatMachine::register_session_inner inserted session"
+            );
             Ok(true)
         }
     }
@@ -489,7 +891,8 @@ impl MeerkatMachine {
                     }
                 };
             let initial_runtime_state = recovery_observation.runtime_state;
-            let dsl_authority =
+            let requires_observed_recovery = recovery_observation.requires_observed_recovery();
+            let recovered_authority = if requires_observed_recovery {
                 match super::dsl_authority::recover_authority_from_runtime_observation(
                     &session_id,
                     initial_runtime_state,
@@ -501,7 +904,7 @@ impl MeerkatMachine {
                     recovery_observation.runtime_generation,
                     recovery_observation.runtime_epoch_id,
                 ) {
-                    Ok(authority) => Arc::new(std::sync::Mutex::new(authority)),
+                    Ok(authority) => authority,
                     Err(err) => {
                         let mapped =
                             super::dsl_authority::map_error(err, "session recovery DSL recovery");
@@ -512,7 +915,11 @@ impl MeerkatMachine {
                         );
                         return Err(RuntimeDriverError::Internal(mapped));
                     }
-                };
+                }
+            } else {
+                fresh_registered_runtime_authority(&session_id, "fresh executor registration")?
+            };
+            let dsl_authority = Arc::new(std::sync::Mutex::new(recovered_authority));
             let mut recovered_entry = self.make_driver(
                 runtime_id.clone(),
                 Arc::clone(&dsl_authority),
@@ -528,19 +935,25 @@ impl MeerkatMachine {
             }
             // Recover ops state OUTSIDE the sessions lock to avoid blocking
             // other adapter operations behind potentially slow disk I/O.
-            let (recovered_ops, recovered_epoch, recovered_cursors) = match self
-                .recover_or_create_ops_state(&session_id, &runtime_id)
-                .await
+            let (recovered_ops, recovered_epoch, recovered_cursors) = if self.store.is_some()
+                || (requires_observed_recovery && initial_runtime_state != RuntimeState::Idle)
             {
-                Ok(recovered) => recovered,
-                Err(err) => {
-                    tracing::error!(
-                        %session_id,
-                        error = %err,
-                        "failed to recover ops lifecycle during executor registration"
-                    );
-                    return Err(err);
+                match self
+                    .recover_or_create_ops_state(&session_id, &runtime_id)
+                    .await
+                {
+                    Ok(recovered) => recovered,
+                    Err(err) => {
+                        tracing::error!(
+                            %session_id,
+                            error = %err,
+                            "failed to recover ops lifecycle during executor registration"
+                        );
+                        return Err(err);
+                    }
                 }
+            } else {
+                Self::fresh_ops_state()
             };
 
             let mutation_gate = Arc::new(Mutex::new(()));
@@ -781,14 +1194,7 @@ impl MeerkatMachine {
     /// Detaches the executor (Attached → Idle) before removal, then drops
     /// the wake channel sender, which causes the RuntimeLoop to exit.
     pub async fn unregister_session(&self, session_id: &SessionId) {
-        let _ = self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::UnregisterSession {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await;
+        self.unregister_session_inner(session_id).await;
     }
 
     async fn stage_unregister_session_authority(
@@ -835,18 +1241,25 @@ impl MeerkatMachine {
                 },
             )
         };
-        let durability_effects = self
-            .preview_session_dsl_input(
+        let authority = if self.store.is_some() {
+            let durability_effects = self
+                .preview_session_dsl_input(
+                    session_id,
+                    durability_input,
+                    "ResolveRuntimeOpsLifecycleDurability",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            runtime_ops_lifecycle_durability_authority_from_effects(
                 session_id,
-                durability_input,
-                "ResolveRuntimeOpsLifecycleDurability",
-            )
-            .await
-            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-        let authority = runtime_ops_lifecycle_durability_authority_from_effects(
-            session_id,
-            &durability_effects,
-        )?;
+                &durability_effects,
+            )?
+        } else {
+            RuntimeOpsLifecycleDurabilityAuthority {
+                action:
+                    crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
+            }
+        };
         let staged = self
             .stage_session_dsl_transition(session_id, unregister_input, "UnregisterSession")
             .await
@@ -890,16 +1303,19 @@ impl MeerkatMachine {
     }
 
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner start");
         let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner no mutation gate");
             return;
         };
-        self.unregister_session_inner_locked(session_id).await;
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner locked mutation gate");
+        Box::pin(self.unregister_session_inner_locked(session_id)).await;
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner complete");
     }
 
     pub(super) async fn unregister_session_inner_locked(&self, session_id: &SessionId) {
-        if let Err(err) = self
-            .unregister_session_inner_locked_authorized(session_id)
-            .await
+        if let Err(err) =
+            Box::pin(self.unregister_session_inner_locked_authorized(session_id)).await
         {
             tracing::warn!(
                 %session_id,
@@ -913,6 +1329,7 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized start");
         let driver_handle = {
             let sessions = self.sessions.read().await;
             sessions
@@ -922,16 +1339,20 @@ impl MeerkatMachine {
                     state: RuntimeState::Destroyed,
                 })?
         };
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized resolving completion authority");
         let runtime_terminated_completion_authority =
             crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
                 &driver_handle,
             )
             .await?;
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized staging unregister");
         let (staged, durability_authority) =
             self.stage_unregister_session_authority(session_id).await?;
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committing unregister");
         self.commit_session_dsl_transition(session_id, staged, "UnregisterSession")
             .await
             .map_err(RuntimeDriverError::Internal)?;
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committed unregister");
         if durability_authority.action
             == crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
         {
@@ -941,6 +1362,7 @@ impl MeerkatMachine {
                 .persist_current_machine_lifecycle("unregister")
                 .await?;
         }
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized removing entry");
         let entry = {
             let mut sessions = self.sessions.write().await;
             // Abort the drain slot inline before removing the entry — the
@@ -954,6 +1376,7 @@ impl MeerkatMachine {
         };
 
         if let Some(entry) = entry {
+            tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing entry");
             self.finalize_unregistered_session(
                 entry,
                 durability_authority,
@@ -961,27 +1384,79 @@ impl MeerkatMachine {
             )
             .await;
         }
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized complete");
         Ok(())
     }
 
     /// Check whether a runtime driver is already registered for a session.
     pub async fn contains_session(&self, session_id: &SessionId) -> bool {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::ContainsSession {
-                    session_id: session_id.clone(),
-                },
+        self.sessions.read().await.contains_key(session_id)
+    }
+
+    /// Drop an in-memory, storeless WASM session entry after generated runtime
+    /// authority has already terminalized it.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn discard_terminal_storeless_session(&self, session_id: &SessionId) -> bool {
+        if self.store.is_some() {
+            return false;
+        }
+        let Some(snapshot) = self.meerkat_machine_archive_snapshot(session_id).await else {
+            return false;
+        };
+        if !matches!(
+            snapshot.control.phase,
+            RuntimeState::Retired | RuntimeState::Stopped
+        ) || !snapshot.queue.is_empty()
+            || !snapshot.steer_queue.is_empty()
+        {
+            return false;
+        }
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return false;
+        };
+        let driver_handle = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return false;
+            };
+            Arc::clone(&entry.driver)
+        };
+        let runtime_terminated_completion_authority =
+            match crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
+                &driver_handle,
             )
             .await
-        {
-            Ok(MeerkatMachineCommandResult::Bool(present)) => present,
-            Ok(_) => {
-                tracing::error!("contains_session: unexpected command result variant");
-                false
+            {
+                Ok(authority) => authority,
+                Err(err) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %err,
+                        "failed to resolve terminal completion authority for storeless WASM session discard"
+                    );
+                    return false;
+                }
+            };
+        let entry = {
+            let mut sessions = self.sessions.write().await;
+            if let Some(entry) = sessions.get_mut(session_id) {
+                abort_slot(&mut entry.drain_slot);
             }
-            Err(_) => false,
-        }
+            sessions.remove(session_id)
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        self.finalize_unregistered_session(
+            entry,
+            RuntimeOpsLifecycleDurabilityAuthority {
+                action:
+                    crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
+            },
+            runtime_terminated_completion_authority,
+        )
+        .await;
+        true
     }
 
     /// Check whether a session has an active RuntimeLoop or attachment in

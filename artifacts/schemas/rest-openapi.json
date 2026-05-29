@@ -8829,11 +8829,7 @@
             "uniqueItems": true
           },
           "machine_state": {
-            "description": "Catalog-generated WorkGraphLifecycleMachine state projection with generated machine identity and schema version.",
-            "required": [
-              "machine",
-              "schema_version"
-            ],
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
             "type": "object"
           },
           "namespace": {

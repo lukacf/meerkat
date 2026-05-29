@@ -10201,22 +10201,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -10261,14 +10245,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -10278,6 +10255,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"

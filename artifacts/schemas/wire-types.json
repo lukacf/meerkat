@@ -24282,22 +24282,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -24342,14 +24326,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -24359,6 +24336,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -30423,7 +30401,7 @@
             "type": "object"
           },
           {
-            "description": "Provider emitted an assistant **spoken-transcript** delta for an\noutput item — text derived from audio output (e.g. OpenAI realtime\n`response.output_audio_transcript.delta`).\n\nIdentity shape mirrors [`Self::AssistantTextDelta`] so the session's\nidempotent ordering / staging logic owns dedup uniformly across\nlanes. Materializes as [`crate::types::AssistantBlock::Transcript`]\nwith `source: TranscriptSource::Spoken` (T9/T10).",
+            "description": "Provider emitted an assistant **spoken-transcript** delta for an\noutput item — text derived from audio output (e.g. OpenAI realtime\n`response.output_audio_transcript.delta`).\n\nIdentity shape mirrors [`Self::AssistantTextDelta`] so generated\nidempotent ordering / staging authority owns dedup uniformly across\nlanes. Materializes as [`crate::types::AssistantBlock::Transcript`]\nwith `source: TranscriptSource::Spoken` (T9/T10).",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -38614,22 +38592,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -38674,14 +38636,7 @@
             "type": "string"
           },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -38691,6 +38646,7 @@
           "operation",
           "target",
           "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -41666,11 +41622,7 @@
             "uniqueItems": true
           },
           "machine_state": {
-            "description": "Catalog-generated WorkGraphLifecycleMachine state projection with generated machine identity and schema version.",
-            "required": [
-              "machine",
-              "schema_version"
-            ],
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
             "type": "object"
           },
           "namespace": {
@@ -42283,11 +42235,7 @@
             "uniqueItems": true
           },
           "machine_state": {
-            "description": "Catalog-generated WorkGraphLifecycleMachine state projection with generated machine identity and schema version.",
-            "required": [
-              "machine",
-              "schema_version"
-            ],
+            "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
             "type": "object"
           },
           "namespace": {
@@ -42717,11 +42665,7 @@
         "uniqueItems": true
       },
       "machine_state": {
-        "description": "Catalog-generated WorkGraphLifecycleMachine state projection with generated machine identity and schema version.",
-        "required": [
-          "machine",
-          "schema_version"
-        ],
+        "description": "Catalog-generated WorkGraphLifecycleMachine state projection.",
         "type": "object"
       },
       "namespace": {

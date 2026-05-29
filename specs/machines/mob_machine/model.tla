@@ -5,6 +5,9 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, DependencyModeValues, EventSubscriptionRejectReasonKindValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, FenceTokenValues, FlowFrameReducerCommandKindValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, KickoffIntentValues, KickoffPhaseValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberLifecycleKindValues, MemberPeerEndpointValues, MemberWaitClassificationKindValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberStateValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, PeerIdValues, PeerSigningKeyValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, RunIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfExternalPeerEdgeValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnPolicyRuntimeModeValues, StepIdValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorProtocolVersionValues, WiringEdgeValues, WiringLifecycleKindValues, WorkIdValues, WorkOriginValues
 
+None == [tag |-> "none", value |-> "none"]
+Some(v) == [tag |-> "some", value |-> v]
+
 ExternalPeerEdgeValuesCi == {}
 ExternalPeerKeyValuesCi == {}
 MemberPeerEndpointValuesCi == {}
@@ -16,9 +19,6 @@ ExternalPeerKeyValuesDeep == {[local |-> "agentidentity_1", name |-> "peername_1
 MemberPeerEndpointValuesDeep == {[name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"], [name |-> "peername_2", peer_id |-> "peerid_2", address |-> "peeraddress_2", signing_key |-> "peersigningkey_2"]}
 SetOfExternalPeerEdgeValuesDeep == {{}, {[local |-> "agentidentity_1", endpoint |-> [name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"]]}, {[local |-> "agentidentity_1", endpoint |-> [name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"]], [local |-> "agentidentity_2", endpoint |-> [name |-> "peername_2", peer_id |-> "peerid_2", address |-> "peeraddress_2", signing_key |-> "peersigningkey_2"]]}}
 SetOfMemberPeerEndpointValuesDeep == {{}, {[name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"]}, {[name |-> "peername_1", peer_id |-> "peerid_1", address |-> "peeraddress_1", signing_key |-> "peersigningkey_1"], [name |-> "peername_2", peer_id |-> "peerid_2", address |-> "peeraddress_2", signing_key |-> "peersigningkey_2"]}}
-
-None == [tag |-> "none", value |-> "none"]
-Some(v) == [tag |-> "some", value |-> v]
 
 MapAgentIdentityAgentRuntimeIdValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in AgentIdentityValues, v \in AgentRuntimeIdValues }
 MapAgentIdentityBoolValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in AgentIdentityValues, v \in BOOLEAN }

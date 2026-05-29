@@ -481,14 +481,24 @@ impl SmokeScheduler {
                         format!("mob-suite scheduler closed for {}", run_label(spec))
                     })?)
                 }
-                SmokeRuntimeClass::Standard => None,
+                SmokeRuntimeClass::Browser | SmokeRuntimeClass::Standard => None,
             };
-        let global = self.global.clone().acquire_owned().await.map_err(|_| {
-            format!(
-                "e2e smoke scheduler closed before starting {}",
-                run_label(spec)
-            )
-        })?;
+        let global_permits = if matches!(class, SmokeRuntimeClass::Browser) {
+            self.jobs
+        } else {
+            1
+        };
+        let global = self
+            .global
+            .clone()
+            .acquire_many_owned(u32::try_from(global_permits).unwrap_or(u32::MAX))
+            .await
+            .map_err(|_| {
+                format!(
+                    "e2e smoke scheduler closed before starting {}",
+                    run_label(spec)
+                )
+            })?;
         eprintln!(
             "e2e smoke scheduler dispatch: {} [{class:?}]",
             run_label(spec)
@@ -510,10 +520,14 @@ enum SmokeRuntimeClass {
     Standard,
     Media,
     MobSuite,
+    Browser,
 }
 
 fn smoke_runtime_class(spec: &Spec) -> SmokeRuntimeClass {
     let label = run_label(spec).to_ascii_lowercase();
+    if label.contains("browser ") {
+        return SmokeRuntimeClass::Browser;
+    }
     if label.contains("mob flow runtime") || label.contains("partial resume collaborative joke") {
         return SmokeRuntimeClass::MobSuite;
     }
@@ -565,6 +579,7 @@ fn smoke_runtime_priority(spec: &Spec) -> u16 {
         SmokeRuntimeClass::Media => 500,
         SmokeRuntimeClass::MobSuite => 400,
         SmokeRuntimeClass::Standard => 100,
+        SmokeRuntimeClass::Browser => 50,
     }
 }
 
@@ -2187,7 +2202,11 @@ fn bazel_rust_test_path(
         "meerkat-integration-tests:smoke_shared_realm" => {
             "tests/integration/smoke_shared_realm_test"
         }
+        "meerkat-comms:e2e" => "meerkat-comms/e2e_test",
         "meerkat-mob:smoke_mob_flow_runtime" => "meerkat-mob/smoke_mob_flow_runtime_test",
+        "meerkat-mob:smoke_mob_generated_image_comms" => {
+            "meerkat-mob/smoke_mob_generated_image_comms_test"
+        }
         "meerkat-mob:smoke_mob_pictionary" => "meerkat-mob/smoke_mob_pictionary_test",
         "meerkat-mob:smoke_mob_resume" => "meerkat-mob/smoke_mob_resume_test",
         "meerkat-rpc:live_smoke_rpc" => "meerkat-rpc/live_smoke_rpc_test",
@@ -5085,6 +5104,10 @@ mod tests {
         assert_eq!(
             smoke_runtime_class(scenario_spec(81).unwrap()),
             SmokeRuntimeClass::Media
+        );
+        assert_eq!(
+            smoke_runtime_class(scenario_spec(48).unwrap()),
+            SmokeRuntimeClass::Browser
         );
         assert_eq!(
             smoke_runtime_class(suite_spec("rpc-dynamic-tool-pickup").unwrap()),

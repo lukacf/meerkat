@@ -5,6 +5,9 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkAttentionBindingKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
+None == [tag |-> "none", value |-> "none"]
+Some(v) == [tag |-> "some", value |-> v]
+
 SetOfWorkDependencyPathKeyValuesCi == {{}}
 SetOfWorkEdgeKeyValuesCi == {{}}
 WorkDependencyPathKeyValuesCi == {}
@@ -22,9 +25,6 @@ SetOfWorkEdgeKeyValuesWitnessclose_stops_attention_route == {{}, {[kind |-> "Blo
 WorkDependencyPathKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkEdgeKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
-
-None == [tag |-> "none", value |-> "none"]
-Some(v) == [tag |-> "some", value |-> v]
 
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 OptionWorkAttentionBindingKeyValues == {None} \cup {Some(x) : x \in WorkAttentionBindingKeyValues}

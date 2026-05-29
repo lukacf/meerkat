@@ -507,6 +507,9 @@ pub fn run_boundary_snapshot_save_guard(
     match append_only_save_guard(incoming, previous) {
         Ok(()) => Ok(()),
         Err(append_error) => {
+            if run_boundary_commitless_history_projection_save_guard(incoming, previous)? {
+                return Ok(());
+            }
             let Some(previous) = previous else {
                 return Err(append_error);
             };
@@ -527,11 +530,24 @@ pub fn run_boundary_snapshot_save_guard(
                 previous,
                 &incoming_revision,
             )?;
+            if commits.is_none()
+                && run_boundary_context_summary_tail_projection_save_guard(
+                    incoming, previous, &state,
+                )?
+            {
+                return Ok(());
+            }
             let Some(commits) = commits else {
                 return Err(append_error);
             };
             let Some(commit) = commits.first() else {
-                return Err(append_error);
+                if state.commits.is_empty() {
+                    return Err(append_error);
+                }
+                for commit in &state.commits {
+                    validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
+                }
+                return Ok(());
             };
             transcript_rewrite_bridge_save_guard(incoming, commit, &state, &incoming_revision)?;
             for commit in commits.iter().skip(1) {
@@ -540,6 +556,111 @@ pub fn run_boundary_snapshot_save_guard(
             Ok(())
         }
     }
+}
+
+fn run_boundary_commitless_history_projection_save_guard(
+    incoming: &Session,
+    previous: Option<&Session>,
+) -> Result<bool, SessionStoreError> {
+    let Some(state) = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?
+    else {
+        return Ok(false);
+    };
+    if !state.commits.is_empty() {
+        return Ok(false);
+    }
+
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    if state.head != incoming_revision
+        || !state
+            .revisions
+            .iter()
+            .any(|body| body.revision == incoming_revision)
+    {
+        return Ok(false);
+    }
+
+    let mut projection_without_history = incoming.clone();
+    projection_without_history.clear_transcript_history_state();
+    if append_only_save_guard(&projection_without_history, previous).is_err() {
+        return Ok(false);
+    }
+
+    let Some(previous) = previous else {
+        return Ok(state.commits.is_empty());
+    };
+    if previous
+        .transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("previous transcript history state is malformed: {err}"),
+        })?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    let previous_revision =
+        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
+    Ok(incoming_revision == previous_revision
+        || transcript_history_revision_extends(&state, &incoming_revision, &previous_revision))
+}
+
+fn run_boundary_context_summary_tail_projection_save_guard(
+    incoming: &Session,
+    previous: &Session,
+    state: &TranscriptHistoryState,
+) -> Result<bool, SessionStoreError> {
+    if state.commits.is_empty() {
+        return Ok(false);
+    }
+    incoming
+        .validate_transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?;
+
+    let (incoming_system, incoming_tail) = match incoming.messages().split_first() {
+        Some((Message::System(system), tail)) => (Some(system), tail),
+        _ => (None, incoming.messages()),
+    };
+    let (previous_system, previous_tail) = match previous.messages().split_first() {
+        Some((Message::System(system), tail)) => (Some(system), tail),
+        _ => (None, previous.messages()),
+    };
+    if incoming_system.is_some() != previous_system.is_some()
+        || incoming_tail.len() <= previous_tail.len()
+    {
+        return Ok(false);
+    }
+    let Some(Message::User(summary)) = incoming_tail.first() else {
+        return Ok(false);
+    };
+    if !summary.text_content().starts_with("[Context compacted]") {
+        return Ok(false);
+    }
+
+    let retained_end = 1 + previous_tail.len();
+    let retained = &incoming_tail[1..retained_end];
+    let retained_revision =
+        transcript_messages_digest(retained).map_err(SessionStoreError::from)?;
+    let previous_revision =
+        transcript_messages_digest(previous_tail).map_err(SessionStoreError::from)?;
+    if retained_revision != previous_revision {
+        return Ok(false);
+    }
+
+    for commit in &state.commits {
+        validate_transcript_rewrite_commit_bodies(incoming, commit, state)?;
+    }
+    Ok(true)
 }
 
 /// Find the rewrite commit that authorizes replacing `previous_revision`,
@@ -1701,6 +1822,151 @@ mod tests {
     }
 
     #[test]
+    fn run_boundary_guard_accepts_commitless_history_seed_on_plain_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("persisted".to_string())));
+        let previous_revision = previous.transcript_revision()?;
+
+        let mut incoming = previous.clone();
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![
+                    crate::TranscriptRevisionBody {
+                        revision: previous_revision.clone(),
+                        parent_revision: None,
+                        messages: previous.messages().to_vec(),
+                        created_at: previous.updated_at(),
+                    },
+                    crate::TranscriptRevisionBody {
+                        revision: incoming_revision,
+                        parent_revision: Some(previous_revision),
+                        messages: incoming.messages().to_vec(),
+                        created_at: incoming.updated_at(),
+                    },
+                ],
+            })?,
+        );
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_retained_history_seed_on_plain_append()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut original = Session::new();
+        original.push(Message::User(UserMessage::text("verbose seed".to_string())));
+        let original_revision = original.transcript_revision()?;
+
+        let mut previous = original.clone();
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "compacted seed".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(original_revision),
+        )?;
+        let previous_with_history = previous.clone();
+        previous.clear_transcript_history_state();
+
+        let mut incoming = previous_with_history;
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "plain append after retained history".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_commitless_history_seed_on_first_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut incoming = Session::new();
+        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![crate::TranscriptRevisionBody {
+                    revision: incoming_revision,
+                    parent_revision: None,
+                    messages: incoming.messages().to_vec(),
+                    created_at: incoming.updated_at(),
+                }],
+            })?,
+        );
+
+        assert!(append_only_save_guard(&incoming, None).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_commitless_history_seed_on_initial_multi_revision_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut base = Session::new();
+        base.push(Message::User(UserMessage::text("first".to_string())));
+        let base_revision = base.transcript_revision()?;
+
+        let mut incoming = base.clone();
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "second".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let incoming_revision = incoming.transcript_revision()?;
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(TranscriptHistoryState {
+                head: incoming_revision.clone(),
+                commits: Vec::new(),
+                revisions: vec![
+                    crate::TranscriptRevisionBody {
+                        revision: base_revision.clone(),
+                        parent_revision: None,
+                        messages: base.messages().to_vec(),
+                        created_at: base.updated_at(),
+                    },
+                    crate::TranscriptRevisionBody {
+                        revision: incoming_revision,
+                        parent_revision: Some(base_revision),
+                        messages: incoming.messages().to_vec(),
+                        created_at: incoming.updated_at(),
+                    },
+                ],
+            })?,
+        );
+
+        assert!(append_only_save_guard(&incoming, None).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn append_only_guard_rejects_new_rewrite_commits_on_system_context_append()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
@@ -1799,6 +2065,57 @@ mod tests {
             append_only_save_guard(&incoming, Some(&previous)),
             Err(SessionStoreError::InvalidTranscriptRewrite { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_generated_context_summary_before_retained_tail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new(
+            "runtime system before context refresh",
+        )));
+        previous.push(Message::User(UserMessage::text(
+            "Turn 1 request".to_string(),
+        )));
+        previous.push(Message::Assistant(AssistantMessage {
+            content: "Turn 1 answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let mut incoming = Session::with_id(previous.id().clone());
+        incoming.push(Message::System(SystemMessage::new(
+            "runtime system after context refresh",
+        )));
+        incoming.push(Message::User(UserMessage::text(
+            "Verbose context that will be compacted".to_string(),
+        )));
+        for message in previous.messages()[1..].iter().cloned() {
+            incoming.push(message);
+        }
+        incoming.push(Message::Assistant(AssistantMessage {
+            content: "Turn 2 generated answer".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = incoming.transcript_revision()?;
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "[Context compacted] Earlier runtime context".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
         Ok(())
     }
 

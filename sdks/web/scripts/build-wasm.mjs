@@ -36,6 +36,13 @@ const BUILD_PROFILE = (() => {
     `invalid MEERKAT_WEB_WASM_PROFILE=${value}; expected release, dev, or profiling`,
   );
 })();
+const WASM_RUSTFLAGS = [
+  process.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS,
+  '--cfg getrandom_backend="wasm_js"',
+  "-C link-arg=-zstack-size=8388608",
+]
+  .filter(Boolean)
+  .join(" ");
 const RELEASE_CARGO_PROFILE_ENV =
   BUILD_PROFILE === "release"
     ? {
@@ -281,7 +288,7 @@ async function localCargoGraphInputs() {
 async function computeSourceHash() {
   const hash = createHash("sha256");
   hash.update("meerkat-web-runtime-wasm-v1\n");
-  hash.update(`rustflags=--cfg getrandom_backend="wasm_js"\n`);
+  hash.update(`rustflags=${WASM_RUSTFLAGS}\n`);
   hash.update(`profile=${BUILD_PROFILE}\n`);
   for (const [key, value] of Object.entries(RELEASE_CARGO_PROFILE_ENV).sort()) {
     hash.update(`${key}=${value}\n`);
@@ -347,7 +354,7 @@ async function run() {
           env: {
             ...process.env,
             ...RELEASE_CARGO_PROFILE_ENV,
-            RUSTFLAGS: '--cfg getrandom_backend="wasm_js"',
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: WASM_RUSTFLAGS,
           },
         },
       );

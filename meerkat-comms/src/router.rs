@@ -30,8 +30,10 @@ use crate::types::{Envelope, MessageKind};
 use meerkat_core::comms::{GeneratedCommsTrustAuthoritySourceKind, PeerId};
 
 type TrustSourceSet = std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>;
-type TrustSourceMap = std::collections::HashMap<PeerId, TrustSourceSet>;
-type TrustDescriptorMap = std::collections::HashMap<
+type PeerIdSet = std::collections::BTreeSet<PeerId>;
+type PubKeyPeerIdMap = std::collections::BTreeMap<crate::identity::PubKey, PeerId>;
+type TrustSourceMap = std::collections::BTreeMap<PeerId, TrustSourceSet>;
+type TrustDescriptorMap = std::collections::BTreeMap<
     PeerId,
     std::collections::BTreeMap<GeneratedCommsTrustAuthoritySourceKind, TrustedPeer>,
 >;
@@ -111,13 +113,13 @@ pub struct Router {
     /// signing pubkey. This preserves explicit `PeerId`s for descriptor
     /// registrations where the runtime owns a stable routing id in addition
     /// to the peer's signing key.
-    trusted_peer_ids: Arc<RwLock<std::collections::HashMap<crate::identity::PubKey, PeerId>>>,
+    trusted_peer_ids: Arc<RwLock<PubKeyPeerIdMap>>,
     /// Directory-filter side-channel for private (control-plane) trust
     /// edges. Membership here is additive to `trusted_peers`: the peer
     /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
     /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
     /// for the supervisor bridge in session-backed mob members.
-    private_peer_ids: Arc<RwLock<std::collections::HashSet<PeerId>>>,
+    private_peer_ids: Arc<RwLock<PeerIdSet>>,
     /// Mechanical projection of which generated source currently owns each
     /// trust row. Admission uses the union; generated removals are scoped to
     /// the source that authorized them.
@@ -156,13 +158,13 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(TrustedPeers::new())),
-            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
-            trusted_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            trusted_peer_ids: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            private_peer_ids: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+            trusted_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
-                std::collections::HashMap::new(),
+                std::collections::BTreeMap::new(),
             )),
-            private_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            private_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -181,13 +183,13 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
-            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
-            trusted_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            trusted_peer_ids: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            private_peer_ids: Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+            trusted_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             trusted_peer_descriptors_by_source: Arc::new(RwLock::new(
-                std::collections::HashMap::new(),
+                std::collections::BTreeMap::new(),
             )),
-            private_peer_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            private_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -202,7 +204,7 @@ impl Router {
             .contains(&peer_id_from_pubkey(pubkey))
     }
 
-    pub(crate) fn private_peer_ids(&self) -> std::collections::HashSet<PeerId> {
+    pub(crate) fn private_peer_ids(&self) -> PeerIdSet {
         self.private_peer_ids.read().clone()
     }
 

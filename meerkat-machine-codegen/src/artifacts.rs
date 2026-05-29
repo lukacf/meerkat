@@ -3921,6 +3921,11 @@ impl<'a> CompositionTlaCompiler<'a> {
             pushln!(&mut out);
         }
 
+        writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
+            .expect("write to string");
+        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
+        pushln!(&mut out);
+
         push_cfg_assignment_operator_definitions(
             &mut out,
             &constants,
@@ -3967,11 +3972,6 @@ impl<'a> CompositionTlaCompiler<'a> {
                 },
             );
         }
-
-        writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
-            .expect("write to string");
-        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
-        pushln!(&mut out);
         for (name, ty) in ordered_composite_domain_definitions(&constants) {
             let definition = match ty {
                 TypeRef::Seq(inner) => render_sequence_domain_definition(inner),
@@ -6423,6 +6423,10 @@ impl<'a> MachineTlaCompiler<'a> {
             pushln!(&mut out);
         }
 
+        pushln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]");
+        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
+        pushln!(&mut out);
+
         push_cfg_assignment_operator_definitions(
             &mut out,
             &constants,
@@ -6448,9 +6452,6 @@ impl<'a> MachineTlaCompiler<'a> {
             },
         );
 
-        pushln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]");
-        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
-        pushln!(&mut out);
         for (name, ty) in ordered_composite_domain_definitions(&constants) {
             let definition = match ty {
                 TypeRef::Seq(inner) => render_sequence_domain_definition(inner),

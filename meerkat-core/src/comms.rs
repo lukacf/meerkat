@@ -73,7 +73,10 @@ impl PeerId {
 
     /// Derive the canonical routing id for a 32-byte Ed25519 public key.
     pub fn from_ed25519_pubkey(pubkey: &[u8; 32]) -> Self {
-        Self(Uuid::new_v5(&PEER_ID_ED25519_PUBKEY_NAMESPACE, pubkey))
+        Self(uuid_v5_from_bytes(
+            &PEER_ID_ED25519_PUBKEY_NAMESPACE,
+            pubkey,
+        ))
     }
 
     /// Hyphenated UUID string form.
@@ -85,6 +88,96 @@ impl PeerId {
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0
     }
+}
+
+fn uuid_v5_from_bytes(namespace: &Uuid, name: &[u8]) -> Uuid {
+    let digest = sha1_digest_bytes(&[namespace.as_bytes(), name]);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn sha1_digest_bytes(parts: &[&[u8]]) -> [u8; 20] {
+    let total_len = parts.iter().map(|part| part.len()).sum::<usize>();
+    let mut message = Vec::with_capacity(((total_len + 9).div_ceil(64)) * 64);
+    for part in parts {
+        message.extend_from_slice(part);
+    }
+    let bit_len = (total_len as u64) * 8;
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut h0 = 0x6745_2301u32;
+    let mut h1 = 0xefcd_ab89u32;
+    let mut h2 = 0x98ba_dcfeu32;
+    let mut h3 = 0x1032_5476u32;
+    let mut h4 = 0xc3d2_e1f0u32;
+
+    for chunk in message.chunks_exact(64) {
+        let mut schedule = [0u32; 80];
+        for (word_index, word) in schedule.iter_mut().take(16).enumerate() {
+            let offset = word_index * 4;
+            *word = u32::from_be_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+        for word_index in 16..80 {
+            schedule[word_index] = (schedule[word_index - 3]
+                ^ schedule[word_index - 8]
+                ^ schedule[word_index - 14]
+                ^ schedule[word_index - 16])
+                .rotate_left(1);
+        }
+
+        let mut work_a = h0;
+        let mut work_b = h1;
+        let mut work_c = h2;
+        let mut work_d = h3;
+        let mut work_e = h4;
+
+        for (round_index, word) in schedule.iter().enumerate() {
+            let (round_function, round_constant) = match round_index {
+                0..=19 => ((work_b & work_c) | ((!work_b) & work_d), 0x5a82_7999),
+                20..=39 => (work_b ^ work_c ^ work_d, 0x6ed9_eba1),
+                40..=59 => (
+                    (work_b & work_c) | (work_b & work_d) | (work_c & work_d),
+                    0x8f1b_bcdc,
+                ),
+                _ => (work_b ^ work_c ^ work_d, 0xca62_c1d6),
+            };
+            let temp = work_a
+                .rotate_left(5)
+                .wrapping_add(round_function)
+                .wrapping_add(work_e)
+                .wrapping_add(round_constant)
+                .wrapping_add(*word);
+            work_e = work_d;
+            work_d = work_c;
+            work_c = work_b.rotate_left(30);
+            work_b = work_a;
+            work_a = temp;
+        }
+
+        h0 = h0.wrapping_add(work_a);
+        h1 = h1.wrapping_add(work_b);
+        h2 = h2.wrapping_add(work_c);
+        h3 = h3.wrapping_add(work_d);
+        h4 = h4.wrapping_add(work_e);
+    }
+
+    let mut digest = [0u8; 20];
+    for (offset, value) in [h0, h1, h2, h3, h4].into_iter().enumerate() {
+        digest[offset * 4..offset * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    digest
 }
 
 impl Default for PeerId {
@@ -1756,6 +1849,15 @@ pub enum SendAndStreamError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_id_pubkey_derivation_matches_uuid_v5() {
+        let pubkey = [42u8; 32];
+        assert_eq!(
+            PeerId::from_ed25519_pubkey(&pubkey).as_uuid(),
+            &Uuid::new_v5(&PEER_ID_ED25519_PUBKEY_NAMESPACE, &pubkey)
+        );
+    }
 
     #[test]
     fn peer_name_validation() {

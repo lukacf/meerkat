@@ -1,6 +1,6 @@
 //! Trust management for Meerkat comms.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -420,7 +420,7 @@ impl TrustedPeers {
 
     pub(crate) fn remove_all_by_resolved_peer_id(
         &mut self,
-        peer_ids: &HashMap<PubKey, PeerId>,
+        peer_ids: &BTreeMap<PubKey, PeerId>,
         peer_id: &PeerId,
     ) -> Vec<PubKey> {
         let mut removed_pubkeys = Vec::new();

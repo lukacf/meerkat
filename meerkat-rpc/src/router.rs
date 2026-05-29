@@ -727,6 +727,7 @@ async fn record_mob_stream_terminal_authority(
         })
 }
 
+#[cfg(feature = "mob")]
 async fn emit_authorized_mob_stream_terminal(
     notification_sink: &NotificationSink,
     active_mob_streams: &Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,

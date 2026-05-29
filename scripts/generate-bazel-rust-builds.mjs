@@ -980,6 +980,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        "//meerkat-cli:cli_mobpack_live_smoke_test",`,
     `        "//meerkat-cli:live_smoke_cli_test",`,
     `        "//meerkat-cli:rkat",`,
+    `        "//meerkat-comms:e2e_test",`,
     `        "//meerkat-mcp-server:rkat_mcp_bin",`,
     `        "//meerkat-mob:smoke_mob_flow_runtime_test",`,
     `        "//meerkat-mob:smoke_mob_generated_image_comms_test",`,

@@ -91,17 +91,17 @@ exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
 http_archive(
     name = "wasm_pack_darwin_arm64",
     build_file_content = 'exports_files(["wasm-pack"])',
-    sha256 = "9d0e70c6b229de18f0abfe910f2963e8f09ebae218250e9b09a1c3fdd955bef9",
-    strip_prefix = "wasm-pack-v0.14.0-aarch64-apple-darwin",
-    urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-aarch64-apple-darwin.tar.gz"],
+    sha256 = "0abff4a03d670b6c00ea31d0e1608a72407e355f3d3765e9c30eb45cd5b7e318",
+    strip_prefix = "wasm-pack-v0.15.0-aarch64-apple-darwin",
+    urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-aarch64-apple-darwin.tar.gz"],
 )
 
 http_archive(
     name = "wasm_pack_linux_x86_64",
     build_file_content = 'exports_files(["wasm-pack"])',
-    sha256 = "278a8d668085821f4d1a637bd864f1713f872b0ae3a118c77562a308c0abfe8d",
-    strip_prefix = "wasm-pack-v0.14.0-x86_64-unknown-linux-musl",
-    urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-musl.tar.gz"],
+    sha256 = "c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a",
+    strip_prefix = "wasm-pack-v0.15.0-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz"],
 )
 
 http_archive(

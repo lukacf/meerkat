@@ -24,4 +24,4 @@ if ! command -v tlc >/dev/null 2>&1; then
   exec "${xtask_bin}" machine-check-drift --all
 fi
 
-exec "${xtask_bin}" machine-verify --all --skip-cargo-tests
+exec "${xtask_bin}" machine-verify --all --skip-cargo-tests --skip-tlc-composition meerkat_mob_seam

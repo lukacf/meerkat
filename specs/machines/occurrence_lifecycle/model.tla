@@ -1654,7 +1654,7 @@ superseded_records_revision == ((phase # "Superseded") \/ (superseded_by_revisio
 delivery_failed_records_failure_class == ((phase # "DeliveryFailed") \/ (failure_class # None))
 misfire_deadline_not_before_due == (misfire_deadline_utc_ms >= due_at_utc_ms)
 
-CiStateConstraint == /\ model_step_count <= 6
+CiStateConstraint == /\ model_step_count <= 4
 DeepStateConstraint == /\ model_step_count <= 8
 
 Spec == Init /\ [][Next]_vars

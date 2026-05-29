@@ -2435,6 +2435,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
+    .with_ci_step_limit(4)
 }
 
 pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {

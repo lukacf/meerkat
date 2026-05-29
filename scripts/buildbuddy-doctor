@@ -574,6 +574,7 @@ fi
 if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'name = "machine_verify_all_tlc_test"' xtask/BUILD.bazel &&
   grep -Fq 'machine-verify --all --skip-cargo-tests' xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq -- '--skip-tlc-composition meerkat_mob_seam' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq 'machine-check-drift --all' xtask/tests/machine_verify_all_tlc_test.sh &&
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin' xtask/BUILD.bazel &&
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib' xtask/BUILD.bazel &&

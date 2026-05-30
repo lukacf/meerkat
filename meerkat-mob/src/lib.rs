@@ -72,10 +72,10 @@ pub mod workgraph_attention;
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
 pub use coordination::{
-    CoordinationOwner, CoordinationRecordRefs, CoordinationResourceRef, MobCoordinationBoard,
-    MobCoordinationError, MobCoordinationEvent, MobCoordinationEventKind, MobCoordinationSnapshot,
-    NewResourceClaim, NewWorkIntent, ResourceClaim, ResourceClaimId, ResourceClaimKind,
-    ResourceClaimStatus, WorkIntent, WorkIntentId, WorkIntentStatus,
+    CoordinationOwner, CoordinationRecordRefs, CoordinationResourceRef, MobCoordinationError,
+    MobCoordinationEvent, MobCoordinationEventKind, MobCoordinationSnapshot, ResourceClaim,
+    ResourceClaimId, ResourceClaimKind, ResourceClaimStatus, WorkIntent, WorkIntentId,
+    WorkIntentStatus,
 };
 pub use definition::MobDefinition;
 pub use error::MobError;

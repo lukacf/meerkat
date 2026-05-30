@@ -36888,7 +36888,22 @@ fn mob_runtime_parity_field_value(
         | "loop_last_completed_iteration"
         | "loop_max_iterations"
         | "loop_active_body_frame"
+        | "work_intent_status"
+        | "work_intent_revision"
+        | "work_intent_resources"
+        | "work_intent_owner_present"
+        | "work_intent_expires_at_ms"
+        | "resource_claim_status"
+        | "resource_claim_kind"
+        | "resource_claim_revision"
+        | "resource_claim_resources"
+        | "resource_claim_owner_present"
+        | "resource_claim_expires_at_ms"
         | "member_kickoff_error" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        // Coordination event cursor is a machine-owned monotonic counter that
+        // initializes to 1 in a fresh mob (no coordination inputs applied yet);
+        // mirrors the default-projection treatment of the run_*/frame_* fields.
+        "coordination_event_next_sequence" => Some(MobRuntimeParityExprValue::U64(1)),
         _ => None,
     }
 }

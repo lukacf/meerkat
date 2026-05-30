@@ -128,6 +128,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `spawn_profile_authority_output_schema_digests`: `Map<AgentIdentity, Option<String>>`
 - `spawn_profile_authority_external_addressable`: `Map<AgentIdentity, Bool>`
 - `topology_epoch`: `u64`
+- `work_intent_status`: `Map<WorkIntentId, MobCoordinationWorkIntentStatus>`
+- `work_intent_revision`: `Map<WorkIntentId, u64>`
+- `work_intent_resources`: `Map<WorkIntentId, Set<CoordinationResourceRef>>`
+- `work_intent_owner_present`: `Map<WorkIntentId, Bool>`
+- `work_intent_expires_at_ms`: `Map<WorkIntentId, Option<u64>>`
+- `resource_claim_status`: `Map<ResourceClaimId, MobCoordinationResourceClaimStatus>`
+- `resource_claim_kind`: `Map<ResourceClaimId, MobCoordinationResourceClaimKind>`
+- `resource_claim_revision`: `Map<ResourceClaimId, u64>`
+- `resource_claim_resources`: `Map<ResourceClaimId, Set<CoordinationResourceRef>>`
+- `resource_claim_owner_present`: `Map<ResourceClaimId, Bool>`
+- `resource_claim_expires_at_ms`: `Map<ResourceClaimId, Option<u64>>`
+- `coordination_event_next_sequence`: `u64`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
@@ -217,6 +229,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `KickoffResolveFailed`(member_id: String, error: String)
 - `KickoffCancelRequested`(member_id: String)
 - `KickoffClear`(member_id: String)
+- `RecordCoordinationWorkIntent`(intent_id: WorkIntentId, requested_status: MobCoordinationWorkIntentStatus, owner_present: Bool, summary_present: Bool, metadata_public: Bool, draft_mob_id: MobId, authority_mob_id: MobId, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>)
+- `RecordCoordinationResourceClaim`(claim_id: ResourceClaimId, requested_kind: MobCoordinationResourceClaimKind, requested_status: MobCoordinationResourceClaimStatus, owner_present: Bool, metadata_public: Bool, draft_mob_id: MobId, authority_mob_id: MobId, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>)
+- `UpdateCoordinationWorkIntentStatus`(intent_id: WorkIntentId, expected_revision: u64, requested_status: MobCoordinationWorkIntentStatus, now_ms: u64)
+- `UpdateCoordinationResourceClaimStatus`(claim_id: ResourceClaimId, expected_revision: u64, requested_status: MobCoordinationResourceClaimStatus, now_ms: u64)
+- `ObserveCoordinationResourceClaimOverlap`(claim_id: ResourceClaimId, now_ms: u64, candidate_overlap_ids: Seq<ResourceClaimId>)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -345,6 +362,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RejectStructuralEventSubscription`(after_cursor: u64, latest_cursor: u64)
 - `AuthorizeStrictEventPoll`(after_cursor: u64, limit: u64)
 - `RejectStrictEventPoll`(after_cursor: u64, latest_cursor: u64)
+- `WorkIntentRecorded`(intent_id: WorkIntentId, status: MobCoordinationWorkIntentStatus, revision: u64, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>, event_kind: MobCoordinationEventKind, sequence: u64)
+- `ResourceClaimRecorded`(claim_id: ResourceClaimId, kind: MobCoordinationResourceClaimKind, status: MobCoordinationResourceClaimStatus, revision: u64, resource_tokens: Set<CoordinationResourceRef>, expires_at_ms: Option<u64>, event_kind: MobCoordinationEventKind, sequence: u64)
+- `WorkIntentStatusChanged`(intent_id: WorkIntentId, status: MobCoordinationWorkIntentStatus, revision: u64, event_kind: MobCoordinationEventKind, sequence: u64)
+- `ResourceClaimStatusChanged`(claim_id: ResourceClaimId, status: MobCoordinationResourceClaimStatus, revision: u64, event_kind: MobCoordinationEventKind, sequence: u64)
+- `ResourceClaimOverlapObserved`(claim_id: ResourceClaimId, overlap_ids: Seq<ResourceClaimId>, event_kind: MobCoordinationEventKind, sequence: u64)
 
 ## Invariants
 - `bindings_require_known_identity`
@@ -4828,13 +4850,144 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `CancelAllWorkRejected`
 - To: `Running`
 
+### `RecordCoordinationWorkIntent`
+- From: `Running`
+- On: `RecordCoordinationWorkIntent`(intent_id, requested_status, owner_present, summary_present, metadata_public, draft_mob_id, authority_mob_id, resource_tokens, expires_at_ms)
+- Guards:
+  - `intent_is_new`
+  - `summary_present`
+  - `metadata_public`
+  - `owning_mob_ref_matches`
+  - `resources_non_empty`
+  - `owner_present`
+- Emits: `WorkIntentRecorded`
+- To: `Running`
+
+### `RecordCoordinationResourceClaim`
+- From: `Running`
+- On: `RecordCoordinationResourceClaim`(claim_id, requested_kind, requested_status, owner_present, metadata_public, draft_mob_id, authority_mob_id, resource_tokens, expires_at_ms)
+- Guards:
+  - `claim_is_new`
+  - `metadata_public`
+  - `owning_mob_ref_matches`
+  - `resources_non_empty`
+  - `owner_present`
+- Emits: `ResourceClaimRecorded`
+- To: `Running`
+
+### `UpdateCoordinationWorkIntentPlanned`
+- From: `Running`
+- On: `UpdateCoordinationWorkIntentStatus`(intent_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `intent_present`
+  - `revision_cas`
+  - `target_is_planned`
+  - `not_expired`
+- Emits: `WorkIntentStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationWorkIntentActive`
+- From: `Running`
+- On: `UpdateCoordinationWorkIntentStatus`(intent_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `intent_present`
+  - `revision_cas`
+  - `target_is_active`
+  - `not_expired`
+- Emits: `WorkIntentStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationWorkIntentBlocked`
+- From: `Running`
+- On: `UpdateCoordinationWorkIntentStatus`(intent_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `intent_present`
+  - `revision_cas`
+  - `target_is_blocked`
+  - `not_expired`
+- Emits: `WorkIntentStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationWorkIntentCompleted`
+- From: `Running`
+- On: `UpdateCoordinationWorkIntentStatus`(intent_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `intent_present`
+  - `revision_cas`
+  - `target_is_completed`
+- Emits: `WorkIntentStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationWorkIntentCancelled`
+- From: `Running`
+- On: `UpdateCoordinationWorkIntentStatus`(intent_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `intent_present`
+  - `revision_cas`
+  - `target_is_cancelled`
+- Emits: `WorkIntentStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationResourceClaimActive`
+- From: `Running`
+- On: `UpdateCoordinationResourceClaimStatus`(claim_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `claim_present`
+  - `revision_cas`
+  - `target_is_active`
+  - `not_expired`
+- Emits: `ResourceClaimStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationResourceClaimReleased`
+- From: `Running`
+- On: `UpdateCoordinationResourceClaimStatus`(claim_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `claim_present`
+  - `revision_cas`
+  - `target_is_released`
+- Emits: `ResourceClaimStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationResourceClaimExpired`
+- From: `Running`
+- On: `UpdateCoordinationResourceClaimStatus`(claim_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `claim_present`
+  - `revision_cas`
+  - `target_is_expired`
+- Emits: `ResourceClaimStatusChanged`
+- To: `Running`
+
+### `UpdateCoordinationResourceClaimCancelled`
+- From: `Running`
+- On: `UpdateCoordinationResourceClaimStatus`(claim_id, expected_revision, requested_status, now_ms)
+- Guards:
+  - `claim_present`
+  - `revision_cas`
+  - `target_is_cancelled`
+- Emits: `ResourceClaimStatusChanged`
+- To: `Running`
+
+### `ObserveCoordinationResourceClaimOverlap`
+- From: `Running`
+- On: `ObserveCoordinationResourceClaimOverlap`(claim_id, now_ms, candidate_overlap_ids)
+- Guards:
+  - `claim_present`
+  - `candidates_are_valid_overlaps`
+  - `no_omitted_overlap`
+- Emits: `ResourceClaimOverlapObserved`
+- To: `Running`
+
 ## Coverage
 ### Code Anchors
 - `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
 - `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
 - `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
+- `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 
 ### Scenarios
+- `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
 - `retire-respawn-destroy` — member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices

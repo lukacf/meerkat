@@ -36,6 +36,10 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_frame_ready_queue_after_terminal",
     "mob_machine_node_terminal",
     "mob_machine_step_status_from_frame_node_status",
+    "mob_coordination_work_intent_unexpired",
+    "mob_coordination_resource_claim_unexpired",
+    "mob_coordination_resource_claim_active_at",
+    "mob_coordination_resource_claim_inactive_at",
 ];
 
 /// Validate the parsed machine definition for semantic correctness.

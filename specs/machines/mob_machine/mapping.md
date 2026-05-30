@@ -11,8 +11,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_handle_surface`: `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
 - `mob_actor_authority`: `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
 - `mob_owner_bridge_cleanup_authority`: `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
+- `mob_coordination_board_authority`: `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 
 ### Scenarios
+- `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
 - `retire-respawn-destroy` — member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
@@ -157,7 +159,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureInvalidTransitionCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureInvalidTransitionDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -181,7 +183,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureBridgeCommandRejectedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureBridgeCommandRejectedDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
@@ -229,7 +231,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureDefinitionErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureDefinitionErrorDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -325,10 +327,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureSpecRevisionConflictCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`
 - `ClassifySpawnManyFailureSpecRevisionConflictDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureSchemaValidationRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -337,7 +339,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureSchemaValidationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureSchemaValidationDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -349,7 +351,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureInsufficientTargetsCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureInsufficientTargetsDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -361,7 +363,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureTopologyViolationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureTopologyViolationDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -373,7 +375,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureBridgeDeliveryRejectedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureBridgeDeliveryRejectedDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
@@ -385,7 +387,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureSupervisorEscalationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureSupervisorEscalationDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
@@ -433,7 +435,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureStorageErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureStorageErrorDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -457,7 +459,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureCommsErrorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureCommsErrorDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -481,7 +483,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureStaleFenceTokenCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureStaleFenceTokenDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -493,10 +495,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureStaleEventCursorCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`
 - `ClassifySpawnManyFailureStaleEventCursorDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureWorkNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
@@ -505,7 +507,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `ClassifySpawnManyFailureWorkNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
 - `ClassifySpawnManyFailureWorkNotFoundDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`
@@ -517,7 +519,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ClassifySpawnManyFailureInternalCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureInternalDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -580,7 +582,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `RecoverMemberKickoffCancelled`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
 - `ReconcileRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
@@ -589,7 +591,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ReconcileCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `flow-and-run-lifecycle`
 - `ObserveRuntimeReady`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`
@@ -730,16 +732,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ObserveRuntimeRetired`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedLive`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ObserveMemberRetirementArchivedLiveStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedRetired`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ObserveMemberRetirementArchivedRetiredStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -751,7 +753,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ObserveMemberRetirementArchivedAlreadyCleared`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ObserveMemberRetirementArchivedAlreadyClearedStopped`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -796,7 +798,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`, `orchestrator-coordinator-cleanup`
 - `ObserveRuntimeDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`
 - `RecordOperatorActionProvenanceRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
@@ -843,7 +845,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `CompleteRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_coordination_board_authority`
   - scenarios: `flow-and-run-lifecycle`
 - `ResetToRunning`
   - anchors: `mob_actor_authority`
@@ -934,7 +936,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
 - `ProvisionSupervisorAuthorityCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
 - `ProvisionSupervisorAuthorityDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
@@ -961,13 +963,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `RecordSupervisorPendingRotationRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `RecordSupervisorPendingRotationStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `RecordSupervisorPendingRotationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`
 - `CommitSupervisorRotationRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
@@ -976,7 +978,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`
 - `CommitSupervisorRotationCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
 - `ClearSupervisorAuthorityForDestroy`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`, `owner-bridge-cleanup`
@@ -1102,7 +1104,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`
 - `PollEventsStrictCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `PollEventsStrictDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -1114,7 +1116,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`
 - `PollEventsStrictStaleCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `PollEventsStrictStaleDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
@@ -1174,7 +1176,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ShutdownCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`
 - `CancelFlowRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1471,7 +1473,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `RetireAllCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `coordination-board-records-and-overlap`, `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `CompleteSpawnRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
@@ -1502,6 +1504,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveCancelAllWorkRejectionStaleFenceToken`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `RecordCoordinationWorkIntent`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `RecordCoordinationResourceClaim`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationWorkIntentPlanned`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationWorkIntentActive`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationWorkIntentBlocked`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationWorkIntentCompleted`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationWorkIntentCancelled`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationResourceClaimActive`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationResourceClaimReleased`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationResourceClaimExpired`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `UpdateCoordinationResourceClaimCancelled`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `ObserveCoordinationResourceClaimOverlap`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
 
 ### Effects
 - `RequestRuntimeBinding`
@@ -1518,10 +1556,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `SubmitWorkRejected`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `flow-and-run-lifecycle`
 - `CancelAllWorkRejected`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`
 - `RequestRuntimeRetire`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -1595,16 +1633,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `PersistKickoffUpdate`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`
 - `PersistKickoffFailureUpdate`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `EmitKickoffLifecycleNotice`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `SpawnPolicyResolutionRecorded`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_coordination_board_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `OwnerBridgeSessionBound`
   - anchors: `mob_owner_bridge_cleanup_authority`
@@ -1698,10 +1736,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `event-subscriptions-and-notices`
 - `AuthorizeStrictEventPoll`
   - anchors: `mob_actor_authority`
-  - scenarios: `event-subscriptions-and-notices`
+  - scenarios: `coordination-board-records-and-overlap`, `event-subscriptions-and-notices`
 - `RejectStrictEventPoll`
   - anchors: `mob_actor_authority`
-  - scenarios: `event-subscriptions-and-notices`
+  - scenarios: `coordination-board-records-and-overlap`, `event-subscriptions-and-notices`
+- `WorkIntentRecorded`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `ResourceClaimRecorded`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `WorkIntentStatusChanged`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `ResourceClaimStatusChanged`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
+- `ResourceClaimOverlapObserved`
+  - anchors: `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`
 
 ### Invariants
 - `bindings_require_known_identity`

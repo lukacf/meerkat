@@ -1260,6 +1260,36 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "WorkIntentRecorded",
+            SeamClassification::NoOwnerRealization,
+            "Coordination board work-intent record is machine-owned local state; no owner realization required",
+        ),
+        (
+            "MobMachine",
+            "ResourceClaimRecorded",
+            SeamClassification::NoOwnerRealization,
+            "Coordination board resource-claim record is machine-owned local state; no owner realization required",
+        ),
+        (
+            "MobMachine",
+            "WorkIntentStatusChanged",
+            SeamClassification::NoOwnerRealization,
+            "Coordination board work-intent status change is machine-owned local state; no owner realization required",
+        ),
+        (
+            "MobMachine",
+            "ResourceClaimStatusChanged",
+            SeamClassification::NoOwnerRealization,
+            "Coordination board resource-claim status change is machine-owned local state; no owner realization required",
+        ),
+        (
+            "MobMachine",
+            "ResourceClaimOverlapObserved",
+            SeamClassification::NoOwnerRealization,
+            "Coordination board overlap observation is a machine-owned local projection over recorded resource claims; no owner realization required",
+        ),
+        (
+            "MobMachine",
             "MemberTrustWiringRequested",
             SeamClassification::OwnerRealizationOnly,
             "External member trust-wiring request realized by the mob comms trust owner",

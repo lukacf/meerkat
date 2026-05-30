@@ -138,8 +138,17 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat-mob-mcp/src/lib.rs",
                     "MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants",
                 ),
+                anchor(
+                    "mob_coordination_board_authority",
+                    "meerkat-mob/src/coordination.rs",
+                    "MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects",
+                ),
             ],
             &[
+                scenario(
+                    "coordination-board-records-and-overlap",
+                    "record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence",
+                ),
                 scenario(
                     "spawn-work-terminal",
                     "member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure",

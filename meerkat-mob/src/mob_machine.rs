@@ -383,6 +383,11 @@ pub enum MobMachineCatalogInput {
     KickoffResolveFailed,
     KickoffCancelRequested,
     KickoffClear,
+    RecordCoordinationWorkIntent,
+    RecordCoordinationResourceClaim,
+    UpdateCoordinationWorkIntentStatus,
+    UpdateCoordinationResourceClaimStatus,
+    ObserveCoordinationResourceClaimOverlap,
 }
 
 impl MobMachineCatalogInput {
@@ -474,6 +479,11 @@ impl MobMachineCatalogInput {
         Self::KickoffResolveFailed,
         Self::KickoffCancelRequested,
         Self::KickoffClear,
+        Self::RecordCoordinationWorkIntent,
+        Self::RecordCoordinationResourceClaim,
+        Self::UpdateCoordinationWorkIntentStatus,
+        Self::UpdateCoordinationResourceClaimStatus,
+        Self::ObserveCoordinationResourceClaimOverlap,
     ];
 
     #[must_use]
@@ -620,6 +630,21 @@ impl MobMachineCatalogInput {
             Self::KickoffResolveFailed => MobMachineInputVariant::KickoffResolveFailed,
             Self::KickoffCancelRequested => MobMachineInputVariant::KickoffCancelRequested,
             Self::KickoffClear => MobMachineInputVariant::KickoffClear,
+            Self::RecordCoordinationWorkIntent => {
+                MobMachineInputVariant::RecordCoordinationWorkIntent
+            }
+            Self::RecordCoordinationResourceClaim => {
+                MobMachineInputVariant::RecordCoordinationResourceClaim
+            }
+            Self::UpdateCoordinationWorkIntentStatus => {
+                MobMachineInputVariant::UpdateCoordinationWorkIntentStatus
+            }
+            Self::UpdateCoordinationResourceClaimStatus => {
+                MobMachineInputVariant::UpdateCoordinationResourceClaimStatus
+            }
+            Self::ObserveCoordinationResourceClaimOverlap => {
+                MobMachineInputVariant::ObserveCoordinationResourceClaimOverlap
+            }
         }
     }
 
@@ -721,6 +746,13 @@ impl MobMachineCatalogInput {
             Self::KickoffResolveFailed => "KickoffResolveFailed",
             Self::KickoffCancelRequested => "KickoffCancelRequested",
             Self::KickoffClear => "KickoffClear",
+            Self::RecordCoordinationWorkIntent => "RecordCoordinationWorkIntent",
+            Self::RecordCoordinationResourceClaim => "RecordCoordinationResourceClaim",
+            Self::UpdateCoordinationWorkIntentStatus => "UpdateCoordinationWorkIntentStatus",
+            Self::UpdateCoordinationResourceClaimStatus => "UpdateCoordinationResourceClaimStatus",
+            Self::ObserveCoordinationResourceClaimOverlap => {
+                "ObserveCoordinationResourceClaimOverlap"
+            }
         }
     }
 }
@@ -817,6 +849,7 @@ pub enum MobMachineRuntimeInternalReason {
     RetireIdempotencyAuthority,
     SupervisorAuthority,
     TrustHandoffAuthority,
+    CoordinationBoardAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1032,6 +1065,26 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RestoreSupervisorAuthorityAfterDestroyRollback,
         reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordCoordinationWorkIntent,
+        reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordCoordinationResourceClaim,
+        reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::UpdateCoordinationWorkIntentStatus,
+        reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::UpdateCoordinationResourceClaimStatus,
+        reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ObserveCoordinationResourceClaimOverlap,
+        reason: MobMachineRuntimeInternalReason::CoordinationBoardAuthority,
     },
 ];
 

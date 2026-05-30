@@ -1,13 +1,23 @@
-//! Product-neutral mob coordination records.
+//! Product-neutral mob coordination projection types.
+//!
+//! The authoritative coordination board state — per-entity work-intent and
+//! resource-claim records, their optimistic-concurrency revisions, affected
+//! resource sets, raw expiry timestamps, and the monotonic coordination event
+//! cursor — is owned by `MobMachine` (see
+//! `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs`, the folded
+//! coordination transitions). The types in this module are *projections* over
+//! the typed effects MobMachine emits (`WorkIntentRecorded`,
+//! `ResourceClaimRecorded`, `WorkIntentStatusChanged`,
+//! `ResourceClaimStatusChanged`, `ResourceClaimOverlapObserved`); they carry no
+//! admission/CAS/expiry/overlap authority of their own.
 
-use crate::generated::mob_coordination_lifecycle_authority;
 use crate::ids::{AgentIdentity, MobId, RunId};
 use chrono::{DateTime, Utc};
 use meerkat_core::types::SessionId;
 use meerkat_core::{PrincipalRef, SurfaceMetadata, SurfaceMetadataError};
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 
 macro_rules! coordination_string_newtype {
@@ -122,7 +132,7 @@ impl CoordinationOwner {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CoordinationRecordRefs {
-    /// Mob that owns the coordination board. Filled by [`MobCoordinationBoard`].
+    /// Mob that owns the coordination board.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mob_id: Option<MobId>,
     /// Mob run associated with this record, when available.
@@ -134,6 +144,9 @@ pub struct CoordinationRecordRefs {
 }
 
 /// Work intent lifecycle for mob coordination.
+///
+/// Mirrors `MobCoordinationWorkIntentStatus` in MobMachine. The terminal
+/// classification is a projection of the machine's own classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkIntentStatus {
@@ -152,7 +165,10 @@ pub enum WorkIntentStatus {
 impl WorkIntentStatus {
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        mob_coordination_lifecycle_authority::work_intent_status_is_terminal(self)
+        matches!(
+            self,
+            WorkIntentStatus::Completed | WorkIntentStatus::Cancelled
+        )
     }
 }
 
@@ -189,20 +205,6 @@ impl WorkIntent {
     }
 }
 
-/// Draft for recording a new [`WorkIntent`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewWorkIntent {
-    pub id: WorkIntentId,
-    pub summary: String,
-    pub details: Option<String>,
-    pub status: WorkIntentStatus,
-    pub owner: CoordinationOwner,
-    pub owning_refs: CoordinationRecordRefs,
-    pub resources: BTreeSet<CoordinationResourceRef>,
-    pub metadata: SurfaceMetadata,
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
 /// Advisory strength for a mob resource claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -216,6 +218,8 @@ pub enum ResourceClaimKind {
 }
 
 /// Resource claim lifecycle.
+///
+/// Mirrors `MobCoordinationResourceClaimStatus` in MobMachine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceClaimStatus {
@@ -228,7 +232,12 @@ pub enum ResourceClaimStatus {
 impl ResourceClaimStatus {
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        mob_coordination_lifecycle_authority::resource_claim_status_is_terminal(self)
+        matches!(
+            self,
+            ResourceClaimStatus::Released
+                | ResourceClaimStatus::Expired
+                | ResourceClaimStatus::Cancelled
+        )
     }
 }
 
@@ -256,7 +265,7 @@ pub struct ResourceClaim {
 impl ResourceClaim {
     #[must_use]
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
-        mob_coordination_lifecycle_authority::resource_claim_status_is_expired(self.status)
+        matches!(self.status, ResourceClaimStatus::Expired)
             || self.expires_at.is_some_and(|expires_at| expires_at <= now)
     }
 
@@ -271,20 +280,6 @@ impl ResourceClaim {
             .iter()
             .any(|resource| resources.contains(resource))
     }
-}
-
-/// Draft for recording a new [`ResourceClaim`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewResourceClaim {
-    pub id: ResourceClaimId,
-    pub kind: ResourceClaimKind,
-    pub status: ResourceClaimStatus,
-    pub owner: CoordinationOwner,
-    pub owning_refs: CoordinationRecordRefs,
-    pub resources: BTreeSet<CoordinationResourceRef>,
-    pub reason: Option<String>,
-    pub metadata: SurfaceMetadata,
-    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Mob-owned coordination event.
@@ -322,271 +317,7 @@ pub enum MobCoordinationEventKind {
     },
 }
 
-/// In-memory mob-owned coordination board.
-#[derive(Debug, Clone)]
-pub struct MobCoordinationBoard {
-    mob_id: MobId,
-    work_intents: BTreeMap<WorkIntentId, WorkIntent>,
-    resource_claims: BTreeMap<ResourceClaimId, ResourceClaim>,
-    events: Vec<MobCoordinationEvent>,
-    next_event_sequence: u64,
-}
-
-impl MobCoordinationBoard {
-    #[must_use]
-    pub fn new(mob_id: MobId) -> Self {
-        Self {
-            mob_id,
-            work_intents: BTreeMap::new(),
-            resource_claims: BTreeMap::new(),
-            events: Vec::new(),
-            next_event_sequence:
-                mob_coordination_lifecycle_authority::authorize_initial_event_sequence(),
-        }
-    }
-
-    #[must_use]
-    pub fn mob_id(&self) -> &MobId {
-        &self.mob_id
-    }
-
-    pub fn record_work_intent(
-        &mut self,
-        draft: NewWorkIntent,
-        now: DateTime<Utc>,
-    ) -> Result<&WorkIntent, MobCoordinationError> {
-        let id = draft.id.clone();
-        let authorized = mob_coordination_lifecycle_authority::authorize_work_intent_record(
-            &self.mob_id,
-            draft,
-            now,
-            self.next_event_sequence,
-            self.work_intents.contains_key(&id),
-        )?;
-        let (record, event_publication) = authorized.into_parts();
-        self.work_intents.insert(id.clone(), record);
-        self.append_authorized_event(event_publication);
-        Ok(self
-            .work_intents
-            .get(&id)
-            .expect("inserted work intent must be present"))
-    }
-
-    pub fn update_work_intent_status(
-        &mut self,
-        id: &WorkIntentId,
-        expected_revision: u64,
-        status: WorkIntentStatus,
-        now: DateTime<Utc>,
-    ) -> Result<&WorkIntent, MobCoordinationError> {
-        let (current_revision, is_expired) = {
-            let intent = self
-                .work_intents
-                .get(id)
-                .ok_or_else(|| MobCoordinationError::UnknownWorkIntent { id: id.clone() })?;
-            (intent.revision, intent.is_expired_at(now))
-        };
-        let authorized_revision =
-            mob_coordination_lifecycle_authority::authorize_record_revision_advance(
-                current_revision,
-                expected_revision,
-            )?;
-        let authorized_status =
-            mob_coordination_lifecycle_authority::authorize_work_intent_update_status(
-                status, is_expired,
-            )?;
-        let event_publication =
-            mob_coordination_lifecycle_authority::authorize_work_intent_status_changed_event(
-                &self.mob_id,
-                now,
-                id.clone(),
-                authorized_status,
-                self.next_event_sequence,
-            )?;
-        let intent = self
-            .work_intents
-            .get_mut(id)
-            .expect("authorized work intent must still be present");
-        intent.status = authorized_status;
-        intent.revision = authorized_revision;
-        intent.updated_at = now;
-        self.append_authorized_event(event_publication);
-        Ok(self
-            .work_intents
-            .get(id)
-            .expect("updated work intent must be present"))
-    }
-
-    pub fn record_resource_claim(
-        &mut self,
-        draft: NewResourceClaim,
-        now: DateTime<Utc>,
-    ) -> Result<&ResourceClaim, MobCoordinationError> {
-        let id = draft.id.clone();
-        let authorized = mob_coordination_lifecycle_authority::authorize_resource_claim_record(
-            &self.mob_id,
-            draft,
-            now,
-            self.next_event_sequence,
-            self.resource_claims.contains_key(&id),
-        )?;
-        let (record, event_publication) = authorized.into_parts();
-        self.resource_claims.insert(id.clone(), record);
-        self.append_authorized_event(event_publication);
-        Ok(self
-            .resource_claims
-            .get(&id)
-            .expect("inserted resource claim must be present"))
-    }
-
-    pub fn update_resource_claim_status(
-        &mut self,
-        id: &ResourceClaimId,
-        expected_revision: u64,
-        status: ResourceClaimStatus,
-        now: DateTime<Utc>,
-    ) -> Result<&ResourceClaim, MobCoordinationError> {
-        let (current_revision, is_expired) = {
-            let claim = self
-                .resource_claims
-                .get(id)
-                .ok_or_else(|| MobCoordinationError::UnknownResourceClaim { id: id.clone() })?;
-            (claim.revision, claim.is_expired_at(now))
-        };
-        let authorized_revision =
-            mob_coordination_lifecycle_authority::authorize_record_revision_advance(
-                current_revision,
-                expected_revision,
-            )?;
-        let authorized_status =
-            mob_coordination_lifecycle_authority::authorize_resource_claim_update_status(
-                status, is_expired,
-            )?;
-        let event_publication =
-            mob_coordination_lifecycle_authority::authorize_resource_claim_status_changed_event(
-                &self.mob_id,
-                now,
-                id.clone(),
-                authorized_status,
-                self.next_event_sequence,
-            )?;
-        let claim = self
-            .resource_claims
-            .get_mut(id)
-            .expect("authorized resource claim must still be present");
-        claim.status = authorized_status;
-        claim.revision = authorized_revision;
-        claim.updated_at = now;
-        self.append_authorized_event(event_publication);
-        Ok(self
-            .resource_claims
-            .get(id)
-            .expect("updated resource claim must be present"))
-    }
-
-    #[must_use]
-    pub fn work_intent(&self, id: &WorkIntentId) -> Option<&WorkIntent> {
-        self.work_intents.get(id)
-    }
-
-    #[must_use]
-    pub fn resource_claim(&self, id: &ResourceClaimId) -> Option<&ResourceClaim> {
-        self.resource_claims.get(id)
-    }
-
-    #[must_use]
-    pub fn active_work_intents(&self, now: DateTime<Utc>) -> Vec<&WorkIntent> {
-        self.work_intents
-            .values()
-            .filter(|intent| intent.is_active_at(now))
-            .collect()
-    }
-
-    #[must_use]
-    pub fn active_resource_claims(&self, now: DateTime<Utc>) -> Vec<&ResourceClaim> {
-        self.resource_claims
-            .values()
-            .filter(|claim| claim.is_active_at(now))
-            .collect()
-    }
-
-    #[must_use]
-    pub fn active_work_intents_for_resources(
-        &self,
-        resources: &BTreeSet<CoordinationResourceRef>,
-        now: DateTime<Utc>,
-    ) -> Vec<&WorkIntent> {
-        self.work_intents
-            .values()
-            .filter(|intent| intent.is_active_at(now))
-            .filter(|intent| resources_overlap(&intent.resources, resources))
-            .collect()
-    }
-
-    #[must_use]
-    pub fn overlapping_resource_claims(
-        &self,
-        resources: &BTreeSet<CoordinationResourceRef>,
-        now: DateTime<Utc>,
-    ) -> Vec<&ResourceClaim> {
-        self.resource_claims
-            .values()
-            .filter(|claim| claim.is_active_at(now))
-            .filter(|claim| claim.overlaps_resources(resources))
-            .collect()
-    }
-
-    pub fn observe_claim_overlaps(
-        &mut self,
-        claim_id: &ResourceClaimId,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<&ResourceClaim>, MobCoordinationError> {
-        let resources = self
-            .resource_claims
-            .get(claim_id)
-            .ok_or_else(|| MobCoordinationError::UnknownResourceClaim {
-                id: claim_id.clone(),
-            })?
-            .resources
-            .clone();
-        let overlaps: Vec<ResourceClaimId> = self
-            .overlapping_resource_claims(&resources, now)
-            .into_iter()
-            .filter(|claim| &claim.id != claim_id)
-            .map(|claim| claim.id.clone())
-            .collect();
-        let event_publication =
-            mob_coordination_lifecycle_authority::authorize_resource_claim_overlap_observed_event(
-                &self.mob_id,
-                now,
-                claim_id.clone(),
-                overlaps.clone(),
-                self.next_event_sequence,
-            )?;
-        self.append_authorized_event(event_publication);
-
-        Ok(overlaps
-            .iter()
-            .filter_map(|id| self.resource_claims.get(id))
-            .collect())
-    }
-
-    #[must_use]
-    pub fn events(&self) -> &[MobCoordinationEvent] {
-        &self.events
-    }
-
-    fn append_authorized_event(
-        &mut self,
-        publication: mob_coordination_lifecycle_authority::AuthorizedMobCoordinationEventPublication,
-    ) {
-        let (event, next_event_sequence) = publication.into_parts();
-        self.next_event_sequence = next_event_sequence;
-        self.events.push(event);
-    }
-}
-
-/// Snapshot of the board suitable for projection consumers.
+/// Snapshot of the coordination board suitable for projection consumers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MobCoordinationSnapshot {
@@ -594,16 +325,7 @@ pub struct MobCoordinationSnapshot {
     pub resource_claims: Vec<ResourceClaim>,
 }
 
-impl From<&MobCoordinationBoard> for MobCoordinationSnapshot {
-    fn from(board: &MobCoordinationBoard) -> Self {
-        Self {
-            work_intents: board.work_intents.values().cloned().collect(),
-            resource_claims: board.resource_claims.values().cloned().collect(),
-        }
-    }
-}
-
-/// Validation and mutation errors for mob coordination records.
+/// Validation and projection errors for mob coordination records.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MobCoordinationError {
     #[error("work intent id must not be empty")]
@@ -634,328 +356,66 @@ pub enum MobCoordinationError {
     UnknownResourceClaim { id: ResourceClaimId },
     #[error("coordination mob ref mismatch: expected '{expected}', actual '{actual}'")]
     MismatchedMobRef { expected: MobId, actual: MobId },
-    #[error("{0}")]
-    GeneratedAuthority(
-        #[from] mob_coordination_lifecycle_authority::MobCoordinationLifecycleAuthorityError,
-    ),
-}
-
-fn resources_overlap(
-    left: &BTreeSet<CoordinationResourceRef>,
-    right: &BTreeSet<CoordinationResourceRef>,
-) -> bool {
-    left.iter().any(|resource| right.contains(resource))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use meerkat_core::{PrincipalKind, PrincipalRef, SurfaceMetadata};
-    use serde_json::json;
-    use std::collections::BTreeSet;
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 26, 12, 0, 0).unwrap()
-    }
-
-    fn owner() -> CoordinationOwner {
-        CoordinationOwner::agent(AgentIdentity::from("worker-1"))
-    }
-
-    fn principal_owner() -> CoordinationOwner {
-        CoordinationOwner::principal(
-            PrincipalRef::new(PrincipalKind::Human, "human:lane-k").expect("valid principal"),
-        )
     }
 
     fn resource(value: &str) -> CoordinationResourceRef {
         CoordinationResourceRef::new(value).expect("valid resource")
     }
 
-    fn resources(values: &[&str]) -> BTreeSet<CoordinationResourceRef> {
-        values.iter().map(|value| resource(value)).collect()
-    }
-
-    fn intent(id: &str, resource_refs: &[&str]) -> NewWorkIntent {
-        NewWorkIntent {
-            id: WorkIntentId::new(id).expect("valid intent id"),
-            summary: "coordinate shared edit".to_string(),
-            details: None,
-            status: WorkIntentStatus::Active,
-            owner: owner(),
-            owning_refs: CoordinationRecordRefs::default(),
-            resources: resources(resource_refs),
-            metadata: SurfaceMetadata::default(),
-            expires_at: None,
-        }
-    }
-
-    fn claim(id: &str, kind: ResourceClaimKind, resource_refs: &[&str]) -> NewResourceClaim {
-        NewResourceClaim {
-            id: ResourceClaimId::new(id).expect("valid claim id"),
-            kind,
-            status: ResourceClaimStatus::Active,
-            owner: owner(),
-            owning_refs: CoordinationRecordRefs::default(),
-            resources: resources(resource_refs),
-            reason: None,
-            metadata: SurfaceMetadata::default(),
-            expires_at: None,
-        }
-    }
-
     #[test]
-    fn coordination_board_records_active_work_intents_with_typed_refs_and_metadata() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let mut metadata = SurfaceMetadata::default();
-        metadata
-            .labels
-            .insert("client.feature".to_string(), "coordination".to_string());
-        metadata.app_context = Some(json!({"client_ref": "lane-k"}));
-
-        let mut draft = intent("intent-1", &["file:/src/lib.rs"]);
-        draft.owner = principal_owner();
-        draft.owning_refs.run_id = Some(RunId::new());
-        draft.metadata = metadata.clone();
-
-        let recorded = board
-            .record_work_intent(draft, now())
-            .expect("record work intent");
-
-        assert_eq!(recorded.revision, 1);
-        assert_eq!(recorded.owning_refs.mob_id, Some(MobId::from("mob-k")));
-        assert_eq!(recorded.metadata, metadata);
-        assert_eq!(board.active_work_intents(now()).len(), 1);
-    }
-
-    #[test]
-    fn coordination_board_rejects_invalid_empty_ids_resources_and_owner() {
+    fn coordination_newtypes_reject_empty_and_control_chars() {
         assert!(WorkIntentId::new(" ").is_err());
         assert!(ResourceClaimId::new("\n").is_err());
         assert!(CoordinationResourceRef::new("").is_err());
-
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let mut empty_owner = intent("intent-1", &["file:/src/lib.rs"]);
-        empty_owner.owner = CoordinationOwner::default();
-        assert!(matches!(
-            board.record_work_intent(empty_owner, now()),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
-
-        let mut empty_resources = claim("claim-1", ResourceClaimKind::Exclusive, &[]);
-        empty_resources.resources = BTreeSet::new();
-        assert!(matches!(
-            board.record_resource_claim(empty_resources, now()),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
+        assert!(WorkIntentId::new("intent-1").is_ok());
     }
 
     #[test]
-    fn coordination_board_rejects_reserved_metadata_spoofing() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let mut draft = claim(
-            "claim-1",
-            ResourceClaimKind::SoftReservation,
-            &["file:/src/lib.rs"],
-        );
-        draft
-            .metadata
-            .labels
-            .insert("mob_id".to_string(), "spoof".to_string());
-
-        assert!(matches!(
-            board.record_resource_claim(draft, now()),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
+    fn work_intent_status_terminal_projection_matches_machine() {
+        assert!(!WorkIntentStatus::Planned.is_terminal());
+        assert!(!WorkIntentStatus::Active.is_terminal());
+        assert!(!WorkIntentStatus::Blocked.is_terminal());
+        assert!(WorkIntentStatus::Completed.is_terminal());
+        assert!(WorkIntentStatus::Cancelled.is_terminal());
     }
 
     #[test]
-    fn coordination_board_rejects_records_for_a_different_mob() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let mut draft = intent("intent-1", &["file:/src/lib.rs"]);
-        draft.owning_refs.mob_id = Some(MobId::from("other-mob"));
-
-        assert!(matches!(
-            board.record_work_intent(draft, now()),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
+    fn resource_claim_status_terminal_projection_matches_machine() {
+        assert!(!ResourceClaimStatus::Active.is_terminal());
+        assert!(ResourceClaimStatus::Released.is_terminal());
+        assert!(ResourceClaimStatus::Expired.is_terminal());
+        assert!(ResourceClaimStatus::Cancelled.is_terminal());
     }
 
     #[test]
-    fn coordination_board_rejects_duplicate_records() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        board
-            .record_work_intent(intent("intent-1", &["file:/src/lib.rs"]), now())
-            .expect("first intent");
-        assert!(matches!(
-            board.record_work_intent(intent("intent-1", &["file:/src/lib.rs"]), now()),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
+    fn resource_claim_overlap_and_active_projection() {
+        let claim = ResourceClaim {
+            id: ResourceClaimId::new("claim-1").unwrap(),
+            revision: 1,
+            kind: ResourceClaimKind::Exclusive,
+            status: ResourceClaimStatus::Active,
+            owner: CoordinationOwner::agent(AgentIdentity::from("worker-1")),
+            owning_refs: CoordinationRecordRefs::default(),
+            resources: [resource("file:/src/lib.rs")].into_iter().collect(),
+            reason: None,
+            metadata: SurfaceMetadata::default(),
+            created_at: now(),
+            updated_at: now(),
+            expires_at: Some(now() - Duration::seconds(1)),
+        };
 
-        board
-            .record_resource_claim(
-                claim(
-                    "claim-1",
-                    ResourceClaimKind::Advisory,
-                    &["file:/src/lib.rs"],
-                ),
-                now(),
-            )
-            .expect("first claim");
-        assert!(matches!(
-            board.record_resource_claim(
-                claim(
-                    "claim-1",
-                    ResourceClaimKind::Advisory,
-                    &["file:/src/lib.rs"],
-                ),
-                now(),
-            ),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
-    }
-
-    #[test]
-    fn coordination_board_uses_revisions_to_reject_stale_updates() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let id = WorkIntentId::new("intent-1").unwrap();
-        board
-            .record_work_intent(intent("intent-1", &["file:/src/lib.rs"]), now())
-            .expect("record intent");
-        board
-            .update_work_intent_status(
-                &id,
-                1,
-                WorkIntentStatus::Blocked,
-                now() + Duration::seconds(1),
-            )
-            .expect("fresh update");
-
-        assert!(matches!(
-            board.update_work_intent_status(
-                &id,
-                1,
-                WorkIntentStatus::Completed,
-                now() + Duration::seconds(2),
-            ),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
-    }
-
-    #[test]
-    fn coordination_board_filters_expired_and_terminal_records_from_active_queries() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let mut expired_intent = intent("intent-1", &["file:/src/lib.rs"]);
-        expired_intent.expires_at = Some(now() - Duration::seconds(1));
-        board
-            .record_work_intent(expired_intent, now() - Duration::minutes(1))
-            .expect("record expired intent");
-
-        let mut released_claim = claim(
-            "claim-1",
-            ResourceClaimKind::Exclusive,
-            &["file:/src/lib.rs"],
-        );
-        released_claim.status = ResourceClaimStatus::Released;
-        board
-            .record_resource_claim(released_claim, now())
-            .expect("record released claim");
-
-        assert!(board.active_work_intents(now()).is_empty());
-        assert!(board.active_resource_claims(now()).is_empty());
-    }
-
-    #[test]
-    fn coordination_board_rejects_reactivating_expired_claims() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let id = ResourceClaimId::new("claim-1").unwrap();
-        let mut draft = claim(
-            "claim-1",
-            ResourceClaimKind::SoftReservation,
-            &["file:/src/lib.rs"],
-        );
-        draft.expires_at = Some(now() - Duration::seconds(1));
-        board
-            .record_resource_claim(draft, now() - Duration::minutes(1))
-            .expect("record expired claim");
-
-        assert!(matches!(
-            board.update_resource_claim_status(&id, 1, ResourceClaimStatus::Active, now()),
-            Err(MobCoordinationError::GeneratedAuthority(_))
-        ));
-    }
-
-    #[test]
-    fn coordination_board_reports_overlapping_claims_without_enforcing_locks() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        let exclusive = board
-            .record_resource_claim(
-                claim(
-                    "claim-1",
-                    ResourceClaimKind::Exclusive,
-                    &["file:/src/lib.rs"],
-                ),
-                now(),
-            )
-            .expect("record exclusive claim")
-            .id
-            .clone();
-        let soft = board
-            .record_resource_claim(
-                claim(
-                    "claim-2",
-                    ResourceClaimKind::SoftReservation,
-                    &["file:/src/lib.rs", "file:/src/event.rs"],
-                ),
-                now(),
-            )
-            .expect("record overlapping claim")
-            .id
-            .clone();
-
-        let overlaps = board.overlapping_resource_claims(&resources(&["file:/src/lib.rs"]), now());
-        assert_eq!(overlaps.len(), 2);
-        assert!(overlaps.iter().any(|claim| claim.id == exclusive));
-        assert!(overlaps.iter().any(|claim| claim.id == soft));
-
-        let observed = board
-            .observe_claim_overlaps(&soft, now())
-            .expect("observe overlaps");
-        assert_eq!(
-            observed.iter().map(|claim| &claim.id).collect::<Vec<_>>(),
-            vec![&exclusive]
-        );
-        assert!(matches!(
-            board.events().last().map(|event| &event.kind),
-            Some(MobCoordinationEventKind::ResourceClaimOverlapObserved {
-                claim_id,
-                overlaps
-            }) if claim_id == &soft && overlaps == &vec![exclusive]
-        ));
-    }
-
-    #[test]
-    fn coordination_board_matches_active_work_by_resource() {
-        let mut board = MobCoordinationBoard::new(MobId::from("mob-k"));
-        board
-            .record_work_intent(intent("intent-1", &["file:/src/lib.rs"]), now())
-            .expect("record first intent");
-        board
-            .record_work_intent(intent("intent-2", &["file:/src/run.rs"]), now())
-            .expect("record second intent");
-
-        let matches = board.active_work_intents_for_resources(
-            &resources(&["file:/src/lib.rs", "file:/src/other.rs"]),
-            now(),
-        );
-
-        assert_eq!(
-            matches
-                .iter()
-                .map(|intent| intent.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["intent-1"]
-        );
+        assert!(claim.overlaps_resources(&[resource("file:/src/lib.rs")].into_iter().collect()));
+        // Expired-by-timestamp records are not active even when status is Active.
+        assert!(claim.is_expired_at(now()));
+        assert!(!claim.is_active_at(now()));
     }
 }

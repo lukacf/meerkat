@@ -166,6 +166,26 @@ macro_rules! mob_catalog_machine_dsl {
             spawn_profile_authority_output_schema_digests: Map<AgentIdentity, Option<String>>,
             spawn_profile_authority_external_addressable: Map<AgentIdentity, bool>,
             topology_epoch: u64,
+            // Mob coordination board authority (folded from the former
+            // standalone MobCoordinationLifecycleAuthorityMachine). MobMachine
+            // owns the per-entity work-intent and resource-claim records,
+            // their optimistic-concurrency revisions, affected resource sets,
+            // owner-presence facts, raw expiry timestamps (NOT a pre-reduced
+            // `is_expired` bool), and the monotonic coordination event cursor.
+            // Every admission/status/overlap conclusion is recomputed in-DSL
+            // from these maps plus raw caller facts — no trusted reducer.
+            work_intent_status: Map<WorkIntentId, Enum<MobCoordinationWorkIntentStatus>>,
+            work_intent_revision: Map<WorkIntentId, u64>,
+            work_intent_resources: Map<WorkIntentId, Set<CoordinationResourceRef>>,
+            work_intent_owner_present: Map<WorkIntentId, bool>,
+            work_intent_expires_at_ms: Map<WorkIntentId, Option<u64>>,
+            resource_claim_status: Map<ResourceClaimId, Enum<MobCoordinationResourceClaimStatus>>,
+            resource_claim_kind: Map<ResourceClaimId, Enum<MobCoordinationResourceClaimKind>>,
+            resource_claim_revision: Map<ResourceClaimId, u64>,
+            resource_claim_resources: Map<ResourceClaimId, Set<CoordinationResourceRef>>,
+            resource_claim_owner_present: Map<ResourceClaimId, bool>,
+            resource_claim_expires_at_ms: Map<ResourceClaimId, Option<u64>>,
+            coordination_event_next_sequence: u64,
         }
 
         init(Running) {
@@ -290,6 +310,18 @@ macro_rules! mob_catalog_machine_dsl {
             spawn_profile_authority_output_schema_digests = EmptyMap,
             spawn_profile_authority_external_addressable = EmptyMap,
             topology_epoch = 0,
+            work_intent_status = EmptyMap,
+            work_intent_revision = EmptyMap,
+            work_intent_resources = EmptyMap,
+            work_intent_owner_present = EmptyMap,
+            work_intent_expires_at_ms = EmptyMap,
+            resource_claim_status = EmptyMap,
+            resource_claim_kind = EmptyMap,
+            resource_claim_revision = EmptyMap,
+            resource_claim_resources = EmptyMap,
+            resource_claim_owner_present = EmptyMap,
+            resource_claim_expires_at_ms = EmptyMap,
+            coordination_event_next_sequence = 1,
         }
 
         terminal [Destroyed]
@@ -495,6 +527,52 @@ macro_rules! mob_catalog_machine_dsl {
             KickoffResolveFailed { member_id: String, error: String },
             KickoffCancelRequested { member_id: String },
             KickoffClear { member_id: String },
+            // ---------------------------------------------------------------
+            // Mob coordination board inputs (folded). These carry only RAW
+            // typed caller facts: no `already_exists`, no `current_revision`
+            // as a trusted input, no `owning_mob_ref_matches`, no `is_expired`,
+            // no `current_next_sequence`, and no pre-decided `overlap_ids`.
+            // MobMachine recomputes/revalidates every conclusion in-DSL.
+            // ---------------------------------------------------------------
+            RecordCoordinationWorkIntent {
+                intent_id: WorkIntentId,
+                requested_status: Enum<MobCoordinationWorkIntentStatus>,
+                owner_present: bool,
+                summary_present: bool,
+                metadata_public: bool,
+                draft_mob_id: MobId,
+                authority_mob_id: MobId,
+                resource_tokens: Set<CoordinationResourceRef>,
+                expires_at_ms: Option<u64>,
+            },
+            RecordCoordinationResourceClaim {
+                claim_id: ResourceClaimId,
+                requested_kind: Enum<MobCoordinationResourceClaimKind>,
+                requested_status: Enum<MobCoordinationResourceClaimStatus>,
+                owner_present: bool,
+                metadata_public: bool,
+                draft_mob_id: MobId,
+                authority_mob_id: MobId,
+                resource_tokens: Set<CoordinationResourceRef>,
+                expires_at_ms: Option<u64>,
+            },
+            UpdateCoordinationWorkIntentStatus {
+                intent_id: WorkIntentId,
+                expected_revision: u64,
+                requested_status: Enum<MobCoordinationWorkIntentStatus>,
+                now_ms: u64,
+            },
+            UpdateCoordinationResourceClaimStatus {
+                claim_id: ResourceClaimId,
+                expected_revision: u64,
+                requested_status: Enum<MobCoordinationResourceClaimStatus>,
+                now_ms: u64,
+            },
+            ObserveCoordinationResourceClaimOverlap {
+                claim_id: ResourceClaimId,
+                now_ms: u64,
+                candidate_overlap_ids: Seq<ResourceClaimId>,
+            },
         }
 
         surface_only [
@@ -653,6 +731,47 @@ macro_rules! mob_catalog_machine_dsl {
             RejectStructuralEventSubscription { after_cursor: u64, latest_cursor: u64 },
             AuthorizeStrictEventPoll { after_cursor: u64, limit: u64 },
             RejectStrictEventPoll { after_cursor: u64, latest_cursor: u64 },
+            // Mob coordination board effects (folded). Each carries the
+            // machine-computed revision / event sequence.
+            WorkIntentRecorded {
+                intent_id: WorkIntentId,
+                status: Enum<MobCoordinationWorkIntentStatus>,
+                revision: u64,
+                resource_tokens: Set<CoordinationResourceRef>,
+                expires_at_ms: Option<u64>,
+                event_kind: Enum<MobCoordinationEventKind>,
+                sequence: u64,
+            },
+            ResourceClaimRecorded {
+                claim_id: ResourceClaimId,
+                kind: Enum<MobCoordinationResourceClaimKind>,
+                status: Enum<MobCoordinationResourceClaimStatus>,
+                revision: u64,
+                resource_tokens: Set<CoordinationResourceRef>,
+                expires_at_ms: Option<u64>,
+                event_kind: Enum<MobCoordinationEventKind>,
+                sequence: u64,
+            },
+            WorkIntentStatusChanged {
+                intent_id: WorkIntentId,
+                status: Enum<MobCoordinationWorkIntentStatus>,
+                revision: u64,
+                event_kind: Enum<MobCoordinationEventKind>,
+                sequence: u64,
+            },
+            ResourceClaimStatusChanged {
+                claim_id: ResourceClaimId,
+                status: Enum<MobCoordinationResourceClaimStatus>,
+                revision: u64,
+                event_kind: Enum<MobCoordinationEventKind>,
+                sequence: u64,
+            },
+            ResourceClaimOverlapObserved {
+                claim_id: ResourceClaimId,
+                overlap_ids: Seq<ResourceClaimId>,
+                event_kind: Enum<MobCoordinationEventKind>,
+                sequence: u64,
+            },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -721,6 +840,11 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RejectStructuralEventSubscription => local,
         disposition AuthorizeStrictEventPoll => local,
         disposition RejectStrictEventPoll => local,
+        disposition WorkIntentRecorded => local,
+        disposition ResourceClaimRecorded => local,
+        disposition WorkIntentStatusChanged => local,
+        disposition ResourceClaimStatusChanged => local,
+        disposition ResourceClaimOverlapObserved => local,
 
         // =====================================================================
         // Invariants
@@ -6381,6 +6505,377 @@ macro_rules! mob_catalog_machine_dsl {
             }
         }
 
+        // =====================================================================
+        // Mob coordination board transitions (folded from the former
+        // standalone MobCoordinationLifecycleAuthorityMachine). MobMachine owns
+        // the records; every conclusion is recomputed in-DSL from owned maps +
+        // raw caller facts. No pre-reduced inputs.
+        // =====================================================================
+
+        // Admission: !exists && summary_present && metadata_public &&
+        // draft_mob_id == authority_mob_id && resources non-empty && owner
+        // present. Revision is the machine-owned initial revision (1); the
+        // event sequence is the machine-owned monotonic cursor.
+        transition RecordCoordinationWorkIntent {
+            on input RecordCoordinationWorkIntent {
+                intent_id,
+                requested_status,
+                owner_present,
+                summary_present,
+                metadata_public,
+                draft_mob_id,
+                authority_mob_id,
+                resource_tokens,
+                expires_at_ms,
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_is_new" { self.work_intent_status.contains_key(intent_id) == false }
+            guard "summary_present" { summary_present == true }
+            guard "metadata_public" { metadata_public == true }
+            guard "owning_mob_ref_matches" { draft_mob_id == authority_mob_id }
+            guard "resources_non_empty" { resource_tokens.len() > 0 }
+            guard "owner_present" { owner_present == true }
+            update {
+                self.work_intent_status.insert(intent_id, requested_status);
+                self.work_intent_revision.insert(intent_id, 1);
+                self.work_intent_resources.insert(intent_id, resource_tokens);
+                self.work_intent_owner_present.insert(intent_id, owner_present);
+                self.work_intent_expires_at_ms.insert(intent_id, expires_at_ms);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit WorkIntentRecorded {
+                intent_id: intent_id,
+                status: requested_status,
+                revision: 1,
+                resource_tokens: resource_tokens,
+                expires_at_ms: expires_at_ms,
+                event_kind: MobCoordinationEventKind::WorkIntentRecorded,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition RecordCoordinationResourceClaim {
+            on input RecordCoordinationResourceClaim {
+                claim_id,
+                requested_kind,
+                requested_status,
+                owner_present,
+                metadata_public,
+                draft_mob_id,
+                authority_mob_id,
+                resource_tokens,
+                expires_at_ms,
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "claim_is_new" { self.resource_claim_status.contains_key(claim_id) == false }
+            guard "metadata_public" { metadata_public == true }
+            guard "owning_mob_ref_matches" { draft_mob_id == authority_mob_id }
+            guard "resources_non_empty" { resource_tokens.len() > 0 }
+            guard "owner_present" { owner_present == true }
+            update {
+                self.resource_claim_status.insert(claim_id, requested_status);
+                self.resource_claim_kind.insert(claim_id, requested_kind);
+                self.resource_claim_revision.insert(claim_id, 1);
+                self.resource_claim_resources.insert(claim_id, resource_tokens);
+                self.resource_claim_owner_present.insert(claim_id, owner_present);
+                self.resource_claim_expires_at_ms.insert(claim_id, expires_at_ms);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit ResourceClaimRecorded {
+                claim_id: claim_id,
+                kind: requested_kind,
+                status: requested_status,
+                revision: 1,
+                resource_tokens: resource_tokens,
+                expires_at_ms: expires_at_ms,
+                event_kind: MobCoordinationEventKind::ResourceClaimRecorded,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        // Work intent status update: revision CAS against the machine-owned
+        // stored revision; emit stored+1. Terminal targets (Completed,
+        // Cancelled) are always legal; live targets (Planned, Active, Blocked)
+        // require the record not be expired — the expiry conclusion is computed
+        // in-DSL from the stored expiry + the raw now_ms input.
+        transition UpdateCoordinationWorkIntentPlanned {
+            on input UpdateCoordinationWorkIntentStatus { intent_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_present" { self.work_intent_status.contains_key(intent_id) }
+            guard "revision_cas" {
+                self.work_intent_revision.get_copied(intent_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_planned" { requested_status == MobCoordinationWorkIntentStatus::Planned }
+            guard "not_expired" {
+                mob_coordination_work_intent_unexpired(self.work_intent_expires_at_ms.get_cloned(intent_id).get("value"), now_ms)
+            }
+            update {
+                self.work_intent_status.insert(intent_id, MobCoordinationWorkIntentStatus::Planned);
+                self.work_intent_revision.insert(intent_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit WorkIntentStatusChanged {
+                intent_id: intent_id,
+                status: MobCoordinationWorkIntentStatus::Planned,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::WorkIntentStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationWorkIntentActive {
+            on input UpdateCoordinationWorkIntentStatus { intent_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_present" { self.work_intent_status.contains_key(intent_id) }
+            guard "revision_cas" {
+                self.work_intent_revision.get_copied(intent_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_active" { requested_status == MobCoordinationWorkIntentStatus::Active }
+            guard "not_expired" {
+                mob_coordination_work_intent_unexpired(self.work_intent_expires_at_ms.get_cloned(intent_id).get("value"), now_ms)
+            }
+            update {
+                self.work_intent_status.insert(intent_id, MobCoordinationWorkIntentStatus::Active);
+                self.work_intent_revision.insert(intent_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit WorkIntentStatusChanged {
+                intent_id: intent_id,
+                status: MobCoordinationWorkIntentStatus::Active,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::WorkIntentStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationWorkIntentBlocked {
+            on input UpdateCoordinationWorkIntentStatus { intent_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_present" { self.work_intent_status.contains_key(intent_id) }
+            guard "revision_cas" {
+                self.work_intent_revision.get_copied(intent_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_blocked" { requested_status == MobCoordinationWorkIntentStatus::Blocked }
+            guard "not_expired" {
+                mob_coordination_work_intent_unexpired(self.work_intent_expires_at_ms.get_cloned(intent_id).get("value"), now_ms)
+            }
+            update {
+                self.work_intent_status.insert(intent_id, MobCoordinationWorkIntentStatus::Blocked);
+                self.work_intent_revision.insert(intent_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit WorkIntentStatusChanged {
+                intent_id: intent_id,
+                status: MobCoordinationWorkIntentStatus::Blocked,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::WorkIntentStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationWorkIntentCompleted {
+            on input UpdateCoordinationWorkIntentStatus { intent_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_present" { self.work_intent_status.contains_key(intent_id) }
+            guard "revision_cas" {
+                self.work_intent_revision.get_copied(intent_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_completed" { requested_status == MobCoordinationWorkIntentStatus::Completed }
+            update {
+                self.work_intent_status.insert(intent_id, MobCoordinationWorkIntentStatus::Completed);
+                self.work_intent_revision.insert(intent_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit WorkIntentStatusChanged {
+                intent_id: intent_id,
+                status: MobCoordinationWorkIntentStatus::Completed,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::WorkIntentStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationWorkIntentCancelled {
+            on input UpdateCoordinationWorkIntentStatus { intent_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "intent_present" { self.work_intent_status.contains_key(intent_id) }
+            guard "revision_cas" {
+                self.work_intent_revision.get_copied(intent_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_cancelled" { requested_status == MobCoordinationWorkIntentStatus::Cancelled }
+            update {
+                self.work_intent_status.insert(intent_id, MobCoordinationWorkIntentStatus::Cancelled);
+                self.work_intent_revision.insert(intent_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit WorkIntentStatusChanged {
+                intent_id: intent_id,
+                status: MobCoordinationWorkIntentStatus::Cancelled,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::WorkIntentStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        // Resource claim status update: revision CAS; Released/Expired/Cancelled
+        // are terminal targets (always legal); Active requires not expired.
+        transition UpdateCoordinationResourceClaimActive {
+            on input UpdateCoordinationResourceClaimStatus { claim_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "claim_present" { self.resource_claim_status.contains_key(claim_id) }
+            guard "revision_cas" {
+                self.resource_claim_revision.get_copied(claim_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_active" { requested_status == MobCoordinationResourceClaimStatus::Active }
+            guard "not_expired" {
+                mob_coordination_resource_claim_unexpired(self.resource_claim_expires_at_ms.get_cloned(claim_id).get("value"), now_ms)
+            }
+            update {
+                self.resource_claim_status.insert(claim_id, MobCoordinationResourceClaimStatus::Active);
+                self.resource_claim_revision.insert(claim_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit ResourceClaimStatusChanged {
+                claim_id: claim_id,
+                status: MobCoordinationResourceClaimStatus::Active,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::ResourceClaimStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationResourceClaimReleased {
+            on input UpdateCoordinationResourceClaimStatus { claim_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "claim_present" { self.resource_claim_status.contains_key(claim_id) }
+            guard "revision_cas" {
+                self.resource_claim_revision.get_copied(claim_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_released" { requested_status == MobCoordinationResourceClaimStatus::Released }
+            update {
+                self.resource_claim_status.insert(claim_id, MobCoordinationResourceClaimStatus::Released);
+                self.resource_claim_revision.insert(claim_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit ResourceClaimStatusChanged {
+                claim_id: claim_id,
+                status: MobCoordinationResourceClaimStatus::Released,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::ResourceClaimStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationResourceClaimExpired {
+            on input UpdateCoordinationResourceClaimStatus { claim_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "claim_present" { self.resource_claim_status.contains_key(claim_id) }
+            guard "revision_cas" {
+                self.resource_claim_revision.get_copied(claim_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_expired" { requested_status == MobCoordinationResourceClaimStatus::Expired }
+            update {
+                self.resource_claim_status.insert(claim_id, MobCoordinationResourceClaimStatus::Expired);
+                self.resource_claim_revision.insert(claim_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit ResourceClaimStatusChanged {
+                claim_id: claim_id,
+                status: MobCoordinationResourceClaimStatus::Expired,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::ResourceClaimStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        transition UpdateCoordinationResourceClaimCancelled {
+            on input UpdateCoordinationResourceClaimStatus { claim_id, expected_revision, requested_status, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "claim_present" { self.resource_claim_status.contains_key(claim_id) }
+            guard "revision_cas" {
+                self.resource_claim_revision.get_copied(claim_id) == Some(expected_revision)
+                && expected_revision > 0
+            }
+            guard "target_is_cancelled" { requested_status == MobCoordinationResourceClaimStatus::Cancelled }
+            update {
+                self.resource_claim_status.insert(claim_id, MobCoordinationResourceClaimStatus::Cancelled);
+                self.resource_claim_revision.insert(claim_id, expected_revision + 1);
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit ResourceClaimStatusChanged {
+                claim_id: claim_id,
+                status: MobCoordinationResourceClaimStatus::Cancelled,
+                revision: expected_revision + 1,
+                event_kind: MobCoordinationEventKind::ResourceClaimStatusChanged,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
+        // Overlap observation. The caller proposes `candidate_overlap_ids`;
+        // MobMachine REVALIDATES it against its own state and rejects any wrong
+        // set. The proposed set is exactly the active resource claims (other
+        // than the target) whose affected resources intersect the target's.
+        //   (a) every proposed id is a DIFFERENT, present, active claim whose
+        //       resources intersect the target's;
+        //   (b) no omitted present active claim (other than the target) overlaps
+        //       the target — i.e. every such claim must appear in the proposal.
+        transition ObserveCoordinationResourceClaimOverlap {
+            on input ObserveCoordinationResourceClaimOverlap { claim_id, now_ms, candidate_overlap_ids }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "claim_present" { self.resource_claim_status.contains_key(claim_id) }
+            guard "candidates_are_valid_overlaps" {
+                for_all(cid in candidate_overlap_ids,
+                    cid != claim_id
+                    && self.resource_claim_status.contains_key(cid)
+                    && mob_coordination_resource_claim_active_at(
+                        self.resource_claim_status.get_cloned(cid).get("value"),
+                        self.resource_claim_expires_at_ms.get_cloned(cid).get("value"),
+                        now_ms)
+                    && exists(r in self.resource_claim_resources.get_cloned(cid).get("value"),
+                        self.resource_claim_resources.get_cloned(claim_id).get("value").contains(r)))
+            }
+            guard "no_omitted_overlap" {
+                for_all(other in self.resource_claim_status.keys(),
+                    other == claim_id
+                    || mob_coordination_resource_claim_inactive_at(
+                        self.resource_claim_status.get_cloned(other).get("value"),
+                        self.resource_claim_expires_at_ms.get_cloned(other).get("value"),
+                        now_ms)
+                    || !exists(r in self.resource_claim_resources.get_cloned(other).get("value"),
+                        self.resource_claim_resources.get_cloned(claim_id).get("value").contains(r))
+                    || candidate_overlap_ids.contains(other))
+            }
+            update {
+                self.coordination_event_next_sequence += 1;
+            }
+            to Running
+            emit ResourceClaimOverlapObserved {
+                claim_id: claim_id,
+                overlap_ids: candidate_overlap_ids,
+                event_kind: MobCoordinationEventKind::ResourceClaimOverlapObserved,
+                sequence: self.coordination_event_next_sequence
+            }
+        }
+
     }
         }
 
@@ -6813,6 +7308,50 @@ macro_rules! mob_catalog_machine_dsl {
             all_ready_queues.insert(frame_id.clone(), ready);
             all_ready_queues
         }
+
+        // -----------------------------------------------------------------
+        // Mob coordination expiry/active classification (folded). These are
+        // pure structural functions over RAW machine-owned facts (stored
+        // expiry timestamp + the caller's raw `now_ms` clock reading). They
+        // do not accept any pre-reduced `is_expired` input; the expiry
+        // conclusion is computed here from `Some(e) && e <= now_ms`.
+        // -----------------------------------------------------------------
+        fn mob_coordination_expired_at(expires_at_ms: &Option<u64>, now_ms: &u64) -> bool {
+            matches!(expires_at_ms, Some(expiry) if *expiry <= *now_ms)
+        }
+
+        fn mob_coordination_work_intent_unexpired(expires_at_ms: &Option<u64>, now_ms: &u64) -> bool {
+            !Self::mob_coordination_expired_at(expires_at_ms, now_ms)
+        }
+
+        fn mob_coordination_resource_claim_unexpired(
+            expires_at_ms: &Option<u64>,
+            now_ms: &u64,
+        ) -> bool {
+            !Self::mob_coordination_expired_at(expires_at_ms, now_ms)
+        }
+
+        // A resource claim is active at `now_ms` iff its status is `Active`
+        // (the only non-terminal status) and it is not expired. The expired
+        // classification matches the former board, which treats both the
+        // `Expired` status and an elapsed `expires_at` as expired; since the
+        // status arm already requires `Active`, only the timestamp matters.
+        fn mob_coordination_resource_claim_active_at(
+            status: &MobCoordinationResourceClaimStatus,
+            expires_at_ms: &Option<u64>,
+            now_ms: &u64,
+        ) -> bool {
+            matches!(status, MobCoordinationResourceClaimStatus::Active)
+                && !Self::mob_coordination_expired_at(expires_at_ms, now_ms)
+        }
+
+        fn mob_coordination_resource_claim_inactive_at(
+            status: &MobCoordinationResourceClaimStatus,
+            expires_at_ms: &Option<u64>,
+            now_ms: &u64,
+        ) -> bool {
+            !Self::mob_coordination_resource_claim_active_at(status, expires_at_ms, now_ms)
+        }
         }
     };
 }
@@ -6821,6 +7360,65 @@ crate::mob_catalog_machine_dsl!("self", "catalog::dsl::mob_machine");
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
+
+// ---------------------------------------------------------------------------
+// Mob coordination board bridging newtypes / enums (folded). These mirror the
+// product-neutral coordination domain types and let the DSL Set/Map machinery
+// treat them as opaque ordered keys/values.
+// ---------------------------------------------------------------------------
+
+/// Stable identifier for a product-neutral mob work intent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct WorkIntentId(pub String);
+
+/// Stable identifier for a mob resource claim.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ResourceClaimId(pub String);
+
+/// Product-neutral reference to a resource affected by mob coordination.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct CoordinationResourceRef(pub String);
+
+/// Work-intent lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationWorkIntentStatus {
+    #[default]
+    Planned,
+    Active,
+    Blocked,
+    Completed,
+    Cancelled,
+}
+
+/// Resource-claim lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationResourceClaimStatus {
+    #[default]
+    Active,
+    Released,
+    Expired,
+    Cancelled,
+}
+
+/// Resource-claim advisory strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationResourceClaimKind {
+    #[default]
+    Advisory,
+    SoftReservation,
+    Exclusive,
+}
+
+/// Coordination event discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationEventKind {
+    #[default]
+    WorkIntentRecorded,
+    WorkIntentStatusChanged,
+    ResourceClaimRecorded,
+    ResourceClaimStatusChanged,
+    ResourceClaimOverlapObserved,
+}
 
 // ---------------------------------------------------------------------------
 // Bridging newtypes

@@ -207,6 +207,34 @@ impl std::fmt::Display for CollectionPolicyKind {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct CoordinationResourceRef(pub String);
+impl From<String> for CoordinationResourceRef {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for CoordinationResourceRef {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for CoordinationResourceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1416,6 +1444,248 @@ impl std::fmt::Display for MemberWaitClassificationKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobCoordinationEventKind {
+    #[default]
+    #[serde(rename = "WorkIntentRecorded")]
+    WorkIntentRecorded,
+    #[serde(rename = "WorkIntentStatusChanged")]
+    WorkIntentStatusChanged,
+    #[serde(rename = "ResourceClaimRecorded")]
+    ResourceClaimRecorded,
+    #[serde(rename = "ResourceClaimStatusChanged")]
+    ResourceClaimStatusChanged,
+    #[serde(rename = "ResourceClaimOverlapObserved")]
+    ResourceClaimOverlapObserved,
+}
+impl MobCoordinationEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WorkIntentRecorded => "WorkIntentRecorded",
+            Self::WorkIntentStatusChanged => "WorkIntentStatusChanged",
+            Self::ResourceClaimRecorded => "ResourceClaimRecorded",
+            Self::ResourceClaimStatusChanged => "ResourceClaimStatusChanged",
+            Self::ResourceClaimOverlapObserved => "ResourceClaimOverlapObserved",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobCoordinationEventKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "WorkIntentRecorded" => Ok(Self::WorkIntentRecorded),
+            "WorkIntentStatusChanged" => Ok(Self::WorkIntentStatusChanged),
+            "ResourceClaimRecorded" => Ok(Self::ResourceClaimRecorded),
+            "ResourceClaimStatusChanged" => Ok(Self::ResourceClaimStatusChanged),
+            "ResourceClaimOverlapObserved" => Ok(Self::ResourceClaimOverlapObserved),
+            other => Err(format!("invalid MobCoordinationEventKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobCoordinationEventKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobCoordinationEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobCoordinationResourceClaimKind {
+    #[default]
+    #[serde(rename = "Advisory")]
+    Advisory,
+    #[serde(rename = "SoftReservation")]
+    SoftReservation,
+    #[serde(rename = "Exclusive")]
+    Exclusive,
+}
+impl MobCoordinationResourceClaimKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Advisory => "Advisory",
+            Self::SoftReservation => "SoftReservation",
+            Self::Exclusive => "Exclusive",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobCoordinationResourceClaimKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Advisory" => Ok(Self::Advisory),
+            "SoftReservation" => Ok(Self::SoftReservation),
+            "Exclusive" => Ok(Self::Exclusive),
+            other => Err(format!(
+                "invalid MobCoordinationResourceClaimKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobCoordinationResourceClaimKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobCoordinationResourceClaimKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobCoordinationResourceClaimStatus {
+    #[default]
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Released")]
+    Released,
+    #[serde(rename = "Expired")]
+    Expired,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl MobCoordinationResourceClaimStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Released => "Released",
+            Self::Expired => "Expired",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobCoordinationResourceClaimStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "Released" => Ok(Self::Released),
+            "Expired" => Ok(Self::Expired),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid MobCoordinationResourceClaimStatus value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobCoordinationResourceClaimStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobCoordinationResourceClaimStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobCoordinationWorkIntentStatus {
+    #[default]
+    #[serde(rename = "Planned")]
+    Planned,
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Blocked")]
+    Blocked,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl MobCoordinationWorkIntentStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Planned => "Planned",
+            Self::Active => "Active",
+            Self::Blocked => "Blocked",
+            Self::Completed => "Completed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobCoordinationWorkIntentStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Planned" => Ok(Self::Planned),
+            "Active" => Ok(Self::Active),
+            "Blocked" => Ok(Self::Blocked),
+            "Completed" => Ok(Self::Completed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid MobCoordinationWorkIntentStatus value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobCoordinationWorkIntentStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobCoordinationWorkIntentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -2018,6 +2288,34 @@ pub type PeerSigningKey = meerkat_machine_schema::catalog::dsl::mob_machine::Pee
     serde::Serialize,
     serde::Deserialize,
 )]
+pub struct ResourceClaimId(pub String);
+impl From<String> for ResourceClaimId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for ResourceClaimId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for ResourceClaimId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct RespawnTopologyPeerId(pub String);
 impl From<String> for RespawnTopologyPeerId {
     fn from(value: String) -> Self {
@@ -2450,6 +2748,34 @@ impl std::fmt::Display for WorkId {
         f.write_str(&self.0)
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkIntentId(pub String);
+impl From<String> for WorkIntentId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for WorkIntentId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for WorkIntentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -2678,6 +3004,27 @@ pub struct State {
     pub spawn_profile_authority_external_addressable:
         std::collections::BTreeMap<AgentIdentity, bool>,
     pub topology_epoch: u64,
+    pub work_intent_status:
+        std::collections::BTreeMap<WorkIntentId, MobCoordinationWorkIntentStatus>,
+    pub work_intent_revision: std::collections::BTreeMap<WorkIntentId, u64>,
+    pub work_intent_resources: std::collections::BTreeMap<
+        WorkIntentId,
+        std::collections::BTreeSet<CoordinationResourceRef>,
+    >,
+    pub work_intent_owner_present: std::collections::BTreeMap<WorkIntentId, bool>,
+    pub work_intent_expires_at_ms: std::collections::BTreeMap<WorkIntentId, Option<u64>>,
+    pub resource_claim_status:
+        std::collections::BTreeMap<ResourceClaimId, MobCoordinationResourceClaimStatus>,
+    pub resource_claim_kind:
+        std::collections::BTreeMap<ResourceClaimId, MobCoordinationResourceClaimKind>,
+    pub resource_claim_revision: std::collections::BTreeMap<ResourceClaimId, u64>,
+    pub resource_claim_resources: std::collections::BTreeMap<
+        ResourceClaimId,
+        std::collections::BTreeSet<CoordinationResourceRef>,
+    >,
+    pub resource_claim_owner_present: std::collections::BTreeMap<ResourceClaimId, bool>,
+    pub resource_claim_expires_at_ms: std::collections::BTreeMap<ResourceClaimId, Option<u64>>,
+    pub coordination_event_next_sequence: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -3189,6 +3536,50 @@ pub mod inputs {
     pub struct KickoffClear {
         pub member_id: String,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordCoordinationWorkIntent {
+        pub intent_id: WorkIntentId,
+        pub requested_status: MobCoordinationWorkIntentStatus,
+        pub owner_present: bool,
+        pub summary_present: bool,
+        pub metadata_public: bool,
+        pub draft_mob_id: MobId,
+        pub authority_mob_id: MobId,
+        pub resource_tokens: std::collections::BTreeSet<CoordinationResourceRef>,
+        pub expires_at_ms: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordCoordinationResourceClaim {
+        pub claim_id: ResourceClaimId,
+        pub requested_kind: MobCoordinationResourceClaimKind,
+        pub requested_status: MobCoordinationResourceClaimStatus,
+        pub owner_present: bool,
+        pub metadata_public: bool,
+        pub draft_mob_id: MobId,
+        pub authority_mob_id: MobId,
+        pub resource_tokens: std::collections::BTreeSet<CoordinationResourceRef>,
+        pub expires_at_ms: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UpdateCoordinationWorkIntentStatus {
+        pub intent_id: WorkIntentId,
+        pub expected_revision: u64,
+        pub requested_status: MobCoordinationWorkIntentStatus,
+        pub now_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UpdateCoordinationResourceClaimStatus {
+        pub claim_id: ResourceClaimId,
+        pub expected_revision: u64,
+        pub requested_status: MobCoordinationResourceClaimStatus,
+        pub now_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveCoordinationResourceClaimOverlap {
+        pub claim_id: ResourceClaimId,
+        pub now_ms: u64,
+        pub candidate_overlap_ids: Vec<ResourceClaimId>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3284,6 +3675,11 @@ pub enum Input {
     KickoffResolveFailed(inputs::KickoffResolveFailed),
     KickoffCancelRequested(inputs::KickoffCancelRequested),
     KickoffClear(inputs::KickoffClear),
+    RecordCoordinationWorkIntent(inputs::RecordCoordinationWorkIntent),
+    RecordCoordinationResourceClaim(inputs::RecordCoordinationResourceClaim),
+    UpdateCoordinationWorkIntentStatus(inputs::UpdateCoordinationWorkIntentStatus),
+    UpdateCoordinationResourceClaimStatus(inputs::UpdateCoordinationResourceClaimStatus),
+    ObserveCoordinationResourceClaimOverlap(inputs::ObserveCoordinationResourceClaimOverlap),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -3397,6 +3793,17 @@ impl Input {
             Self::KickoffResolveFailed(_) => InputKind::KickoffResolveFailed,
             Self::KickoffCancelRequested(_) => InputKind::KickoffCancelRequested,
             Self::KickoffClear(_) => InputKind::KickoffClear,
+            Self::RecordCoordinationWorkIntent(_) => InputKind::RecordCoordinationWorkIntent,
+            Self::RecordCoordinationResourceClaim(_) => InputKind::RecordCoordinationResourceClaim,
+            Self::UpdateCoordinationWorkIntentStatus(_) => {
+                InputKind::UpdateCoordinationWorkIntentStatus
+            }
+            Self::UpdateCoordinationResourceClaimStatus(_) => {
+                InputKind::UpdateCoordinationResourceClaimStatus
+            }
+            Self::ObserveCoordinationResourceClaimOverlap(_) => {
+                InputKind::ObserveCoordinationResourceClaimOverlap
+            }
         }
     }
 }
@@ -3489,6 +3896,11 @@ pub enum InputKind {
     KickoffResolveFailed,
     KickoffCancelRequested,
     KickoffClear,
+    RecordCoordinationWorkIntent,
+    RecordCoordinationResourceClaim,
+    UpdateCoordinationWorkIntentStatus,
+    UpdateCoordinationResourceClaimStatus,
+    ObserveCoordinationResourceClaimOverlap,
 }
 
 pub mod signals {
@@ -4210,6 +4622,50 @@ pub mod effects {
         pub after_cursor: u64,
         pub latest_cursor: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WorkIntentRecorded {
+        pub intent_id: WorkIntentId,
+        pub status: MobCoordinationWorkIntentStatus,
+        pub revision: u64,
+        pub resource_tokens: std::collections::BTreeSet<CoordinationResourceRef>,
+        pub expires_at_ms: Option<u64>,
+        pub event_kind: MobCoordinationEventKind,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResourceClaimRecorded {
+        pub claim_id: ResourceClaimId,
+        pub kind: MobCoordinationResourceClaimKind,
+        pub status: MobCoordinationResourceClaimStatus,
+        pub revision: u64,
+        pub resource_tokens: std::collections::BTreeSet<CoordinationResourceRef>,
+        pub expires_at_ms: Option<u64>,
+        pub event_kind: MobCoordinationEventKind,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WorkIntentStatusChanged {
+        pub intent_id: WorkIntentId,
+        pub status: MobCoordinationWorkIntentStatus,
+        pub revision: u64,
+        pub event_kind: MobCoordinationEventKind,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResourceClaimStatusChanged {
+        pub claim_id: ResourceClaimId,
+        pub status: MobCoordinationResourceClaimStatus,
+        pub revision: u64,
+        pub event_kind: MobCoordinationEventKind,
+        pub sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResourceClaimOverlapObserved {
+        pub claim_id: ResourceClaimId,
+        pub overlap_ids: Vec<ResourceClaimId>,
+        pub event_kind: MobCoordinationEventKind,
+        pub sequence: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4280,6 +4736,11 @@ pub enum Effect {
     RejectStructuralEventSubscription(effects::RejectStructuralEventSubscription),
     AuthorizeStrictEventPoll(effects::AuthorizeStrictEventPoll),
     RejectStrictEventPoll(effects::RejectStrictEventPoll),
+    WorkIntentRecorded(effects::WorkIntentRecorded),
+    ResourceClaimRecorded(effects::ResourceClaimRecorded),
+    WorkIntentStatusChanged(effects::WorkIntentStatusChanged),
+    ResourceClaimStatusChanged(effects::ResourceClaimStatusChanged),
+    ResourceClaimOverlapObserved(effects::ResourceClaimOverlapObserved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -4349,6 +4810,11 @@ pub enum EffectKind {
     RejectStructuralEventSubscription,
     AuthorizeStrictEventPoll,
     RejectStrictEventPoll,
+    WorkIntentRecorded,
+    ResourceClaimRecorded,
+    WorkIntentStatusChanged,
+    ResourceClaimStatusChanged,
+    ResourceClaimOverlapObserved,
 }
 
 #[allow(non_camel_case_types)]
@@ -4847,6 +5313,18 @@ pub enum TransitionId {
     ResolveCancelAllWorkRejectionMemberNotFound,
     ResolveCancelAllWorkRejectionCurrentRuntimeNotLive,
     ResolveCancelAllWorkRejectionStaleFenceToken,
+    RecordCoordinationWorkIntent,
+    RecordCoordinationResourceClaim,
+    UpdateCoordinationWorkIntentPlanned,
+    UpdateCoordinationWorkIntentActive,
+    UpdateCoordinationWorkIntentBlocked,
+    UpdateCoordinationWorkIntentCompleted,
+    UpdateCoordinationWorkIntentCancelled,
+    UpdateCoordinationResourceClaimActive,
+    UpdateCoordinationResourceClaimReleased,
+    UpdateCoordinationResourceClaimExpired,
+    UpdateCoordinationResourceClaimCancelled,
+    ObserveCoordinationResourceClaimOverlap,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5041,5 +5519,17 @@ pub fn initial_state() -> State {
         spawn_profile_authority_output_schema_digests: Default::default(),
         spawn_profile_authority_external_addressable: Default::default(),
         topology_epoch: 0,
+        work_intent_status: Default::default(),
+        work_intent_revision: Default::default(),
+        work_intent_resources: Default::default(),
+        work_intent_owner_present: Default::default(),
+        work_intent_expires_at_ms: Default::default(),
+        resource_claim_status: Default::default(),
+        resource_claim_kind: Default::default(),
+        resource_claim_revision: Default::default(),
+        resource_claim_resources: Default::default(),
+        resource_claim_owner_present: Default::default(),
+        resource_claim_expires_at_ms: Default::default(),
+        coordination_event_next_sequence: 1,
     }
 }

@@ -35,7 +35,6 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
 pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod meerkat_machine;
-pub mod mob_coordination_lifecycle_authority;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod pending_continuation_admission;
@@ -82,9 +81,6 @@ pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const MOB_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_MACHINE_PRODUCTION_RUST_MODULE: &str = "machines::mob_machine";
-pub const MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
-pub const MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
-    "generated::mob_coordination_lifecycle_authority";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::schedule_lifecycle";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
@@ -406,56 +402,6 @@ pub fn session_persistence_version_authority_schema_metadata() -> MachineSchemaM
                 "SessionMetadataSchema",
             ],
         )],
-        Vec::new(),
-    )
-}
-
-/// Non-canonical support schema used only to emit generated mob coordination
-/// lifecycle authority into `meerkat-mob`.
-pub fn dsl_mob_coordination_lifecycle_authority_machine() -> MachineSchema {
-    mob_coordination_lifecycle_authority_schema_metadata().attach_to(
-        mob_coordination_lifecycle_authority::MobCoordinationLifecycleAuthorityMachineState::schema(
-        ),
-    )
-}
-
-pub fn dsl_mob_coordination_lifecycle_authority_machine_production_schema() -> MachineSchema {
-    with_production_rust_binding(
-        dsl_mob_coordination_lifecycle_authority_machine(),
-        MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_CRATE,
-        MOB_COORDINATION_LIFECYCLE_AUTHORITY_PRODUCTION_RUST_MODULE,
-    )
-}
-
-pub fn mob_coordination_lifecycle_authority_schema_metadata() -> MachineSchemaMetadata {
-    machine_schema_metadata(
-        vec![
-            NamedTypeBinding::string_enum(
-                "MobCoordinationWorkIntentStatus",
-                &["Planned", "Active", "Blocked", "Completed", "Cancelled"],
-            ),
-            NamedTypeBinding::string_enum(
-                "MobCoordinationResourceClaimStatus",
-                &["Active", "Released", "Expired", "Cancelled"],
-            ),
-            NamedTypeBinding::string_enum(
-                "MobCoordinationResourceClaimKind",
-                &["Advisory", "SoftReservation", "Exclusive"],
-            ),
-            NamedTypeBinding::string_enum(
-                "MobCoordinationEventKind",
-                &[
-                    "WorkIntentRecorded",
-                    "WorkIntentStatusChanged",
-                    "ResourceClaimRecorded",
-                    "ResourceClaimStatusChanged",
-                    "ResourceClaimOverlapObserved",
-                ],
-            ),
-            NamedTypeBinding::string("WorkIntentId"),
-            NamedTypeBinding::string("ResourceClaimId"),
-            NamedTypeBinding::string("CoordinationResourceRef"),
-        ],
         Vec::new(),
     )
 }
@@ -2200,6 +2146,33 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "PeerSigningKey",
                 "crate::catalog::dsl::mob_machine::PeerSigningKey",
             ),
+            // Mob coordination board types (folded from the former standalone
+            // MobCoordinationLifecycleAuthorityMachine).
+            NamedTypeBinding::string("WorkIntentId"),
+            NamedTypeBinding::string("ResourceClaimId"),
+            NamedTypeBinding::string("CoordinationResourceRef"),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationWorkIntentStatus",
+                &["Planned", "Active", "Blocked", "Completed", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationResourceClaimStatus",
+                &["Active", "Released", "Expired", "Cancelled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationResourceClaimKind",
+                &["Advisory", "SoftReservation", "Exclusive"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobCoordinationEventKind",
+                &[
+                    "WorkIntentRecorded",
+                    "WorkIntentStatusChanged",
+                    "ResourceClaimRecorded",
+                    "ResourceClaimStatusChanged",
+                    "ResourceClaimOverlapObserved",
+                ],
+            ),
         ],
         input_variant_ids(MOB_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
@@ -2261,6 +2234,11 @@ runtime_internal_inputs!(
         CommitSupervisorRotation,
         ClearSupervisorAuthorityForDestroy,
         RestoreSupervisorAuthorityAfterDestroyRollback,
+        RecordCoordinationWorkIntent,
+        RecordCoordinationResourceClaim,
+        UpdateCoordinationWorkIntentStatus,
+        UpdateCoordinationResourceClaimStatus,
+        ObserveCoordinationResourceClaimOverlap,
     ]
 );
 

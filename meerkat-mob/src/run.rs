@@ -432,6 +432,11 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
             | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
             | mob_dsl::MobMachineInput::KickoffClear { .. }
+            | mob_dsl::MobMachineInput::RecordCoordinationWorkIntent { .. }
+            | mob_dsl::MobMachineInput::RecordCoordinationResourceClaim { .. }
+            | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
+            | mob_dsl::MobMachineInput::UpdateCoordinationResourceClaimStatus { .. }
+            | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. }
     };
 }
 
@@ -1571,7 +1576,12 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::KickoffResolveCallbackPending { .. }
             | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
             | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
-            | mob_dsl::MobMachineInput::KickoffClear { .. } => {
+            | mob_dsl::MobMachineInput::KickoffClear { .. }
+            | mob_dsl::MobMachineInput::RecordCoordinationWorkIntent { .. }
+            | mob_dsl::MobMachineInput::RecordCoordinationResourceClaim { .. }
+            | mob_dsl::MobMachineInput::UpdateCoordinationWorkIntentStatus { .. }
+            | mob_dsl::MobMachineInput::UpdateCoordinationResourceClaimStatus { .. }
+            | mob_dsl::MobMachineInput::ObserveCoordinationResourceClaimOverlap { .. } => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));

@@ -1136,6 +1136,191 @@ impl From<[u8; 32]> for PeerSigningKey {
 }
 
 // ---------------------------------------------------------------------------
+// Mob coordination board bridging newtypes / enums (folded). Mirror the
+// product-neutral coordination domain types in `crate::coordination`. The DSL
+// needs Ord+Hash+Clone+Default for Set/Map machinery; these satisfy that and
+// provide conversions to/from the domain projection types.
+// ---------------------------------------------------------------------------
+
+/// Bridging type for a work intent id. Maps to `crate::coordination::WorkIntentId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct WorkIntentId(pub String);
+
+impl<T: Into<String>> From<T> for WorkIntentId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl From<&crate::coordination::WorkIntentId> for WorkIntentId {
+    fn from(id: &crate::coordination::WorkIntentId) -> Self {
+        Self(id.as_str().to_owned())
+    }
+}
+
+impl WorkIntentId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Bridging type for a resource claim id. Maps to `crate::coordination::ResourceClaimId`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ResourceClaimId(pub String);
+
+impl<T: Into<String>> From<T> for ResourceClaimId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl From<&crate::coordination::ResourceClaimId> for ResourceClaimId {
+    fn from(id: &crate::coordination::ResourceClaimId) -> Self {
+        Self(id.as_str().to_owned())
+    }
+}
+
+impl ResourceClaimId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Bridging type for a coordination resource ref. Maps to
+/// `crate::coordination::CoordinationResourceRef`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct CoordinationResourceRef(pub String);
+
+impl<T: Into<String>> From<T> for CoordinationResourceRef {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl From<&crate::coordination::CoordinationResourceRef> for CoordinationResourceRef {
+    fn from(value: &crate::coordination::CoordinationResourceRef) -> Self {
+        Self(value.as_str().to_owned())
+    }
+}
+
+impl CoordinationResourceRef {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Work-intent lifecycle status. Mirrors `crate::coordination::WorkIntentStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationWorkIntentStatus {
+    #[default]
+    Planned,
+    Active,
+    Blocked,
+    Completed,
+    Cancelled,
+}
+
+impl From<crate::coordination::WorkIntentStatus> for MobCoordinationWorkIntentStatus {
+    fn from(status: crate::coordination::WorkIntentStatus) -> Self {
+        match status {
+            crate::coordination::WorkIntentStatus::Planned => Self::Planned,
+            crate::coordination::WorkIntentStatus::Active => Self::Active,
+            crate::coordination::WorkIntentStatus::Blocked => Self::Blocked,
+            crate::coordination::WorkIntentStatus::Completed => Self::Completed,
+            crate::coordination::WorkIntentStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<MobCoordinationWorkIntentStatus> for crate::coordination::WorkIntentStatus {
+    fn from(status: MobCoordinationWorkIntentStatus) -> Self {
+        match status {
+            MobCoordinationWorkIntentStatus::Planned => Self::Planned,
+            MobCoordinationWorkIntentStatus::Active => Self::Active,
+            MobCoordinationWorkIntentStatus::Blocked => Self::Blocked,
+            MobCoordinationWorkIntentStatus::Completed => Self::Completed,
+            MobCoordinationWorkIntentStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Resource-claim lifecycle status. Mirrors `crate::coordination::ResourceClaimStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationResourceClaimStatus {
+    #[default]
+    Active,
+    Released,
+    Expired,
+    Cancelled,
+}
+
+impl From<crate::coordination::ResourceClaimStatus> for MobCoordinationResourceClaimStatus {
+    fn from(status: crate::coordination::ResourceClaimStatus) -> Self {
+        match status {
+            crate::coordination::ResourceClaimStatus::Active => Self::Active,
+            crate::coordination::ResourceClaimStatus::Released => Self::Released,
+            crate::coordination::ResourceClaimStatus::Expired => Self::Expired,
+            crate::coordination::ResourceClaimStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<MobCoordinationResourceClaimStatus> for crate::coordination::ResourceClaimStatus {
+    fn from(status: MobCoordinationResourceClaimStatus) -> Self {
+        match status {
+            MobCoordinationResourceClaimStatus::Active => Self::Active,
+            MobCoordinationResourceClaimStatus::Released => Self::Released,
+            MobCoordinationResourceClaimStatus::Expired => Self::Expired,
+            MobCoordinationResourceClaimStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Resource-claim advisory strength. Mirrors `crate::coordination::ResourceClaimKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationResourceClaimKind {
+    #[default]
+    Advisory,
+    SoftReservation,
+    Exclusive,
+}
+
+impl From<crate::coordination::ResourceClaimKind> for MobCoordinationResourceClaimKind {
+    fn from(kind: crate::coordination::ResourceClaimKind) -> Self {
+        match kind {
+            crate::coordination::ResourceClaimKind::Advisory => Self::Advisory,
+            crate::coordination::ResourceClaimKind::SoftReservation => Self::SoftReservation,
+            crate::coordination::ResourceClaimKind::Exclusive => Self::Exclusive,
+        }
+    }
+}
+
+impl From<MobCoordinationResourceClaimKind> for crate::coordination::ResourceClaimKind {
+    fn from(kind: MobCoordinationResourceClaimKind) -> Self {
+        match kind {
+            MobCoordinationResourceClaimKind::Advisory => Self::Advisory,
+            MobCoordinationResourceClaimKind::SoftReservation => Self::SoftReservation,
+            MobCoordinationResourceClaimKind::Exclusive => Self::Exclusive,
+        }
+    }
+}
+
+/// Coordination event discriminant. Mirrors the variant tags of
+/// `crate::coordination::MobCoordinationEventKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCoordinationEventKind {
+    #[default]
+    WorkIntentRecorded,
+    WorkIntentStatusChanged,
+    ResourceClaimRecorded,
+    ResourceClaimStatusChanged,
+    ResourceClaimOverlapObserved,
+}
+
+// ---------------------------------------------------------------------------
 // Machine definition
 // ---------------------------------------------------------------------------
 

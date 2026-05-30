@@ -76,6 +76,57 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
     }
 }
 
+/// Anti-regression ratchet (LUC-524, P0 Dogma Invariant 1): a stateless
+/// classifier must never be registered as a canonical machine. A classifier
+/// has a single phase, an empty `terminal []` set, every transition self-loops
+/// back to that phase, and NO per-entity `Map` state field — it owns no
+/// lifecycle and no durable registry, it only reduces inputs to a disposition.
+/// This is exactly the shape `PendingContinuationAdmissionMachine` had when it
+/// was wrongly promoted to canonical; promoting such a reducer makes its
+/// conclusion an unproved trusted base relative to the canonical TLA proof.
+///
+/// Stateful registries are NOT classifiers and remain allowed: e.g.
+/// `ApprovalLifecycleMachine` keeps an `approval_statuses: Map<..>` (its
+/// per-approval lifecycle lives in the map values), so it has registry state.
+#[test]
+fn no_canonical_machine_is_a_stateless_classifier() {
+    fn contains_map(ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Map(_, _) => true,
+            TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+                contains_map(inner)
+            }
+            _ => false,
+        }
+    }
+
+    for schema in canonical_machine_schemas() {
+        let single_phase = schema.state.phase.variants.len() == 1;
+        let no_terminal = schema.state.terminal_phases.is_empty();
+        let all_self_loop = schema
+            .transitions
+            .iter()
+            .all(|transition| transition.from.iter().all(|from| *from == transition.to));
+        let has_registry_state = schema
+            .state
+            .fields
+            .iter()
+            .any(|field| contains_map(&field.ty));
+
+        let is_stateless_classifier =
+            single_phase && no_terminal && all_self_loop && !has_registry_state;
+
+        assert!(
+            !is_stateless_classifier,
+            "{} is a stateless classifier (single phase, empty terminal set, all \
+             transitions self-loop, no Map registry state) and must NOT be canonical — \
+             fold its decision into the owning canonical machine, or keep it as a \
+             non-canonical generated helper revalidated by one",
+            schema.machine.as_str()
+        );
+    }
+}
+
 #[test]
 fn workgraph_machine_state_wire_retains_topology_projection_fields() {
     let value = serde_json::json!({

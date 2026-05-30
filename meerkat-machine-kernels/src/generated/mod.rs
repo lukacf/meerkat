@@ -4,7 +4,6 @@ pub mod auth;
 pub mod meerkat;
 pub mod mob;
 pub mod occurrence_lifecycle;
-pub mod pending_continuation_admission;
 pub mod schedule_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_graph_lifecycle;

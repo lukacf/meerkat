@@ -56,9 +56,6 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             "WorkGraphLifecycleMachine",
             // Work attention owns goal/attention queue lifecycle.
             "WorkAttentionLifecycleMachine",
-            // Pending continuation: public run-pending admission and
-            // NoPendingBoundary terminality belong to generated authority.
-            "PendingContinuationAdmissionMachine",
         ]
     );
 
@@ -66,6 +63,11 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
         "SessionTurnAdmissionMachine",
         "SessionToolVisibilityMachine",
         "PeerDirectoryReachabilityMachine",
+        // Pending-continuation is a stateless boundary classifier (single
+        // `Ready` phase, `terminal []`, all self-loops). It owns no
+        // independent lifecycle and is consumed as a generated helper that
+        // feeds SessionTurnAdmissionMachine — it must NOT be canonical.
+        "PendingContinuationAdmissionMachine",
     ] {
         assert!(
             !names.iter().any(|name| name == absorbed),

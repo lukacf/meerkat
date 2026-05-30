@@ -1530,22 +1530,6 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         //
         // =========================================================================
-        // PendingContinuationAdmissionMachine
-        // =========================================================================
-        (
-            "PendingContinuationAdmissionMachine",
-            "PendingContinuationResolved",
-            SeamClassification::NoOwnerRealization,
-            "Local pending-continuation admission result retained inside the continuation admission region",
-        ),
-        (
-            "PendingContinuationAdmissionMachine",
-            "PendingContinuationPublicTerminalResolved",
-            SeamClassification::SurfaceResultAlignment,
-            "Pending-continuation public terminal result must align with canonical admission truth",
-        ),
-        //
-        // =========================================================================
         // ApprovalLifecycleMachine
         // =========================================================================
         (

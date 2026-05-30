@@ -8,9 +8,8 @@ use super::{
     },
     dsl::{
         dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine,
-        dsl_occurrence_lifecycle_machine, dsl_pending_continuation_admission_machine,
-        dsl_schedule_lifecycle_machine, dsl_work_attention_lifecycle_machine,
-        dsl_workgraph_lifecycle_machine,
+        dsl_occurrence_lifecycle_machine, dsl_schedule_lifecycle_machine,
+        dsl_work_attention_lifecycle_machine, dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -277,18 +276,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, and RestoreRejectedInvalidRecord validate persisted status, decision audit consistency, and allowed-decision compatibility before rehydrating approval lifecycle truth",
                 ),
             ],
-        ),
-        machine_manifest_from_schema(
-            &dsl_pending_continuation_admission_machine(),
-            &[anchor(
-                "pending_continuation_authority",
-                "meerkat-core/src/generated/pending_continuation_admission.rs",
-                "generated PendingContinuationAdmissionMachine owner for ResolveWithBoundary, ResolveWithoutBoundary, ResolveLastNoPendingTerminal, PendingContinuationResolved, and PendingContinuationPublicTerminalResolved",
-            )],
-            &[scenario(
-                "pending-continuation-admission-terminal",
-                "ResolveWithBoundary admits RunPending, ResolveWithoutBoundary emits NoPendingBoundary through PendingContinuationResolved and PendingContinuationPublicTerminalResolved, and ResolveLastNoPendingTerminal replays the generated terminal witness",
-            )],
         ),
         machine_manifest_from_schema(
             &dsl_workgraph_lifecycle_machine(),

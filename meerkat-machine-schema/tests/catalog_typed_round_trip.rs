@@ -77,7 +77,6 @@ fn canonical_machine_slug_snapshot() {
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
             "OccurrenceLifecycleMachine".to_string(),
-            "PendingContinuationAdmissionMachine".to_string(),
             "ScheduleLifecycleMachine".to_string(),
             "WorkAttentionLifecycleMachine".to_string(),
             "WorkGraphLifecycleMachine".to_string(),

@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_runtime_bundle.
 
-CONSTANTS ClaimTokenValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, ScheduleLifecycleStateValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues
+CONSTANTS ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, ScheduleLifecycleStateValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -909,6 +909,186 @@ occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "DeliveryFailed", public_class |-> "DueClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Pending"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Pending"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Pending", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Pending"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Claimed", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Dispatching"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Dispatching", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "AwaitingCompletion"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "AwaitingCompletion"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "AwaitingCompletion", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "AwaitingCompletion"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Completed"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Completed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Completed", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Skipped"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Skipped"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Skipped", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Skipped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Misfired"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Misfired"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Misfired", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Misfired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Superseded"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "Superseded"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "Superseded", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Superseded"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed(arg_refusal_kind, arg_trigger) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyTransitionFailure"
+       /\ packet.payload.refusal_kind = arg_refusal_kind
+       /\ packet.payload.trigger = arg_trigger
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "DeliveryFailed"
+       /\ ((packet.payload.trigger = "ClassifyClaimedDispatchDisposition") /\ ((packet.payload.refusal_kind = "GuardRejected") \/ (packet.payload.refusal_kind = "NoMatchingTransition")))
+       /\ occurrence_phase' = "DeliveryFailed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "TransitionFailureClassified", payload |-> [phase |-> "DeliveryFailed", public_class |-> "ClaimedDispatchClassificationRejected", refusal_kind |-> packet.payload.refusal_kind, trigger |-> packet.payload.trigger], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2141,6 +2321,106 @@ occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DueNoAction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyDueDeliveryFailedNoAction"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyDueDeliveryFailedNoAction", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "DeliveryFailed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyClaimedDispatchDispositionFutureRevision(arg_schedule_phase, arg_current_schedule_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyClaimedDispatchDisposition"
+       /\ packet.payload.schedule_phase = arg_schedule_phase
+       /\ packet.payload.current_schedule_revision = arg_current_schedule_revision
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ (packet.payload.current_schedule_revision < occurrence_schedule_revision)
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "ClaimedDispatchDispositionClassified", payload |-> [disposition |-> "FutureRevision", superseded_by_revision |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyClaimedDispatchDispositionFutureRevision"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyClaimedDispatchDispositionFutureRevision", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyClaimedDispatchDispositionFrozen(arg_schedule_phase, arg_current_schedule_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyClaimedDispatchDisposition"
+       /\ packet.payload.schedule_phase = arg_schedule_phase
+       /\ packet.payload.current_schedule_revision = arg_current_schedule_revision
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.current_schedule_revision >= occurrence_schedule_revision) /\ (packet.payload.schedule_phase = "Paused"))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "ClaimedDispatchDispositionClassified", payload |-> [disposition |-> "Frozen", superseded_by_revision |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyClaimedDispatchDispositionFrozen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyClaimedDispatchDispositionFrozen", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyClaimedDispatchDispositionSupersedeDeleted(arg_schedule_phase, arg_current_schedule_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyClaimedDispatchDisposition"
+       /\ packet.payload.schedule_phase = arg_schedule_phase
+       /\ packet.payload.current_schedule_revision = arg_current_schedule_revision
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.current_schedule_revision >= occurrence_schedule_revision) /\ (packet.payload.schedule_phase = "Deleted"))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "ClaimedDispatchDispositionClassified", payload |-> [disposition |-> "Supersede", superseded_by_revision |-> Some(packet.payload.current_schedule_revision)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyClaimedDispatchDispositionSupersedeDeleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyClaimedDispatchDispositionSupersedeDeleted", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyClaimedDispatchDispositionSupersedeStale(arg_schedule_phase, arg_current_schedule_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyClaimedDispatchDisposition"
+       /\ packet.payload.schedule_phase = arg_schedule_phase
+       /\ packet.payload.current_schedule_revision = arg_current_schedule_revision
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.schedule_phase = "Active") /\ (occurrence_schedule_revision < packet.payload.current_schedule_revision))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "ClaimedDispatchDispositionClassified", payload |-> [disposition |-> "Supersede", superseded_by_revision |-> Some(packet.payload.current_schedule_revision)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyClaimedDispatchDispositionSupersedeStale"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyClaimedDispatchDispositionSupersedeStale", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_ClassifyClaimedDispatchDispositionReady(arg_schedule_phase, arg_current_schedule_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "ClassifyClaimedDispatchDisposition"
+       /\ packet.payload.schedule_phase = arg_schedule_phase
+       /\ packet.payload.current_schedule_revision = arg_current_schedule_revision
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Claimed"
+       /\ ((packet.payload.schedule_phase = "Active") /\ (occurrence_schedule_revision = packet.payload.current_schedule_revision))
+       /\ occurrence_phase' = "Claimed"
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_misfire_policy_key, schedule_overlap_policy, schedule_overlap_policy_key, schedule_missing_target_policy, schedule_missing_target_policy_key, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "ClaimedDispatchDispositionClassified", payload |-> [disposition |-> "Ready", superseded_by_revision |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyClaimedDispatchDispositionReady"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "ClassifyClaimedDispatchDispositionReady", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Claimed"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3744,6 +4024,15 @@ CoreNext ==
     \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_refusal_kind, arg_trigger)
     \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_refusal_kind, arg_trigger)
     \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded(arg_refusal_kind, arg_trigger)
+    \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed(arg_refusal_kind, arg_trigger)
     \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimRejectedPendingPending(arg_refusal_kind, arg_trigger)
     \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_refusal_kind, arg_trigger)
     \/ \E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_refusal_kind, arg_trigger)
@@ -3804,6 +4093,11 @@ CoreNext ==
     \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms)
     \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms)
     \/ \E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms)
+    \/ \E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFutureRevision(arg_schedule_phase, arg_current_schedule_revision)
+    \/ \E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFrozen(arg_schedule_phase, arg_current_schedule_revision)
+    \/ \E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeDeleted(arg_schedule_phase, arg_current_schedule_revision)
+    \/ \E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeStale(arg_schedule_phase, arg_current_schedule_revision)
+    \/ \E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionReady(arg_schedule_phase, arg_current_schedule_revision)
     \/ \E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id)
     \/ \E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id)
     \/ \E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptPending(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key)
@@ -3943,8 +4237,19 @@ WitnessFairness_runtime_delivery_feedback_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimRejectedPendingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_runtime_delivery_feedback_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_refusal_kind, arg_trigger))
@@ -3954,8 +4259,6 @@ WitnessFairness_runtime_delivery_feedback_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_runtime_delivery_feedback_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_refusal_kind, arg_trigger))
@@ -3971,6 +4274,8 @@ WitnessFairness_runtime_delivery_feedback_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_runtime_delivery_feedback_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_refusal_kind, arg_trigger))
@@ -3980,8 +4285,6 @@ WitnessFairness_runtime_delivery_feedback_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_runtime_delivery_feedback_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_refusal_kind, arg_trigger))
@@ -3997,6 +4300,8 @@ WitnessFairness_runtime_delivery_feedback_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
+
+WitnessFairness_runtime_delivery_feedback_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
@@ -4006,9 +4311,12 @@ WitnessFairness_runtime_delivery_feedback_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms))
-
-WitnessFairness_runtime_delivery_feedback_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFutureRevision(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFrozen(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeDeleted(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeStale(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionReady(arg_schedule_phase, arg_current_schedule_revision))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptPending(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -4018,6 +4326,8 @@ WitnessFairness_runtime_delivery_feedback_5 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_runtime_delivery_feedback_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token))
@@ -4032,8 +4342,6 @@ WitnessFairness_runtime_delivery_feedback_5 ==
     /\ WF_vars(\E arg_reason \in DeliveryCompletionFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryCompletionFailureInternalError(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMaterializationFailed(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMissing(arg_reason, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_runtime_delivery_feedback_6 ==
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetBusy(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureRuntimeRejected(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureMobRejected(arg_reason, arg_detail, arg_at_utc_ms))
@@ -4044,6 +4352,8 @@ WitnessFairness_runtime_delivery_feedback_6 ==
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
+
+WitnessFairness_runtime_delivery_feedback_7 ==
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DueMisfirePending(arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms))
@@ -4058,8 +4368,6 @@ WitnessFairness_runtime_delivery_feedback_6 ==
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigActive(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigPaused(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal))
-
-WitnessFairness_runtime_delivery_feedback_7 ==
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotActive(arg_target_binding_key))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms))
@@ -4122,8 +4430,19 @@ WitnessFairness_runtime_lease_expiry_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimRejectedPendingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_runtime_lease_expiry_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_refusal_kind, arg_trigger))
@@ -4133,8 +4452,6 @@ WitnessFairness_runtime_lease_expiry_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_runtime_lease_expiry_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_refusal_kind, arg_trigger))
@@ -4150,6 +4467,8 @@ WitnessFairness_runtime_lease_expiry_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_runtime_lease_expiry_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_refusal_kind, arg_trigger))
@@ -4159,8 +4478,6 @@ WitnessFairness_runtime_lease_expiry_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_runtime_lease_expiry_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_refusal_kind, arg_trigger))
@@ -4176,6 +4493,8 @@ WitnessFairness_runtime_lease_expiry_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
+
+WitnessFairness_runtime_lease_expiry_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
@@ -4185,9 +4504,12 @@ WitnessFairness_runtime_lease_expiry_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms))
-
-WitnessFairness_runtime_lease_expiry_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFutureRevision(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFrozen(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeDeleted(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeStale(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionReady(arg_schedule_phase, arg_current_schedule_revision))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptPending(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -4197,6 +4519,8 @@ WitnessFairness_runtime_lease_expiry_5 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_runtime_lease_expiry_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token))
@@ -4211,8 +4535,6 @@ WitnessFairness_runtime_lease_expiry_5 ==
     /\ WF_vars(\E arg_reason \in DeliveryCompletionFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryCompletionFailureInternalError(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMaterializationFailed(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMissing(arg_reason, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_runtime_lease_expiry_6 ==
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetBusy(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureRuntimeRejected(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureMobRejected(arg_reason, arg_detail, arg_at_utc_ms))
@@ -4223,6 +4545,8 @@ WitnessFairness_runtime_lease_expiry_6 ==
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
+
+WitnessFairness_runtime_lease_expiry_7 ==
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DueMisfirePending(arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms))
@@ -4237,8 +4561,6 @@ WitnessFairness_runtime_lease_expiry_6 ==
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigActive(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigPaused(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal))
-
-WitnessFairness_runtime_lease_expiry_7 ==
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotActive(arg_target_binding_key))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms))
@@ -4301,8 +4623,19 @@ WitnessFairness_revision_supersede_route_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimRejectedPendingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_revision_supersede_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_refusal_kind, arg_trigger))
@@ -4312,8 +4645,6 @@ WitnessFairness_revision_supersede_route_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_revision_supersede_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_refusal_kind, arg_trigger))
@@ -4329,6 +4660,8 @@ WitnessFairness_revision_supersede_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_revision_supersede_route_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_refusal_kind, arg_trigger))
@@ -4338,8 +4671,6 @@ WitnessFairness_revision_supersede_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_revision_supersede_route_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_refusal_kind, arg_trigger))
@@ -4355,6 +4686,8 @@ WitnessFairness_revision_supersede_route_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
+
+WitnessFairness_revision_supersede_route_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
@@ -4364,9 +4697,12 @@ WitnessFairness_revision_supersede_route_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms))
-
-WitnessFairness_revision_supersede_route_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFutureRevision(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFrozen(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeDeleted(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeStale(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionReady(arg_schedule_phase, arg_current_schedule_revision))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptPending(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -4376,6 +4712,8 @@ WitnessFairness_revision_supersede_route_5 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_revision_supersede_route_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token))
@@ -4390,8 +4728,6 @@ WitnessFairness_revision_supersede_route_5 ==
     /\ WF_vars(\E arg_reason \in DeliveryCompletionFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryCompletionFailureInternalError(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMaterializationFailed(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMissing(arg_reason, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_revision_supersede_route_6 ==
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetBusy(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureRuntimeRejected(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureMobRejected(arg_reason, arg_detail, arg_at_utc_ms))
@@ -4402,6 +4738,8 @@ WitnessFairness_revision_supersede_route_6 ==
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
+
+WitnessFairness_revision_supersede_route_7 ==
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DueMisfirePending(arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms))
@@ -4416,8 +4754,6 @@ WitnessFairness_revision_supersede_route_6 ==
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigActive(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigPaused(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal))
-
-WitnessFairness_revision_supersede_route_7 ==
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotActive(arg_target_binding_key))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms))
@@ -4480,8 +4816,19 @@ WitnessFairness_occurrence_supersede_ack_route_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedSuperseded(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded(arg_refusal_kind, arg_trigger))
+    /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureClaimRejectedPendingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimClaimed(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_occurrence_supersede_ack_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimCompleted(arg_refusal_kind, arg_trigger))
@@ -4491,8 +4838,6 @@ WitnessFairness_occurrence_supersede_ack_route_2 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotPendingForClaimDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedClaimed(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_occurrence_supersede_ack_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedDispatching(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedAwaitingCompletion(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotClaimedCompleted(arg_refusal_kind, arg_trigger))
@@ -4508,6 +4853,8 @@ WitnessFairness_occurrence_supersede_ack_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingSuperseded(arg_refusal_kind, arg_trigger))
+
+WitnessFairness_occurrence_supersede_ack_route_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotDispatchingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingClaimed(arg_refusal_kind, arg_trigger))
@@ -4517,8 +4864,6 @@ WitnessFairness_occurrence_supersede_ack_route_3 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSkipped(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingMisfired(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingSuperseded(arg_refusal_kind, arg_trigger))
-
-WitnessFairness_occurrence_supersede_ack_route_4 ==
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLeaseHoldingDeliveryFailed(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalPending(arg_refusal_kind, arg_trigger))
     /\ WF_vars(\E arg_refusal_kind \in OccurrenceTransitionFailureRefusalKindValues : \E arg_trigger \in OccurrenceLifecycleInputVariantValues : occurrence_ClassifyTransitionFailureNotLiveForTerminalClaimed(arg_refusal_kind, arg_trigger))
@@ -4534,6 +4879,8 @@ WitnessFairness_occurrence_supersede_ack_route_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingMisfire(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDuePendingClaimEligible(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseExpired(arg_now_utc_ms))
+
+WitnessFairness_occurrence_supersede_ack_route_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDispatchingLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueAwaitingCompletionLeaseExpired(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueClaimedLeaseCurrent(arg_now_utc_ms))
@@ -4543,9 +4890,12 @@ WitnessFairness_occurrence_supersede_ack_route_4 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSkippedNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueMisfiredNoAction(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueSupersededNoAction(arg_now_utc_ms))
-
-WitnessFairness_occurrence_supersede_ack_route_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : occurrence_ClassifyDueDeliveryFailedNoAction(arg_now_utc_ms))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFutureRevision(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionFrozen(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeDeleted(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionSupersedeStale(arg_schedule_phase, arg_current_schedule_revision))
+    /\ WF_vars(\E arg_schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E arg_current_schedule_revision \in 0..2 : occurrence_ClassifyClaimedDispatchDispositionReady(arg_schedule_phase, arg_current_schedule_revision))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotPending(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : \E arg_target_materialized_session_id \in OptionSessionIdValues : occurrence_SyncTargetSnapshotClaimed(arg_target_binding_key, arg_target_materialized_session_id))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptPending(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
@@ -4555,6 +4905,8 @@ WitnessFairness_occurrence_supersede_ack_route_5 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptCompleted(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSkipped(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptMisfired(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
+
+WitnessFairness_occurrence_supersede_ack_route_6 ==
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptSuperseded(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionStringValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token))
@@ -4569,8 +4921,6 @@ WitnessFairness_occurrence_supersede_ack_route_5 ==
     /\ WF_vars(\E arg_reason \in DeliveryCompletionFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryCompletionFailureInternalError(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMaterializationFailed(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetMissing(arg_reason, arg_detail, arg_at_utc_ms))
-
-WitnessFairness_occurrence_supersede_ack_route_6 ==
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureTargetBusy(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureRuntimeRejected(arg_reason, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailureMobRejected(arg_reason, arg_detail, arg_at_utc_ms))
@@ -4581,6 +4931,8 @@ WitnessFairness_occurrence_supersede_ack_route_6 ==
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeBusySkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingSkipByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in OccurrenceTargetProbeOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_TargetProbeMissingMisfireByPolicy(arg_outcome, arg_detail, arg_at_utc_ms))
+
+WitnessFairness_occurrence_supersede_ack_route_7 ==
     /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DueMisfirePending(arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms))
@@ -4595,8 +4947,6 @@ WitnessFairness_occurrence_supersede_ack_route_6 ==
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigActive(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : schedule_UpdatePlanningConfigPaused(arg_planning_horizon_days, arg_planning_horizon_occurrences))
     /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal))
-
-WitnessFairness_occurrence_supersede_ack_route_7 ==
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotActive(arg_target_binding_key))
     /\ WF_vars(\E arg_target_binding_key \in StringValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms))

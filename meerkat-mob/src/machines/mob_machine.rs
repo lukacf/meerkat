@@ -643,6 +643,40 @@ pub enum MobFlowDelegationEdgeAdmissionKind {
     DeniedAdvisory,
 }
 
+/// Pure observation of a remote member's runtime state, extracted by the bridge
+/// consumer from the wire `BridgeMemberRuntimeState` projection and fed to
+/// MobMachine for terminality classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobRemoteMemberRuntimeObservedState {
+    #[default]
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+/// Machine-owned terminality verdict for an observed remote-member runtime
+/// state. The bridge shell mirrors this: `Terminal` lets cleanup stop,
+/// `NonTerminal` forces a destroy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobRemoteMemberRuntimeTerminality {
+    #[default]
+    NonTerminal,
+    Terminal,
+}
+
+/// Machine-owned composite spawn-member operator admission verdict. The tool
+/// shell mirrors this: `Denied` -> `access_denied`, `Allowed` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnMemberAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SubmitWorkRejectReasonKind {
@@ -1748,6 +1782,77 @@ mod tests {
                 MobFlowDelegationEdgeAdmissionKind::DeniedAdvisory
             ))
         );
+    }
+
+    #[test]
+    fn remote_member_runtime_terminality_is_decided_by_machine() {
+        use MobRemoteMemberRuntimeObservedState as Observed;
+        use MobRemoteMemberRuntimeTerminality as Terminality;
+        let terminal_cases = [Observed::Retired, Observed::Stopped, Observed::Destroyed];
+        let non_terminal_cases = [
+            Observed::Initializing,
+            Observed::Idle,
+            Observed::Attached,
+            Observed::Running,
+        ];
+        for (cases, expected) in [
+            (terminal_cases.as_slice(), Terminality::Terminal),
+            (non_terminal_cases.as_slice(), Terminality::NonTerminal),
+        ] {
+            for observed in cases {
+                let mut authority = MobMachineAuthority::new();
+                let transition = MobMachineMutator::apply(
+                    &mut authority,
+                    MobMachineInput::ClassifyRemoteMemberRuntimeObservation {
+                        observed_state: *observed,
+                    },
+                )
+                .expect("runtime observation should resolve a terminality verdict");
+                let verdict = transition.effects().iter().find_map(|effect| match effect {
+                    MobMachineEffect::RemoteMemberRuntimeTerminalityClassified {
+                        observed_state,
+                        terminality,
+                    } => Some((*observed_state, *terminality)),
+                    _ => None,
+                });
+                assert_eq!(verdict, Some((*observed, expected)), "for {observed:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_member_admission_is_decided_by_machine() {
+        use MobSpawnMemberAdmissionKind as Admission;
+        // (manage_scope, profile_scope, privileged_args) -> expected verdict.
+        let cases = [
+            (true, false, false, Admission::Allowed),
+            (true, true, true, Admission::Allowed),
+            (false, false, true, Admission::Denied),
+            (false, true, true, Admission::Denied),
+            (false, true, false, Admission::Allowed),
+            (false, false, false, Admission::Denied),
+        ];
+        for (manage, profile, privileged, expected) in cases {
+            let mut authority = MobMachineAuthority::new();
+            let transition = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ResolveSpawnMemberAdmission {
+                    manage_scope_present: manage,
+                    profile_scope_present: profile,
+                    privileged_args_present: privileged,
+                },
+            )
+            .expect("spawn-member admission should resolve a verdict");
+            let admission = transition.effects().iter().find_map(|effect| match effect {
+                MobMachineEffect::SpawnMemberAdmissionResolved { admission } => Some(*admission),
+                _ => None,
+            });
+            assert_eq!(
+                admission,
+                Some(expected),
+                "for manage={manage} profile={profile} privileged={privileged}"
+            );
+        }
     }
 
     fn seed_root_frame(

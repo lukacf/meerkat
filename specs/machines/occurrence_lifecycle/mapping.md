@@ -125,6 +125,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_terminal_classification`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`
 - `ClassifyTransitionFailureClaimRejectedPendingPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`
@@ -305,6 +332,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyDueDeliveryFailedNoAction`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionFutureRevision`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionFrozen`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionSupersedeDeleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionSupersedeStale`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyClaimedDispatchDispositionReady`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
 - `SyncTargetSnapshotPending`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`
@@ -466,6 +508,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DueLeaseExpired`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
+- `ClaimedDispatchDispositionClassified`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
 - `DeliveryFailed`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`

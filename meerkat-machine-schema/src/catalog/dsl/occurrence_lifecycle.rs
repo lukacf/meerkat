@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 5,
+        version: 6,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -129,6 +129,19 @@ machine! {
                 runtime_outcome_key: Option<String>
             },
             ClassifyDue { now_utc_ms: u64 },
+            // Claimed-occurrence pre-dispatch reconciliation. The driver shell
+            // observes the owning schedule's current phase and revision (pure
+            // observations) and feeds them here together with the occurrence's
+            // own claimed schedule_revision (already machine-owned state). The
+            // occurrence authority — not the driver — classifies the dispatch
+            // disposition: a paused schedule freezes the claim, a deleted
+            // schedule or a stale claimed revision supersedes it, a claimed
+            // revision ahead of the schedule is an impossible/corrupt fact, and
+            // otherwise the claim is ready to dispatch.
+            ClassifyClaimedDispatchDisposition {
+                schedule_phase: Enum<ClaimedDispatchSchedulePhase>,
+                current_schedule_revision: u64
+            },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
@@ -182,6 +195,16 @@ machine! {
             DueClaimEligible,
             DueMisfireRequired,
             DueLeaseExpired,
+            // Claimed-occurrence pre-dispatch disposition decided by the
+            // occurrence authority. The driver shell mirrors `disposition`:
+            // Frozen releases the lease for the paused schedule, Supersede
+            // terminalizes the occurrence against `superseded_by_revision`,
+            // Ready continues to dispatch, and FutureRevision is an impossible
+            // fact the driver surfaces as an internal error.
+            ClaimedDispatchDispositionClassified {
+                disposition: Enum<ClaimedDispatchDisposition>,
+                superseded_by_revision: Option<u64>,
+            },
             DeliveryFailed,
             LeaseExpired,
             TransitionFailureClassified {
@@ -224,6 +247,7 @@ machine! {
         disposition DueClaimEligible => local,
         disposition DueMisfireRequired => local,
         disposition DueLeaseExpired => local,
+        disposition ClaimedDispatchDispositionClassified => local,
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
         disposition TransitionFailureClassified => local,
@@ -312,6 +336,26 @@ machine! {
                 refusal_kind: refusal_kind,
                 trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::DueClassificationRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureClaimedDispatchDispositionRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "claimed_dispatch_disposition_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::ClassifyClaimedDispatchDisposition
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::ClaimedDispatchClassificationRejected
             }
         }
 
@@ -663,6 +707,85 @@ machine! {
             guard { self.lifecycle_phase == Phase::DeliveryFailed }
             to DeliveryFailed
             emit DueNoAction
+        }
+
+        // --- Claimed-occurrence pre-dispatch disposition ---
+        //
+        // The driver claims due occurrences and then, before dispatching,
+        // reconciles each claim against the latest owning-schedule facts. The
+        // schedule's current phase and revision are pure observations the
+        // driver extracts; the occurrence authority owns whether the claim is
+        // frozen (schedule paused), superseded (schedule deleted or the claim's
+        // revision is stale), ready, or references an impossible future
+        // revision. These are pure classifications in the Claimed phase.
+
+        transition ClassifyClaimedDispatchDispositionFutureRevision {
+            on input ClassifyClaimedDispatchDisposition { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && current_schedule_revision < self.schedule_revision
+            }
+            to Claimed
+            emit ClaimedDispatchDispositionClassified {
+                disposition: ClaimedDispatchDisposition::FutureRevision,
+                superseded_by_revision: None
+            }
+        }
+
+        transition ClassifyClaimedDispatchDispositionFrozen {
+            on input ClassifyClaimedDispatchDisposition { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && current_schedule_revision >= self.schedule_revision
+                && schedule_phase == ClaimedDispatchSchedulePhase::Paused
+            }
+            to Claimed
+            emit ClaimedDispatchDispositionClassified {
+                disposition: ClaimedDispatchDisposition::Frozen,
+                superseded_by_revision: None
+            }
+        }
+
+        transition ClassifyClaimedDispatchDispositionSupersedeDeleted {
+            on input ClassifyClaimedDispatchDisposition { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && current_schedule_revision >= self.schedule_revision
+                && schedule_phase == ClaimedDispatchSchedulePhase::Deleted
+            }
+            to Claimed
+            emit ClaimedDispatchDispositionClassified {
+                disposition: ClaimedDispatchDisposition::Supersede,
+                superseded_by_revision: Some(current_schedule_revision)
+            }
+        }
+
+        transition ClassifyClaimedDispatchDispositionSupersedeStale {
+            on input ClassifyClaimedDispatchDisposition { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && schedule_phase == ClaimedDispatchSchedulePhase::Active
+                && self.schedule_revision < current_schedule_revision
+            }
+            to Claimed
+            emit ClaimedDispatchDispositionClassified {
+                disposition: ClaimedDispatchDisposition::Supersede,
+                superseded_by_revision: Some(current_schedule_revision)
+            }
+        }
+
+        transition ClassifyClaimedDispatchDispositionReady {
+            on input ClassifyClaimedDispatchDisposition { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && schedule_phase == ClaimedDispatchSchedulePhase::Active
+                && self.schedule_revision == current_schedule_revision
+            }
+            to Claimed
+            emit ClaimedDispatchDispositionClassified {
+                disposition: ClaimedDispatchDisposition::Ready,
+                superseded_by_revision: None
+            }
         }
 
         // --- Target snapshot sync ---
@@ -1562,6 +1685,32 @@ pub enum OccurrenceTargetProbeOutcome {
     Missing,
 }
 
+/// Pure observation of the owning schedule's lifecycle phase, extracted by the
+/// driver shell and fed to the occurrence authority during claimed-occurrence
+/// pre-dispatch reconciliation. Mirrors the schedule-domain `SchedulePhase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimedDispatchSchedulePhase {
+    Active,
+    Paused,
+    Deleted,
+}
+
+/// Machine-owned disposition verdict for a claimed occurrence awaiting
+/// dispatch. The driver shell mirrors this rather than deciding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimedDispatchDisposition {
+    /// Schedule is paused: release the lease and leave the occurrence pending.
+    Frozen,
+    /// Schedule was deleted or the claim is for a stale revision: terminalize
+    /// the occurrence as superseded by `superseded_by_revision`.
+    Supersede,
+    /// Schedule is active and the claimed revision is current: dispatch.
+    Ready,
+    /// The claimed revision is ahead of the schedule's current revision — an
+    /// impossible/corrupt fact the driver surfaces as an internal error.
+    FutureRevision,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryReceiptStage {
     Planned,
@@ -1589,6 +1738,7 @@ pub enum OccurrenceTransitionFailureClassKind {
     TargetSyncRejected,
     ReceiptRecordRejected,
     DueClassificationRejected,
+    ClaimedDispatchClassificationRejected,
     ClaimRejected,
     NotPendingForClaim,
     NotClaimed,

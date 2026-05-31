@@ -1980,6 +1980,23 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Admitted", "DeniedStrict", "DeniedAdvisory"],
             ),
             NamedTypeBinding::string_enum(
+                "MobRemoteMemberRuntimeObservedState",
+                &[
+                    "Initializing",
+                    "Idle",
+                    "Attached",
+                    "Running",
+                    "Retired",
+                    "Stopped",
+                    "Destroyed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobRemoteMemberRuntimeTerminality",
+                &["NonTerminal", "Terminal"],
+            ),
+            NamedTypeBinding::string_enum("MobSpawnMemberAdmissionKind", &["Denied", "Allowed"]),
+            NamedTypeBinding::string_enum(
                 "MobSpawnManyFailureObservationKind",
                 &[
                     "ProfileNotFound",
@@ -2328,12 +2345,21 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 &["Ready", "Busy", "Missing"],
             ),
             NamedTypeBinding::string_enum(
+                "ClaimedDispatchSchedulePhase",
+                &["Active", "Paused", "Deleted"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ClaimedDispatchDisposition",
+                &["Frozen", "Supersede", "Ready", "FutureRevision"],
+            ),
+            NamedTypeBinding::string_enum(
                 "OccurrenceLifecycleInputVariant",
                 &[
                     "PlanOccurrence",
                     "SyncTargetSnapshot",
                     "RecordReceipt",
                     "ClassifyDue",
+                    "ClassifyClaimedDispatchDisposition",
                     "Claim",
                     "DispatchStarted",
                     "AwaitCompletion",
@@ -2356,6 +2382,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "TargetSyncRejected",
                     "ReceiptRecordRejected",
                     "DueClassificationRejected",
+                    "ClaimedDispatchClassificationRejected",
                     "ClaimRejected",
                     "NotPendingForClaim",
                     "NotClaimed",

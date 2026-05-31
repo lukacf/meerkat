@@ -134,3 +134,45 @@ Per dogma rule 11 (derived projections are rebuildable, never authoritative) and
 
 ### Operational caveat (pre-existing, CI-budget-managed)
 The largest merged machines (MeerkatMachine, SessionDocumentMachine) and the meerkat_mob_seam composition have heap-bound per-machine/composition TLC that does not complete in a constrained local env. This is the pre-existing constraint the branch's "Tame generated authority CI TLC sweep" / "Raise BuildBuddy CI SLO" commits manage; structural correctness is covered locally by machine-check-drift + classifier/witness ratchets + schema-contract + protocol-codegen-drift gates, with full TLC on the CI/BuildBuddy budget. Per-machine TLC DID complete clean locally for the smaller machines (session_turn_admission 89 states, work_graph_lifecycle 138,103 states).
+
+## SWEEP-TAIL DRAINING (post-final-state; pre-existing class beyond the branch's own additions)
+
+The targeted class-sweep (wo5y03y8g) enumerated ~10-15 PRE-EXISTING codebase-wide
+shell-enforced-verdict sites in the same invariant-1 class as the branch's additions
+(a shell DECIDES+ENFORCES a semantic verdict over a machine-owned fact without routing
+through a canonical Classify*/Resolve*/Authorize* input + mirror). The branch's own
+additions were already clean; these are the broader class being drained to satisfy the
+Stop-hook GOAL ("every lifecycle/admission/recovery/write semantic decision ...
+machine-owned or revalidated ... no unmodeled helper reducers, string folklore, or
+legacy authority paths remaining"). FOLD-only; zero shortcuts.
+
+### Workgraph batch (b51107b57) — 4 folded
+- WorkAttention is_eligible_at -> WorkAttentionLifecycle ClassifyAttentionEligibility
+  (SUPERSEDES the earlier "defended as projection" entry; the targeted sweep + alpha's
+  enforcement-vs-feed analysis proved the shell DECIDES+ENFORCES, not merely projects).
+- WorkAttention projected_attention_authority -> ClassifyAttentionAuthority.
+- WorkGraph terminality -> ClassifyTerminality; blocker-satisfaction -> ClassifyBlockerSatisfied.
+  Shell deciders is_eligible_at + projected_attention_authority DELETED.
+
+### Schedule + mob batch (this commit) — 3 folded, 1 deferred-as-its-own-fold
+- SITE 1 schedule reconcile_claimed_occurrence_before_dispatch (HIGH) ->
+  OccurrenceLifecycle ClassifyClaimedDispatchDisposition (Frozen/Supersede/Ready/
+  FutureRevision). Driver feeds pure phase+revision observations, mirrors verdict,
+  fails closed. occurrence_lifecycle version 5->6. Per-machine TLC: 2.6M states, clean.
+- SITE 2 mob bridge observation_is_terminal (HIGH) -> MobMachine
+  ClassifyRemoteMemberRuntimeObservation; old free fn + lib.rs re-export DELETED;
+  #[non_exhaustive] unknown wire states fail closed.
+- SITE 4 mob ensure_spawn_member_scope (LOW, BOTH surfaces tools.rs + agent_tools.rs)
+  -> MobMachine ResolveSpawnMemberAdmission via MobHandle::resolve_spawn_member_admission;
+  scope projection booleans fed as observations, per-mob admission composed by machine.
+- SITE 3 bridge-rejection recovery class (HIGH) — NOT defended; FOLDING next. The agent
+  defended it as "contracts-owned protocol property", but BridgeRejectionCause::class()
+  is a handwritten match in meerkat-contracts (NOT a canonical machine) that reduces a
+  raw wire cause into a recoverable/fatal SEMANTIC CONCLUSION gating rebind-vs-bubble-up.
+  Under the witness rule, a semantic recovery conclusion must be machine-owned or
+  machine-revalidated; the wire reply carries only the cause, and MobMachine never
+  receives it. -> fold into MobMachine ClassifyBridgeRejectionRecovery; delete
+  bridge_fallback.rs + class() + BridgeRejectionClass.
+- ADJACENT (agent-flagged, same class): schedule driver.rs complete_dispatched_occurrence
+  post-completion Deleted/stale->Supersede shell decision; fold via the same
+  ClassifyClaimedDispatchDisposition (or a sibling post-completion input).

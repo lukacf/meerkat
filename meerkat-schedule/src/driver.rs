@@ -1,5 +1,5 @@
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
-use crate::lifecycle::OccurrenceLifecycleInput;
+use crate::lifecycle::{ClaimedDispatchDisposition, OccurrenceLifecycleInput};
 use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
@@ -342,31 +342,42 @@ impl ScheduleDriver {
             Err(error) => return Err(error),
         };
 
-        if occurrence.schedule_revision > current.revision {
-            return Err(ScheduleDomainError::Internal(format!(
-                "claimed occurrence {} has future revision {} ahead of schedule {}",
-                occurrence.occurrence_id, occurrence.schedule_revision.0, current.revision.0
-            )));
-        }
+        // The schedule's current phase and revision are pure observations. The
+        // OccurrenceLifecycleMachine — not this driver — classifies the
+        // pre-dispatch disposition; we mirror the emitted verdict and fail
+        // closed if no disposition is emitted.
+        let verdict = occurrence
+            .classify_claimed_dispatch_disposition(current.phase, current.revision)
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
 
-        if current.phase == SchedulePhase::Paused {
-            return Ok(ClaimedOccurrenceDispatchState::Frozen);
+        match verdict.disposition {
+            ClaimedDispatchDisposition::FutureRevision => {
+                Err(ScheduleDomainError::Internal(format!(
+                    "claimed occurrence {} has future revision {} ahead of schedule {}",
+                    occurrence.occurrence_id, occurrence.schedule_revision.0, current.revision.0
+                )))
+            }
+            ClaimedDispatchDisposition::Frozen => Ok(ClaimedOccurrenceDispatchState::Frozen),
+            ClaimedDispatchDisposition::Supersede => {
+                let superseded_by_revision = verdict.superseded_by_revision.ok_or_else(|| {
+                    ScheduleDomainError::Internal(
+                        "occurrence authority classified Supersede without a superseding revision"
+                            .to_string(),
+                    )
+                })?;
+                Ok(ClaimedOccurrenceDispatchState::Supersede {
+                    occurrence,
+                    superseded_by_revision,
+                })
+            }
+            ClaimedDispatchDisposition::Ready => {
+                let occurrence = self
+                    .service
+                    .sync_occurrence_target_with_schedule(occurrence)
+                    .await?;
+                Ok(ClaimedOccurrenceDispatchState::Ready(occurrence))
+            }
         }
-
-        if current.phase == SchedulePhase::Deleted
-            || occurrence.schedule_revision < current.revision
-        {
-            return Ok(ClaimedOccurrenceDispatchState::Supersede {
-                occurrence,
-                superseded_by_revision: current.revision,
-            });
-        }
-
-        let occurrence = self
-            .service
-            .sync_occurrence_target_with_schedule(occurrence)
-            .await?;
-        Ok(ClaimedOccurrenceDispatchState::Ready(occurrence))
     }
 
     async fn terminalize_occurrence(

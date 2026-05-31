@@ -118,9 +118,7 @@ pub use run::{
     mob_machine_run_status_is_terminal, mob_machine_step_status_is_terminal,
 };
 pub use runtime::RestoreIncompatible;
-pub use runtime::bridge::{
-    MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge, observation_is_terminal,
-};
+pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
@@ -138,8 +136,8 @@ pub use runtime::{
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
     MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
     MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec,
-    SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
+    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberCustomizer,
+    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
     SupervisorRotationReport, WorkDeliveryReceipt,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};

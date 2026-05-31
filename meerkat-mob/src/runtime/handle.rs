@@ -38,6 +38,14 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Machine-decided spawn-member operator admission verdict, mirrored by tool
+/// surfaces. `Denied` maps to a tool `access_denied` error; `Allowed` proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnMemberAdmission {
+    Allowed,
+    Denied,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MobMemberSnapshot {
@@ -5198,6 +5206,49 @@ impl MobHandle {
             reply_tx,
         })
         .await?
+    }
+
+    /// Resolve the composite spawn-member operator admission verdict.
+    ///
+    /// The tool surface extracts three raw observations — whether the operator
+    /// holds manage scope over the target mob, whether it holds spawn-profile
+    /// scope for the requested profile (both machine-owned operator-scope
+    /// projections), and whether the spawn request carries privileged args (a
+    /// pure typed argument observation) — and feeds them here. MobMachine, not
+    /// the tool surface, composes the Allow/Deny verdict; the surface mirrors
+    /// the returned verdict (`SpawnMemberAdmission::Denied` -> `access_denied`).
+    /// Fails closed if the machine emits no verdict.
+    pub async fn resolve_spawn_member_admission(
+        &self,
+        manage_scope_present: bool,
+        profile_scope_present: bool,
+        privileged_args_present: bool,
+    ) -> Result<SpawnMemberAdmission, MobError> {
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission {
+                manage_scope_present,
+                profile_scope_present,
+                privileged_args_present,
+            })
+            .await?;
+        let admission = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::SpawnMemberAdmissionResolved { admission } => {
+                    Some(admission)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted spawn-member admission observations but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        Ok(match admission {
+            mob_dsl::MobSpawnMemberAdmissionKind::Allowed => SpawnMemberAdmission::Allowed,
+            mob_dsl::MobSpawnMemberAdmissionKind::Denied => SpawnMemberAdmission::Denied,
+        })
     }
 
     pub(super) async fn subscribe_authorized_agent_session_events(

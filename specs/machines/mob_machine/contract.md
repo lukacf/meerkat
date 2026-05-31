@@ -163,6 +163,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
 - `ClassifyMemberWait`(agent_identity: AgentIdentity)
 - `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
+- `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
+- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_present: Bool, privileged_args_present: Bool)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
@@ -336,6 +338,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
 - `MemberWaitClassified`(agent_identity: AgentIdentity, result: MemberWaitClassificationKind)
 - `FlowDelegationEdgeAdmissionResolved`(from_role: String, to_role: String, admission: MobFlowDelegationEdgeAdmissionKind)
+- `RemoteMemberRuntimeTerminalityClassified`(observed_state: MobRemoteMemberRuntimeObservedState, terminality: MobRemoteMemberRuntimeTerminality)
+- `SpawnMemberAdmissionResolved`(admission: MobSpawnMemberAdmissionKind)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `SessionProvisionOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
@@ -745,6 +749,198 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `rule_denies_edge_advisory_mode`
 - Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Destroyed`
+
+### `ClassifyRemoteMemberRuntimeObservationTerminalRunning`
+- From: `Running`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Running`
+
+### `ClassifyRemoteMemberRuntimeObservationTerminalStopped`
+- From: `Stopped`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Stopped`
+
+### `ClassifyRemoteMemberRuntimeObservationTerminalCompleted`
+- From: `Completed`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Completed`
+
+### `ClassifyRemoteMemberRuntimeObservationTerminalDestroyed`
+- From: `Destroyed`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Destroyed`
+
+### `ClassifyRemoteMemberRuntimeObservationNonTerminalRunning`
+- From: `Running`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_non_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Running`
+
+### `ClassifyRemoteMemberRuntimeObservationNonTerminalStopped`
+- From: `Stopped`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_non_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Stopped`
+
+### `ClassifyRemoteMemberRuntimeObservationNonTerminalCompleted`
+- From: `Completed`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_non_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Completed`
+
+### `ClassifyRemoteMemberRuntimeObservationNonTerminalDestroyed`
+- From: `Destroyed`
+- On: `ClassifyRemoteMemberRuntimeObservation`(observed_state)
+- Guards:
+  - `observed_state_non_terminal`
+- Emits: `RemoteMemberRuntimeTerminalityClassified`
+- To: `Destroyed`
+
+### `ResolveSpawnMemberAdmissionManageScopeRunning`
+- From: `Running`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveSpawnMemberAdmissionManageScopeStopped`
+- From: `Stopped`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSpawnMemberAdmissionManageScopeCompleted`
+- From: `Completed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveSpawnMemberAdmissionManageScopeDestroyed`
+- From: `Destroyed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning`
+- From: `Running`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `privileged_args_without_manage_scope`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped`
+- From: `Stopped`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `privileged_args_without_manage_scope`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted`
+- From: `Completed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `privileged_args_without_manage_scope`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `privileged_args_without_manage_scope`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSpawnMemberAdmissionProfileScopeRunning`
+- From: `Running`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `profile_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveSpawnMemberAdmissionProfileScopeStopped`
+- From: `Stopped`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `profile_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSpawnMemberAdmissionProfileScopeCompleted`
+- From: `Completed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `profile_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveSpawnMemberAdmissionProfileScopeDestroyed`
+- From: `Destroyed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `profile_scope_allows`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSpawnMemberAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `no_scope_denies`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveSpawnMemberAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `no_scope_denies`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSpawnMemberAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `no_scope_denies`
+- Emits: `SpawnMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveSpawnMemberAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- Guards:
+  - `no_scope_denies`
+- Emits: `SpawnMemberAdmissionResolved`
 - To: `Destroyed`
 
 ### `ClassifySpawnManyFailureProfileNotFoundRunning`

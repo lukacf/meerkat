@@ -346,27 +346,44 @@ impl AgentMobToolSurface {
         Err(ToolError::access_denied(tool_name))
     }
 
-    fn ensure_spawn_member_scope(
+    async fn ensure_spawn_member_scope(
         &self,
         tool_name: &str,
         mob_id: &MobId,
         args: &SpawnMemberArgs,
     ) -> Result<(), ToolError> {
+        // Pure observations extracted from the machine-owned operator-scope
+        // projection and the typed spawn args. MobMachine — not this surface —
+        // composes the Allow/Deny admission verdict; we mirror it.
         let authority = self.authority_context_snapshot();
-        if authority.can_manage_mob(mob_id.as_str()) {
-            return Ok(());
-        }
-        if args.runtime_mode.is_some()
+        let manage_scope_present = authority.can_manage_mob(mob_id.as_str());
+        let profile_scope_present =
+            authority.can_spawn_profile_in_mob(mob_id.as_str(), &args.profile);
+        let privileged_args_present = args.runtime_mode.is_some()
             || args.backend.is_some()
             || args.tooling.is_some()
-            || args.auth_binding.is_some()
-        {
-            return Err(ToolError::access_denied(tool_name));
+            || args.auth_binding.is_some();
+        let handle = self.state.handle_for(mob_id).await.map_err(|error| {
+            ToolError::execution_failed(format!(
+                "tool '{tool_name}' spawn-member admission failed: {error}"
+            ))
+        })?;
+        let admission = handle
+            .resolve_spawn_member_admission(
+                manage_scope_present,
+                profile_scope_present,
+                privileged_args_present,
+            )
+            .await
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{tool_name}' spawn-member admission failed: {error}"
+                ))
+            })?;
+        match admission {
+            meerkat_mob::SpawnMemberAdmission::Allowed => Ok(()),
+            meerkat_mob::SpawnMemberAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        if authority.can_spawn_profile_in_mob(mob_id.as_str(), &args.profile) {
-            return Ok(());
-        }
-        Err(ToolError::access_denied(tool_name))
     }
 
     /// Resolve spawn tooling into inherited tool filter and optional override profile.
@@ -880,7 +897,8 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id.clone());
 
-        self.ensure_spawn_member_scope(call.name, &mob_id, &args)?;
+        self.ensure_spawn_member_scope(call.name, &mob_id, &args)
+            .await?;
         let audit_handle = self
             .state
             .handle_for(&mob_id)

@@ -308,6 +308,8 @@ pub enum MobMachineCatalogInput {
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
     ResolveFlowDelegationEdgeAdmission,
+    ClassifyRemoteMemberRuntimeObservation,
+    ResolveSpawnMemberAdmission,
     EnsureMember,
     Reconcile,
     Retire,
@@ -405,6 +407,8 @@ impl MobMachineCatalogInput {
         Self::ClassifySpawnManyFailure,
         Self::ClassifyMemberWait,
         Self::ResolveFlowDelegationEdgeAdmission,
+        Self::ClassifyRemoteMemberRuntimeObservation,
+        Self::ResolveSpawnMemberAdmission,
         Self::EnsureMember,
         Self::Reconcile,
         Self::Retire,
@@ -510,6 +514,12 @@ impl MobMachineCatalogInput {
             Self::ClassifyMemberWait => MobMachineInputVariant::ClassifyMemberWait,
             Self::ResolveFlowDelegationEdgeAdmission => {
                 MobMachineInputVariant::ResolveFlowDelegationEdgeAdmission
+            }
+            Self::ClassifyRemoteMemberRuntimeObservation => {
+                MobMachineInputVariant::ClassifyRemoteMemberRuntimeObservation
+            }
+            Self::ResolveSpawnMemberAdmission => {
+                MobMachineInputVariant::ResolveSpawnMemberAdmission
             }
             Self::EnsureMember => MobMachineInputVariant::EnsureMember,
             Self::Reconcile => MobMachineInputVariant::Reconcile,
@@ -668,6 +678,10 @@ impl MobMachineCatalogInput {
             Self::ClassifySpawnManyFailure => "ClassifySpawnManyFailure",
             Self::ClassifyMemberWait => "ClassifyMemberWait",
             Self::ResolveFlowDelegationEdgeAdmission => "ResolveFlowDelegationEdgeAdmission",
+            Self::ClassifyRemoteMemberRuntimeObservation => {
+                "ClassifyRemoteMemberRuntimeObservation"
+            }
+            Self::ResolveSpawnMemberAdmission => "ResolveSpawnMemberAdmission",
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
             Self::Retire => "Retire",
@@ -960,6 +974,22 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // not a surface command.
         input: MobMachineCatalogInput::ResolveFlowDelegationEdgeAdmission,
         reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Remote-member runtime observation terminality is decided by
+        // MobMachine from the bridge consumer's pure wire-state observation
+        // during respawn/destroy cleanup — a runtime-internal observation
+        // classification authority, not a surface command.
+        input: MobMachineCatalogInput::ClassifyRemoteMemberRuntimeObservation,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Spawn-member operator admission is composed by MobMachine from the
+        // tool surface's pure scope/privileged-arg observations; the tool
+        // surface drives this as a spawn-profile authority input, not a
+        // standalone surface command.
+        input: MobMachineCatalogInput::ResolveSpawnMemberAdmission,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeSpawnProfile,

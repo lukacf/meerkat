@@ -549,32 +549,45 @@ impl MobOperatorToolDispatcher {
         self.authority_context.can_manage_mob(mob_id)
     }
 
-    fn ensure_spawn_member_scope(
+    async fn ensure_spawn_member_scope(
         &self,
         tool_name: &str,
         args: &SpawnMemberArgs,
     ) -> Result<(), ToolError> {
-        if self.can_manage_current_mob() {
-            return Ok(());
-        }
-        if args.resume_bridge_session_id.is_some()
+        // Pure observations extracted from the machine-owned operator-scope
+        // projection and the typed spawn args. MobMachine — not this shell —
+        // composes the Allow/Deny admission verdict.
+        let mob_id = self.handle.definition().id.as_str();
+        let manage_scope_present = self.authority_context.can_manage_mob(mob_id);
+        let profile_scope_present = self
+            .authority_context
+            .can_spawn_profile_in_mob(mob_id, &args.profile);
+        let privileged_args_present = args.resume_bridge_session_id.is_some()
             || args.resume_session_id.is_some()
             || args.backend.is_some()
             || args.runtime_mode.is_some()
             || args.launch_mode.is_some()
             || args.tool_access_policy.is_some()
-            || args.budget_split_policy.is_some()
-        {
-            return Err(ToolError::access_denied(tool_name));
+            || args.budget_split_policy.is_some();
+        let admission = self
+            .handle
+            .resolve_spawn_member_admission(
+                manage_scope_present,
+                profile_scope_present,
+                privileged_args_present,
+            )
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            SpawnMemberAdmission::Allowed => Ok(()),
+            SpawnMemberAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        let mob_id = self.handle.definition().id.as_str();
-        if self
-            .authority_context
-            .can_spawn_profile_in_mob(mob_id, &args.profile)
-        {
-            return Ok(());
-        }
-        Err(ToolError::access_denied(tool_name))
+    }
+
+    fn map_mob_error_to_tool_access(tool_name: &str, error: MobError) -> ToolError {
+        ToolError::execution_failed(format!(
+            "tool '{tool_name}' spawn-member admission failed: {error}"
+        ))
     }
 
     fn can_spawn_any_profile_in_current_mob(&self) -> bool {
@@ -832,7 +845,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     owner_bound = self.owner_bridge_session_id.is_some(),
                     "MobOperatorToolDispatcher::spawn_member dispatch start"
                 );
-                self.ensure_spawn_member_scope(call.name, &args)?;
+                self.ensure_spawn_member_scope(call.name, &args).await?;
                 let agent_identity = AgentIdentity::from(args.member_id.as_str());
                 let mut spec = SpawnMemberSpec::from_wire(
                     args.profile,
@@ -892,7 +905,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 for spec in &args.specs {
-                    self.ensure_spawn_member_scope(call.name, spec)?;
+                    self.ensure_spawn_member_scope(call.name, spec).await?;
                 }
                 let identities = args
                     .specs

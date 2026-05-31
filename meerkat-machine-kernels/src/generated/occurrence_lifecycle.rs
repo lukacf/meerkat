@@ -55,6 +55,122 @@ impl std::fmt::Display for ClaimToken {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ClaimedDispatchDisposition {
+    #[default]
+    #[serde(rename = "Frozen")]
+    Frozen,
+    #[serde(rename = "Supersede")]
+    Supersede,
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "FutureRevision")]
+    FutureRevision,
+}
+impl ClaimedDispatchDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Frozen => "Frozen",
+            Self::Supersede => "Supersede",
+            Self::Ready => "Ready",
+            Self::FutureRevision => "FutureRevision",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ClaimedDispatchDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Frozen" => Ok(Self::Frozen),
+            "Supersede" => Ok(Self::Supersede),
+            "Ready" => Ok(Self::Ready),
+            "FutureRevision" => Ok(Self::FutureRevision),
+            other => Err(format!(
+                "invalid ClaimedDispatchDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ClaimedDispatchDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ClaimedDispatchDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ClaimedDispatchSchedulePhase {
+    #[default]
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Paused")]
+    Paused,
+    #[serde(rename = "Deleted")]
+    Deleted,
+}
+impl ClaimedDispatchSchedulePhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Paused => "Paused",
+            Self::Deleted => "Deleted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ClaimedDispatchSchedulePhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "Paused" => Ok(Self::Paused),
+            "Deleted" => Ok(Self::Deleted),
+            other => Err(format!(
+                "invalid ClaimedDispatchSchedulePhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ClaimedDispatchSchedulePhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ClaimedDispatchSchedulePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DeliveryCompletionFailureReason {
     #[default]
     #[serde(rename = "CompletionFutureFailed")]
@@ -485,6 +601,8 @@ pub enum OccurrenceLifecycleInputVariant {
     RecordReceipt,
     #[serde(rename = "ClassifyDue")]
     ClassifyDue,
+    #[serde(rename = "ClassifyClaimedDispatchDisposition")]
+    ClassifyClaimedDispatchDisposition,
     #[serde(rename = "Claim")]
     Claim,
     #[serde(rename = "DispatchStarted")]
@@ -519,6 +637,7 @@ impl OccurrenceLifecycleInputVariant {
             Self::SyncTargetSnapshot => "SyncTargetSnapshot",
             Self::RecordReceipt => "RecordReceipt",
             Self::ClassifyDue => "ClassifyDue",
+            Self::ClassifyClaimedDispatchDisposition => "ClassifyClaimedDispatchDisposition",
             Self::Claim => "Claim",
             Self::DispatchStarted => "DispatchStarted",
             Self::AwaitCompletion => "AwaitCompletion",
@@ -543,6 +662,7 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "SyncTargetSnapshot" => Ok(Self::SyncTargetSnapshot),
             "RecordReceipt" => Ok(Self::RecordReceipt),
             "ClassifyDue" => Ok(Self::ClassifyDue),
+            "ClassifyClaimedDispatchDisposition" => Ok(Self::ClassifyClaimedDispatchDisposition),
             "Claim" => Ok(Self::Claim),
             "DispatchStarted" => Ok(Self::DispatchStarted),
             "AwaitCompletion" => Ok(Self::AwaitCompletion),
@@ -731,6 +851,8 @@ pub enum OccurrenceTransitionFailureClassKind {
     ReceiptRecordRejected,
     #[serde(rename = "DueClassificationRejected")]
     DueClassificationRejected,
+    #[serde(rename = "ClaimedDispatchClassificationRejected")]
+    ClaimedDispatchClassificationRejected,
     #[serde(rename = "ClaimRejected")]
     ClaimRejected,
     #[serde(rename = "NotPendingForClaim")]
@@ -751,6 +873,7 @@ impl OccurrenceTransitionFailureClassKind {
             Self::TargetSyncRejected => "TargetSyncRejected",
             Self::ReceiptRecordRejected => "ReceiptRecordRejected",
             Self::DueClassificationRejected => "DueClassificationRejected",
+            Self::ClaimedDispatchClassificationRejected => "ClaimedDispatchClassificationRejected",
             Self::ClaimRejected => "ClaimRejected",
             Self::NotPendingForClaim => "NotPendingForClaim",
             Self::NotClaimed => "NotClaimed",
@@ -768,6 +891,9 @@ impl std::convert::TryFrom<&str> for OccurrenceTransitionFailureClassKind {
             "TargetSyncRejected" => Ok(Self::TargetSyncRejected),
             "ReceiptRecordRejected" => Ok(Self::ReceiptRecordRejected),
             "DueClassificationRejected" => Ok(Self::DueClassificationRejected),
+            "ClaimedDispatchClassificationRejected" => {
+                Ok(Self::ClaimedDispatchClassificationRejected)
+            }
             "ClaimRejected" => Ok(Self::ClaimRejected),
             "NotPendingForClaim" => Ok(Self::NotPendingForClaim),
             "NotClaimed" => Ok(Self::NotClaimed),
@@ -1120,6 +1246,11 @@ pub mod inputs {
         pub now_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyClaimedDispatchDisposition {
+        pub schedule_phase: ClaimedDispatchSchedulePhase,
+        pub current_schedule_revision: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
         pub owner_id: String,
         pub at_utc_ms: u64,
@@ -1194,6 +1325,7 @@ pub enum Input {
     SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     RecordReceipt(inputs::RecordReceipt),
     ClassifyDue(inputs::ClassifyDue),
+    ClassifyClaimedDispatchDisposition(inputs::ClassifyClaimedDispatchDisposition),
     Claim(inputs::Claim),
     DispatchStarted(inputs::DispatchStarted),
     AwaitCompletion(inputs::AwaitCompletion),
@@ -1215,6 +1347,9 @@ impl Input {
             Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::RecordReceipt(_) => InputKind::RecordReceipt,
             Self::ClassifyDue(_) => InputKind::ClassifyDue,
+            Self::ClassifyClaimedDispatchDisposition(_) => {
+                InputKind::ClassifyClaimedDispatchDisposition
+            }
             Self::Claim(_) => InputKind::Claim,
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
@@ -1239,6 +1374,7 @@ pub enum InputKind {
     SyncTargetSnapshot,
     RecordReceipt,
     ClassifyDue,
+    ClassifyClaimedDispatchDisposition,
     Claim,
     DispatchStarted,
     AwaitCompletion,
@@ -1285,6 +1421,11 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DueLeaseExpired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClaimedDispatchDispositionClassified {
+        pub disposition: ClaimedDispatchDisposition,
+        pub superseded_by_revision: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeliveryFailed {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseExpired {}
@@ -1311,6 +1452,7 @@ pub enum Effect {
     DueClaimEligible(effects::DueClaimEligible),
     DueMisfireRequired(effects::DueMisfireRequired),
     DueLeaseExpired(effects::DueLeaseExpired),
+    ClaimedDispatchDispositionClassified(effects::ClaimedDispatchDispositionClassified),
     DeliveryFailed(effects::DeliveryFailed),
     LeaseExpired(effects::LeaseExpired),
     TransitionFailureClassified(effects::TransitionFailureClassified),
@@ -1329,6 +1471,7 @@ pub enum EffectKind {
     DueClaimEligible,
     DueMisfireRequired,
     DueLeaseExpired,
+    ClaimedDispatchDispositionClassified,
     DeliveryFailed,
     LeaseExpired,
     TransitionFailureClassified,
@@ -1373,6 +1516,15 @@ pub enum TransitionId {
     ClassifyTransitionFailureDueClassificationRejectedMisfired,
     ClassifyTransitionFailureDueClassificationRejectedSuperseded,
     ClassifyTransitionFailureDueClassificationRejectedDeliveryFailed,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded,
+    ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed,
     ClassifyTransitionFailureClaimRejectedPendingPending,
     ClassifyTransitionFailureNotPendingForClaimClaimed,
     ClassifyTransitionFailureNotPendingForClaimDispatching,
@@ -1433,6 +1585,11 @@ pub enum TransitionId {
     ClassifyDueMisfiredNoAction,
     ClassifyDueSupersededNoAction,
     ClassifyDueDeliveryFailedNoAction,
+    ClassifyClaimedDispatchDispositionFutureRevision,
+    ClassifyClaimedDispatchDispositionFrozen,
+    ClassifyClaimedDispatchDispositionSupersedeDeleted,
+    ClassifyClaimedDispatchDispositionSupersedeStale,
+    ClassifyClaimedDispatchDispositionReady,
     SyncTargetSnapshotPending,
     SyncTargetSnapshotClaimed,
     RecordReceiptPending,

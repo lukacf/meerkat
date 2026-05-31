@@ -139,6 +139,78 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `ClassifyRemoteMemberRuntimeObservationTerminalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationTerminalStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationTerminalCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationTerminalDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationNonTerminalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationNonTerminalStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationNonTerminalCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ClassifyRemoteMemberRuntimeObservationNonTerminalDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`
+- `ResolveSpawnMemberAdmissionManageScopeRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionManageScopeStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionManageScopeCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ResolveSpawnMemberAdmissionManageScopeDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ResolveSpawnMemberAdmissionProfileScopeRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionProfileScopeStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionProfileScopeCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ResolveSpawnMemberAdmissionProfileScopeDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ResolveSpawnMemberAdmissionDeniedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionDeniedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ResolveSpawnMemberAdmissionDeniedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+- `ResolveSpawnMemberAdmissionDeniedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
@@ -1695,6 +1767,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FlowDelegationEdgeAdmissionResolved`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+- `RemoteMemberRuntimeTerminalityClassified`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SpawnMemberAdmissionResolved`
+  - anchors: `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

@@ -684,6 +684,33 @@ fn project_dsl_phase(phase: mob_dsl::MobPhase) -> MobState {
     }
 }
 
+/// Extract the pure wire runtime-state observation for MobMachine terminality
+/// classification. This is a faithful 1:1 projection of the observed
+/// `BridgeMemberRuntimeState`; the terminal/non-terminal verdict is decided by
+/// MobMachine, not here. `BridgeMemberRuntimeState` is `#[non_exhaustive]`, so
+/// an unrecognized wire state fails closed rather than being silently coerced
+/// to a (non-terminal) default.
+fn remote_member_runtime_observed_state(
+    state: super::bridge_protocol::BridgeMemberRuntimeState,
+) -> Result<mob_dsl::MobRemoteMemberRuntimeObservedState, MobError> {
+    use super::bridge_protocol::BridgeMemberRuntimeState as Wire;
+    use mob_dsl::MobRemoteMemberRuntimeObservedState as Observed;
+    Ok(match state {
+        Wire::Initializing => Observed::Initializing,
+        Wire::Idle => Observed::Idle,
+        Wire::Attached => Observed::Attached,
+        Wire::Running => Observed::Running,
+        Wire::Retired => Observed::Retired,
+        Wire::Stopped => Observed::Stopped,
+        Wire::Destroyed => Observed::Destroyed,
+        other => {
+            return Err(MobError::Internal(format!(
+                "unrecognized remote-member runtime wire state `{other}` cannot be classified for terminality"
+            )));
+        }
+    })
+}
+
 /// Render forked conversation messages as a text context block for the new member.
 fn render_fork_context(
     source_member_id: &MeerkatId,
@@ -2748,10 +2775,47 @@ impl MobActor {
         )
     }
 
+    /// Mirror MobMachine's terminality verdict for an observed remote-member
+    /// runtime state.
+    ///
+    /// The bridge consumer extracts the pure wire runtime-state observation;
+    /// MobMachine — not this shell — decides whether the observed state is
+    /// terminal. We feed the raw observation and mirror the emitted verdict,
+    /// failing closed (treating the observation as non-terminal, which forces a
+    /// conservative destroy) only if the machine emits no verdict.
     fn observation_is_terminal(
+        &mut self,
         observation: &super::bridge_protocol::BridgeObservationResponse,
-    ) -> bool {
-        super::bridge::observation_is_terminal(observation)
+    ) -> Result<bool, MobError> {
+        let observed_state = remote_member_runtime_observed_state(observation.state)?;
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { observed_state },
+            "classify_remote_member_runtime_observation",
+        )?;
+        let (effect_observed_state, terminality) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::RemoteMemberRuntimeTerminalityClassified {
+                    observed_state,
+                    terminality,
+                } => Some((observed_state, terminality)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted remote-member runtime observation but emitted no terminality verdict"
+                        .into(),
+                )
+            })?;
+        if effect_observed_state != observed_state {
+            return Err(MobError::Internal(format!(
+                "MobMachine remote-member terminality drift: input={observed_state:?}, effect={effect_observed_state:?}"
+            )));
+        }
+        Ok(matches!(
+            terminality,
+            mob_dsl::MobRemoteMemberRuntimeTerminality::Terminal
+        ))
     }
 
     /// Issue a strictly increasing fence token.
@@ -12396,7 +12460,10 @@ impl MobActor {
                         Ok(observation) => {
                             cleanup_report.confirmatory_observation =
                                 Some(format!("state={}", observation.state));
-                            if !Self::observation_is_terminal(&observation) {
+                            let observation_is_terminal = self
+                                .observation_is_terminal(&observation)
+                                .map_err(MobRespawnError::from)?;
+                            if !observation_is_terminal {
                                 cleanup_report.destroy_attempted = true;
                                 if let Err(destroy_error) = self
                                     .destroy_peer_only_binding(
@@ -13936,16 +14003,24 @@ impl MobActor {
                 .observe_peer_only_binding(&binding, std::time::Duration::from_millis(750))
                 .await
             {
-                Ok(observation) => {
-                    if Self::observation_is_terminal(&observation) {
+                Ok(observation) => match self.observation_is_terminal(&observation) {
+                    // Mirror MobMachine's terminality verdict. A non-terminal
+                    // verdict (or a fail-closed classification error) leaves
+                    // `remote_cleanup_complete` false so the force-destroy path
+                    // below runs.
+                    Ok(true) => {
                         remote_cleanup_complete = true;
-                    } else {
+                    }
+                    Ok(false) => {
                         outcome.errors.push(format!(
                             "confirmatory observation reported non-terminal state {}",
                             observation.state
                         ));
                     }
-                }
+                    Err(error) => outcome.errors.push(format!(
+                        "confirmatory observation terminality classification failed: {error}"
+                    )),
+                },
                 Err(error) => outcome
                     .errors
                     .push(format!("confirmatory observation failed: {error}")),

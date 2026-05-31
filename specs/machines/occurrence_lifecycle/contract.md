@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `5`
+- Version: `6`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -51,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SyncTargetSnapshot`(target_binding_key: String, target_materialized_session_id: Option<SessionId>)
 - `RecordReceipt`(correlation_id: Option<String>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<String>)
 - `ClassifyDue`(now_utc_ms: u64)
+- `ClassifyClaimedDispatchDisposition`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
@@ -80,6 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DueClaimEligible`
 - `DueMisfireRequired`
 - `DueLeaseExpired`
+- `ClaimedDispatchDispositionClassified`(disposition: ClaimedDispatchDisposition, superseded_by_revision: Option<u64>)
 - `DeliveryFailed`
 - `LeaseExpired`
 - `TransitionFailureClassified`(phase: OccurrenceLifecycleState, refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant, public_class: OccurrenceTransitionFailureClassKind)
@@ -379,6 +381,78 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `due_classification_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureClaimedDispatchDispositionRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `claimed_dispatch_disposition_rejected`
 - Emits: `TransitionFailureClassified`
 - To: `DeliveryFailed`
 
@@ -850,6 +924,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyDue`(now_utc_ms)
 - Emits: `DueNoAction`
 - To: `DeliveryFailed`
+
+### `ClassifyClaimedDispatchDispositionFutureRevision`
+- From: `Claimed`
+- On: `ClassifyClaimedDispatchDisposition`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `ClaimedDispatchDispositionClassified`
+- To: `Claimed`
+
+### `ClassifyClaimedDispatchDispositionFrozen`
+- From: `Claimed`
+- On: `ClassifyClaimedDispatchDisposition`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `ClaimedDispatchDispositionClassified`
+- To: `Claimed`
+
+### `ClassifyClaimedDispatchDispositionSupersedeDeleted`
+- From: `Claimed`
+- On: `ClassifyClaimedDispatchDisposition`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `ClaimedDispatchDispositionClassified`
+- To: `Claimed`
+
+### `ClassifyClaimedDispatchDispositionSupersedeStale`
+- From: `Claimed`
+- On: `ClassifyClaimedDispatchDisposition`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `ClaimedDispatchDispositionClassified`
+- To: `Claimed`
+
+### `ClassifyClaimedDispatchDispositionReady`
+- From: `Claimed`
+- On: `ClassifyClaimedDispatchDisposition`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `ClaimedDispatchDispositionClassified`
+- To: `Claimed`
 
 ### `SyncTargetSnapshotPending`
 - From: `Pending`

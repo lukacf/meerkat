@@ -2004,6 +2004,130 @@ impl std::fmt::Display for MobMemberState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobRemoteMemberRuntimeObservedState {
+    #[default]
+    #[serde(rename = "Initializing")]
+    Initializing,
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Attached")]
+    Attached,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+}
+impl MobRemoteMemberRuntimeObservedState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Initializing => "Initializing",
+            Self::Idle => "Idle",
+            Self::Attached => "Attached",
+            Self::Running => "Running",
+            Self::Retired => "Retired",
+            Self::Stopped => "Stopped",
+            Self::Destroyed => "Destroyed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobRemoteMemberRuntimeObservedState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Initializing" => Ok(Self::Initializing),
+            "Idle" => Ok(Self::Idle),
+            "Attached" => Ok(Self::Attached),
+            "Running" => Ok(Self::Running),
+            "Retired" => Ok(Self::Retired),
+            "Stopped" => Ok(Self::Stopped),
+            "Destroyed" => Ok(Self::Destroyed),
+            other => Err(format!(
+                "invalid MobRemoteMemberRuntimeObservedState value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobRemoteMemberRuntimeObservedState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobRemoteMemberRuntimeObservedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobRemoteMemberRuntimeTerminality {
+    #[default]
+    #[serde(rename = "NonTerminal")]
+    NonTerminal,
+    #[serde(rename = "Terminal")]
+    Terminal,
+}
+impl MobRemoteMemberRuntimeTerminality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NonTerminal => "NonTerminal",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobRemoteMemberRuntimeTerminality {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NonTerminal" => Ok(Self::NonTerminal),
+            "Terminal" => Ok(Self::Terminal),
+            other => Err(format!(
+                "invalid MobRemoteMemberRuntimeTerminality value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobRemoteMemberRuntimeTerminality {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobRemoteMemberRuntimeTerminality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobSpawnManyFailureCauseKind {
     #[default]
     #[serde(rename = "ProfileNotFound")]
@@ -2358,6 +2482,58 @@ impl std::convert::TryFrom<String> for MobSpawnManyFailureObservationKind {
     }
 }
 impl std::fmt::Display for MobSpawnManyFailureObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobSpawnMemberAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Allowed")]
+    Allowed,
+}
+impl MobSpawnMemberAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::Allowed => "Allowed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobSpawnMemberAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "Allowed" => Ok(Self::Allowed),
+            other => Err(format!(
+                "invalid MobSpawnMemberAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobSpawnMemberAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobSpawnMemberAdmissionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3379,6 +3555,16 @@ pub mod inputs {
         pub mode: MobFlowDelegationEdgeModeKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRemoteMemberRuntimeObservation {
+        pub observed_state: MobRemoteMemberRuntimeObservedState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSpawnMemberAdmission {
+        pub manage_scope_present: bool,
+        pub profile_scope_present: bool,
+        pub privileged_args_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -3772,6 +3958,8 @@ pub enum Input {
     ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
     ClassifyMemberWait(inputs::ClassifyMemberWait),
     ResolveFlowDelegationEdgeAdmission(inputs::ResolveFlowDelegationEdgeAdmission),
+    ClassifyRemoteMemberRuntimeObservation(inputs::ClassifyRemoteMemberRuntimeObservation),
+    ResolveSpawnMemberAdmission(inputs::ResolveSpawnMemberAdmission),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -3879,6 +4067,10 @@ impl Input {
             Self::ResolveFlowDelegationEdgeAdmission(_) => {
                 InputKind::ResolveFlowDelegationEdgeAdmission
             }
+            Self::ClassifyRemoteMemberRuntimeObservation(_) => {
+                InputKind::ClassifyRemoteMemberRuntimeObservation
+            }
+            Self::ResolveSpawnMemberAdmission(_) => InputKind::ResolveSpawnMemberAdmission,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -4001,6 +4193,8 @@ pub enum InputKind {
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
     ResolveFlowDelegationEdgeAdmission,
+    ClassifyRemoteMemberRuntimeObservation,
+    ResolveSpawnMemberAdmission,
     EnsureMember,
     Reconcile,
     Retire,
@@ -4631,6 +4825,15 @@ pub mod effects {
         pub admission: MobFlowDelegationEdgeAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RemoteMemberRuntimeTerminalityClassified {
+        pub observed_state: MobRemoteMemberRuntimeObservedState,
+        pub terminality: MobRemoteMemberRuntimeTerminality,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnMemberAdmissionResolved {
+        pub admission: MobSpawnMemberAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -4887,6 +5090,8 @@ pub enum Effect {
     SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
     MemberWaitClassified(effects::MemberWaitClassified),
     FlowDelegationEdgeAdmissionResolved(effects::FlowDelegationEdgeAdmissionResolved),
+    RemoteMemberRuntimeTerminalityClassified(effects::RemoteMemberRuntimeTerminalityClassified),
+    SpawnMemberAdmissionResolved(effects::SpawnMemberAdmissionResolved),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     SessionProvisionOperationOwnerAuthorized(effects::SessionProvisionOperationOwnerAuthorized),
@@ -4962,6 +5167,8 @@ pub enum EffectKind {
     SpawnManyFailureClassified,
     MemberWaitClassified,
     FlowDelegationEdgeAdmissionResolved,
+    RemoteMemberRuntimeTerminalityClassified,
+    SpawnMemberAdmissionResolved,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     SessionProvisionOperationOwnerAuthorized,
@@ -5038,6 +5245,30 @@ pub enum TransitionId {
     ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryStopped,
     ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryCompleted,
     ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed,
+    ClassifyRemoteMemberRuntimeObservationTerminalRunning,
+    ClassifyRemoteMemberRuntimeObservationTerminalStopped,
+    ClassifyRemoteMemberRuntimeObservationTerminalCompleted,
+    ClassifyRemoteMemberRuntimeObservationTerminalDestroyed,
+    ClassifyRemoteMemberRuntimeObservationNonTerminalRunning,
+    ClassifyRemoteMemberRuntimeObservationNonTerminalStopped,
+    ClassifyRemoteMemberRuntimeObservationNonTerminalCompleted,
+    ClassifyRemoteMemberRuntimeObservationNonTerminalDestroyed,
+    ResolveSpawnMemberAdmissionManageScopeRunning,
+    ResolveSpawnMemberAdmissionManageScopeStopped,
+    ResolveSpawnMemberAdmissionManageScopeCompleted,
+    ResolveSpawnMemberAdmissionManageScopeDestroyed,
+    ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning,
+    ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped,
+    ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted,
+    ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed,
+    ResolveSpawnMemberAdmissionProfileScopeRunning,
+    ResolveSpawnMemberAdmissionProfileScopeStopped,
+    ResolveSpawnMemberAdmissionProfileScopeCompleted,
+    ResolveSpawnMemberAdmissionProfileScopeDestroyed,
+    ResolveSpawnMemberAdmissionDeniedRunning,
+    ResolveSpawnMemberAdmissionDeniedStopped,
+    ResolveSpawnMemberAdmissionDeniedCompleted,
+    ResolveSpawnMemberAdmissionDeniedDestroyed,
     ClassifySpawnManyFailureProfileNotFoundRunning,
     ClassifySpawnManyFailureProfileNotFoundStopped,
     ClassifySpawnManyFailureProfileNotFoundCompleted,

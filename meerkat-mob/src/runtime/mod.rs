@@ -124,8 +124,9 @@ pub use handle::{
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
     MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
     PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
-    SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource,
-    SpawnSystemPromptOverride, SupervisorRotationReport, WorkDeliveryReceipt,
+    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberCustomizer, SpawnMemberSpec,
+    SpawnResult, SpawnSource, SpawnSystemPromptOverride, SupervisorRotationReport,
+    WorkDeliveryReceipt,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{

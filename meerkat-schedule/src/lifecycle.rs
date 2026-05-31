@@ -366,6 +366,10 @@ pub enum OccurrenceLifecycleInput {
     ClassifyDue {
         now_utc: DateTime<Utc>,
     },
+    ClassifyClaimedDispatchDisposition {
+        schedule_phase: SchedulePhase,
+        current_schedule_revision: ScheduleRevision,
+    },
     Claim {
         owner_id: String,
         at_utc: DateTime<Utc>,
@@ -435,6 +439,10 @@ pub enum OccurrenceLifecycleEffect {
     DueClaimEligible,
     DueMisfireRequired,
     DueLeaseExpired,
+    ClaimedDispatchDispositionClassified {
+        disposition: ClaimedDispatchDisposition,
+        superseded_by_revision: Option<ScheduleRevision>,
+    },
     DeliveryFailed,
     LeaseExpired,
 }
@@ -444,6 +452,24 @@ pub enum OccurrenceDueAction {
     ClaimEligible,
     MisfireRequired,
     LeaseExpired,
+}
+
+/// Domain mirror of the occurrence authority's claimed-occurrence pre-dispatch
+/// disposition verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimedDispatchDisposition {
+    Frozen,
+    Supersede,
+    Ready,
+    FutureRevision,
+}
+
+/// Machine-decided claimed-occurrence pre-dispatch verdict the driver mirrors.
+/// `superseded_by_revision` is `Some` only for the `Supersede` disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimedDispatchVerdict {
+    pub disposition: ClaimedDispatchDisposition,
+    pub superseded_by_revision: Option<ScheduleRevision>,
 }
 
 #[derive(Debug, Clone)]
@@ -606,6 +632,8 @@ pub enum OccurrenceLifecycleError {
     ReceiptRecordRejected,
     #[error("generated occurrence authority rejected due classification")]
     DueClassificationRejected,
+    #[error("generated occurrence authority rejected claimed-dispatch disposition classification")]
+    ClaimedDispatchClassificationRejected,
     #[error("generated occurrence authority rejected recovered machine state: {source}")]
     AuthorityRecoveryRejected {
         source: occ_dsl::OccurrenceLifecycleMachineTransitionError,
@@ -700,6 +728,18 @@ pub enum OccurrenceLifecycleError {
     },
     #[error("OccurrenceLifecycleMachine emitted ambiguous due classification effects: {effects:?}")]
     AmbiguousDueClassification { effects: Vec<&'static str> },
+    #[error(
+        "OccurrenceLifecycleMachine did not emit a claimed-dispatch disposition for the observed schedule facts"
+    )]
+    MissingClaimedDispatchDisposition,
+    #[error(
+        "OccurrenceLifecycleMachine emitted multiple claimed-dispatch disposition classifications"
+    )]
+    AmbiguousClaimedDispatchDisposition,
+    #[error(
+        "OccurrenceLifecycleMachine classified the claimed-dispatch disposition as Supersede without a superseding revision"
+    )]
+    ClaimedDispatchSupersedeMissingRevision,
     #[error("occurrence projection does not match generated machine_state: {reason}")]
     ProjectionMismatch { reason: String },
 }
@@ -804,6 +844,28 @@ impl Occurrence {
             .clone()
             .apply(OccurrenceLifecycleInput::ClassifyDue { now_utc })?;
         due_action_from_effects(&mutator.effects)
+    }
+
+    /// Classify the pre-dispatch disposition of this claimed occurrence against
+    /// the observed owning-schedule facts.
+    ///
+    /// The driver shell extracts the schedule's current phase and revision (pure
+    /// observations) and feeds them here; the occurrence authority — not the
+    /// driver — decides Frozen / Supersede / Ready / FutureRevision. The driver
+    /// mirrors the returned verdict. Fails closed if the authority emits no
+    /// disposition.
+    pub fn classify_claimed_dispatch_disposition(
+        &self,
+        schedule_phase: SchedulePhase,
+        current_schedule_revision: ScheduleRevision,
+    ) -> Result<ClaimedDispatchVerdict, OccurrenceLifecycleError> {
+        let mutator = self.clone().apply(
+            OccurrenceLifecycleInput::ClassifyClaimedDispatchDisposition {
+                schedule_phase,
+                current_schedule_revision,
+            },
+        )?;
+        claimed_dispatch_verdict_from_effects(&mutator.effects)
     }
 
     /// Build a public receipt from the generated receipt facts accepted by the
@@ -986,6 +1048,13 @@ fn convert_occurrence_input(
                 now_utc_ms: occurrence_datetime_to_millis(*now_utc, "now_utc")?,
             }
         }
+        OccurrenceLifecycleInput::ClassifyClaimedDispatchDisposition {
+            schedule_phase,
+            current_schedule_revision,
+        } => occ_dsl::OccurrenceLifecycleInput::ClassifyClaimedDispatchDisposition {
+            schedule_phase: to_dsl_claimed_dispatch_schedule_phase(*schedule_phase),
+            current_schedule_revision: current_schedule_revision.0,
+        },
         OccurrenceLifecycleInput::Claim {
             owner_id,
             at_utc,
@@ -1333,6 +1402,9 @@ fn occurrence_error_from_transition_failure_class(
         occ_dsl::OccurrenceTransitionFailureClassKind::DueClassificationRejected => {
             OccurrenceLifecycleError::DueClassificationRejected
         }
+        occ_dsl::OccurrenceTransitionFailureClassKind::ClaimedDispatchClassificationRejected => {
+            OccurrenceLifecycleError::ClaimedDispatchClassificationRejected
+        }
         occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected => {
             OccurrenceLifecycleError::ClaimRejected
         }
@@ -1397,6 +1469,29 @@ fn to_dsl_occurrence_target_probe_outcome(
     }
 }
 
+fn to_dsl_claimed_dispatch_schedule_phase(
+    phase: SchedulePhase,
+) -> occ_dsl::ClaimedDispatchSchedulePhase {
+    match phase {
+        SchedulePhase::Active => occ_dsl::ClaimedDispatchSchedulePhase::Active,
+        SchedulePhase::Paused => occ_dsl::ClaimedDispatchSchedulePhase::Paused,
+        SchedulePhase::Deleted => occ_dsl::ClaimedDispatchSchedulePhase::Deleted,
+    }
+}
+
+fn claimed_dispatch_disposition_from_dsl(
+    disposition: occ_dsl::ClaimedDispatchDisposition,
+) -> ClaimedDispatchDisposition {
+    match disposition {
+        occ_dsl::ClaimedDispatchDisposition::Frozen => ClaimedDispatchDisposition::Frozen,
+        occ_dsl::ClaimedDispatchDisposition::Supersede => ClaimedDispatchDisposition::Supersede,
+        occ_dsl::ClaimedDispatchDisposition::Ready => ClaimedDispatchDisposition::Ready,
+        occ_dsl::ClaimedDispatchDisposition::FutureRevision => {
+            ClaimedDispatchDisposition::FutureRevision
+        }
+    }
+}
+
 /// Map DSL effect → domain effect (1:1 by name).
 fn map_occurrence_effect(
     effect: &occ_dsl::OccurrenceLifecycleEffect,
@@ -1430,6 +1525,13 @@ fn map_occurrence_effect(
         occ_dsl::OccurrenceLifecycleEffect::DueLeaseExpired => {
             OccurrenceLifecycleEffect::DueLeaseExpired
         }
+        occ_dsl::OccurrenceLifecycleEffect::ClaimedDispatchDispositionClassified {
+            disposition,
+            superseded_by_revision,
+        } => OccurrenceLifecycleEffect::ClaimedDispatchDispositionClassified {
+            disposition: claimed_dispatch_disposition_from_dsl(*disposition),
+            superseded_by_revision: superseded_by_revision.map(ScheduleRevision),
+        },
         occ_dsl::OccurrenceLifecycleEffect::DeliveryFailed => {
             OccurrenceLifecycleEffect::DeliveryFailed
         }
@@ -1469,6 +1571,34 @@ fn due_action_from_effects(
         });
     }
     Ok(first_action)
+}
+
+fn claimed_dispatch_verdict_from_effects(
+    effects: &[OccurrenceLifecycleEffect],
+) -> Result<ClaimedDispatchVerdict, OccurrenceLifecycleError> {
+    let mut verdicts = effects.iter().filter_map(|effect| match effect {
+        OccurrenceLifecycleEffect::ClaimedDispatchDispositionClassified {
+            disposition,
+            superseded_by_revision,
+        } => Some(ClaimedDispatchVerdict {
+            disposition: *disposition,
+            superseded_by_revision: *superseded_by_revision,
+        }),
+        _ => None,
+    });
+
+    let Some(verdict) = verdicts.next() else {
+        return Err(OccurrenceLifecycleError::MissingClaimedDispatchDisposition);
+    };
+    if verdicts.next().is_some() {
+        return Err(OccurrenceLifecycleError::AmbiguousClaimedDispatchDisposition);
+    }
+    if matches!(verdict.disposition, ClaimedDispatchDisposition::Supersede)
+        && verdict.superseded_by_revision.is_none()
+    {
+        return Err(OccurrenceLifecycleError::ClaimedDispatchSupersedeMissingRevision);
+    }
+    Ok(verdict)
 }
 
 // ===========================================================================
@@ -2774,6 +2904,67 @@ mod tests {
                 "claim should reject occurrences already in phase {phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn claimed_dispatch_disposition_comes_from_occurrence_authority() {
+        // Occurrence is claimed at schedule revision 1 (the sample schedule's
+        // initial revision). The machine — not the driver — classifies each
+        // disposition from the observed schedule phase + current revision.
+        let claimed = sample_claimed_occurrence();
+        assert_eq!(claimed.schedule_revision, ScheduleRevision(1));
+
+        // Active + current revision -> Ready.
+        let ready = claimed
+            .classify_claimed_dispatch_disposition(SchedulePhase::Active, ScheduleRevision(1))
+            .expect("ready disposition should classify");
+        assert_eq!(ready.disposition, ClaimedDispatchDisposition::Ready);
+        assert_eq!(ready.superseded_by_revision, None);
+
+        // Paused (revision not behind) -> Frozen.
+        let frozen = claimed
+            .classify_claimed_dispatch_disposition(SchedulePhase::Paused, ScheduleRevision(1))
+            .expect("frozen disposition should classify");
+        assert_eq!(frozen.disposition, ClaimedDispatchDisposition::Frozen);
+        assert_eq!(frozen.superseded_by_revision, None);
+
+        // Deleted -> Supersede by current revision.
+        let superseded_deleted = claimed
+            .classify_claimed_dispatch_disposition(SchedulePhase::Deleted, ScheduleRevision(3))
+            .expect("deleted disposition should classify");
+        assert_eq!(
+            superseded_deleted.disposition,
+            ClaimedDispatchDisposition::Supersede
+        );
+        assert_eq!(
+            superseded_deleted.superseded_by_revision,
+            Some(ScheduleRevision(3))
+        );
+
+        // Active but stale claimed revision -> Supersede by current revision.
+        let superseded_stale = claimed
+            .classify_claimed_dispatch_disposition(SchedulePhase::Active, ScheduleRevision(2))
+            .expect("stale disposition should classify");
+        assert_eq!(
+            superseded_stale.disposition,
+            ClaimedDispatchDisposition::Supersede
+        );
+        assert_eq!(
+            superseded_stale.superseded_by_revision,
+            Some(ScheduleRevision(2))
+        );
+
+        // Claimed revision ahead of the schedule -> FutureRevision (the driver
+        // surfaces this as an internal error; the class itself is the
+        // machine's).
+        let future = claimed
+            .classify_claimed_dispatch_disposition(SchedulePhase::Active, ScheduleRevision(0))
+            .expect("future-revision disposition should classify");
+        assert_eq!(
+            future.disposition,
+            ClaimedDispatchDisposition::FutureRevision
+        );
+        assert_eq!(future.superseded_by_revision, None);
     }
 
     #[test]

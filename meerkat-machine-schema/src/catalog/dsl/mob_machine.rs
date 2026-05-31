@@ -461,6 +461,22 @@ macro_rules! mob_catalog_machine_dsl {
             // are echoed so the shell can reconstruct the `TopologyViolation`
             // error / advisory notice from the machine's emitted verdict.
             ResolveFlowDelegationEdgeAdmission { from_role: String, to_role: String, rule_verdict: Enum<MobFlowDelegationEdgeRuleVerdictKind>, mode: Enum<MobFlowDelegationEdgeModeKind> },
+            // Remote-member runtime observation terminality. The bridge consumer
+            // observes a remote member's runtime state (a pure wire projection)
+            // during respawn/destroy cleanup; MobMachine — not the bridge shell
+            // — owns whether that observed state is terminal. The shell mirrors
+            // the emitted verdict to decide whether cleanup may stop or must
+            // force-destroy.
+            ClassifyRemoteMemberRuntimeObservation { observed_state: Enum<MobRemoteMemberRuntimeObservedState> },
+            // Composite spawn-member operator admission. The tool shell extracts
+            // three raw observations: whether the operator holds manage scope
+            // over the target mob, whether the operator holds spawn-profile scope
+            // for the requested profile (both machine-owned operator-scope
+            // projections), and whether the request carries privileged args
+            // (a pure typed argument observation). MobMachine — not the tool
+            // shell — composes these into the Allow/Deny admission verdict, which
+            // the shell mirrors (Deny -> access_denied).
+            ResolveSpawnMemberAdmission { manage_scope_present: bool, profile_scope_present: bool, privileged_args_present: bool },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
@@ -690,6 +706,15 @@ macro_rules! mob_catalog_machine_dsl {
             // DeniedAdvisory -> advisory notice; Admitted -> proceed) instead
             // of computing+enforcing the admission itself.
             FlowDelegationEdgeAdmissionResolved { from_role: String, to_role: String, admission: Enum<MobFlowDelegationEdgeAdmissionKind> },
+            // Machine-owned terminality verdict for an observed remote-member
+            // runtime state. The bridge shell mirrors this to decide whether
+            // confirmatory cleanup may stop (Terminal) or must force-destroy
+            // (NonTerminal).
+            RemoteMemberRuntimeTerminalityClassified { observed_state: Enum<MobRemoteMemberRuntimeObservedState>, terminality: Enum<MobRemoteMemberRuntimeTerminality> },
+            // Machine-owned composite spawn-member operator admission verdict.
+            // The tool shell mirrors this (Denied -> access_denied; Allowed ->
+            // proceed) instead of composing+enforcing the admission itself.
+            SpawnMemberAdmissionResolved { admission: Enum<MobSpawnMemberAdmissionKind> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -827,6 +852,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition SpawnManyFailureClassified => local,
         disposition MemberWaitClassified => local,
         disposition FlowDelegationEdgeAdmissionResolved => local,
+        disposition RemoteMemberRuntimeTerminalityClassified => local,
+        disposition SpawnMemberAdmissionResolved => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition SessionProvisionOperationOwnerAuthorized => local,
@@ -1274,6 +1301,93 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit FlowDelegationEdgeAdmissionResolved { from_role: from_role, to_role: to_role, admission: MobFlowDelegationEdgeAdmissionKind::DeniedAdvisory }
+        }
+
+        // --- Remote-member runtime observation terminality ---
+        //
+        // The bridge consumer observes a remote member's runtime state during
+        // respawn/destroy cleanup. The observed state is a pure wire projection;
+        // MobMachine owns whether it is terminal. Pure classification across all
+        // lifecycle phases, like ClassifySpawnManyFailure.
+
+        transition ClassifyRemoteMemberRuntimeObservationTerminal {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyRemoteMemberRuntimeObservation { observed_state }
+            guard "observed_state_terminal" {
+                observed_state == MobRemoteMemberRuntimeObservedState::Retired
+                || observed_state == MobRemoteMemberRuntimeObservedState::Stopped
+                || observed_state == MobRemoteMemberRuntimeObservedState::Destroyed
+            }
+            update {}
+            to Running
+            emit RemoteMemberRuntimeTerminalityClassified { observed_state: observed_state, terminality: MobRemoteMemberRuntimeTerminality::Terminal }
+        }
+
+        transition ClassifyRemoteMemberRuntimeObservationNonTerminal {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyRemoteMemberRuntimeObservation { observed_state }
+            guard "observed_state_non_terminal" {
+                observed_state == MobRemoteMemberRuntimeObservedState::Initializing
+                || observed_state == MobRemoteMemberRuntimeObservedState::Idle
+                || observed_state == MobRemoteMemberRuntimeObservedState::Attached
+                || observed_state == MobRemoteMemberRuntimeObservedState::Running
+            }
+            update {}
+            to Running
+            emit RemoteMemberRuntimeTerminalityClassified { observed_state: observed_state, terminality: MobRemoteMemberRuntimeTerminality::NonTerminal }
+        }
+
+        // --- Spawn-member operator admission ---
+        //
+        // The tool surface extracts three raw observations (manage scope,
+        // profile scope, privileged-arg presence) and feeds them here; MobMachine
+        // composes the Allow/Deny verdict. Pure classification across all phases.
+
+        transition ResolveSpawnMemberAdmissionManageScope {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            guard "manage_scope_allows" { manage_scope_present == true }
+            update {}
+            to Running
+            emit SpawnMemberAdmissionResolved { admission: MobSpawnMemberAdmissionKind::Allowed }
+        }
+
+        transition ResolveSpawnMemberAdmissionPrivilegedArgsDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            guard "privileged_args_without_manage_scope" {
+                manage_scope_present == false
+                && privileged_args_present == true
+            }
+            update {}
+            to Running
+            emit SpawnMemberAdmissionResolved { admission: MobSpawnMemberAdmissionKind::Denied }
+        }
+
+        transition ResolveSpawnMemberAdmissionProfileScope {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            guard "profile_scope_allows" {
+                manage_scope_present == false
+                && privileged_args_present == false
+                && profile_scope_present == true
+            }
+            update {}
+            to Running
+            emit SpawnMemberAdmissionResolved { admission: MobSpawnMemberAdmissionKind::Allowed }
+        }
+
+        transition ResolveSpawnMemberAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            guard "no_scope_denies" {
+                manage_scope_present == false
+                && privileged_args_present == false
+                && profile_scope_present == false
+            }
+            update {}
+            to Running
+            emit SpawnMemberAdmissionResolved { admission: MobSpawnMemberAdmissionKind::Denied }
         }
 
         transition ClassifySpawnManyFailureProfileNotFound {
@@ -8156,6 +8270,40 @@ pub enum MobFlowDelegationEdgeAdmissionKind {
     Admitted,
     DeniedStrict,
     DeniedAdvisory,
+}
+
+/// Pure observation of a remote member's runtime state, extracted by the bridge
+/// consumer from the wire `BridgeMemberRuntimeState` projection and fed to
+/// MobMachine for terminality classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobRemoteMemberRuntimeObservedState {
+    #[default]
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+/// Machine-owned terminality verdict for an observed remote-member runtime
+/// state. The bridge shell mirrors this: `Terminal` lets cleanup stop,
+/// `NonTerminal` forces a destroy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobRemoteMemberRuntimeTerminality {
+    #[default]
+    NonTerminal,
+    Terminal,
+}
+
+/// Machine-owned composite spawn-member operator admission verdict. The tool
+/// shell mirrors this: `Denied` -> `access_denied`, `Allowed` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnMemberAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

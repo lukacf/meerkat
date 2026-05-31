@@ -1212,6 +1212,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "RemoteMemberRuntimeTerminalityClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Remote-member runtime observation terminality (Terminal/NonTerminal) is decided by MobMachine; the bridge cleanup shell mirrors it (stop vs force-destroy) instead of classifying the observed wire state itself",
+        ),
+        (
+            "MobMachine",
+            "SpawnMemberAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Composite spawn-member operator admission (Allowed/Denied) is decided by MobMachine from raw scope/privileged-arg observations; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
+        ),
+        (
+            "MobMachine",
             "AuthorizeAgentEventSubscription",
             SeamClassification::SurfaceResultAlignment,
             "Agent event subscription authorization result must align with generated MobMachine target/session truth",
@@ -1475,6 +1487,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "DueLeaseExpired",
             SeamClassification::NoOwnerRealization,
             "Local due-occurrence lease-expired classification retained inside the occurrence scheduler",
+        ),
+        (
+            "OccurrenceLifecycleMachine",
+            "ClaimedDispatchDispositionClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local claimed-occurrence pre-dispatch disposition (Frozen/Supersede/Ready/FutureRevision) decided by the occurrence machine; the driver mirrors it instead of classifying schedule facts itself",
         ),
         (
             "OccurrenceLifecycleMachine",

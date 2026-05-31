@@ -116,12 +116,34 @@ impl AuthorizedSessionBuildState {
 pub struct AuthorizedSystemPrompt {
     prompt: String,
     replacing_existing: bool,
+    source: SessionSystemPromptSource,
 }
 
 impl AuthorizedSystemPrompt {
     #[must_use]
     pub fn into_parts(self) -> (String, bool) {
         (self.prompt, self.replacing_existing)
+    }
+
+    /// The typed mutation provenance carried into the applied system message so
+    /// the transcript-continuity save-guard reads a typed fact, not a rendered
+    /// prompt prefix.
+    #[must_use]
+    pub fn mutation_kind(&self) -> crate::types::SystemPromptMutationKind {
+        self.source.into()
+    }
+}
+
+impl From<SessionSystemPromptSource> for crate::types::SystemPromptMutationKind {
+    fn from(value: SessionSystemPromptSource) -> Self {
+        match value {
+            SessionSystemPromptSource::DirectMutation => Self::DirectMutation,
+            SessionSystemPromptSource::ExplicitBuild => Self::ExplicitBuild,
+            SessionSystemPromptSource::DefaultBuild => Self::DefaultBuild,
+            SessionSystemPromptSource::WasmDefaultBuild => Self::WasmDefaultBuild,
+            SessionSystemPromptSource::RuntimeContextAppend => Self::RuntimeContextAppend,
+            SessionSystemPromptSource::RuntimeSteerCleanup => Self::RuntimeSteerCleanup,
+        }
     }
 }
 
@@ -361,5 +383,6 @@ pub fn authorize_system_prompt_mutation(
     Ok(AuthorizedSystemPrompt {
         prompt,
         replacing_existing,
+        source,
     })
 }

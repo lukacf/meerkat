@@ -3523,7 +3523,8 @@ async fn handle_meerkat_resume(
         stored_metadata.self_hosted_server_id.clone(),
         input.model.as_deref(),
         provider,
-    );
+    )
+    .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
             provider: llm_binding.provider,

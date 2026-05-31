@@ -1062,7 +1062,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             incoming
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    vec![Message::User(UserMessage::text(
+                    vec![Message::User(UserMessage::compaction_summary(
                         "[Context compacted] first turn",
                     ))],
                     TranscriptRewriteReason::new("compaction"),
@@ -1152,7 +1152,7 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             incoming
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    vec![Message::User(UserMessage::text(
+                    vec![Message::User(UserMessage::compaction_summary(
                         "[Context compacted] Earlier runtime context".to_string(),
                     ))],
                     TranscriptRewriteReason::new("compaction"),

@@ -202,6 +202,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolvePendingContinuationWithoutBoundary`
   - anchors: `session_document_authority`
   - scenarios: `session_first_turn_pending_consume`
+- `AuthorizeSessionResumeOverridesRejectProviderRequiresModel`
+  - anchors: `session_document_authority`
+  - scenarios: `session_durable_config_authorize_restore`
+- `AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_durable_config_authorize_restore`
+- `AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding`
+  - anchors: `session_document_authority`
+  - scenarios: `session_durable_config_authorize_restore`
+- `AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`
+- `AuthorizeSessionResumeOverridesAcceptRecomputeProvider`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+- `AuthorizeSessionResumeOverridesAcceptUseOverride`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+- `AuthorizeSessionResumeOverridesAcceptRetainStored`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_system_context_snapshot_restore`, `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -261,6 +282,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PendingContinuationPublicTerminalResolved`
   - anchors: `session_document_authority`
   - scenarios: `session_first_turn_pending_consume`, `session_system_context_apply_discard`
+- `SessionResumeOverridesAuthorized`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_system_context_snapshot_restore`, `session_realtime_transcript_materialize_and_restore`, `session_durable_config_authorize_restore`
+- `SessionResumeOverridesRejected`
+  - anchors: `session_document_authority`
+  - scenarios: `session_initial_inputs_stage`, `session_durable_config_authorize_restore`
 
 ### Invariants
 - `(none)`

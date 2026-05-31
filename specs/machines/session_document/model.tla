@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, SessionCallTimeoutOverrideKindValues, SessionDurableProviderKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SessionToolCategoryOverrideKindValues, SystemContextAppendDecisionValues, SystemContextSourceValues
+CONSTANTS BooleanValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, SessionCallTimeoutOverrideKindValues, SessionDurableProviderKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SessionToolCategoryOverrideKindValues, SystemContextAppendDecisionValues, SystemContextSourceValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -29,6 +29,10 @@ VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_ini
 
 vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
+resume_provider_recompute_from_model(model_override_present, provider_override_present) == (model_override_present /\ (provider_override_present = FALSE))
+resume_reject_clear_and_set_auth_binding(clear_auth_binding, auth_binding_override_present) == (clear_auth_binding /\ auth_binding_override_present)
+resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present) == (clear_provider_params /\ provider_params_override_present)
+resume_reject_provider_requires_model(provider_override_present, model_override_present) == (provider_override_present /\ (model_override_present = FALSE))
 tail_has_pending_boundary(session_tail) == ((session_tail = "User") \/ (session_tail = "ToolResults"))
 realtime_stop_reason_records_completion(stop_reason) == (stop_reason = "Other")
 realtime_stop_reason_removes_completion(stop_reason) == (stop_reason = "ToolUse")
@@ -42,7 +46,9 @@ append_is_conflict(idempotency_key_present, existing_key_conflicts) == (idempote
 append_is_empty(trimmed_text_byte_count) == (trimmed_text_byte_count = 0)
 should_store_initial_prompt(arg_phase, prompt_has_content) == ((arg_phase = "Pending") /\ prompt_has_content)
 phase_allows_initial_turn_overrides(arg_phase) == (arg_phase = "Pending")
+resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase) == (has_build_only_overrides /\ (phase_allows_initial_turn_overrides(first_turn_phase) = FALSE))
 has_effective_pending_boundary(session_tail, staged_tool_result_count) == (tail_has_pending_boundary(session_tail) \/ (staged_tool_result_count > 0))
+resume_overrides_admissible(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) == ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ (resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present) = FALSE) /\ (resume_reject_clear_and_set_auth_binding(clear_auth_binding, auth_binding_override_present) = FALSE) /\ (resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase) = FALSE))
 
 Init ==
     /\ phase = "Ready"
@@ -546,6 +552,62 @@ ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
+AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ resume_reject_provider_requires_model(provider_override_present, model_override_present)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ (resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present) = FALSE) /\ resume_reject_clear_and_set_auth_binding(clear_auth_binding, auth_binding_override_present))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ (resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present) = FALSE) /\ (resume_reject_clear_and_set_auth_binding(clear_auth_binding, auth_binding_override_present) = FALSE) /\ resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
 Next ==
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingInactiveOrPending(session_id)
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingConsumed(session_id)
@@ -607,6 +669,13 @@ Next ==
     \/ \E source \in SessionSystemPromptSourceValues : \E prompt_present \in BOOLEAN : \E prompt_byte_count \in 0..2 : \E replacing_existing \in BOOLEAN : AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E clear_provider_params \in BOOLEAN : \E provider_params_override_present \in BOOLEAN : \E clear_auth_binding \in BOOLEAN : \E auth_binding_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
 
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1

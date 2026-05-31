@@ -5358,12 +5358,27 @@ async fn continue_session_inner(
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message)));
             }
         };
-        let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
+        let llm_binding = match meerkat_core::session_recovery::resolve_resume_llm_binding(
             stored_metadata.provider,
             stored_metadata.self_hosted_server_id.clone(),
             req.model.as_deref(),
             req.provider,
-        );
+        ) {
+            Ok(binding) => binding,
+            Err(e) => {
+                unregister_rest_runtime_if_new_idle_locked(
+                    state,
+                    &session_id,
+                    runtime_was_registered,
+                )
+                .await;
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(
+                    e.to_string(),
+                )));
+            }
+        };
         let mut build = SessionBuildOptions {
             provider: llm_binding.provider,
             self_hosted_server_id: llm_binding.self_hosted_server_id,

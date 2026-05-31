@@ -831,7 +831,9 @@ mod tests {
             .commit_transcript_rewrite(
                 meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
                 vec![meerkat_core::types::Message::User(
-                    meerkat_core::types::UserMessage::text("[Context compacted] first turn"),
+                    meerkat_core::types::UserMessage::compaction_summary(
+                        "[Context compacted] first turn",
+                    ),
                 )],
                 meerkat_core::TranscriptRewriteReason::new("compaction"),
                 Some("meerkat-core".to_string()),
@@ -920,7 +922,7 @@ mod tests {
             .commit_transcript_rewrite(
                 meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
                 vec![meerkat_core::types::Message::User(
-                    meerkat_core::types::UserMessage::text(
+                    meerkat_core::types::UserMessage::compaction_summary(
                         "[Context compacted] Earlier runtime context".to_string(),
                     ),
                 )],

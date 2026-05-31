@@ -4720,6 +4720,9 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
         "PendingContinuationPublicTerminal",
+        "ResumeOverrideRejection",
+        "ResumeProviderSelection",
+        "ResumeSelfHostedSelection",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -4806,6 +4809,9 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "ObservedSessionTailKind" => Ok("Empty"),
         "PendingContinuationDisposition" => Ok("NoPendingBoundary"),
         "PendingContinuationPublicTerminal" => Ok("NoPendingBoundary"),
+        "ResumeOverrideRejection" => Ok("ProviderRequiresModel"),
+        "ResumeProviderSelection" => Ok("RecomputeFromModel"),
+        "ResumeSelfHostedSelection" => Ok("Clear"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -5665,6 +5671,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RestoreSessionBuildState",
         "AuthorizeSystemPromptMutation",
         "ResolvePendingContinuation",
+        "AuthorizeSessionResumeOverrides",
     ] {
         machine
             .inputs
@@ -5691,6 +5698,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SystemPromptMutationAuthorized",
         "PendingContinuationResolved",
         "PendingContinuationPublicTerminalResolved",
+        "SessionResumeOverridesAuthorized",
+        "SessionResumeOverridesRejected",
     ] {
         machine
             .effects
@@ -5713,6 +5722,9 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
         "PendingContinuationPublicTerminal",
+        "ResumeOverrideRejection",
+        "ResumeProviderSelection",
+        "ResumeSelfHostedSelection",
     ] {
         let binding = machine
             .named_types

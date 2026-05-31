@@ -2686,13 +2686,19 @@ impl Session {
     ) {
         use crate::types::SystemMessage;
 
+        // The typed mutation provenance is carried onto the applied system
+        // message so the transcript-continuity save-guard recognizes a
+        // runtime context-append shape from a typed field instead of the
+        // rendered `[Runtime System Context]` label.
+        let mutation_kind = prompt.mutation_kind();
         let (prompt, _replacing_existing) = prompt.into_parts();
+        let message = SystemMessage::with_mutation_kind(prompt, mutation_kind);
         let inner = Arc::make_mut(&mut self.messages);
         // Check if first message is system
         if let Some(Message::System(_)) = inner.first() {
-            inner[0] = Message::System(SystemMessage::new(prompt));
+            inner[0] = Message::System(message);
         } else {
-            inner.insert(0, Message::System(SystemMessage::new(prompt)));
+            inner.insert(0, Message::System(message));
         }
         self.updated_at = SystemTime::now();
         self.refresh_transcript_head_after_message_mutation();

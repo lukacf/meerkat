@@ -417,6 +417,168 @@ impl std::fmt::Display for RealtimeTranscriptStopReasonKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ResumeOverrideRejection {
+    #[default]
+    #[serde(rename = "ProviderRequiresModel")]
+    ProviderRequiresModel,
+    #[serde(rename = "ClearAndSetProviderParams")]
+    ClearAndSetProviderParams,
+    #[serde(rename = "ClearAndSetAuthBinding")]
+    ClearAndSetAuthBinding,
+    #[serde(rename = "BuildOnlyAfterFirstTurn")]
+    BuildOnlyAfterFirstTurn,
+}
+impl ResumeOverrideRejection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProviderRequiresModel => "ProviderRequiresModel",
+            Self::ClearAndSetProviderParams => "ClearAndSetProviderParams",
+            Self::ClearAndSetAuthBinding => "ClearAndSetAuthBinding",
+            Self::BuildOnlyAfterFirstTurn => "BuildOnlyAfterFirstTurn",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ResumeOverrideRejection {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ProviderRequiresModel" => Ok(Self::ProviderRequiresModel),
+            "ClearAndSetProviderParams" => Ok(Self::ClearAndSetProviderParams),
+            "ClearAndSetAuthBinding" => Ok(Self::ClearAndSetAuthBinding),
+            "BuildOnlyAfterFirstTurn" => Ok(Self::BuildOnlyAfterFirstTurn),
+            other => Err(format!("invalid ResumeOverrideRejection value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ResumeOverrideRejection {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ResumeOverrideRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ResumeProviderSelection {
+    #[default]
+    #[serde(rename = "RecomputeFromModel")]
+    RecomputeFromModel,
+    #[serde(rename = "UseOverride")]
+    UseOverride,
+    #[serde(rename = "UseStored")]
+    UseStored,
+}
+impl ResumeProviderSelection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RecomputeFromModel => "RecomputeFromModel",
+            Self::UseOverride => "UseOverride",
+            Self::UseStored => "UseStored",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ResumeProviderSelection {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RecomputeFromModel" => Ok(Self::RecomputeFromModel),
+            "UseOverride" => Ok(Self::UseOverride),
+            "UseStored" => Ok(Self::UseStored),
+            other => Err(format!("invalid ResumeProviderSelection value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ResumeProviderSelection {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ResumeProviderSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ResumeSelfHostedSelection {
+    #[default]
+    #[serde(rename = "Clear")]
+    Clear,
+    #[serde(rename = "Retain")]
+    Retain,
+}
+impl ResumeSelfHostedSelection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clear => "Clear",
+            Self::Retain => "Retain",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ResumeSelfHostedSelection {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Clear" => Ok(Self::Clear),
+            "Retain" => Ok(Self::Retain),
+            other => Err(format!("invalid ResumeSelfHostedSelection value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ResumeSelfHostedSelection {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ResumeSelfHostedSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SessionCallTimeoutOverrideKind {
     #[default]
     #[serde(rename = "Inherit")]
@@ -1126,6 +1288,17 @@ pub mod inputs {
         pub session_tail: ObservedSessionTailKind,
         pub staged_tool_result_count: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSessionResumeOverrides {
+        pub provider_override_present: bool,
+        pub model_override_present: bool,
+        pub clear_provider_params: bool,
+        pub provider_params_override_present: bool,
+        pub clear_auth_binding: bool,
+        pub auth_binding_override_present: bool,
+        pub has_build_only_overrides: bool,
+        pub first_turn_phase: SessionFirstTurnPhase,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1156,6 +1329,7 @@ pub enum Input {
     RestoreSessionBuildState(inputs::RestoreSessionBuildState),
     AuthorizeSystemPromptMutation(inputs::AuthorizeSystemPromptMutation),
     ResolvePendingContinuation(inputs::ResolvePendingContinuation),
+    AuthorizeSessionResumeOverrides(inputs::AuthorizeSessionResumeOverrides),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1204,6 +1378,7 @@ impl Input {
             Self::RestoreSessionBuildState(_) => InputKind::RestoreSessionBuildState,
             Self::AuthorizeSystemPromptMutation(_) => InputKind::AuthorizeSystemPromptMutation,
             Self::ResolvePendingContinuation(_) => InputKind::ResolvePendingContinuation,
+            Self::AuthorizeSessionResumeOverrides(_) => InputKind::AuthorizeSessionResumeOverrides,
         }
     }
 }
@@ -1235,6 +1410,7 @@ pub enum InputKind {
     RestoreSessionBuildState,
     AuthorizeSystemPromptMutation,
     ResolvePendingContinuation,
+    AuthorizeSessionResumeOverrides,
 }
 
 pub mod effects {
@@ -1322,6 +1498,16 @@ pub mod effects {
     pub struct PendingContinuationPublicTerminalResolved {
         pub terminal: PendingContinuationPublicTerminal,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionResumeOverridesAuthorized {
+        pub provider_selection: ResumeProviderSelection,
+        pub self_hosted_selection: ResumeSelfHostedSelection,
+        pub provider_overridden: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionResumeOverridesRejected {
+        pub reason: ResumeOverrideRejection,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1347,6 +1533,8 @@ pub enum Effect {
     SystemPromptMutationAuthorized(effects::SystemPromptMutationAuthorized),
     PendingContinuationResolved(effects::PendingContinuationResolved),
     PendingContinuationPublicTerminalResolved(effects::PendingContinuationPublicTerminalResolved),
+    SessionResumeOverridesAuthorized(effects::SessionResumeOverridesAuthorized),
+    SessionResumeOverridesRejected(effects::SessionResumeOverridesRejected),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1369,6 +1557,8 @@ pub enum EffectKind {
     SystemPromptMutationAuthorized,
     PendingContinuationResolved,
     PendingContinuationPublicTerminalResolved,
+    SessionResumeOverridesAuthorized,
+    SessionResumeOverridesRejected,
 }
 
 #[allow(non_camel_case_types)]
@@ -1434,6 +1624,13 @@ pub enum TransitionId {
     AuthorizeSystemPromptMutation,
     ResolvePendingContinuationWithBoundary,
     ResolvePendingContinuationWithoutBoundary,
+    AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
+    AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams,
+    AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding,
+    AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn,
+    AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
+    AuthorizeSessionResumeOverridesAcceptUseOverride,
+    AuthorizeSessionResumeOverridesAcceptRetainStored,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

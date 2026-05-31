@@ -287,6 +287,7 @@ pub(crate) fn project_openai_replay_messages(
             Message::User(user) => Some(Message::User(UserMessage {
                 content: project_openai_content_blocks(&user.content),
                 render_metadata: user.render_metadata.clone(),
+                transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
             Message::Assistant(assistant) => {

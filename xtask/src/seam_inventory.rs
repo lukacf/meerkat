@@ -1697,6 +1697,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local NoPendingBoundary terminal witness mirrored alongside the pending-continuation disposition; consumed in-process, never crosses a shell boundary",
         ),
+        (
+            "SessionDocumentMachine",
+            "SessionResumeOverridesAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local resume-override admission verdict + LLM-binding selection mirrored in-process by the meerkat-core session_recovery shell (resolve_effective_turn_config / resolve_resume_llm_binding), which supplies the concrete provider/server values the typed selection points at",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionResumeOverridesRejected",
+            SeamClassification::NoOwnerRealization,
+            "Local resume-override rejection reason mapped in-process by the meerkat-core session_recovery shell to its typed SurfaceSessionRecoveryError; never crosses a shell boundary",
+        ),
         //
         // =========================================================================
         // SessionTurnAdmissionMachine — ephemeral turn-admission gate

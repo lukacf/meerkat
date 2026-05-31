@@ -3300,7 +3300,7 @@ mod tests {
                 .rev()
                 .find(|message| matches!(message, Message::User(_)))
                 .cloned();
-            let mut compacted = vec![Message::User(UserMessage::text(format!(
+            let mut compacted = vec![Message::User(UserMessage::compaction_summary(format!(
                 "[Context compacted] {summary}"
             )))];
             if let Some(last_user) = last_user {

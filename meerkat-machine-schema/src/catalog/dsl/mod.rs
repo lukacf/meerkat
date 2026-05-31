@@ -339,6 +339,23 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "PendingContinuationPublicTerminal",
                 &["NoPendingBoundary"],
             ),
+            // Resume-override-admission region typed vocabulary (folded from the
+            // handwritten session_recovery.rs resolve_effective_turn_config /
+            // resolve_resume_llm_binding shell helpers).
+            NamedTypeBinding::string_enum(
+                "ResumeOverrideRejection",
+                &[
+                    "ProviderRequiresModel",
+                    "ClearAndSetProviderParams",
+                    "ClearAndSetAuthBinding",
+                    "BuildOnlyAfterFirstTurn",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ResumeProviderSelection",
+                &["RecomputeFromModel", "UseOverride", "UseStored"],
+            ),
+            NamedTypeBinding::string_enum("ResumeSelfHostedSelection", &["Clear", "Retain"]),
         ],
         Vec::new(),
     )

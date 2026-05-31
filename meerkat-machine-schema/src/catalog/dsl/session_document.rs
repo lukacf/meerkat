@@ -12,6 +12,7 @@
 //! scoped for the broader session-document domain so later folds
 //! (system-context, realtime-transcript, durable-config) can join the same
 //! canonical machine.
+#![allow(clippy::too_many_arguments)]
 
 use meerkat_machine_dsl::machine;
 
@@ -244,6 +245,54 @@ pub enum PendingContinuationDisposition {
 pub enum PendingContinuationPublicTerminal {
     #[default]
     NoPendingBoundary,
+}
+
+// ---------------------------------------------------------------------------
+// Resume-override-admission region (folded from the handwritten
+// session_recovery.rs `resolve_effective_turn_config` override-admission and
+// `resolve_resume_llm_binding` shell helpers under LUC-524 Dogma Invariant 1).
+//
+// The shell computes only typed presence/override observations against the
+// surface recovery overrides and the durable session defaults (including the
+// RAW first-turn phase — NOT the already-reduced overrides-allowed verdict). It
+// carries NO pre-decided admission verdict. The machine decides the
+// accept/reject verdict AND the effective LLM-binding selection below; the
+// first-turn-overrides legality is re-derived here from the raw phase via the
+// same `phase_allows_initial_turn_overrides` helper the first-turn region uses.
+// ---------------------------------------------------------------------------
+
+/// Typed reason a resume-override admission was rejected. The shell maps each
+/// variant to its existing typed recovery-error message; the verdict is the
+/// machine's decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ResumeOverrideRejection {
+    #[default]
+    ProviderRequiresModel,
+    ClearAndSetProviderParams,
+    ClearAndSetAuthBinding,
+    BuildOnlyAfterFirstTurn,
+}
+
+/// Effective provider selection for a resumed turn's LLM binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ResumeProviderSelection {
+    /// Recompute the provider from the (new) model — clear the stored provider.
+    #[default]
+    RecomputeFromModel,
+    /// Use the explicit provider override.
+    UseOverride,
+    /// Retain the stored provider.
+    UseStored,
+}
+
+/// Effective self-hosted-binding selection for a resumed turn's LLM binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ResumeSelfHostedSelection {
+    /// Clear the persisted self-hosted server binding (model changed).
+    #[default]
+    Clear,
+    /// Retain the persisted self-hosted server binding.
+    Retain,
 }
 
 machine! {
@@ -496,6 +545,24 @@ machine! {
                 session_tail: Enum<ObservedSessionTailKind>,
                 staged_tool_result_count: u64,
             },
+
+            // -----------------------------------------------------------
+            // Resume-override-admission region. The input carries only typed
+            // presence/override observations and the RAW first-turn phase the
+            // shell read from durable session state. It carries NO pre-decided
+            // verdict. The machine resolves accept (with the effective
+            // LLM-binding selection) or a typed rejection below.
+            // -----------------------------------------------------------
+            AuthorizeSessionResumeOverrides {
+                provider_override_present: bool,
+                model_override_present: bool,
+                clear_provider_params: bool,
+                provider_params_override_present: bool,
+                clear_auth_binding: bool,
+                auth_binding_override_present: bool,
+                has_build_only_overrides: bool,
+                first_turn_phase: Enum<SessionFirstTurnPhase>,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -576,6 +643,19 @@ machine! {
             // shell can surface the typed terminal without re-deriving it.
             PendingContinuationResolved { disposition: Enum<PendingContinuationDisposition> },
             PendingContinuationPublicTerminalResolved { terminal: Enum<PendingContinuationPublicTerminal> },
+
+            // Resume-override-admission region effects. On accept the machine
+            // emits the verdict alongside the effective LLM-binding selection
+            // (provider source, self-hosted source, provider_overridden flag);
+            // the shell mirrors the selection and decides nothing. On reject the
+            // machine emits the typed rejection reason; the shell maps it to its
+            // typed recovery error.
+            SessionResumeOverridesAuthorized {
+                provider_selection: Enum<ResumeProviderSelection>,
+                self_hosted_selection: Enum<ResumeSelfHostedSelection>,
+                provider_overridden: bool,
+            },
+            SessionResumeOverridesRejected { reason: Enum<ResumeOverrideRejection> },
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -674,6 +754,80 @@ machine! {
             tail_has_pending_boundary(session_tail) || staged_tool_result_count > 0
         }
 
+        // Resume-override-admission classification helpers (folded from the
+        // handwritten session_recovery.rs shell). Each reject condition is the
+        // verbatim port of the corresponding shell `if` guard; the LLM-binding
+        // selection helpers port `resolve_resume_llm_binding`.
+        helper resume_reject_provider_requires_model(
+            provider_override_present: bool,
+            model_override_present: bool
+        ) -> bool {
+            provider_override_present && model_override_present == false
+        }
+
+        helper resume_reject_clear_and_set_provider_params(
+            clear_provider_params: bool,
+            provider_params_override_present: bool
+        ) -> bool {
+            clear_provider_params && provider_params_override_present
+        }
+
+        helper resume_reject_clear_and_set_auth_binding(
+            clear_auth_binding: bool,
+            auth_binding_override_present: bool
+        ) -> bool {
+            clear_auth_binding && auth_binding_override_present
+        }
+
+        helper resume_reject_build_only_after_first_turn(
+            has_build_only_overrides: bool,
+            first_turn_phase: Enum<SessionFirstTurnPhase>
+        ) -> bool {
+            has_build_only_overrides
+                && phase_allows_initial_turn_overrides(first_turn_phase) == false
+        }
+
+        // A resume request is admissible iff none of the four reject conditions
+        // fire. Used as the guard prefix for every accept branch.
+        helper resume_overrides_admissible(
+            provider_override_present: bool,
+            model_override_present: bool,
+            clear_provider_params: bool,
+            provider_params_override_present: bool,
+            clear_auth_binding: bool,
+            auth_binding_override_present: bool,
+            has_build_only_overrides: bool,
+            first_turn_phase: Enum<SessionFirstTurnPhase>
+        ) -> bool {
+            resume_reject_provider_requires_model(
+                provider_override_present,
+                model_override_present
+            ) == false
+            && resume_reject_clear_and_set_provider_params(
+                clear_provider_params,
+                provider_params_override_present
+            ) == false
+            && resume_reject_clear_and_set_auth_binding(
+                clear_auth_binding,
+                auth_binding_override_present
+            ) == false
+            && resume_reject_build_only_after_first_turn(
+                has_build_only_overrides,
+                first_turn_phase
+            ) == false
+        }
+
+        // Provider selection (port of resolve_resume_llm_binding): a model
+        // change without an explicit provider override recomputes the provider
+        // from the new model; an explicit provider override is used directly;
+        // otherwise the stored provider is retained.
+        helper resume_provider_recompute_from_model(
+            model_override_present: bool,
+            provider_override_present: bool
+        ) -> bool {
+            model_override_present && provider_override_present == false
+        }
+
         disposition SessionFirstTurnPhaseResolved => local,
         disposition SessionFirstTurnOverridesResolved => local,
         disposition SessionInitialPromptStageResolved => local,
@@ -693,6 +847,8 @@ machine! {
         disposition SystemPromptMutationAuthorized => local,
         disposition PendingContinuationResolved => local,
         disposition PendingContinuationPublicTerminalResolved => local,
+        disposition SessionResumeOverridesAuthorized => local,
+        disposition SessionResumeOverridesRejected => local,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2298,6 +2454,262 @@ machine! {
             }
             emit PendingContinuationPublicTerminalResolved {
                 terminal: PendingContinuationPublicTerminal::NoPendingBoundary
+            }
+        }
+
+        // ===============================================================
+        // Resume-override-admission region. Reject transitions are guarded in
+        // the shell's first-match-wins precedence order: each lower-priority
+        // reject only fires when every higher-priority reject condition is
+        // false. The three accept transitions split on the provider selection.
+        // ===============================================================
+
+        // Reject (priority 1): provider override without a model override.
+        transition AuthorizeSessionResumeOverridesRejectProviderRequiresModel {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_reject_provider_requires_model(
+                    provider_override_present,
+                    model_override_present
+                )
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesRejected {
+                reason: ResumeOverrideRejection::ProviderRequiresModel
+            }
+        }
+
+        // Reject (priority 2): clear + set provider params.
+        transition AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_reject_provider_requires_model(
+                    provider_override_present,
+                    model_override_present
+                ) == false
+                && resume_reject_clear_and_set_provider_params(
+                    clear_provider_params,
+                    provider_params_override_present
+                )
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesRejected {
+                reason: ResumeOverrideRejection::ClearAndSetProviderParams
+            }
+        }
+
+        // Reject (priority 3): clear + set auth binding.
+        transition AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_reject_provider_requires_model(
+                    provider_override_present,
+                    model_override_present
+                ) == false
+                && resume_reject_clear_and_set_provider_params(
+                    clear_provider_params,
+                    provider_params_override_present
+                ) == false
+                && resume_reject_clear_and_set_auth_binding(
+                    clear_auth_binding,
+                    auth_binding_override_present
+                )
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesRejected {
+                reason: ResumeOverrideRejection::ClearAndSetAuthBinding
+            }
+        }
+
+        // Reject (priority 4): build-only overrides after the first turn started.
+        transition AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_reject_provider_requires_model(
+                    provider_override_present,
+                    model_override_present
+                ) == false
+                && resume_reject_clear_and_set_provider_params(
+                    clear_provider_params,
+                    provider_params_override_present
+                ) == false
+                && resume_reject_clear_and_set_auth_binding(
+                    clear_auth_binding,
+                    auth_binding_override_present
+                ) == false
+                && resume_reject_build_only_after_first_turn(
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesRejected {
+                reason: ResumeOverrideRejection::BuildOnlyAfterFirstTurn
+            }
+        }
+
+        // Accept (provider recomputed from a model-only change): clears stored
+        // provider + self-hosted binding; provider_overridden is true.
+        transition AuthorizeSessionResumeOverridesAcceptRecomputeProvider {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_overrides_admissible(
+                    provider_override_present,
+                    model_override_present,
+                    clear_provider_params,
+                    provider_params_override_present,
+                    clear_auth_binding,
+                    auth_binding_override_present,
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+                && resume_provider_recompute_from_model(
+                    model_override_present,
+                    provider_override_present
+                )
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesAuthorized {
+                provider_selection: ResumeProviderSelection::RecomputeFromModel,
+                self_hosted_selection: ResumeSelfHostedSelection::Clear,
+                provider_overridden: true
+            }
+        }
+
+        // Accept (explicit provider override): use the override; self-hosted is
+        // cleared because a provider override always rides a model override;
+        // provider_overridden is true.
+        transition AuthorizeSessionResumeOverridesAcceptUseOverride {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_overrides_admissible(
+                    provider_override_present,
+                    model_override_present,
+                    clear_provider_params,
+                    provider_params_override_present,
+                    clear_auth_binding,
+                    auth_binding_override_present,
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+                && resume_provider_recompute_from_model(
+                    model_override_present,
+                    provider_override_present
+                ) == false
+                && provider_override_present
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesAuthorized {
+                provider_selection: ResumeProviderSelection::UseOverride,
+                self_hosted_selection: ResumeSelfHostedSelection::Clear,
+                provider_overridden: true
+            }
+        }
+
+        // Accept (retain stored provider): no provider override and not a
+        // model-only recompute. self-hosted retained iff the model is unchanged;
+        // provider_overridden iff the model changed.
+        transition AuthorizeSessionResumeOverridesAcceptRetainStored {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                clear_provider_params,
+                provider_params_override_present,
+                clear_auth_binding,
+                auth_binding_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_overrides_admissible(
+                    provider_override_present,
+                    model_override_present,
+                    clear_provider_params,
+                    provider_params_override_present,
+                    clear_auth_binding,
+                    auth_binding_override_present,
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+                && resume_provider_recompute_from_model(
+                    model_override_present,
+                    provider_override_present
+                ) == false
+                && provider_override_present == false
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesAuthorized {
+                provider_selection: ResumeProviderSelection::UseStored,
+                self_hosted_selection: ResumeSelfHostedSelection::Retain,
+                provider_overridden: false
             }
         }
     }

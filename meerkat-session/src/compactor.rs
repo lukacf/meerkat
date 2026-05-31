@@ -187,11 +187,14 @@ impl Compactor for DefaultCompactor {
             rebuilt.push(Message::System(sys.clone()));
         }
 
-        // 2. Inject summary as a user message
+        // 2. Inject summary as a user message carrying the typed compaction-
+        //    summary transcript role so the transcript-continuity save-guard
+        //    recognizes the rebuilt-transcript boundary from a typed field, not
+        //    the rendered `[Context compacted]` prefix.
         let summary_content = format!("{SUMMARY_PREFIX}{summary}");
-        rebuilt.push(Message::User(meerkat_core::types::UserMessage::text(
-            summary_content,
-        )));
+        rebuilt.push(Message::User(
+            meerkat_core::types::UserMessage::compaction_summary(summary_content),
+        ));
 
         // 3. Identify recent complete turns to retain
         // A "turn" is User -> BlockAssistant -> ToolResults sequence.

@@ -38,6 +38,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RestoreSessionBuildState`(system_prompt_present: Bool, output_schema_present: Bool, hook_entry_count: u64, disabled_hook_count: u64, budget_limits_present: Bool, recoverable_tool_count: u64, silent_comms_intent_count: u64, max_inline_peer_notifications_present: Bool, app_context_present: Bool, additional_instruction_count: u64, shell_env_count: u64, mob_tool_authority_context_present: Bool, call_timeout_override: SessionCallTimeoutOverrideKind)
 - `AuthorizeSystemPromptMutation`(source: SessionSystemPromptSource, prompt_present: Bool, prompt_byte_count: u64, replacing_existing: Bool)
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
+- `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, clear_provider_params: Bool, provider_params_override_present: Bool, clear_auth_binding: Bool, auth_binding_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 
 ## Signals
 
@@ -61,6 +62,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SystemPromptMutationAuthorized`
 - `PendingContinuationResolved`(disposition: PendingContinuationDisposition)
 - `PendingContinuationPublicTerminalResolved`(terminal: PendingContinuationPublicTerminal)
+- `SessionResumeOverridesAuthorized`(provider_selection: ResumeProviderSelection, self_hosted_selection: ResumeSelfHostedSelection, provider_overridden: Bool)
+- `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -77,6 +80,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_stop_reason_records_completion`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
 - `tail_has_pending_boundary`(session_tail: ObservedSessionTailKind) -> `Bool`
 - `has_effective_pending_boundary`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64) -> `Bool`
+- `resume_reject_provider_requires_model`(provider_override_present: Bool, model_override_present: Bool) -> `Bool`
+- `resume_reject_clear_and_set_provider_params`(clear_provider_params: Bool, provider_params_override_present: Bool) -> `Bool`
+- `resume_reject_clear_and_set_auth_binding`(clear_auth_binding: Bool, auth_binding_override_present: Bool) -> `Bool`
+- `resume_reject_build_only_after_first_turn`(has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
+- `resume_overrides_admissible`(provider_override_present: Bool, model_override_present: Bool, clear_provider_params: Bool, provider_params_override_present: Bool, clear_auth_binding: Bool, auth_binding_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
+- `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
 
 ## Invariants
 
@@ -555,6 +564,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `PendingContinuationResolved`, `PendingContinuationPublicTerminalResolved`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesRejectProviderRequiresModel`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesRejected`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesRejected`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesRejected`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesRejected`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesAcceptRecomputeProvider`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesAuthorized`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesAcceptUseOverride`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesAuthorized`
+- To: `Ready`
+
+### `AuthorizeSessionResumeOverridesAcceptRetainStored`
+- From: `Ready`
+- On: `AuthorizeSessionResumeOverrides`(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase)
+- Guards:
+  - ``
+- Emits: `SessionResumeOverridesAuthorized`
 - To: `Ready`
 
 ## Coverage

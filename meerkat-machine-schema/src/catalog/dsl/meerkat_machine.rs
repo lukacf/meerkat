@@ -2093,6 +2093,24 @@ pub enum SupervisorBindRejectionKind {
     SenderMismatch,
 }
 
+/// Generated material-admission verdict for `BindMember`. Owns the
+/// transport/identity equality checks the shell previously decided inline:
+/// advertised-address match, raw supervisor-peer sender match, expected
+/// runtime peer-id match, and bootstrap-token match. The shell extracts the
+/// four pure boolean observations and mirrors this verdict; the precedence
+/// (address → sender → peer-id → token, else accept) is encoded in the
+/// transitions below so the first failing check wins exactly as the shell
+/// short-circuited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindMaterialAdmissionKind {
+    #[default]
+    Accept,
+    AddressMismatch,
+    SenderMismatch,
+    InvalidPeerSpec,
+    InvalidBootstrapToken,
+}
+
 /// Generated admission result for `AuthorizeSupervisor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SupervisorAuthorizeAdmissionResultKind {
@@ -3792,6 +3810,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 supervisor_epoch: u64,
                 sender_peer_id: Option<String>,
             },
+            // Material `BindMember` admission: the transport/identity equality
+            // verdict the shell previously decided inline (advertised-address
+            // match, raw supervisor-peer sender match, expected runtime peer-id
+            // match, bootstrap-token match). The shell supplies the four pure
+            // boolean observations it already computes; the machine emits the
+            // typed verdict in the same precedence order the shell short-circuited.
+            ResolveSupervisorBindMaterialAdmission {
+                address_matches: bool,
+                sender_matches_supervisor: bool,
+                expected_peer_id_matches: bool,
+                bootstrap_token_matches: bool,
+            },
             ResolveSupervisorAuthorizeAdmission {
                 supervisor_peer_id: String,
                 supervisor_epoch: u64,
@@ -4409,6 +4439,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 result: Enum<SupervisorBindAdmissionResultKind>,
                 rejection: Option<Enum<SupervisorBindRejectionKind>>,
             },
+            SupervisorBindMaterialAdmissionResolved {
+                verdict: Enum<SupervisorBindMaterialAdmissionKind>,
+            },
             SupervisorAuthorizeAdmissionResolved {
                 result: Enum<SupervisorAuthorizeAdmissionResultKind>,
                 rejection: Option<Enum<SupervisorAuthorizeRejectionKind>>,
@@ -4582,6 +4615,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InteractionStreamCleanup => external,
         disposition LocalEndpointChanged => external,
         disposition SupervisorBindAdmissionResolved => local,
+        disposition SupervisorBindMaterialAdmissionResolved => local,
         disposition SupervisorAuthorizeAdmissionResolved => local,
         disposition SessionLlmReconfigurePlanResolved => local,
         disposition PeerProjectionChanged => external,
@@ -18235,6 +18269,79 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit SupervisorBindAdmissionResolved {
                 result: SupervisorBindAdmissionResultKind::Reject,
                 rejection: Some(SupervisorBindRejectionKind::AlreadyBound)
+            }
+        }
+
+        // ResolveSupervisorBindMaterialAdmission: generated authority for the
+        // material `BindMember` transport/identity verdict the shell formerly
+        // decided inline. The shell computes four pure boolean observations
+        // (advertised-address match, raw supervisor-peer sender match, expected
+        // runtime peer-id match, bootstrap-token match) and mirrors the verdict
+        // emitted here. The precedence is encoded structurally so the FIRST
+        // failing check wins, matching the shell's short-circuit order:
+        // address → sender → expected peer-id → bootstrap token, else accept.
+        // Idle self-loops: pure classification of input booleans, no state read.
+        transition ResolveSupervisorBindMaterialAdmissionAddressMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_mismatch" { address_matches == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::AddressMismatch
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionSenderMismatch {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_mismatch" { sender_matches_supervisor == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::SenderMismatch
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionInvalidPeerSpec {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_matches" { sender_matches_supervisor == true }
+            guard "expected_peer_id_mismatch" { expected_peer_id_matches == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::InvalidPeerSpec
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionInvalidBootstrapToken {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_matches" { sender_matches_supervisor == true }
+            guard "expected_peer_id_matches" { expected_peer_id_matches == true }
+            guard "bootstrap_token_mismatch" { bootstrap_token_matches == false }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::InvalidBootstrapToken
+            }
+        }
+
+        transition ResolveSupervisorBindMaterialAdmissionAccept {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches }
+            guard "address_matches" { address_matches == true }
+            guard "sender_matches" { sender_matches_supervisor == true }
+            guard "expected_peer_id_matches" { expected_peer_id_matches == true }
+            guard "bootstrap_token_matches" { bootstrap_token_matches == true }
+            update {}
+            to Idle
+            emit SupervisorBindMaterialAdmissionResolved {
+                verdict: SupervisorBindMaterialAdmissionKind::Accept
             }
         }
 

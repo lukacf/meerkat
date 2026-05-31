@@ -516,6 +516,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttachMobIngress`(comms_runtime_id: CommsRuntimeId, mob_id: MobId)
 - `DetachIngress`
 - `ResolveSupervisorBindAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
+- `ResolveSupervisorBindMaterialAdmission`(address_matches: Bool, sender_matches_supervisor: Bool, expected_peer_id_matches: Bool, bootstrap_token_matches: Bool)
 - `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `BindSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
@@ -694,6 +695,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
 - `LocalEndpointChanged`(endpoint: Option<PeerEndpoint>)
 - `SupervisorBindAdmissionResolved`(result: SupervisorBindAdmissionResultKind, rejection: Option<SupervisorBindRejectionKind>)
+- `SupervisorBindMaterialAdmissionResolved`(verdict: SupervisorBindMaterialAdmissionKind)
 - `SupervisorAuthorizeAdmissionResolved`(result: SupervisorAuthorizeAdmissionResultKind, rejection: Option<SupervisorAuthorizeRejectionKind>, previous_name: Option<String>, previous_peer_id: Option<String>, previous_address: Option<String>, previous_signing_public_key: Option<String>, previous_epoch: Option<u64>)
 - `SupervisorBridgeCommandAdmissionResolved`(result: SupervisorBridgeCommandAdmissionResultKind, rejection: Option<SupervisorBridgeCommandRejectionKind>)
 - `SessionLlmReconfigurePlanResolved`(previous_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface: Option<SessionLlmCapabilitySurface>, capability_changed: Bool, previous_capability_base_filter: ToolFilter, current_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool, revision_bumped: Bool, active_visibility_revision: u64)
@@ -14459,6 +14461,153 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `supervisor_bound`
   - `supervisor_binding_mismatch`
 - Emits: `SupervisorBindAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorBindMaterialAdmissionAddressMismatchIdle`
+- From: `Idle`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorBindMaterialAdmissionAddressMismatchAttached`
+- From: `Attached`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorBindMaterialAdmissionAddressMismatchRunning`
+- From: `Running`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorBindMaterialAdmissionSenderMismatchIdle`
+- From: `Idle`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorBindMaterialAdmissionSenderMismatchAttached`
+- From: `Attached`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorBindMaterialAdmissionSenderMismatchRunning`
+- From: `Running`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecIdle`
+- From: `Idle`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecAttached`
+- From: `Attached`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecRunning`
+- From: `Running`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenIdle`
+- From: `Idle`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_matches`
+  - `bootstrap_token_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenAttached`
+- From: `Attached`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_matches`
+  - `bootstrap_token_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenRunning`
+- From: `Running`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_matches`
+  - `bootstrap_token_mismatch`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorBindMaterialAdmissionAcceptIdle`
+- From: `Idle`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_matches`
+  - `bootstrap_token_matches`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorBindMaterialAdmissionAcceptAttached`
+- From: `Attached`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_matches`
+  - `bootstrap_token_matches`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorBindMaterialAdmissionAcceptRunning`
+- From: `Running`
+- On: `ResolveSupervisorBindMaterialAdmission`(address_matches, sender_matches_supervisor, expected_peer_id_matches, bootstrap_token_matches)
+- Guards:
+  - `address_matches`
+  - `sender_matches`
+  - `expected_peer_id_matches`
+  - `bootstrap_token_matches`
+- Emits: `SupervisorBindMaterialAdmissionResolved`
 - To: `Running`
 
 ### `ResolveSupervisorAuthorizeAdmissionNotBoundIdle`

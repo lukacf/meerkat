@@ -4352,6 +4352,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSupervisorBindAdmissionAlreadyBoundRunning`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `ResolveSupervisorBindMaterialAdmissionAddressMismatchIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionAddressMismatchAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionAddressMismatchRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionSenderMismatchIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionSenderMismatchAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionSenderMismatchRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `live_topology_and_supervision`
+- `ResolveSupervisorBindMaterialAdmissionAcceptIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveSupervisorBindMaterialAdmissionAcceptAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveSupervisorBindMaterialAdmissionAcceptRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveSupervisorAuthorizeAdmissionNotBoundIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
@@ -5114,6 +5159,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
 - `SupervisorBindAdmissionResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `live_topology_and_supervision`
+- `SupervisorBindMaterialAdmissionResolved`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
 - `SupervisorAuthorizeAdmissionResolved`

@@ -1161,6 +1161,57 @@ impl MeerkatMachine {
             })
     }
 
+    /// Resolve the material `BindMember` admission verdict (advertised-address
+    /// match, raw supervisor-peer sender match, expected runtime peer-id match,
+    /// bootstrap-token match) through MeerkatMachine authority. The shell
+    /// supplies the four pure boolean observations it already computes; the
+    /// machine emits the verdict in the precedence order address → sender →
+    /// peer-id → token, else accept. The shell mirrors the returned verdict.
+    pub(crate) async fn resolve_supervisor_bind_material_admission(
+        &self,
+        session_id: &SessionId,
+        address_matches: bool,
+        sender_matches_supervisor: bool,
+        expected_peer_id_matches: bool,
+        bootstrap_token_matches: bool,
+    ) -> Result<
+        crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind,
+        SupervisorAdmissionStageError,
+    > {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorAdmissionStageError::SessionNotRegistered)?;
+        let effects = {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveSupervisorBindMaterialAdmission {
+                    address_matches,
+                    sender_matches_supervisor,
+                    expected_peer_id_matches,
+                    bootstrap_token_matches,
+                },
+            )
+            .map_err(SupervisorAdmissionStageError::Dsl)?
+            .into_effects()
+        };
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::SupervisorBindMaterialAdmissionResolved {
+                    verdict,
+                } => Some(*verdict),
+                _ => None,
+            })
+            .ok_or(SupervisorAdmissionStageError::MissingAdmissionEffect(
+                "bind supervisor material",
+            ))
+    }
+
     pub(crate) async fn resolve_supervisor_authorize_admission(
         &self,
         session_id: &SessionId,

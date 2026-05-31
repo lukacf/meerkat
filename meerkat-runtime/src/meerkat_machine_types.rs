@@ -805,6 +805,7 @@ meerkat_machine_runtime_internal_inputs!(
         ResolvePeerIngressReceive,
         ResolveSupervisorAuthorizeAdmission,
         ResolveSupervisorBindAdmission,
+        ResolveSupervisorBindMaterialAdmission,
         ResolveSupervisorBridgeCommandAdmission,
         SpawnDrain,
         StopDrain,

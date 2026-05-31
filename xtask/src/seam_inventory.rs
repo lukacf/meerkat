@@ -946,6 +946,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "SupervisorBindMaterialAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Supervisor bind material admission verdict (address/sender/peer-id/token precedence) must align with the shell mirror in validate_bind_request",
+        ),
+        (
+            "MeerkatMachine",
             "SupervisorAuthorizeAdmissionResolved",
             SeamClassification::SurfaceResultAlignment,
             "Supervisor authorize admission projection must align with generated supervisor authorization truth",

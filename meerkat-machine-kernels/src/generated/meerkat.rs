@@ -8346,6 +8346,70 @@ impl std::fmt::Display for SupervisorBindAdmissionResultKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SupervisorBindMaterialAdmissionKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "AddressMismatch")]
+    AddressMismatch,
+    #[serde(rename = "SenderMismatch")]
+    SenderMismatch,
+    #[serde(rename = "InvalidPeerSpec")]
+    InvalidPeerSpec,
+    #[serde(rename = "InvalidBootstrapToken")]
+    InvalidBootstrapToken,
+}
+impl SupervisorBindMaterialAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::AddressMismatch => "AddressMismatch",
+            Self::SenderMismatch => "SenderMismatch",
+            Self::InvalidPeerSpec => "InvalidPeerSpec",
+            Self::InvalidBootstrapToken => "InvalidBootstrapToken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorBindMaterialAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "AddressMismatch" => Ok(Self::AddressMismatch),
+            "SenderMismatch" => Ok(Self::SenderMismatch),
+            "InvalidPeerSpec" => Ok(Self::InvalidPeerSpec),
+            "InvalidBootstrapToken" => Ok(Self::InvalidBootstrapToken),
+            other => Err(format!(
+                "invalid SupervisorBindMaterialAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorBindMaterialAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorBindMaterialAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SupervisorBindRejectionKind {
     #[default]
     #[serde(rename = "AlreadyBound")]
@@ -11279,6 +11343,13 @@ pub mod inputs {
         pub sender_peer_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSupervisorBindMaterialAdmission {
+        pub address_matches: bool,
+        pub sender_matches_supervisor: bool,
+        pub expected_peer_id_matches: bool,
+        pub bootstrap_token_matches: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSupervisorAuthorizeAdmission {
         pub supervisor_peer_id: String,
         pub supervisor_epoch: u64,
@@ -11630,6 +11701,7 @@ pub enum Input {
     AttachMobIngress(inputs::AttachMobIngress),
     DetachIngress(inputs::DetachIngress),
     ResolveSupervisorBindAdmission(inputs::ResolveSupervisorBindAdmission),
+    ResolveSupervisorBindMaterialAdmission(inputs::ResolveSupervisorBindMaterialAdmission),
     ResolveSupervisorAuthorizeAdmission(inputs::ResolveSupervisorAuthorizeAdmission),
     BindSupervisor(inputs::BindSupervisor),
     AuthorizeSupervisor(inputs::AuthorizeSupervisor),
@@ -11954,6 +12026,9 @@ impl Input {
             Self::AttachMobIngress(_) => InputKind::AttachMobIngress,
             Self::DetachIngress(_) => InputKind::DetachIngress,
             Self::ResolveSupervisorBindAdmission(_) => InputKind::ResolveSupervisorBindAdmission,
+            Self::ResolveSupervisorBindMaterialAdmission(_) => {
+                InputKind::ResolveSupervisorBindMaterialAdmission
+            }
             Self::ResolveSupervisorAuthorizeAdmission(_) => {
                 InputKind::ResolveSupervisorAuthorizeAdmission
             }
@@ -12233,6 +12308,7 @@ pub enum InputKind {
     AttachMobIngress,
     DetachIngress,
     ResolveSupervisorBindAdmission,
+    ResolveSupervisorBindMaterialAdmission,
     ResolveSupervisorAuthorizeAdmission,
     BindSupervisor,
     AuthorizeSupervisor,
@@ -13060,6 +13136,10 @@ pub mod effects {
         pub rejection: Option<SupervisorBindRejectionKind>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorBindMaterialAdmissionResolved {
+        pub verdict: SupervisorBindMaterialAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SupervisorAuthorizeAdmissionResolved {
         pub result: SupervisorAuthorizeAdmissionResultKind,
         pub rejection: Option<SupervisorAuthorizeRejectionKind>,
@@ -13242,6 +13322,7 @@ pub enum Effect {
     InteractionStreamCleanup(effects::InteractionStreamCleanup),
     LocalEndpointChanged(effects::LocalEndpointChanged),
     SupervisorBindAdmissionResolved(effects::SupervisorBindAdmissionResolved),
+    SupervisorBindMaterialAdmissionResolved(effects::SupervisorBindMaterialAdmissionResolved),
     SupervisorAuthorizeAdmissionResolved(effects::SupervisorAuthorizeAdmissionResolved),
     SupervisorBridgeCommandAdmissionResolved(effects::SupervisorBridgeCommandAdmissionResolved),
     SessionLlmReconfigurePlanResolved(effects::SessionLlmReconfigurePlanResolved),
@@ -13390,6 +13471,7 @@ pub enum EffectKind {
     InteractionStreamCleanup,
     LocalEndpointChanged,
     SupervisorBindAdmissionResolved,
+    SupervisorBindMaterialAdmissionResolved,
     SupervisorAuthorizeAdmissionResolved,
     SupervisorBridgeCommandAdmissionResolved,
     SessionLlmReconfigurePlanResolved,
@@ -14842,6 +14924,21 @@ pub enum TransitionId {
     ResolveSupervisorBindAdmissionAlreadyBoundIdle,
     ResolveSupervisorBindAdmissionAlreadyBoundAttached,
     ResolveSupervisorBindAdmissionAlreadyBoundRunning,
+    ResolveSupervisorBindMaterialAdmissionAddressMismatchIdle,
+    ResolveSupervisorBindMaterialAdmissionAddressMismatchAttached,
+    ResolveSupervisorBindMaterialAdmissionAddressMismatchRunning,
+    ResolveSupervisorBindMaterialAdmissionSenderMismatchIdle,
+    ResolveSupervisorBindMaterialAdmissionSenderMismatchAttached,
+    ResolveSupervisorBindMaterialAdmissionSenderMismatchRunning,
+    ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecIdle,
+    ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecAttached,
+    ResolveSupervisorBindMaterialAdmissionInvalidPeerSpecRunning,
+    ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenIdle,
+    ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenAttached,
+    ResolveSupervisorBindMaterialAdmissionInvalidBootstrapTokenRunning,
+    ResolveSupervisorBindMaterialAdmissionAcceptIdle,
+    ResolveSupervisorBindMaterialAdmissionAcceptAttached,
+    ResolveSupervisorBindMaterialAdmissionAcceptRunning,
     ResolveSupervisorAuthorizeAdmissionNotBoundIdle,
     ResolveSupervisorAuthorizeAdmissionNotBoundAttached,
     ResolveSupervisorAuthorizeAdmissionNotBoundRunning,

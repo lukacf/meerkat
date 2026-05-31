@@ -776,7 +776,24 @@ fn advertised_bind_bootstrap_token(
     ))
 }
 
-fn validate_bind_request(
+/// Validate the material `BindMember` admission facts and mirror the
+/// MeerkatMachine verdict.
+///
+/// The material admission verdict (advertised-address match, raw
+/// supervisor-peer sender match, expected runtime peer-id match,
+/// bootstrap-token match, in that precedence) is a MeerkatMachine-owned
+/// wiring fact. The shell extracts the four pure boolean observations it
+/// already computes, routes them through the machine, and mirrors the
+/// emitted verdict onto the existing typed `(BridgeRejectionCause, reason)`
+/// pairs (or the `Ok` payload on `Accept`).
+///
+/// The two `Internal` checks below — missing advertised bootstrap token and
+/// missing advertised address / runtime peer id — are runtime self-integrity
+/// invariants, NOT admission verdicts over a machine-owned fact, so they stay
+/// shell-side and fail before any machine routing.
+async fn validate_bind_request(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
     sender: &PeerIngressFact,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
@@ -788,28 +805,7 @@ fn validate_bind_request(
             "runtime does not expose an advertised address for bind bootstrap".to_string(),
         )
     })?;
-    if canonicalize_bridge_address(&payload.expected_address)
-        != canonicalize_bridge_address(&advertised_address)
-    {
-        return Err((
-            BridgeRejectionCause::AddressMismatch,
-            format!(
-                "bind address mismatch: expected '{}', actual '{}'",
-                payload.expected_address, advertised_address
-            ),
-        ));
-    }
     let supervisor = bridge_peer_identity(&payload.supervisor, "bind member failed")?;
-    if !sender_matches_bridge_peer(sender, &supervisor) {
-        let sender_label = sender_peer_label(sender);
-        return Err((
-            BridgeRejectionCause::SenderMismatch,
-            format!(
-                "request sender '{sender_label}' does not match supervisor '{}'",
-                supervisor.peer_id
-            ),
-        ));
-    }
     // Canonical peer identity must be present to validate the request's
     // expected_peer_id. Missing runtime identity is a typed internal
     // invariant failure, not a silent "skip the check" path — otherwise
@@ -820,25 +816,67 @@ fn validate_bind_request(
             "bind member failed: runtime peer_id unavailable".to_string(),
         ));
     };
-    if actual_peer_id != payload.expected_peer_id {
-        return Err((
+
+    // Pure boolean observations the shell hands to the machine. The machine
+    // owns the verdict + precedence; the shell only mirrors it.
+    let address_matches = canonicalize_bridge_address(&payload.expected_address)
+        == canonicalize_bridge_address(&advertised_address);
+    let sender_matches_supervisor = sender_matches_bridge_peer(sender, &supervisor);
+    let expected_peer_id_matches = actual_peer_id == payload.expected_peer_id;
+    let bootstrap_token_matches = payload.bootstrap_token.as_str() == expected_bootstrap_token;
+
+    let verdict = adapter
+        .resolve_supervisor_bind_material_admission(
+            session_id,
+            address_matches,
+            sender_matches_supervisor,
+            expected_peer_id_matches,
+            bootstrap_token_matches,
+        )
+        .await
+        .map_err(|error| {
+            (
+                BridgeRejectionCause::Internal,
+                format!("bind member material admission failed: {error}"),
+            )
+        })?;
+
+    match verdict {
+        crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind::Accept => Ok((
+            supervisor.into_trusted_peer_descriptor(),
+            advertised_address,
+        )),
+        crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind::AddressMismatch => Err((
+            BridgeRejectionCause::AddressMismatch,
+            format!(
+                "bind address mismatch: expected '{}', actual '{}'",
+                payload.expected_address, advertised_address
+            ),
+        )),
+        crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind::SenderMismatch => {
+            let sender_label = sender_peer_label(sender);
+            Err((
+                BridgeRejectionCause::SenderMismatch,
+                format!(
+                    "request sender '{sender_label}' does not match supervisor '{}'",
+                    supervisor.peer_id
+                ),
+            ))
+        }
+        crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind::InvalidPeerSpec => Err((
             BridgeRejectionCause::InvalidPeerSpec,
             format!(
                 "bind peer_id mismatch: expected '{}', actual '{actual_peer_id}'",
                 payload.expected_peer_id
             ),
-        ));
+        )),
+        crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind::InvalidBootstrapToken => {
+            Err((
+                BridgeRejectionCause::InvalidBootstrapToken,
+                "bind member failed: invalid bootstrap token".to_string(),
+            ))
+        }
     }
-    if payload.bootstrap_token.as_str() != expected_bootstrap_token {
-        return Err((
-            BridgeRejectionCause::InvalidBootstrapToken,
-            "bind member failed: invalid bootstrap token".to_string(),
-        ));
-    }
-    Ok((
-        supervisor.into_trusted_peer_descriptor(),
-        advertised_address,
-    ))
 }
 
 #[derive(Clone, Debug)]
@@ -1442,7 +1480,9 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             let (supervisor_spec, advertised_address) =
-                match validate_bind_request(comms_runtime, sender, &payload) {
+                match validate_bind_request(adapter, session_id, comms_runtime, sender, &payload)
+                    .await
+                {
                     Ok(binding) => binding,
                     Err((cause, reason)) => {
                         send_bridge_failure(comms_runtime, candidate, cause, reason).await;
@@ -4345,13 +4385,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_bind_request_rejects_missing_or_wrong_bootstrap_token() {
+    #[tokio::test]
+    async fn validate_bind_request_rejects_missing_or_wrong_bootstrap_token() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -4362,9 +4403,15 @@ mod tests {
             bootstrap_token: "wrong-token".into(),
         };
 
-        let (cause, error) =
-            validate_bind_request(&runtime, &bridge_sender_fact(&supervisor.peer_id), &payload)
-                .expect_err("bind must reject incorrect bootstrap token");
+        let (cause, error) = validate_bind_request(
+            &adapter,
+            &session_id,
+            &runtime,
+            &bridge_sender_fact(&supervisor.peer_id),
+            &payload,
+        )
+        .await
+        .expect_err("bind must reject incorrect bootstrap token");
         assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
         assert!(
             error.contains("invalid bootstrap token"),
@@ -4372,13 +4419,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_bind_request_accepts_matching_bootstrap_token() {
+    #[tokio::test]
+    async fn validate_bind_request_accepts_matching_bootstrap_token() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -4389,9 +4437,15 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (authorized, advertised_address) =
-            validate_bind_request(&runtime, &bridge_sender_fact(&supervisor.peer_id), &payload)
-                .expect("bind should accept the configured bootstrap token");
+        let (authorized, advertised_address) = validate_bind_request(
+            &adapter,
+            &session_id,
+            &runtime,
+            &bridge_sender_fact(&supervisor.peer_id),
+            &payload,
+        )
+        .await
+        .expect("bind should accept the configured bootstrap token");
         assert_eq!(authorized.peer_id.as_str(), supervisor.peer_id);
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
     }
@@ -4422,13 +4476,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_bind_request_rejects_same_display_name_different_canonical_sender() {
+    #[tokio::test]
+    async fn validate_bind_request_rejects_same_display_name_different_canonical_sender() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -4442,8 +4497,10 @@ mod tests {
             PeerId::parse(PEER_ID_OLD_SUPERVISOR).expect("valid attacker peer id");
         let sender = bridge_sender_fact_with_display(attacker_peer_id, &supervisor.name);
 
-        let (cause, error) = validate_bind_request(&runtime, &sender, &payload)
-            .expect_err("same display name with a different canonical sender must reject");
+        let (cause, error) =
+            validate_bind_request(&adapter, &session_id, &runtime, &sender, &payload)
+                .await
+                .expect_err("same display name with a different canonical sender must reject");
         assert_eq!(cause, BridgeRejectionCause::SenderMismatch);
         assert!(
             error.contains("does not match supervisor"),
@@ -4451,13 +4508,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_bind_request_accepts_pubkey_sender_with_canonical_supervisor_peer_id() {
+    #[tokio::test]
+    async fn validate_bind_request_accepts_pubkey_sender_with_canonical_supervisor_peer_id() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor_key = meerkat_comms::Keypair::generate();
         let supervisor_pubkey = supervisor_key.public_key();
         let supervisor = BridgePeerSpec {
@@ -4476,18 +4534,21 @@ mod tests {
         };
 
         let (authorized, advertised_address) = validate_bind_request(
+            &adapter,
+            &session_id,
             &runtime,
             &bridge_sender_fact(&supervisor_pubkey.to_pubkey_string()),
             &payload,
         )
+        .await
         .expect("bind should accept raw transport sender when payload carries pubkey");
         assert_eq!(authorized.peer_id.as_str(), supervisor.peer_id);
         assert_eq!(authorized.pubkey, supervisor.pubkey);
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
     }
 
-    #[test]
-    fn validate_bind_request_returns_runtime_advertised_address() {
+    #[tokio::test]
+    async fn validate_bind_request_returns_runtime_advertised_address() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             &format!(
@@ -4495,6 +4556,7 @@ mod tests {
             ),
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -4505,19 +4567,26 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (_, advertised_address) =
-            validate_bind_request(&runtime, &bridge_sender_fact(&supervisor.peer_id), &payload)
-                .expect("bind should canonicalize to the callee's advertised address");
+        let (_, advertised_address) = validate_bind_request(
+            &adapter,
+            &session_id,
+            &runtime,
+            &bridge_sender_fact(&supervisor.peer_id),
+            &payload,
+        )
+        .await
+        .expect("bind should canonicalize to the callee's advertised address");
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
     }
 
-    #[test]
-    fn validate_bind_request_rejects_mismatched_expected_address() {
+    #[tokio::test]
+    async fn validate_bind_request_rejects_mismatched_expected_address() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver-real",
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -4528,9 +4597,15 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, error) =
-            validate_bind_request(&runtime, &bridge_sender_fact(&supervisor.peer_id), &payload)
-                .expect_err("bind should reject mismatched expected addresses");
+        let (cause, error) = validate_bind_request(
+            &adapter,
+            &session_id,
+            &runtime,
+            &bridge_sender_fact(&supervisor.peer_id),
+            &payload,
+        )
+        .await
+        .expect_err("bind should reject mismatched expected addresses");
         assert_eq!(cause, BridgeRejectionCause::AddressMismatch);
         assert!(
             error.contains("bind address mismatch"),
@@ -4619,13 +4694,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn validate_bind_request_rejects_invalid_supervisor_peer_name() {
+    #[tokio::test]
+    async fn validate_bind_request_rejects_invalid_supervisor_peer_name() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some("expected-token"),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let mut supervisor = supervisor_bridge_spec();
         supervisor.name = String::new();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
@@ -4638,10 +4714,13 @@ mod tests {
         };
 
         let (cause, error) = validate_bind_request(
+            &adapter,
+            &session_id,
             &runtime,
             &bridge_sender_fact(&payload.supervisor.peer_id),
             &payload,
         )
+        .await
         .expect_err("bind should reject invalid supervisor peer names");
         assert_eq!(cause, BridgeRejectionCause::InvalidSupervisorSpec);
         assert!(
@@ -4659,6 +4738,83 @@ mod tests {
             expected_address: "inproc://receiver".to_string(),
             bootstrap_token: "expected-token".into(),
         }
+    }
+
+    /// Ephemeral MeerkatMachine with one registered (unbound) session, for
+    /// exercising `validate_bind_request` through the machine-backed material
+    /// admission seam. The material verdict is a pure boolean classifier
+    /// independent of supervisor binding state, so an unbound session suffices.
+    async fn bind_material_adapter() -> (Arc<MeerkatMachine>, SessionId) {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        (adapter, session_id)
+    }
+
+    /// The material bind-admission verdict is MeerkatMachine-owned: each of the
+    /// five outcomes (Accept + four rejections) must be emitted from the four
+    /// pure boolean observations, and the precedence (address → sender →
+    /// peer-id → token) must hold so the FIRST failing check wins exactly as
+    /// the shell short-circuited before the fold.
+    #[tokio::test]
+    async fn machine_owns_material_bind_admission_verdict_and_precedence() {
+        use crate::meerkat_machine::dsl::SupervisorBindMaterialAdmissionKind as Verdict;
+
+        let (adapter, session_id) = bind_material_adapter().await;
+
+        let verdict = |address, sender, peer_id, token| {
+            let adapter = adapter.clone();
+            let session_id = session_id.clone();
+            async move {
+                adapter
+                    .resolve_supervisor_bind_material_admission(
+                        &session_id,
+                        address,
+                        sender,
+                        peer_id,
+                        token,
+                    )
+                    .await
+                    .expect("machine must emit a material bind-admission verdict")
+            }
+        };
+
+        // All four observations true -> Accept.
+        assert_eq!(verdict(true, true, true, true).await, Verdict::Accept);
+
+        // Single failures map to their typed verdict.
+        assert_eq!(
+            verdict(false, true, true, true).await,
+            Verdict::AddressMismatch
+        );
+        assert_eq!(
+            verdict(true, false, true, true).await,
+            Verdict::SenderMismatch
+        );
+        assert_eq!(
+            verdict(true, true, false, true).await,
+            Verdict::InvalidPeerSpec
+        );
+        assert_eq!(
+            verdict(true, true, true, false).await,
+            Verdict::InvalidBootstrapToken
+        );
+
+        // Precedence: address beats every later check.
+        assert_eq!(
+            verdict(false, false, false, false).await,
+            Verdict::AddressMismatch
+        );
+        // Sender beats peer-id and token once address matches.
+        assert_eq!(
+            verdict(true, false, false, false).await,
+            Verdict::SenderMismatch
+        );
+        // Peer-id beats token once address + sender match.
+        assert_eq!(
+            verdict(true, true, false, false).await,
+            Verdict::InvalidPeerSpec
+        );
     }
 
     #[tokio::test]
@@ -5629,13 +5785,14 @@ mod tests {
     // would make the initial bind handshake unverifiable, so pin the
     // typed rejection.
 
-    #[test]
-    fn validate_bind_request_rejects_empty_bootstrap_token_at_runtime() {
+    #[tokio::test]
+    async fn validate_bind_request_rejects_empty_bootstrap_token_at_runtime() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some(""),
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -5646,19 +5803,26 @@ mod tests {
             bootstrap_token: "whatever".into(),
         };
 
-        let (cause, _error) =
-            validate_bind_request(&runtime, &bridge_sender_fact(&supervisor.peer_id), &payload)
-                .expect_err("runtime with empty token must refuse to validate");
+        let (cause, _error) = validate_bind_request(
+            &adapter,
+            &session_id,
+            &runtime,
+            &bridge_sender_fact(&supervisor.peer_id),
+            &payload,
+        )
+        .await
+        .expect_err("runtime with empty token must refuse to validate");
         assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
     }
 
-    #[test]
-    fn validate_bind_request_rejects_query_string_bootstrap_without_typed_runtime_token() {
+    #[tokio::test]
+    async fn validate_bind_request_rejects_query_string_bootstrap_without_typed_runtime_token() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             &format!("inproc://receiver?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"),
             None,
         ));
+        let (adapter, session_id) = bind_material_adapter().await;
         let supervisor = supervisor_bridge_spec();
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
@@ -5669,9 +5833,15 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, error) =
-            validate_bind_request(&runtime, &bridge_sender_fact(&supervisor.peer_id), &payload)
-                .expect_err("query-string token must not satisfy typed bootstrap proof");
+        let (cause, error) = validate_bind_request(
+            &adapter,
+            &session_id,
+            &runtime,
+            &bridge_sender_fact(&supervisor.peer_id),
+            &payload,
+        )
+        .await
+        .expect_err("query-string token must not satisfy typed bootstrap proof");
         assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
         assert!(
             error.contains("typed bridge bootstrap token"),

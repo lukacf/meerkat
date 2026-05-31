@@ -3619,6 +3619,22 @@ pub enum SupervisorBindRejectionKind {
     SenderMismatch,
 }
 
+/// Generated material-admission verdict for `BindMember`. Owns the
+/// transport/identity equality checks the shell previously decided inline:
+/// advertised-address match, raw supervisor-peer sender match, expected
+/// runtime peer-id match, and bootstrap-token match. The shell extracts the
+/// four pure boolean observations and mirrors this verdict in the precedence
+/// order address → sender → peer-id → token, else accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorBindMaterialAdmissionKind {
+    #[default]
+    Accept,
+    AddressMismatch,
+    SenderMismatch,
+    InvalidPeerSpec,
+    InvalidBootstrapToken,
+}
+
 /// Generated admission result for `AuthorizeSupervisor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SupervisorAuthorizeAdmissionResultKind {

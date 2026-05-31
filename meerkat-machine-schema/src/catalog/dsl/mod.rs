@@ -1131,6 +1131,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["AlreadyBound", "SenderMismatch"],
             ),
             NamedTypeBinding::string_enum(
+                "SupervisorBindMaterialAdmissionKind",
+                &[
+                    "Accept",
+                    "AddressMismatch",
+                    "SenderMismatch",
+                    "InvalidPeerSpec",
+                    "InvalidBootstrapToken",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "SupervisorAuthorizeAdmissionResultKind",
                 &["Proceed", "IdempotentAck", "Reject"],
             ),
@@ -1743,6 +1753,7 @@ runtime_internal_inputs!(
         ResolveRuntimeOpsLifecycleDurability,
         ResolveSupervisorAuthorizeAdmission,
         ResolveSupervisorBindAdmission,
+        ResolveSupervisorBindMaterialAdmission,
         ResolveSupervisorBridgeCommandAdmission,
         ResolveTurnSurfaceResult,
         ResolveUserInterruptPublicResult,

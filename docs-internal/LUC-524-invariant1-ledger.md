@@ -301,3 +301,26 @@ classifier ratchet pass; seam-inventory 0 debt.
 - run_primitive.rs peer_response_terminal_apply_intent_violation: pure typed-SHAPE well-formedness
   check over the RunPrimitive's OWN fields (StagedInput + RunStart + non-empty context + ContentTurn);
   not a verdict over a separate machine-owned lifecycle fact.
+
+### FOLDED — supervisor bind material admission (sweep HIGH) -> MeerkatMachine
+comms_drain.rs validate_bind_request decided the BindMember material admission verdict in-shell:
+it computed four equality observations (address/sender/expected_peer_id/bootstrap_token matches)
+AND emitted the typed BridgeRejectionCause itself (first-failing-check-wins precedence), while the
+sibling ResolveSupervisorBindAdmission only modeled identity+epoch.
+FOLD: MeerkatMachine ResolveSupervisorBindMaterialAdmission { address_matches, sender_matches_supervisor,
+expected_peer_id_matches, bootstrap_token_matches } -> SupervisorBindMaterialAdmissionResolved { verdict:
+SupervisorBindMaterialAdmissionKind (Accept|AddressMismatch|SenderMismatch|InvalidPeerSpec|
+InvalidBootstrapToken) }. 5 pure-boolean transitions encode the EXACT shell precedence (address >
+sender > peer_id > token > Accept). Declared runtime-internal in BOTH parity lists
+(MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS + meerkat_machine_runtime_internal_inputs! CommsIngressLifecycle,
+same region as ResolveSupervisorBindAdmission) so meerkat-machine-codegen parity stays green.
+validate_bind_request is now async, extracts the 4 booleans, routes through
+MeerkatMachine::resolve_supervisor_bind_material_admission, mirrors the verdict to the SAME
+(BridgeRejectionCause, reason) pairs, fails closed. Internal self-integrity guards (missing
+advertised_address/peer_id/bootstrap_token) preserved shell-side (not admission verdicts). MeerkatMachine-
+local verdict enum mapped to the existing wire BridgeRejectionCause -> no contracts/schema change.
+Behavior unchanged (pure ownership move); new test machine_owns_material_bind_admission_verdict_and_precedence.
+Gates: drift 10/6; check clean; runtime 1036 + machine-codegen 94 pass; ratchets pass; seam 0 debt.
+
+Convergence round 1 actions COMPLETE (both genuine candidates folded: workgraph tool-surface +
+supervisor bind material admission; 4 LOWs defended with evidence). Re-running convergence for two-clean.

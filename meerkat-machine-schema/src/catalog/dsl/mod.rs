@@ -516,6 +516,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "AdmissionContinuationKind",
+                &["Ordinary", "WorkgraphAttention"],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputDurabilityKind",
                 &["Durable", "Ephemeral", "Derived", "Missing"],
             ),
@@ -1475,6 +1479,22 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RuntimeApplyFailure",
                     "FatalFailure",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "TerminalCauseClass",
+                &[
+                    "Missing",
+                    "Unknown",
+                    "BudgetExhausted",
+                    "TimeBudgetExceeded",
+                    "RetryExhausted",
+                    "StructuredOutputValidationFailed",
+                    "OtherFailure",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "SurfaceResultClass",
+                &["Success", "HardFailure", "Cancelled", "MissingTerminal"],
             ),
             NamedTypeBinding::u64("TurnNumber"),
             NamedTypeBinding::string("WaitRequestId"),

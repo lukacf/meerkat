@@ -27,6 +27,56 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum AdmissionContinuationKind {
+    #[default]
+    #[serde(rename = "Ordinary")]
+    Ordinary,
+    #[serde(rename = "WorkgraphAttention")]
+    WorkgraphAttention,
+}
+impl AdmissionContinuationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ordinary => "Ordinary",
+            Self::WorkgraphAttention => "WorkgraphAttention",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionContinuationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ordinary" => Ok(Self::Ordinary),
+            "WorkgraphAttention" => Ok(Self::WorkgraphAttention),
+            other => Err(format!("invalid AdmissionContinuationKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionContinuationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionContinuationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AdmissionExistingQueuedActionKind {
     #[default]
     #[serde(rename = "None")]
@@ -8720,6 +8770,64 @@ impl std::fmt::Display for SurfaceRequestTerminalPolicy {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SurfaceResultClass {
+    #[default]
+    #[serde(rename = "Success")]
+    Success,
+    #[serde(rename = "HardFailure")]
+    HardFailure,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "MissingTerminal")]
+    MissingTerminal,
+}
+impl SurfaceResultClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "Success",
+            Self::HardFailure => "HardFailure",
+            Self::Cancelled => "Cancelled",
+            Self::MissingTerminal => "MissingTerminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceResultClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Success" => Ok(Self::Success),
+            "HardFailure" => Ok(Self::HardFailure),
+            "Cancelled" => Ok(Self::Cancelled),
+            "MissingTerminal" => Ok(Self::MissingTerminal),
+            other => Err(format!("invalid SurfaceResultClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceResultClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceResultClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SurfaceStagedOp {
     #[default]
     #[serde(rename = "None")]
@@ -8760,6 +8868,76 @@ impl std::convert::TryFrom<String> for SurfaceStagedOp {
     }
 }
 impl std::fmt::Display for SurfaceStagedOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TerminalCauseClass {
+    #[default]
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "BudgetExhausted")]
+    BudgetExhausted,
+    #[serde(rename = "TimeBudgetExceeded")]
+    TimeBudgetExceeded,
+    #[serde(rename = "RetryExhausted")]
+    RetryExhausted,
+    #[serde(rename = "StructuredOutputValidationFailed")]
+    StructuredOutputValidationFailed,
+    #[serde(rename = "OtherFailure")]
+    OtherFailure,
+}
+impl TerminalCauseClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Missing => "Missing",
+            Self::Unknown => "Unknown",
+            Self::BudgetExhausted => "BudgetExhausted",
+            Self::TimeBudgetExceeded => "TimeBudgetExceeded",
+            Self::RetryExhausted => "RetryExhausted",
+            Self::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
+            Self::OtherFailure => "OtherFailure",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TerminalCauseClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Missing" => Ok(Self::Missing),
+            "Unknown" => Ok(Self::Unknown),
+            "BudgetExhausted" => Ok(Self::BudgetExhausted),
+            "TimeBudgetExceeded" => Ok(Self::TimeBudgetExceeded),
+            "RetryExhausted" => Ok(Self::RetryExhausted),
+            "StructuredOutputValidationFailed" => Ok(Self::StructuredOutputValidationFailed),
+            "OtherFailure" => Ok(Self::OtherFailure),
+            other => Err(format!("invalid TerminalCauseClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TerminalCauseClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TerminalCauseClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -10191,6 +10369,7 @@ pub mod inputs {
         pub input_id: String,
         pub input_kind: AdmissionInputKind,
         pub requested_lane: Option<InputLane>,
+        pub continuation_kind: AdmissionContinuationKind,
         pub silent_intent_match: bool,
         pub existing_superseded_input_id: Option<String>,
         pub runtime_running: bool,
@@ -10246,6 +10425,15 @@ pub mod inputs {
         pub phase: RecoveredInputObservedPhase,
         pub terminal_kind: Option<InputTerminalKind>,
         pub abandon_reason: Option<InputAbandonReason>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTurnTerminalCauseClass {
+        pub cause_kind: Option<TurnTerminalCauseKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveTurnSurfaceResult {
+        pub outcome: TurnTerminalOutcome,
+        pub cause_class: TerminalCauseClass,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeStoredInputStateSeed {
@@ -11275,6 +11463,8 @@ pub enum Input {
     ResolveInputPublicLifecycle(inputs::ResolveInputPublicLifecycle),
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
+    ClassifyTurnTerminalCauseClass(inputs::ClassifyTurnTerminalCauseClass),
+    ResolveTurnSurfaceResult(inputs::ResolveTurnSurfaceResult),
     AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
     ClassifyRuntimeLifecycleDurability(inputs::ClassifyRuntimeLifecycleDurability),
@@ -11569,6 +11759,8 @@ impl Input {
                 InputKind::ResolveInputPublicTerminalOutcome
             }
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
+            Self::ClassifyTurnTerminalCauseClass(_) => InputKind::ClassifyTurnTerminalCauseClass,
+            Self::ResolveTurnSurfaceResult(_) => InputKind::ResolveTurnSurfaceResult,
             Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
             Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
             Self::ClassifyRuntimeLifecycleDurability(_) => {
@@ -11874,6 +12066,8 @@ pub enum InputKind {
     ResolveInputPublicLifecycle,
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
+    ClassifyTurnTerminalCauseClass,
+    ResolveTurnSurfaceResult,
     AuthorizeStoredInputStateSeed,
     ClassifyRuntimeLifecycleState,
     ClassifyRuntimeLifecycleDurability,
@@ -12361,6 +12555,17 @@ pub mod effects {
     pub struct InputBehavioralTerminalityResolved {
         pub input_id: String,
         pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TurnTerminalCauseClassResolved {
+        pub cause_kind: Option<TurnTerminalCauseKind>,
+        pub cause_class: TerminalCauseClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TurnSurfaceResultResolved {
+        pub outcome: TurnTerminalOutcome,
+        pub cause_class: TerminalCauseClass,
+        pub surface_class: SurfaceResultClass,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StoredInputStateSeedAuthorized {
@@ -12939,6 +13144,8 @@ pub enum Effect {
     InputPublicLifecycleResolved(effects::InputPublicLifecycleResolved),
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
+    TurnTerminalCauseClassResolved(effects::TurnTerminalCauseClassResolved),
+    TurnSurfaceResultResolved(effects::TurnSurfaceResultResolved),
     StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
     RuntimeLifecycleDurabilityClassified(effects::RuntimeLifecycleDurabilityClassified),
@@ -13087,6 +13294,8 @@ pub enum EffectKind {
     InputPublicLifecycleResolved,
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
+    TurnTerminalCauseClassResolved,
+    TurnSurfaceResultResolved,
     StoredInputStateSeedAuthorized,
     RuntimeLifecycleStateClassified,
     RuntimeLifecycleDurabilityClassified,
@@ -13793,6 +14002,9 @@ pub enum TransitionId {
     ResolveAdmissionPlanDefaultContinuationIdle,
     ResolveAdmissionPlanDefaultContinuationAttached,
     ResolveAdmissionPlanDefaultContinuationRunning,
+    ResolveAdmissionPlanWorkgraphAttentionContinuationIdle,
+    ResolveAdmissionPlanWorkgraphAttentionContinuationAttached,
+    ResolveAdmissionPlanWorkgraphAttentionContinuationRunning,
     ResolveAdmissionPlanOperationIdle,
     ResolveAdmissionPlanOperationAttached,
     ResolveAdmissionPlanOperationRunning,
@@ -14727,6 +14939,23 @@ pub enum TransitionId {
     RepairMobPeerOverlayIdle,
     RepairMobPeerOverlayAttached,
     RepairMobPeerOverlayRunning,
+    ClassifyTurnTerminalCauseClassMissingIdle,
+    ClassifyTurnTerminalCauseClassUnknownIdle,
+    ClassifyTurnTerminalCauseClassBudgetExhaustedIdle,
+    ClassifyTurnTerminalCauseClassTimeBudgetExceededIdle,
+    ClassifyTurnTerminalCauseClassRetryExhaustedIdle,
+    ClassifyTurnTerminalCauseClassStructuredOutputValidationFailedIdle,
+    ClassifyTurnTerminalCauseClassOtherFailureIdle,
+    ResolveTurnSurfaceResultNoneMissingTerminalIdle,
+    ResolveTurnSurfaceResultCompletedSuccessIdle,
+    ResolveTurnSurfaceResultCompletedFailureIdle,
+    ResolveTurnSurfaceResultFailedHardFailureIdle,
+    ResolveTurnSurfaceResultCancelledCancelledIdle,
+    ResolveTurnSurfaceResultCancelledFailureIdle,
+    ResolveTurnSurfaceResultBudgetExhaustedSuccessIdle,
+    ResolveTurnSurfaceResultBudgetExhaustedFailureIdle,
+    ResolveTurnSurfaceResultTimeBudgetExceededHardFailureIdle,
+    ResolveTurnSurfaceResultStructuredOutputValidationFailedHardFailureIdle,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

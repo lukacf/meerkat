@@ -440,6 +440,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "TurnTerminalCauseClassResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Terminal-cause class projection feeds the codegen-derived surface-result table and must align with canonical terminal-cause truth",
+        ),
+        (
+            "MeerkatMachine",
+            "TurnSurfaceResultResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Surface-result class projection feeds the codegen-derived classify_terminal table and must align with canonical terminal outcome/cause truth",
+        ),
+        (
+            "MeerkatMachine",
             "RuntimeLifecycleStateClassified",
             SeamClassification::SurfaceResultAlignment,
             "Runtime lifecycle classification must align with canonical runtime lifecycle state",

@@ -1832,6 +1832,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveAdmissionPlanDefaultContinuationRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveAdmissionPlanOperationIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
@@ -4634,6 +4643,57 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RepairMobPeerOverlayRunning`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyTurnTerminalCauseClassMissingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ClassifyTurnTerminalCauseClassUnknownIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`
+- `ClassifyTurnTerminalCauseClassBudgetExhaustedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyTurnTerminalCauseClassTimeBudgetExceededIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `ClassifyTurnTerminalCauseClassRetryExhaustedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyTurnTerminalCauseClassStructuredOutputValidationFailedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `ClassifyTurnTerminalCauseClassOtherFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultCompletedSuccessIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultCompletedFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultFailedHardFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultCancelledCancelledIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultCancelledFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultBudgetExhaustedSuccessIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultBudgetExhaustedFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTurnSurfaceResultTimeBudgetExceededHardFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveTurnSurfaceResultStructuredOutputValidationFailedHardFailureIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 
 ### Effects
 - `RuntimeBound`
@@ -4768,6 +4828,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InputBehavioralTerminalityResolved`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `TurnTerminalCauseClassResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`
+- `TurnSurfaceResultResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `StoredInputStateSeedAuthorized`
   - anchors: `meerkat_machine`
   - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `model_routing_and_image_operation`

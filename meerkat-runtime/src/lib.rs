@@ -136,9 +136,9 @@ pub use identifiers::{
 };
 pub use ingress_types::{ContentShape, RequestId, ReservationKey};
 pub use input::{
-    ContinuationInput, ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader,
-    InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput, PromptInput,
-    ResponseProgressPhase, ResponseTerminalStatus, peer_response_terminal_input,
+    ContinuationInput, ContinuationKind, ExternalEventInput, FlowStepInput, Input, InputDurability,
+    InputHeader, InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput,
+    PromptInput, ResponseProgressPhase, ResponseTerminalStatus, peer_response_terminal_input,
     response_terminal_status_from_wire,
 };
 pub use input_ledger::InputLedger;
@@ -349,6 +349,9 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
             requested_lane: input
                 .handling_mode()
                 .map(meerkat_machine::dsl::InputLane::from),
+            continuation_kind: meerkat_machine::dsl::AdmissionContinuationKind::from(
+                input.continuation_kind(),
+            ),
             silent_intent_match: false,
             existing_superseded_input_id: None,
             runtime_running: false,

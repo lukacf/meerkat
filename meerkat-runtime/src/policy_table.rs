@@ -12,7 +12,7 @@ use crate::input::Input;
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
 use crate::runtime_state::RuntimeState;
-use meerkat_core::lifecycle::{RunApplyBoundary, RunId, RuntimeExecutionKind};
+use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::SessionId;
 
 pub struct DefaultPolicyTable;
@@ -25,13 +25,8 @@ impl DefaultPolicyTable {
     }
 
     pub fn try_resolve(input: &Input, runtime_idle: bool) -> Result<PolicyDecision, String> {
-        generated_admission_projection(
-            input.id().to_string(),
-            input.kind(),
-            requested_lane_for_admission(input),
-            runtime_idle,
-        )
-        .map(|projection| projection.policy)
+        generated_admission_projection_for_input(input, runtime_idle)
+            .map(|projection| projection.policy)
     }
 
     #[allow(clippy::expect_used)]
@@ -59,42 +54,17 @@ pub(crate) fn generated_admission_projection_for_input(
     input: &Input,
     runtime_idle: bool,
 ) -> Result<GeneratedAdmissionProjection, String> {
-    let mut projection = generated_admission_projection(
+    // The shell mirrors the machine's emitted projection: it threads the typed
+    // input facts (kind, requested lane, continuation kind) into
+    // `ResolveAdmissionPlan` and returns whatever lane/runtime-semantics the
+    // machine emits. No shell-side reclassification or override.
+    generated_admission_projection(
         input.id().to_string(),
         input.kind(),
-        requested_lane_for_admission(input),
+        input.handling_mode().map(mm_dsl::InputLane::from),
+        mm_dsl::AdmissionContinuationKind::from(input.continuation_kind()),
         runtime_idle,
-    )?;
-    if is_workgraph_attention_queue_continuation(input) {
-        projection.runtime_semantics = RuntimeInputSemantics {
-            boundary: RunApplyBoundary::RunStart,
-            execution_kind: RuntimeExecutionKind::ContentTurn,
-            peer_response_terminal_apply_intent: None,
-        };
-    }
-    Ok(projection)
-}
-
-fn requested_lane_for_admission(input: &Input) -> Option<mm_dsl::InputLane> {
-    if is_workgraph_attention_queue_continuation(input) {
-        return Some(mm_dsl::InputLane::Queue);
-    }
-    input.handling_mode().map(mm_dsl::InputLane::from)
-}
-
-fn is_workgraph_attention_queue_continuation(input: &Input) -> bool {
-    let Input::Continuation(continuation) = input else {
-        return false;
-    };
-    continuation.reason != "workgraph_attention"
-        && continuation
-            .flow_tool_overlay
-            .as_ref()
-            .is_some_and(|overlay| {
-                overlay
-                    .dispatch_context
-                    .contains_key("workgraph.attention_projection")
-            })
+    )
 }
 
 pub(crate) fn generated_admission_projection_for_kind(
@@ -105,6 +75,7 @@ pub(crate) fn generated_admission_projection_for_kind(
         format!("policy-projection:{:?}", kind.kind()),
         kind.kind(),
         None,
+        mm_dsl::AdmissionContinuationKind::Ordinary,
         runtime_idle,
     )
 }
@@ -113,6 +84,7 @@ fn generated_admission_projection(
     input_id: String,
     input_kind: InputKind,
     requested_lane: Option<mm_dsl::InputLane>,
+    continuation_kind: mm_dsl::AdmissionContinuationKind,
     runtime_idle: bool,
 ) -> Result<GeneratedAdmissionProjection, String> {
     let mut authority = projection_authority(runtime_idle)?;
@@ -122,6 +94,7 @@ fn generated_admission_projection(
             input_id: input_id.clone(),
             input_kind: mm_dsl::AdmissionInputKind::from(input_kind),
             requested_lane,
+            continuation_kind,
             silent_intent_match: false,
             existing_superseded_input_id: None,
             runtime_running: !runtime_idle,

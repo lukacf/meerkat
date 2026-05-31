@@ -237,6 +237,9 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
     let mut attention_continuation =
         Input::Continuation(ContinuationInput::detached_background_op_completed());
     if let Input::Continuation(continuation) = &mut attention_continuation {
+        // The producer declares the typed continuation kind; admission routes
+        // the lane and runtime semantics from it, not from overlay strings.
+        continuation.continuation_kind = meerkat_runtime::ContinuationKind::WorkgraphAttention;
         continuation.turn_append = Some(ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::Text {

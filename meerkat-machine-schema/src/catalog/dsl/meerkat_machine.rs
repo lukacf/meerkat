@@ -775,6 +775,39 @@ pub enum TurnTerminalCauseKind {
     FatalFailure,
 }
 
+/// Normalized terminal-cause class used by the surface-result classification
+/// authority. MeerkatMachine groups the closed [`TurnTerminalCauseKind`] set
+/// (plus the absent/`None` cause) into this coarser class before classifying
+/// the surface result, so the surface-result policy is expressed over a small
+/// closed domain. The `terminal_surface_mapping` codegen pass derives both the
+/// `cause_kind -> class` projection and the `(outcome, class) -> surface class`
+/// table mechanically from this machine's transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TerminalCauseClass {
+    #[default]
+    Missing,
+    Unknown,
+    BudgetExhausted,
+    TimeBudgetExceeded,
+    RetryExhausted,
+    StructuredOutputValidationFailed,
+    OtherFailure,
+}
+
+/// Surface result classification emitted by MeerkatMachine for a turn-execution
+/// terminal `(outcome, cause)` pair. This is the machine-owned policy that the
+/// agent loop projects onto `Ok`/`Err` run results; the `terminal_surface_mapping`
+/// codegen pass derives the classification table from the machine's
+/// `ResolveTurnSurfaceResult*` transitions rather than hand-authoring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceResultClass {
+    #[default]
+    Success,
+    HardFailure,
+    Cancelled,
+    MissingTerminal,
+}
+
 /// Raw failure source fact carried by runtime run-failure handoff. The shell
 /// reports the source that observed the error; MeerkatMachine maps it to
 /// terminal outcome/cause instead of accepting shell-supplied terminal facts.
@@ -1612,6 +1645,21 @@ pub enum AdmissionInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+}
+
+/// Typed continuation discriminant carried by `ResolveAdmissionPlan`.
+///
+/// Continuations differ in how the runtime must apply them: an ordinary
+/// continuation resumes the pending run (`ResumePending`), while a WorkGraph
+/// attention continuation re-enters as a fresh content turn queued onto the run
+/// boundary. The shell reports only this typed discriminant; MeerkatMachine
+/// owns the lane and run-apply semantics derived from it. Non-continuation
+/// inputs always carry [`AdmissionContinuationKind::Ordinary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionContinuationKind {
+    #[default]
+    Ordinary,
+    WorkgraphAttention,
 }
 
 /// Typed durability class observed on an input. The shell may observe and
@@ -3216,6 +3264,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id: String,
                 input_kind: Enum<AdmissionInputKind>,
                 requested_lane: Option<Enum<InputLane>>,
+                continuation_kind: Enum<AdmissionContinuationKind>,
                 silent_intent_match: bool,
                 existing_superseded_input_id: Option<String>,
                 runtime_running: bool,
@@ -3257,6 +3306,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 phase: Enum<RecoveredInputObservedPhase>,
                 terminal_kind: Option<Enum<InputTerminalKind>>,
                 abandon_reason: Option<Enum<InputAbandonReason>>,
+            },
+            // Surface-result classification authority. The agent loop reports
+            // only the typed terminal `(outcome, cause)` facts; the machine owns
+            // the projection from those facts onto the public surface-result
+            // class. `ClassifyTurnTerminalCauseClass` normalizes the closed
+            // cause enum (plus the absent cause) into `TerminalCauseClass`, and
+            // `ResolveTurnSurfaceResult` classifies the `(outcome, class)` pair.
+            ClassifyTurnTerminalCauseClass {
+                cause_kind: Option<Enum<TurnTerminalCauseKind>>,
+            },
+            ResolveTurnSurfaceResult {
+                outcome: Enum<TurnTerminalOutcome>,
+                cause_class: Enum<TerminalCauseClass>,
             },
             AuthorizeStoredInputStateSeed {
                 input_id: String,
@@ -4004,6 +4066,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 terminal_outcome: Option<Enum<InputPublicTerminalOutcome>>,
             },
             InputBehavioralTerminalityResolved { input_id: String, terminal: bool },
+            TurnTerminalCauseClassResolved {
+                cause_kind: Option<Enum<TurnTerminalCauseKind>>,
+                cause_class: Enum<TerminalCauseClass>,
+            },
+            TurnSurfaceResultResolved {
+                outcome: Enum<TurnTerminalOutcome>,
+                cause_class: Enum<TerminalCauseClass>,
+                surface_class: Enum<SurfaceResultClass>,
+            },
             StoredInputStateSeedAuthorized { input_id: String },
             RuntimeLifecycleStateClassified {
                 state: Enum<RuntimeLifecycleObservedState>,
@@ -4414,6 +4485,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicLifecycleResolved => local,
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
+        disposition TurnTerminalCauseClassResolved => local,
+        disposition TurnSurfaceResultResolved => local,
         disposition StoredInputStateSeedAuthorized => local,
         disposition RuntimeLifecycleStateClassified => local,
         disposition RuntimeLifecycleDurabilityClassified => local,
@@ -9733,7 +9806,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // lifecycle transitions require.
         transition ResolveAdmissionPlanRequestedTerminalQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -9777,7 +9850,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedTerminalSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -9829,7 +9902,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -9838,6 +9911,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requested_lane == Some(InputLane::Queue)
                 && input_kind != AdmissionInputKind::PeerResponseProgress
                 && input_kind != AdmissionInputKind::PeerResponseTerminal
+                && continuation_kind == AdmissionContinuationKind::Ordinary
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
@@ -9892,7 +9966,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanRequestedSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -9901,6 +9975,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requested_lane == Some(InputLane::Steer)
                 && input_kind != AdmissionInputKind::PeerResponseProgress
                 && input_kind != AdmissionInputKind::PeerResponseTerminal
+                && continuation_kind == AdmissionContinuationKind::Ordinary
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
@@ -9949,7 +10024,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultQueueKind {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -10007,7 +10082,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -10065,7 +10140,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanPeerResponseProgress {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -10117,7 +10192,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -10161,7 +10236,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveAdmissionPlanDefaultContinuation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -10169,6 +10244,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "default_continuation" {
                 input_kind == AdmissionInputKind::Continuation
                 && requested_lane == None
+                && continuation_kind == AdmissionContinuationKind::Ordinary
                 && silent_intent_match == false
             }
             update {
@@ -10214,9 +10290,71 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // WorkGraph attention continuations re-enter as a fresh queued content
+        // turn rather than resuming the pending run. The typed
+        // `continuation_kind` discriminant routes them here directly so the
+        // Queue lane and `RunStart`/`ContentTurn` run-apply semantics are emitted
+        // by the machine; the runtime shell no longer forces a queue lane or
+        // overrides the projected runtime semantics.
+        transition ResolveAdmissionPlanWorkgraphAttentionContinuation {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "workgraph_attention_continuation" {
+                input_kind == AdmissionInputKind::Continuation
+                && continuation_kind == AdmissionContinuationKind::WorkgraphAttention
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running || active_turn_boundary_available {
+                        AdmissionPolicyWakeMode::None
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                existing_input_id: None,
+                requires_active_pre_admission: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: false,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+                    && runtime_running == false
+                    && active_turn_boundary_available == false
+            }
+        }
+
         transition ResolveAdmissionPlanOperation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
@@ -18701,6 +18839,237 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit CommsTrustReconcileRequested { local_endpoint: self.local_endpoint, peer_projection_epoch: self.peer_projection_epoch, direct_peer_endpoints: self.direct_peer_endpoints, mob_overlay_peer_endpoints: self.mob_overlay_peer_endpoints }
+        }
+
+        // ClassifyTurnTerminalCauseClass: generated normalization of the closed
+        // turn-terminal cause enum (plus the absent `None` cause) onto the
+        // coarser `TerminalCauseClass`. The `terminal_surface_mapping` codegen
+        // derives the `classify_cause` projection mechanically from these
+        // transitions. Idle self-loops: pure classification, no state mutation.
+        transition ClassifyTurnTerminalCauseClassMissing {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_missing" { cause_kind == None }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::Missing }
+        }
+
+        transition ClassifyTurnTerminalCauseClassUnknown {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_unknown" { cause_kind == Some(TurnTerminalCauseKind::Unknown) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::Unknown }
+        }
+
+        transition ClassifyTurnTerminalCauseClassBudgetExhausted {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_budget_exhausted" { cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::BudgetExhausted }
+        }
+
+        transition ClassifyTurnTerminalCauseClassTimeBudgetExceeded {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_time_budget_exceeded" { cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::TimeBudgetExceeded }
+        }
+
+        transition ClassifyTurnTerminalCauseClassRetryExhausted {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_retry_exhausted" { cause_kind == Some(TurnTerminalCauseKind::RetryExhausted) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::RetryExhausted }
+        }
+
+        transition ClassifyTurnTerminalCauseClassStructuredOutputValidationFailed {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_structured_output_validation_failed" { cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::StructuredOutputValidationFailed }
+        }
+
+        transition ClassifyTurnTerminalCauseClassOtherFailure {
+            per_phase [Idle]
+            on input ClassifyTurnTerminalCauseClass { cause_kind }
+            guard "cause_other_failure" {
+                cause_kind == Some(TurnTerminalCauseKind::HookDenied)
+                || cause_kind == Some(TurnTerminalCauseKind::HookFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::LlmFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::ToolFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::TurnLimitReached)
+                || cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                || cause_kind == Some(TurnTerminalCauseKind::FatalFailure)
+            }
+            update {}
+            to Idle
+            emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::OtherFailure }
+        }
+
+        // ResolveTurnSurfaceResult: generated surface-result classification
+        // authority. Owns the `(terminal outcome, terminal cause class)` ->
+        // public surface-result class policy. The `terminal_surface_mapping`
+        // codegen derives the exhaustive `classify_terminal` table mechanically
+        // from these transitions; each `cause_class` arm is enumerated so the
+        // covered `(outcome, class)` set is read structurally, not by negation.
+        // Idle self-loops: pure classification, no state mutation.
+        transition ResolveTurnSurfaceResultNoneMissingTerminal {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_none" { outcome == TurnTerminalOutcome::None }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::MissingTerminal }
+        }
+
+        transition ResolveTurnSurfaceResultCompletedSuccess {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_completed" { outcome == TurnTerminalOutcome::Completed }
+            guard "cause_absent_or_unknown" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::Success }
+        }
+
+        transition ResolveTurnSurfaceResultCompletedFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_completed" { outcome == TurnTerminalOutcome::Completed }
+            guard "cause_specific_failure" {
+                cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultFailedHardFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_failed" { outcome == TurnTerminalOutcome::Failed }
+            guard "cause_any" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultCancelledCancelled {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_cancelled" { outcome == TurnTerminalOutcome::Cancelled }
+            guard "cause_absent_or_unknown" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::Cancelled }
+        }
+
+        transition ResolveTurnSurfaceResultCancelledFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_cancelled" { outcome == TurnTerminalOutcome::Cancelled }
+            guard "cause_specific_failure" {
+                cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultBudgetExhaustedSuccess {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_budget_exhausted" { outcome == TurnTerminalOutcome::BudgetExhausted }
+            guard "cause_budget_exhausted" { cause_class == TerminalCauseClass::BudgetExhausted }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::Success }
+        }
+
+        transition ResolveTurnSurfaceResultBudgetExhaustedFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_budget_exhausted" { outcome == TurnTerminalOutcome::BudgetExhausted }
+            guard "cause_not_budget_exhausted" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultTimeBudgetExceededHardFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_time_budget_exceeded" { outcome == TurnTerminalOutcome::TimeBudgetExceeded }
+            guard "cause_any" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        transition ResolveTurnSurfaceResultStructuredOutputValidationFailedHardFailure {
+            per_phase [Idle]
+            on input ResolveTurnSurfaceResult { outcome, cause_class }
+            guard "outcome_structured_output_validation_failed" { outcome == TurnTerminalOutcome::StructuredOutputValidationFailed }
+            guard "cause_any" {
+                cause_class == TerminalCauseClass::Missing
+                || cause_class == TerminalCauseClass::Unknown
+                || cause_class == TerminalCauseClass::BudgetExhausted
+                || cause_class == TerminalCauseClass::TimeBudgetExceeded
+                || cause_class == TerminalCauseClass::RetryExhausted
+                || cause_class == TerminalCauseClass::StructuredOutputValidationFailed
+                || cause_class == TerminalCauseClass::OtherFailure
+            }
+            update {}
+            to Idle
+            emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
         }
     }
         }

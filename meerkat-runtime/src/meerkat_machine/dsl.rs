@@ -1702,6 +1702,33 @@ impl From<TurnTerminalCauseKind> for meerkat_core::turn_execution_authority::Tur
     }
 }
 
+/// Normalized terminal-cause class for surface-result classification. The DSL
+/// owns the typed mirror so the `ClassifyTurnTerminalCauseClass` /
+/// `ResolveTurnSurfaceResult` transitions can carry it; the
+/// `terminal_surface_mapping` codegen derives the classification table from
+/// those transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TerminalCauseClass {
+    #[default]
+    Missing,
+    Unknown,
+    BudgetExhausted,
+    TimeBudgetExceeded,
+    RetryExhausted,
+    StructuredOutputValidationFailed,
+    OtherFailure,
+}
+
+/// Surface result classification emitted by `ResolveTurnSurfaceResult`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceResultClass {
+    #[default]
+    Success,
+    HardFailure,
+    Cancelled,
+    MissingTerminal,
+}
+
 /// Raw failure source fact carried by runtime run-failure handoff.
 /// MeerkatMachine maps this to terminal outcome/cause before public
 /// projection.
@@ -2948,6 +2975,25 @@ pub enum AdmissionInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+}
+
+/// Typed continuation discriminant carried by `ResolveAdmissionPlan`. The DSL
+/// owns the typed mirror of the shell's `ContinuationKind` so the lane and
+/// run-apply semantics for WorkGraph attention re-entry are machine-emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionContinuationKind {
+    #[default]
+    Ordinary,
+    WorkgraphAttention,
+}
+
+impl From<crate::input::ContinuationKind> for AdmissionContinuationKind {
+    fn from(kind: crate::input::ContinuationKind) -> Self {
+        match kind {
+            crate::input::ContinuationKind::Ordinary => Self::Ordinary,
+            crate::input::ContinuationKind::WorkgraphAttention => Self::WorkgraphAttention,
+        }
+    }
 }
 
 /// Typed durability class observed on an input.

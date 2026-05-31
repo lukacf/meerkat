@@ -249,6 +249,7 @@ mod tests {
         let input = Input::Continuation(ContinuationInput {
             header: make_header(InputDurability::Derived, InputOrigin::Operator),
             reason: "test".into(),
+            continuation_kind: crate::input::ContinuationKind::Ordinary,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: None,
             flow_tool_overlay: None,

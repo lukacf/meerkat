@@ -7862,9 +7862,272 @@ pub fn render_terminal_surface_mapping(machine: &MachineSchema) -> Result<String
     generate_terminal_surface_mapping(machine)
 }
 
-fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> {
-    let mut out = String::new();
+/// Optional-cause domain element: either the absent (`None`) cause or one of
+/// the closed `TurnTerminalCauseKind` variants.
+#[derive(Debug, Clone)]
+enum OptionalCauseValue {
+    Absent,
+    Variant(String),
+}
 
+/// Statically evaluate a MeerkatMachine guard `Expr` against a fixed binding
+/// environment of `name -> {Absent | NamedVariant}` values.
+///
+/// Only the closed form produced by the surface-result classification
+/// transitions is supported: equalities of a destructure binding against a
+/// named-variant literal (optionally wrapped in `Some(...)`) or `None`, joined
+/// by `&&`/`||`. Any other shape is a schema authoring error and is rejected so
+/// the codegen cannot silently mis-derive policy.
+fn eval_surface_guard(
+    expr: &Expr,
+    env: &std::collections::BTreeMap<&str, OptionalCauseValue>,
+) -> Result<bool> {
+    match expr {
+        Expr::And(items) => {
+            for item in items {
+                if !eval_surface_guard(item, env)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Expr::Or(items) => {
+            for item in items {
+                if eval_surface_guard(item, env)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Expr::Eq(left, right) => {
+            let Expr::Binding(binding) = left.as_ref() else {
+                bail!(
+                    "surface-result guard equality must have a destructure binding on the left, got {left:?}"
+                );
+            };
+            let actual = env.get(binding.as_str()).with_context(|| {
+                format!("surface-result guard references unknown binding `{binding}`")
+            })?;
+            match right.as_ref() {
+                Expr::None => Ok(matches!(actual, OptionalCauseValue::Absent)),
+                Expr::NamedVariant { variant, .. } => Ok(matches!(
+                    actual,
+                    OptionalCauseValue::Variant(v) if v == variant.as_str()
+                )),
+                Expr::Some(inner) => {
+                    let Expr::NamedVariant { variant, .. } = inner.as_ref() else {
+                        bail!(
+                            "surface-result guard `Some(..)` must wrap a named variant, got {inner:?}"
+                        );
+                    };
+                    Ok(matches!(
+                        actual,
+                        OptionalCauseValue::Variant(v) if v == variant.as_str()
+                    ))
+                }
+                other => bail!(
+                    "surface-result guard equality right-hand side must be a named variant, `Some(variant)`, or `None`, got {other:?}"
+                ),
+            }
+        }
+        other => bail!(
+            "unsupported surface-result guard expression `{other:?}`; only `&&`/`||` of binding equalities are allowed"
+        ),
+    }
+}
+
+/// Read the closed variant list of a `StringEnum` named type from the schema.
+fn surface_string_enum_variants(machine: &MachineSchema, name: &str) -> Result<Vec<String>> {
+    let binding = machine
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == name)
+        .with_context(|| {
+            format!(
+                "{} missing named type `{name}` required for terminal surface mapping",
+                machine.machine.as_str()
+            )
+        })?;
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
+        bail!(
+            "{} named type `{name}` must be a string enum for terminal surface mapping",
+            machine.machine.as_str()
+        );
+    };
+    Ok(variants
+        .iter()
+        .map(|variant| variant.as_str().to_owned())
+        .collect())
+}
+
+/// Collect the transitions firing on a given input variant.
+fn surface_transitions_for_input<'a>(
+    machine: &'a MachineSchema,
+    input: &str,
+) -> Vec<&'a TransitionSchema> {
+    machine
+        .transitions
+        .iter()
+        .filter(|transition| {
+            matches!(
+                &transition.on,
+                TriggerMatch::Input { variant, .. } if variant.as_str() == input
+            )
+        })
+        .collect()
+}
+
+/// Read the single named-variant value emitted into `effect.field` by a
+/// classification transition (mechanical projection of the machine's decision).
+fn surface_emitted_named_variant(
+    transition: &TransitionSchema,
+    effect_variant: &str,
+    field: &str,
+) -> Result<String> {
+    let emit = match transition.emit.as_slice() {
+        [emit] => emit,
+        _ => bail!(
+            "surface classification transition `{}` must emit exactly one effect",
+            transition.name.as_str()
+        ),
+    };
+    if emit.variant.as_str() != effect_variant {
+        bail!(
+            "surface classification transition `{}` emitted `{}`, expected `{effect_variant}`",
+            transition.name.as_str(),
+            emit.variant.as_str()
+        );
+    }
+    let expr = emit
+        .fields
+        .iter()
+        .find_map(|(candidate, expr)| (candidate.as_str() == field).then_some(expr))
+        .with_context(|| {
+            format!(
+                "surface classification transition `{}` effect missing field `{field}`",
+                transition.name.as_str()
+            )
+        })?;
+    let Expr::NamedVariant { variant, .. } = expr else {
+        bail!(
+            "surface classification transition `{}` field `{field}` must emit a named variant, got {expr:?}",
+            transition.name.as_str()
+        );
+    };
+    Ok(variant.as_str().to_owned())
+}
+
+/// Resolve the unique transition (and its emitted class) whose guards match a
+/// fixed binding environment. Fails closed on gaps or overlaps so the derived
+/// table is provably total and unambiguous.
+fn surface_resolve_unique(
+    transitions: &[&TransitionSchema],
+    env: &std::collections::BTreeMap<&str, OptionalCauseValue>,
+    effect_variant: &str,
+    field: &str,
+    cell_description: &str,
+) -> Result<String> {
+    let mut matched: Option<String> = None;
+    for transition in transitions {
+        let mut all = true;
+        for guard in &transition.guards {
+            if !eval_surface_guard(&guard.expr, env)? {
+                all = false;
+                break;
+            }
+        }
+        if !all {
+            continue;
+        }
+        let emitted = surface_emitted_named_variant(transition, effect_variant, field)?;
+        if let Some(existing) = &matched {
+            bail!(
+                "terminal surface mapping is ambiguous for {cell_description}: both `{existing}` and \
+                 `{emitted}` match (transition `{}`)",
+                transition.name.as_str()
+            );
+        }
+        matched = Some(emitted);
+    }
+    matched.with_context(|| {
+        format!("terminal surface mapping has no transition covering {cell_description}")
+    })
+}
+
+fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> {
+    // Closed domains owned by MeerkatMachine.
+    let outcomes = surface_string_enum_variants(machine, "TurnTerminalOutcome")?;
+    let cause_kinds = surface_string_enum_variants(machine, "TurnTerminalCauseKind")?;
+    let cause_classes = surface_string_enum_variants(machine, "TerminalCauseClass")?;
+    let _surface_classes = surface_string_enum_variants(machine, "SurfaceResultClass")?;
+
+    let cause_class_transitions =
+        surface_transitions_for_input(machine, "ClassifyTurnTerminalCauseClass");
+    if cause_class_transitions.is_empty() {
+        bail!(
+            "{} missing `ClassifyTurnTerminalCauseClass` transitions for terminal surface mapping",
+            machine.machine.as_str()
+        );
+    }
+    let surface_transitions = surface_transitions_for_input(machine, "ResolveTurnSurfaceResult");
+    if surface_transitions.is_empty() {
+        bail!(
+            "{} missing `ResolveTurnSurfaceResult` transitions for terminal surface mapping",
+            machine.machine.as_str()
+        );
+    }
+
+    // Derive `cause_kind -> TerminalCauseClass` for the absent cause and every
+    // closed cause variant by querying the machine's classification transitions.
+    let mut cause_kind_class: Vec<(OptionalCauseValue, String)> =
+        Vec::with_capacity(cause_kinds.len() + 1);
+    for value in std::iter::once(OptionalCauseValue::Absent).chain(
+        cause_kinds
+            .iter()
+            .map(|v| OptionalCauseValue::Variant(v.clone())),
+    ) {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("cause_kind", value.clone());
+        let description = match &value {
+            OptionalCauseValue::Absent => "cause_kind None".to_string(),
+            OptionalCauseValue::Variant(v) => format!("cause_kind Some({v})"),
+        };
+        let class = surface_resolve_unique(
+            &cause_class_transitions,
+            &env,
+            "TurnTerminalCauseClassResolved",
+            "cause_class",
+            &description,
+        )?;
+        cause_kind_class.push((value, class));
+    }
+
+    // Derive `(outcome, cause_class) -> SurfaceResultClass` over the full cross
+    // product by querying the machine's surface-result transitions.
+    let mut surface_table: Vec<(String, String, String)> =
+        Vec::with_capacity(outcomes.len() * cause_classes.len());
+    for outcome in &outcomes {
+        for cause_class in &cause_classes {
+            let mut env = std::collections::BTreeMap::new();
+            env.insert("outcome", OptionalCauseValue::Variant(outcome.clone()));
+            env.insert(
+                "cause_class",
+                OptionalCauseValue::Variant(cause_class.clone()),
+            );
+            let description = format!("(outcome {outcome}, cause class {cause_class})");
+            let surface_class = surface_resolve_unique(
+                &surface_transitions,
+                &env,
+                "TurnSurfaceResultResolved",
+                "surface_class",
+                &description,
+            )?;
+            surface_table.push((outcome.clone(), cause_class.clone(), surface_class));
+        }
+    }
+
+    // Emit the derived module.
+    let mut out = String::new();
     writeln!(
         &mut out,
         "// @generated — terminal surface mapping for `{}`",
@@ -7873,17 +8136,20 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
     writeln!(&mut out, "// Generated by `xtask protocol-codegen`")?;
     writeln!(
         &mut out,
+        "// Derived mechanically from `{}` `ClassifyTurnTerminalCauseClass` / `ResolveTurnSurfaceResult` transitions.",
+        machine.machine
+    )?;
+    writeln!(
+        &mut out,
         "// Exhaustive match — adding a new TurnTerminalOutcome or TurnTerminalCauseKind variant forces a compile-time update."
     )?;
     writeln!(&mut out)?;
-
     writeln!(
         &mut out,
         "use crate::turn_execution_authority::{{TurnTerminalCauseKind, TurnTerminalOutcome}};"
     )?;
     writeln!(&mut out)?;
 
-    // SurfaceResultClass enum
     writeln!(
         &mut out,
         "/// Surface result classification for turn execution terminal outcomes."
@@ -7903,13 +8169,9 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
     )?;
     writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
     writeln!(&mut out, "enum TerminalCauseClass {{")?;
-    writeln!(&mut out, "    Missing,")?;
-    writeln!(&mut out, "    Unknown,")?;
-    writeln!(&mut out, "    BudgetExhausted,")?;
-    writeln!(&mut out, "    TimeBudgetExceeded,")?;
-    writeln!(&mut out, "    RetryExhausted,")?;
-    writeln!(&mut out, "    StructuredOutputValidationFailed,")?;
-    writeln!(&mut out, "    OtherFailure,")?;
+    for cause_class in &cause_classes {
+        writeln!(&mut out, "    {cause_class},")?;
+    }
     writeln!(&mut out, "}}")?;
     writeln!(&mut out)?;
 
@@ -7918,45 +8180,16 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
         "fn classify_cause(cause_kind: Option<TurnTerminalCauseKind>) -> TerminalCauseClass {{"
     )?;
     writeln!(&mut out, "    match cause_kind {{")?;
-    writeln!(&mut out, "        None => TerminalCauseClass::Missing,")?;
-    writeln!(
-        &mut out,
-        "        Some(TurnTerminalCauseKind::Unknown) => TerminalCauseClass::Unknown,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(TurnTerminalCauseKind::BudgetExhausted) => TerminalCauseClass::BudgetExhausted,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(TurnTerminalCauseKind::TimeBudgetExceeded) => TerminalCauseClass::TimeBudgetExceeded,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(TurnTerminalCauseKind::RetryExhausted) => TerminalCauseClass::RetryExhausted,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) => TerminalCauseClass::StructuredOutputValidationFailed,"
-    )?;
-    writeln!(&mut out, "        Some(")?;
-    writeln!(&mut out, "            TurnTerminalCauseKind::HookDenied")?;
-    writeln!(&mut out, "            | TurnTerminalCauseKind::HookFailure")?;
-    writeln!(&mut out, "            | TurnTerminalCauseKind::LlmFailure")?;
-    writeln!(&mut out, "            | TurnTerminalCauseKind::ToolFailure")?;
-    writeln!(
-        &mut out,
-        "            | TurnTerminalCauseKind::TurnLimitReached"
-    )?;
-    writeln!(
-        &mut out,
-        "            | TurnTerminalCauseKind::RuntimeApplyFailure"
-    )?;
-    writeln!(
-        &mut out,
-        "            | TurnTerminalCauseKind::FatalFailure,"
-    )?;
-    writeln!(&mut out, "        ) => TerminalCauseClass::OtherFailure,")?;
+    for (value, class) in &cause_kind_class {
+        let pattern = match value {
+            OptionalCauseValue::Absent => "None".to_string(),
+            OptionalCauseValue::Variant(v) => format!("Some(TurnTerminalCauseKind::{v})"),
+        };
+        writeln!(
+            &mut out,
+            "        {pattern} => TerminalCauseClass::{class},"
+        )?;
+    }
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out, "}}")?;
     writeln!(&mut out)?;
@@ -7978,202 +8211,12 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
         &mut out,
         "    match (*outcome, classify_cause(cause_kind)) {{"
     )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::Missing) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::Unknown) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::None, TerminalCauseClass::OtherFailure) => SurfaceResultClass::MissingTerminal,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::Missing) => SurfaceResultClass::Success,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::Unknown) => SurfaceResultClass::Success,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Completed, TerminalCauseClass::OtherFailure) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::Missing) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::Unknown) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Failed, TerminalCauseClass::OtherFailure) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::Missing) => SurfaceResultClass::Cancelled,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::Unknown) => SurfaceResultClass::Cancelled,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::Cancelled, TerminalCauseClass::OtherFailure) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::Success,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::Missing) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::Unknown) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::BudgetExhausted, TerminalCauseClass::OtherFailure) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::Missing) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::Unknown) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::TimeBudgetExceeded, TerminalCauseClass::OtherFailure) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::Missing) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::Unknown) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::BudgetExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::TimeBudgetExceeded) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::RetryExhausted) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::StructuredOutputValidationFailed) => SurfaceResultClass::HardFailure,"
-    )?;
-    writeln!(
-        &mut out,
-        "        (TurnTerminalOutcome::StructuredOutputValidationFailed, TerminalCauseClass::OtherFailure) => SurfaceResultClass::HardFailure,"
-    )?;
+    for (outcome, cause_class, surface_class) in &surface_table {
+        writeln!(
+            &mut out,
+            "        (TurnTerminalOutcome::{outcome}, TerminalCauseClass::{cause_class}) => SurfaceResultClass::{surface_class},"
+        )?;
+    }
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out, "}}")?;
 

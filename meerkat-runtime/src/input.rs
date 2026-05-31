@@ -185,6 +185,18 @@ impl Input {
             Input::Operation(_) => None,
         }
     }
+
+    /// Typed continuation discriminant threaded into admission. Only
+    /// continuations carry a non-ordinary kind; every other input family is
+    /// [`ContinuationKind::Ordinary`]. This is a typed pass-through of the
+    /// producer-declared fact — admission never re-classifies continuation
+    /// routing from reason strings or overlay dispatch-context keys.
+    pub fn continuation_kind(&self) -> ContinuationKind {
+        match self {
+            Input::Continuation(continuation) => continuation.continuation_kind,
+            _ => ContinuationKind::Ordinary,
+        }
+    }
 }
 
 fn migrate_legacy_payload_blocks(event: &mut ExternalEventInput) -> Result<(), BlobStoreError> {
@@ -493,6 +505,25 @@ pub struct ExternalEventInput {
     pub render_metadata: Option<RenderMetadata>,
 }
 
+/// Typed continuation discriminant carried on a [`ContinuationInput`].
+///
+/// The producer of a continuation declares how the runtime must re-enter the
+/// session: an ordinary continuation resumes the pending run, while a WorkGraph
+/// attention continuation re-enters as a fresh queued content turn. This is a
+/// typed fact owned by the producer; admission threads it into
+/// `MeerkatMachine::ResolveAdmissionPlan`, which owns the lane and run-apply
+/// semantics derived from it. No downstream consumer re-classifies continuation
+/// routing from continuation reason strings or overlay dispatch-context keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationKind {
+    /// Ordinary continuation: resume the pending run at the run boundary.
+    #[default]
+    Ordinary,
+    /// WorkGraph attention continuation: re-enter as a fresh queued content turn.
+    WorkgraphAttention,
+}
+
 /// Explicit continuation request that asks the runtime to keep draining
 /// ordinary work after a boundary-local event (for example, terminal peer
 /// responses injected into session state).
@@ -501,6 +532,11 @@ pub struct ContinuationInput {
     pub header: InputHeader,
     /// Stable reason for the continuation request.
     pub reason: String,
+    /// Typed continuation discriminant owned by the producer. Admission threads
+    /// it into `MeerkatMachine::ResolveAdmissionPlan` so the machine owns the
+    /// lane and run-apply semantics for WorkGraph attention re-entry.
+    #[serde(default)]
+    pub continuation_kind: ContinuationKind,
     /// Ordinary-work handling mode for the continuation.
     #[serde(default)]
     pub handling_mode: HandlingMode,
@@ -540,6 +576,7 @@ impl ContinuationInput {
                 correlation_id: None,
             },
             reason: "detached_background_op_completed".to_string(),
+            continuation_kind: ContinuationKind::Ordinary,
             handling_mode: HandlingMode::Steer,
             request_id: None,
             flow_tool_overlay: None,
@@ -1302,6 +1339,7 @@ mod tests {
         let input = Input::Continuation(ContinuationInput {
             header: make_header(),
             reason: "workgraph_attention".into(),
+            continuation_kind: ContinuationKind::WorkgraphAttention,
             handling_mode: HandlingMode::Steer,
             request_id: Some("binding-1".into()),
             flow_tool_overlay: Some(TurnToolOverlay {
@@ -1698,6 +1736,7 @@ mod tests {
         let continuation = Input::Continuation(ContinuationInput {
             header: make_header(),
             reason: "continue".into(),
+            continuation_kind: ContinuationKind::Ordinary,
             handling_mode: HandlingMode::Steer,
             request_id: None,
             flow_tool_overlay: None,

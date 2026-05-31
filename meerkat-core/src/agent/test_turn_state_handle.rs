@@ -1398,6 +1398,73 @@ mod tests {
         assert!(snapshot.barrier_operation_ids.contains(&barrier_id));
     }
 
+    /// P0 Dogma Invariant 1: the generated MeerkatMachine kernel — not the
+    /// shell `RetryPolicy` — is the authority on retry exhaustion. A
+    /// `RecoverableFailure` whose one-based `retry_attempt` exceeds
+    /// `max_retries` is rejected by the kernel, so the turn cannot enter
+    /// `ErrorRecovery` past exhaustion. The accepting case at the exhaustion
+    /// boundary (`retry_attempt == max_retries`) is also covered.
+    #[test]
+    fn recoverable_failure_past_exhaustion_is_kernel_rejected() {
+        use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
+
+        fn schedule(attempt: u32, max_retries: u32) -> LlmRetrySchedule {
+            LlmRetrySchedule {
+                failure: LlmRetryFailure {
+                    provider: "test".to_string(),
+                    kind: LlmRetryFailureKind::RateLimited,
+                    retry_after_ms: Some(1_000),
+                    duration_ms: None,
+                    message: "rate limited".to_string(),
+                },
+                plan: LlmRetryPlan {
+                    attempt,
+                    max_retries,
+                    computed_delay_ms: 500,
+                    selected_delay_ms: 1_000,
+                    retry_after_hint_ms: Some(1_000),
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            }
+        }
+
+        let handle = TestTurnStateHandle::new();
+        let run_id = RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("start run");
+        handle
+            .primitive_applied(run_id.clone())
+            .expect("primitive applied");
+
+        // attempt 4 with max_retries 3 is past exhaustion → kernel refuses it.
+        // The kernel oracle reports the sole matching transition's guard
+        // failure as `NoMatchingTransition` (no transition fired); the
+        // load-bearing fact is the refusal — the turn never enters recovery.
+        handle
+            .recoverable_failure(run_id.clone(), schedule(4, 3))
+            .expect_err("exhausted retry must be refused by the kernel");
+        assert_eq!(handle.snapshot().turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(handle.snapshot().llm_retry_attempt, 0);
+
+        // attempt 3 with max_retries 3 is at the exhaustion boundary → accepted.
+        handle
+            .recoverable_failure(run_id, schedule(3, 3))
+            .expect("retry at the exhaustion boundary is legitimate");
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
+        assert_eq!(snapshot.llm_retry_attempt, 3);
+        assert_eq!(snapshot.llm_retry_max_retries, 3);
+    }
+
     #[test]
     fn test_turn_state_handle_preserves_supplied_content_shape() {
         let handle = TestTurnStateHandle::new();

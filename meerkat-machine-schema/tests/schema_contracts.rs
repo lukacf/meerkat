@@ -2515,3 +2515,54 @@ fn schedule_bundle_validates_with_reciprocal_ack_route() {
         "schedule_bundle composition must validate after the reciprocal ack is wired"
     );
 }
+
+/// P0 Dogma Invariant 1 (LUC-524): the recoverable-vs-fatal recovery FORK must
+/// be a MeerkatMachine-owned conclusion, not a shell verdict the machine merely
+/// records. This pins the `RecoverableFailure` transition to revalidate BOTH
+/// the recoverability of the typed `failure_kind` (via the machine-owned
+/// `llm_failure_kind_recoverable` helper) AND retry exhaustion
+/// (`retry_attempt <= max_retries`). Any edit that drops either revalidation
+/// reintroduces the shell-trust violation and trips this ratchet.
+#[test]
+fn recoverable_failure_transition_revalidates_recoverability_and_exhaustion() {
+    let schema = meerkat_machine();
+
+    // The recoverability classification is owned by the machine as a helper —
+    // not pre-reduced to a bool fed by the shell.
+    let helper = schema
+        .helpers
+        .iter()
+        .find(|helper| helper.name == "llm_failure_kind_recoverable")
+        .expect(
+            "MeerkatMachine must own the LLM recoverability classification as a helper \
+             (P0 Dogma Invariant 1)",
+        );
+    assert_eq!(
+        helper.params.len(),
+        1,
+        "llm_failure_kind_recoverable must classify a single typed failure_kind"
+    );
+
+    let recoverable_failure = schema
+        .transitions
+        .iter()
+        .find(|transition| transition.on.variant_str() == "RecoverableFailure")
+        .expect("MeerkatMachine must define a RecoverableFailure transition");
+
+    let guard_names = recoverable_failure
+        .guards
+        .iter()
+        .map(|guard| guard.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(
+        guard_names.contains("failure_kind_recoverable"),
+        "RecoverableFailure must guard on machine-owned recoverability of the typed \
+         failure_kind; found guards: {guard_names:?}"
+    );
+    assert!(
+        guard_names.contains("retries_remaining"),
+        "RecoverableFailure must guard on retry exhaustion (retry_attempt <= max_retries); \
+         found guards: {guard_names:?}"
+    );
+}

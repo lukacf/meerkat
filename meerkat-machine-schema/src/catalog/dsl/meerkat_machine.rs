@@ -4640,6 +4640,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             || status == OperationStatus::Terminated
         }
 
+        // P0 Dogma Invariant 1: the recoverable-vs-fatal recovery FORK for an
+        // LLM failure is a machine-owned conclusion, not a shell verdict the
+        // machine merely records. The shell may EXTRACT a typed
+        // `LlmRetryFailureKind` from an `AgentError`, but the machine OWNS the
+        // recoverability classification: this helper is the single authority on
+        // which failure kinds may legitimately drive a turn into ErrorRecovery.
+        // The `RecoverableFailure` transition guards on it, so a shell verdict
+        // can never smuggle a non-recoverable kind into recovery.
+        helper llm_failure_kind_recoverable(kind: LlmRetryFailureKind) -> bool {
+            kind == LlmRetryFailureKind::RateLimited
+            || kind == LlmRetryFailureKind::NetworkTimeout
+            || kind == LlmRetryFailureKind::CallTimeout
+            || kind == LlmRetryFailureKind::RetryableProviderError
+        }
+
         helper operation_source_valid(source: Option<OperationSource>) -> bool {
             source == None
             || ((source.get("value").kind == OperationSourceKind::SessionChild)
@@ -12519,6 +12534,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Extracting
             }
             guard "retry_attempt_present" { retry_attempt > 0 }
+            // P0 Dogma Invariant 1: revalidate the recoverable-vs-fatal fork.
+            // The machine — not the shell `RetryPolicy` — is the authority on
+            // whether this failure_kind may enter ErrorRecovery. A
+            // non-recoverable kind is rejected even if the shell built the
+            // input.
+            guard "failure_kind_recoverable" { llm_failure_kind_recoverable(failure_kind) }
+            // P0 Dogma Invariant 1: revalidate retry exhaustion. The one-based
+            // `retry_attempt` must not exceed `max_retries`; a past-exhaustion
+            // recovery attempt is rejected by the machine rather than recorded.
+            guard "retries_remaining" { retry_attempt <= max_retries }
             update {
                 self.turn_phase = TurnPhase::ErrorRecovery;
                 self.llm_retry_attempt = retry_attempt;

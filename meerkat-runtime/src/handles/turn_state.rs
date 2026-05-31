@@ -679,17 +679,25 @@ mod tests {
     use uuid::Uuid;
 
     fn retry_schedule(attempt: u32) -> LlmRetrySchedule {
+        retry_schedule_with_kind(attempt, 3, LlmRetryFailureKind::RateLimited)
+    }
+
+    fn retry_schedule_with_kind(
+        attempt: u32,
+        max_retries: u32,
+        kind: LlmRetryFailureKind,
+    ) -> LlmRetrySchedule {
         LlmRetrySchedule {
             failure: LlmRetryFailure {
                 provider: "test".to_string(),
-                kind: LlmRetryFailureKind::RateLimited,
+                kind,
                 retry_after_ms: Some(1_000),
                 duration_ms: None,
                 message: "rate limited".to_string(),
             },
             plan: LlmRetryPlan {
                 attempt,
-                max_retries: 3,
+                max_retries,
                 computed_delay_ms: 500,
                 selected_delay_ms: 1_000,
                 retry_after_hint_ms: Some(1_000),
@@ -697,6 +705,20 @@ mod tests {
                 budget_capped: false,
             },
         }
+    }
+
+    fn start_running_conversation_turn(handle: &RuntimeTurnStateHandle, run_id: &RunId) {
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
     }
 
     fn unknown_failure_source(message: &'static str) -> TurnFailureSource {
@@ -938,6 +960,38 @@ mod tests {
         assert!(handle.retry_requested(run_id.clone(), 1).is_err());
         handle.retry_requested(run_id, 2).unwrap();
         assert_eq!(handle.snapshot().turn_phase, TurnPhase::CallingLlm);
+    }
+
+    /// P0 Dogma Invariant 1: the machine — not the shell `RetryPolicy` — is the
+    /// authority on retry exhaustion. A `RecoverableFailure` whose one-based
+    /// `retry_attempt` exceeds `max_retries` must be machine-rejected so the
+    /// turn cannot enter `ErrorRecovery` past exhaustion.
+    #[test]
+    fn recoverable_failure_past_exhaustion_is_machine_rejected() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(31));
+        start_running_conversation_turn(&handle, &run_id);
+
+        // attempt 4 with max_retries 3 is past exhaustion.
+        let exhausted = retry_schedule_with_kind(4, 3, LlmRetryFailureKind::RateLimited);
+        let err = handle
+            .recoverable_failure(run_id.clone(), exhausted)
+            .expect_err("exhausted retry must be rejected by the machine");
+        assert!(err.is_guard_rejected(), "expected guard rejection: {err:?}");
+
+        // The turn never entered recovery; it remains in CallingLlm.
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::CallingLlm);
+        assert_eq!(snapshot.llm_retry_attempt, 0);
+
+        // A retry at the exhaustion boundary (attempt == max_retries) is still
+        // legitimate and the machine accepts it.
+        let last = retry_schedule_with_kind(3, 3, LlmRetryFailureKind::NetworkTimeout);
+        handle.recoverable_failure(run_id, last).unwrap();
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::ErrorRecovery);
+        assert_eq!(snapshot.llm_retry_attempt, 3);
+        assert_eq!(snapshot.llm_retry_max_retries, 3);
     }
 
     #[test]

@@ -704,6 +704,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`
 - `op_lifecycle_action_status_valid`(action: OpLifecycleActionKind, status: OperationStatus) -> `Bool`
 - `operation_status_terminal`(status: OperationStatus) -> `Bool`
+- `llm_failure_kind_recoverable`(kind: LlmRetryFailureKind) -> `Bool`
 - `operation_source_valid`(source: Option<OperationSource>) -> `Bool`
 - `op_lifecycle_transition_rejection_idempotent`(action: OpLifecycleActionKind, status: OperationStatus) -> `Bool`
 - `wait_operation_token_witness_valid`(operation_ids: Set<String>, operation_id_tokens: Set<OperationId>, operation_token_by_id: Map<String, OperationId>, operation_id_by_token: Map<OperationId, String>) -> `Bool`
@@ -7424,6 +7425,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
   - `turn_non_terminal`
   - `retry_attempt_present`
+  - `failure_kind_recoverable`
+  - `retries_remaining`
 - To: `Running`
 
 ### `FatalFailure`

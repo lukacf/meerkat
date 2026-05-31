@@ -302,26 +302,13 @@ fn session_document_authority_matches_codegen_output() {
     );
 }
 
-#[test]
-fn session_durable_config_authority_matches_codegen_output() {
-    use meerkat_machine_schema::catalog::dsl;
-
-    let machine = dsl::dsl_session_durable_config_authority_machine_production_schema();
-    let rendered = xtask::protocol_codegen::render_session_durable_config_authority(&machine)
-        .expect("render session_durable_config_authority");
-    let rendered = rustfmt(&rendered);
-
-    let committed_path =
-        repo_root().join("meerkat-core/src/generated/session_durable_config_authority.rs");
-    let committed = std::fs::read_to_string(&committed_path)
-        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
-
-    assert_eq!(
-        normalize(&committed),
-        normalize(&rendered),
-        "session_durable_config_authority.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
-    );
-}
+// NOTE: `SessionDurableConfigAuthorityMachine` was retired under LUC-524
+// (P0 Dogma Invariant 1). Its semantic admission decisions (metadata/build-state
+// persist, build-state restore, system-prompt mutation) folded into the
+// canonical `SessionDocumentMachine` durable-config region — covered by
+// `session_document_matches_codegen_output` above. The meerkat-core
+// `session_durable_config_authority` module is now a hand-written shell adapter
+// over that machine, not a generated file, so it has no codegen-drift test.
 
 /// Compile canary for generated protocol helper ownership: every helper
 /// emitted by protocol-codegen must land in an owning crate's checked

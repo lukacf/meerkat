@@ -40,7 +40,6 @@ pub mod occurrence_lifecycle;
 pub mod pending_continuation_admission;
 pub mod schedule_lifecycle;
 pub mod session_document;
-pub mod session_durable_config_authority;
 pub mod session_persistence_version_authority;
 pub mod work_attention_lifecycle;
 pub mod workgraph_lifecycle;
@@ -88,9 +87,6 @@ pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE: &str =
     "generated::pending_continuation_admission";
 pub const SESSION_DOCUMENT_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const SESSION_DOCUMENT_PRODUCTION_RUST_MODULE: &str = "generated::session_document";
-pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
-pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
-    "generated::session_durable_config_authority";
 pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
     "generated::session_persistence_version_authority";
@@ -339,30 +335,8 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "MaterializeAssistant",
                 ],
             ),
-        ],
-        Vec::new(),
-    )
-}
-
-/// Non-canonical support schema used only to emit generated session durable
-/// config authority into `meerkat-core`.
-pub fn dsl_session_durable_config_authority_machine() -> MachineSchema {
-    session_durable_config_authority_schema_metadata().attach_to(
-        session_durable_config_authority::SessionDurableConfigAuthorityMachineState::schema(),
-    )
-}
-
-pub fn dsl_session_durable_config_authority_machine_production_schema() -> MachineSchema {
-    with_production_rust_binding(
-        dsl_session_durable_config_authority_machine(),
-        SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_CRATE,
-        SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_MODULE,
-    )
-}
-
-pub fn session_durable_config_authority_schema_metadata() -> MachineSchemaMetadata {
-    machine_schema_metadata(
-        vec![
+            // Durable-config region typed vocabulary (folded from the retired
+            // SessionDurableConfigAuthorityMachine).
             NamedTypeBinding::string_enum(
                 "SessionDurableProviderKind",
                 &["Anthropic", "OpenAI", "Gemini", "SelfHosted", "Other"],

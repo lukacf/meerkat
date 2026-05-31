@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, NatValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SystemContextAppendDecisionValues, SystemContextSourceValues
+CONSTANTS BooleanValues, NatValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, SessionCallTimeoutOverrideKindValues, SessionDurableProviderKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SessionToolCategoryOverrideKindValues, SystemContextAppendDecisionValues, SystemContextSourceValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -497,6 +497,37 @@ AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
+AuthorizeSessionMetadataPersist(schema_version, model_present, max_tokens, structured_output_retries, provider, self_hosted_server_present, provider_params_present, tooling_builtins, tooling_shell, tooling_comms, tooling_mob, tooling_memory, tooling_schedule, tooling_workgraph, tooling_image_generation, tooling_web_search, active_skill_count, keep_alive, comms_name_present, peer_meta_present, realm_id_present, instance_id_present, backend_present, config_generation_present, auth_binding_present) ==
+    /\ phase = "Ready"
+    /\ ((schema_version > 0) /\ (model_present = TRUE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSessionBuildStatePersist(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, mob_tool_authority_context_generated, call_timeout_override) ==
+    /\ phase = "Ready"
+    /\ ((mob_tool_authority_context_present = FALSE) \/ (mob_tool_authority_context_generated = TRUE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+RestoreSessionBuildState(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, call_timeout_override) ==
+    /\ phase = "Ready"
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing) ==
+    /\ phase = "Ready"
+    /\ ((prompt_present = TRUE) \/ (prompt_byte_count = 0))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
 Next ==
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingInactiveOrPending(session_id)
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingConsumed(session_id)
@@ -552,6 +583,10 @@ Next ==
     \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
     \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
     \/ \E item_count \in 0..2 : \E first_seen_count \in 0..2 : \E first_seen_unique_count \in 0..2 : \E every_item_has_order_entry \in BOOLEAN : \E every_order_entry_has_item \in BOOLEAN : \E all_identity_fields_valid \in BOOLEAN : \E all_delta_ids_valid \in BOOLEAN : \E all_completion_response_ids_valid \in BOOLEAN : \E all_discarded_response_ids_valid \in BOOLEAN : \E all_materialized_items_were_ready_or_skipped \in BOOLEAN : \E all_assistant_items_have_response_unless_skipped \in BOOLEAN : \E all_ready_assistant_items_have_completion_or_are_skipped \in BOOLEAN : \E all_materialized_assistant_completions_consumed \in BOOLEAN : \E all_completed_assistant_text_items_are_ready_or_materialized_or_skipped \in BOOLEAN : \E all_discarded_assistant_items_are_skipped_or_materialized \in BOOLEAN : AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized)
+    \/ \E schema_version \in 0..2 : \E model_present \in BOOLEAN : \E max_tokens \in 0..2 : \E structured_output_retries \in 0..2 : \E provider \in SessionDurableProviderKindValues : \E self_hosted_server_present \in BOOLEAN : \E provider_params_present \in BOOLEAN : \E tooling_builtins \in SessionToolCategoryOverrideKindValues : \E tooling_shell \in SessionToolCategoryOverrideKindValues : \E tooling_comms \in SessionToolCategoryOverrideKindValues : \E tooling_mob \in SessionToolCategoryOverrideKindValues : \E tooling_memory \in SessionToolCategoryOverrideKindValues : \E tooling_schedule \in SessionToolCategoryOverrideKindValues : \E tooling_workgraph \in SessionToolCategoryOverrideKindValues : \E tooling_image_generation \in SessionToolCategoryOverrideKindValues : \E tooling_web_search \in SessionToolCategoryOverrideKindValues : \E active_skill_count \in 0..2 : \E keep_alive \in BOOLEAN : \E comms_name_present \in BOOLEAN : \E peer_meta_present \in BOOLEAN : \E realm_id_present \in BOOLEAN : \E instance_id_present \in BOOLEAN : \E backend_present \in BOOLEAN : \E config_generation_present \in BOOLEAN : \E auth_binding_present \in BOOLEAN : AuthorizeSessionMetadataPersist(schema_version, model_present, max_tokens, structured_output_retries, provider, self_hosted_server_present, provider_params_present, tooling_builtins, tooling_shell, tooling_comms, tooling_mob, tooling_memory, tooling_schedule, tooling_workgraph, tooling_image_generation, tooling_web_search, active_skill_count, keep_alive, comms_name_present, peer_meta_present, realm_id_present, instance_id_present, backend_present, config_generation_present, auth_binding_present)
+    \/ \E system_prompt_present \in BOOLEAN : \E output_schema_present \in BOOLEAN : \E hook_entry_count \in 0..2 : \E disabled_hook_count \in 0..2 : \E budget_limits_present \in BOOLEAN : \E recoverable_tool_count \in 0..2 : \E silent_comms_intent_count \in 0..2 : \E max_inline_peer_notifications_present \in BOOLEAN : \E app_context_present \in BOOLEAN : \E additional_instruction_count \in 0..2 : \E shell_env_count \in 0..2 : \E mob_tool_authority_context_present \in BOOLEAN : \E mob_tool_authority_context_generated \in BOOLEAN : \E call_timeout_override \in SessionCallTimeoutOverrideKindValues : AuthorizeSessionBuildStatePersist(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, mob_tool_authority_context_generated, call_timeout_override)
+    \/ \E system_prompt_present \in BOOLEAN : \E output_schema_present \in BOOLEAN : \E hook_entry_count \in 0..2 : \E disabled_hook_count \in 0..2 : \E budget_limits_present \in BOOLEAN : \E recoverable_tool_count \in 0..2 : \E silent_comms_intent_count \in 0..2 : \E max_inline_peer_notifications_present \in BOOLEAN : \E app_context_present \in BOOLEAN : \E additional_instruction_count \in 0..2 : \E shell_env_count \in 0..2 : \E mob_tool_authority_context_present \in BOOLEAN : \E call_timeout_override \in SessionCallTimeoutOverrideKindValues : RestoreSessionBuildState(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, call_timeout_override)
+    \/ \E source \in SessionSystemPromptSourceValues : \E prompt_present \in BOOLEAN : \E prompt_byte_count \in 0..2 : \E replacing_existing \in BOOLEAN : AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing)
 
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1

@@ -10,15 +10,14 @@
 //! - `push_batch()` adds multiple messages with a single timestamp update
 
 use crate::Provider;
-use crate::generated::{
-    session_document, session_durable_config_authority, session_persistence_version_authority,
-};
+use crate::generated::{session_document, session_persistence_version_authority};
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 use crate::realtime_transcript_revision::{self, SessionRealtimeTranscriptState};
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
+use crate::session_durable_config_authority;
 use crate::time_compat::SystemTime;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
@@ -6187,9 +6186,12 @@ mod tests {
                 ..Default::default()
             })
             .expect_err("forged build state must be rejected by generated authority");
+        // The build-state-persist admission decision now lives in the canonical
+        // SessionDocumentMachine durable-config region (LUC-524); the rejection
+        // surfaces with that machine's authority wording.
         assert!(
             err.to_string()
-                .contains("generated session durable-config authority rejected"),
+                .contains("generated session document authority rejected"),
             "unexpected error: {err}"
         );
     }

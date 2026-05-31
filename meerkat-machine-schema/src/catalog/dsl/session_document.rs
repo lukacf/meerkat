@@ -144,6 +144,65 @@ pub enum RealtimeTranscriptMaterializeDecision {
     MaterializeAssistant,
 }
 
+// ---------------------------------------------------------------------------
+// Durable-config region typed vocabulary (folded from the retired
+// SessionDurableConfigAuthorityMachine).
+//
+// These typed observation enums are the SAME ones the retired machine
+// carried. The bulky `SessionMetadata` / `SessionBuildState` records stay in
+// the meerkat-core shell: the DSL has no struct-walk op, so the shell computes
+// the mechanical presence/count/kind observations against those records and
+// feeds them as typed RAW observations. The machine decides the persist /
+// restore / system-prompt-mutation admission verdict from those observations —
+// never the other way around.
+// ---------------------------------------------------------------------------
+
+/// Provider class observed on a session-metadata persist request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionDurableProviderKind {
+    Anthropic,
+    OpenAI,
+    Gemini,
+    SelfHosted,
+    #[default]
+    Other,
+}
+
+/// Per-category tool-override class observed on a session-metadata persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionToolCategoryOverrideKind {
+    #[default]
+    Inherit,
+    Enable,
+    Disable,
+}
+
+/// Call-timeout override class observed on a session-build-state persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionCallTimeoutOverrideKind {
+    #[default]
+    Inherit,
+    Disabled,
+    Value,
+}
+
+/// Typed provenance class for a system-prompt mutation request.
+///
+/// This is carried on the mutation request so every provenance is a typed
+/// fact at the seam (no `source` string folklore). The mutation guard does not
+/// branch on the provenance — the verdict is decided from prompt presence —
+/// but keeping the class typed pins the producer's intent at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionSystemPromptSource {
+    #[default]
+    DirectMutation,
+    ExplicitBuild,
+    DefaultBuild,
+    WasmDefaultBuild,
+    RuntimeContextAppend,
+    RuntimeSteerCleanup,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -303,6 +362,83 @@ machine! {
                 all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: bool,
                 all_discarded_assistant_items_are_skipped_or_materialized: bool,
             },
+
+            // -----------------------------------------------------------
+            // Durable-config region (folded from the retired
+            // SessionDurableConfigAuthorityMachine).
+            //
+            // Each input carries only typed RAW observations the shell
+            // computes mechanically against its bulky `SessionMetadata` /
+            // `SessionBuildState` record (presence flags, counts, typed
+            // override/provider kinds). NONE carries a pre-decided admission
+            // verdict. The machine resolves the persist / restore /
+            // system-prompt-mutation verdict below; rejection surfaces as the
+            // input matching no transition.
+            // -----------------------------------------------------------
+            AuthorizeSessionMetadataPersist {
+                schema_version: u64,
+                model_present: bool,
+                max_tokens: u64,
+                structured_output_retries: u64,
+                provider: Enum<SessionDurableProviderKind>,
+                self_hosted_server_present: bool,
+                provider_params_present: bool,
+                tooling_builtins: Enum<SessionToolCategoryOverrideKind>,
+                tooling_shell: Enum<SessionToolCategoryOverrideKind>,
+                tooling_comms: Enum<SessionToolCategoryOverrideKind>,
+                tooling_mob: Enum<SessionToolCategoryOverrideKind>,
+                tooling_memory: Enum<SessionToolCategoryOverrideKind>,
+                tooling_schedule: Enum<SessionToolCategoryOverrideKind>,
+                tooling_workgraph: Enum<SessionToolCategoryOverrideKind>,
+                tooling_image_generation: Enum<SessionToolCategoryOverrideKind>,
+                tooling_web_search: Enum<SessionToolCategoryOverrideKind>,
+                active_skill_count: u64,
+                keep_alive: bool,
+                comms_name_present: bool,
+                peer_meta_present: bool,
+                realm_id_present: bool,
+                instance_id_present: bool,
+                backend_present: bool,
+                config_generation_present: bool,
+                auth_binding_present: bool,
+            },
+            AuthorizeSessionBuildStatePersist {
+                system_prompt_present: bool,
+                output_schema_present: bool,
+                hook_entry_count: u64,
+                disabled_hook_count: u64,
+                budget_limits_present: bool,
+                recoverable_tool_count: u64,
+                silent_comms_intent_count: u64,
+                max_inline_peer_notifications_present: bool,
+                app_context_present: bool,
+                additional_instruction_count: u64,
+                shell_env_count: u64,
+                mob_tool_authority_context_present: bool,
+                mob_tool_authority_context_generated: bool,
+                call_timeout_override: Enum<SessionCallTimeoutOverrideKind>,
+            },
+            RestoreSessionBuildState {
+                system_prompt_present: bool,
+                output_schema_present: bool,
+                hook_entry_count: u64,
+                disabled_hook_count: u64,
+                budget_limits_present: bool,
+                recoverable_tool_count: u64,
+                silent_comms_intent_count: u64,
+                max_inline_peer_notifications_present: bool,
+                app_context_present: bool,
+                additional_instruction_count: u64,
+                shell_env_count: u64,
+                mob_tool_authority_context_present: bool,
+                call_timeout_override: Enum<SessionCallTimeoutOverrideKind>,
+            },
+            AuthorizeSystemPromptMutation {
+                source: Enum<SessionSystemPromptSource>,
+                prompt_present: bool,
+                prompt_byte_count: u64,
+                replacing_existing: bool,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -363,6 +499,18 @@ machine! {
                 consume_usage: bool,
             },
             RealtimeTranscriptSnapshotRestoreAuthorized,
+
+            // Durable-config region effects. Each is a fieldless authorization
+            // marker: the admission verdict is the machine's decision (a
+            // rejected request matches no transition and surfaces as `Err`).
+            // The original typed `SessionMetadata` / `SessionBuildState` /
+            // prompt value is carried through unchanged by the meerkat-core
+            // shell wrapper — there is nothing for the machine to echo, so no
+            // fact is dead-carried back across the seam.
+            SessionMetadataPersistAuthorized,
+            SessionBuildStatePersistAuthorized,
+            SessionBuildStateRestoreAuthorized,
+            SystemPromptMutationAuthorized,
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -458,6 +606,10 @@ machine! {
         disposition RealtimeTranscriptEventResolved => local,
         disposition RealtimeMaterializeCandidateResolved => local,
         disposition RealtimeTranscriptSnapshotRestoreAuthorized => local,
+        disposition SessionMetadataPersistAuthorized => local,
+        disposition SessionBuildStatePersistAuthorized => local,
+        disposition SessionBuildStateRestoreAuthorized => local,
+        disposition SystemPromptMutationAuthorized => local,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -1880,6 +2032,146 @@ machine! {
             update {}
             to Ready
             emit RealtimeTranscriptSnapshotRestoreAuthorized
+        }
+
+        // ===============================================================
+        // Durable-config region (folded from the retired
+        // SessionDurableConfigAuthorityMachine). Each transition reads only
+        // the typed RAW observations carried on the input and resolves the
+        // admission verdict. A request that fails the guard matches no
+        // transition and surfaces to the shell as `Err` — exactly the
+        // reject path the retired machine returned. The shell wrapper mirrors
+        // the verdict (admit -> return the original typed value; reject ->
+        // propagate the error) and decides nothing.
+        // ===============================================================
+
+        // ---------------------------------------------------------------
+        // AuthorizeSessionMetadataPersist — admit a session-metadata persist
+        // iff the record is well-formed enough to drive a session: a nonzero
+        // schema version and a configured model. Ported verbatim from the
+        // retired guard `schema_version > 0 && model_present`.
+        // ---------------------------------------------------------------
+        transition AuthorizeSessionMetadataPersist {
+            on input AuthorizeSessionMetadataPersist {
+                schema_version,
+                model_present,
+                max_tokens,
+                structured_output_retries,
+                provider,
+                self_hosted_server_present,
+                provider_params_present,
+                tooling_builtins,
+                tooling_shell,
+                tooling_comms,
+                tooling_mob,
+                tooling_memory,
+                tooling_schedule,
+                tooling_workgraph,
+                tooling_image_generation,
+                tooling_web_search,
+                active_skill_count,
+                keep_alive,
+                comms_name_present,
+                peer_meta_present,
+                realm_id_present,
+                instance_id_present,
+                backend_present,
+                config_generation_present,
+                auth_binding_present,
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && schema_version > 0
+                && model_present == true
+            }
+            update {}
+            to Ready
+            emit SessionMetadataPersistAuthorized
+        }
+
+        // ---------------------------------------------------------------
+        // AuthorizeSessionBuildStatePersist — admit a build-state persist iff
+        // its mob-tool authority context is absent or is the generated
+        // authority kind. Ported verbatim from the retired guard
+        // `mob_tool_authority_context_present == false
+        //  || mob_tool_authority_context_generated == true`.
+        // ---------------------------------------------------------------
+        transition AuthorizeSessionBuildStatePersist {
+            on input AuthorizeSessionBuildStatePersist {
+                system_prompt_present,
+                output_schema_present,
+                hook_entry_count,
+                disabled_hook_count,
+                budget_limits_present,
+                recoverable_tool_count,
+                silent_comms_intent_count,
+                max_inline_peer_notifications_present,
+                app_context_present,
+                additional_instruction_count,
+                shell_env_count,
+                mob_tool_authority_context_present,
+                mob_tool_authority_context_generated,
+                call_timeout_override,
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (
+                    mob_tool_authority_context_present == false
+                    || mob_tool_authority_context_generated == true
+                )
+            }
+            update {}
+            to Ready
+            emit SessionBuildStatePersistAuthorized
+        }
+
+        // ---------------------------------------------------------------
+        // RestoreSessionBuildState — the recovery half of the build-state
+        // fact. Ported verbatim from the retired guard, which authorized any
+        // persisted build-state snapshot (`Ready`-only guard).
+        // ---------------------------------------------------------------
+        transition RestoreSessionBuildState {
+            on input RestoreSessionBuildState {
+                system_prompt_present,
+                output_schema_present,
+                hook_entry_count,
+                disabled_hook_count,
+                budget_limits_present,
+                recoverable_tool_count,
+                silent_comms_intent_count,
+                max_inline_peer_notifications_present,
+                app_context_present,
+                additional_instruction_count,
+                shell_env_count,
+                mob_tool_authority_context_present,
+                call_timeout_override,
+            }
+            guard { self.lifecycle_phase == Phase::Ready }
+            update {}
+            to Ready
+            emit SessionBuildStateRestoreAuthorized
+        }
+
+        // ---------------------------------------------------------------
+        // AuthorizeSystemPromptMutation — admit a system-prompt mutation iff
+        // the prompt has content or is an explicit clear (zero bytes). Ported
+        // verbatim from the retired guard
+        // `prompt_present == true || prompt_byte_count == 0`.
+        // ---------------------------------------------------------------
+        transition AuthorizeSystemPromptMutation {
+            on input AuthorizeSystemPromptMutation {
+                source,
+                prompt_present,
+                prompt_byte_count,
+                replacing_existing,
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (prompt_present == true || prompt_byte_count == 0)
+            }
+            update {}
+            to Ready
+            emit SystemPromptMutationAuthorized
         }
     }
 }

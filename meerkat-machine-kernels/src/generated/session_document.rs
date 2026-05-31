@@ -247,6 +247,126 @@ impl std::fmt::Display for RealtimeTranscriptStopReasonKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SessionCallTimeoutOverrideKind {
+    #[default]
+    #[serde(rename = "Inherit")]
+    Inherit,
+    #[serde(rename = "Disabled")]
+    Disabled,
+    #[serde(rename = "Value")]
+    Value,
+}
+impl SessionCallTimeoutOverrideKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit",
+            Self::Disabled => "Disabled",
+            Self::Value => "Value",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionCallTimeoutOverrideKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Inherit" => Ok(Self::Inherit),
+            "Disabled" => Ok(Self::Disabled),
+            "Value" => Ok(Self::Value),
+            other => Err(format!(
+                "invalid SessionCallTimeoutOverrideKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionCallTimeoutOverrideKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionCallTimeoutOverrideKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SessionDurableProviderKind {
+    #[default]
+    #[serde(rename = "Anthropic")]
+    Anthropic,
+    #[serde(rename = "OpenAI")]
+    OpenAI,
+    #[serde(rename = "Gemini")]
+    Gemini,
+    #[serde(rename = "SelfHosted")]
+    SelfHosted,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl SessionDurableProviderKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAI => "OpenAI",
+            Self::Gemini => "Gemini",
+            Self::SelfHosted => "SelfHosted",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionDurableProviderKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Anthropic" => Ok(Self::Anthropic),
+            "OpenAI" => Ok(Self::OpenAI),
+            "Gemini" => Ok(Self::Gemini),
+            "SelfHosted" => Ok(Self::SelfHosted),
+            "Other" => Ok(Self::Other),
+            other => Err(format!(
+                "invalid SessionDurableProviderKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionDurableProviderKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionDurableProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SessionFirstTurnPhase {
     #[default]
     #[serde(rename = "Inactive")]
@@ -363,6 +483,128 @@ impl std::convert::TryFrom<String> for SessionInitialPromptStageDecision {
     }
 }
 impl std::fmt::Display for SessionInitialPromptStageDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SessionSystemPromptSource {
+    #[default]
+    #[serde(rename = "DirectMutation")]
+    DirectMutation,
+    #[serde(rename = "ExplicitBuild")]
+    ExplicitBuild,
+    #[serde(rename = "DefaultBuild")]
+    DefaultBuild,
+    #[serde(rename = "WasmDefaultBuild")]
+    WasmDefaultBuild,
+    #[serde(rename = "RuntimeContextAppend")]
+    RuntimeContextAppend,
+    #[serde(rename = "RuntimeSteerCleanup")]
+    RuntimeSteerCleanup,
+}
+impl SessionSystemPromptSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DirectMutation => "DirectMutation",
+            Self::ExplicitBuild => "ExplicitBuild",
+            Self::DefaultBuild => "DefaultBuild",
+            Self::WasmDefaultBuild => "WasmDefaultBuild",
+            Self::RuntimeContextAppend => "RuntimeContextAppend",
+            Self::RuntimeSteerCleanup => "RuntimeSteerCleanup",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionSystemPromptSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DirectMutation" => Ok(Self::DirectMutation),
+            "ExplicitBuild" => Ok(Self::ExplicitBuild),
+            "DefaultBuild" => Ok(Self::DefaultBuild),
+            "WasmDefaultBuild" => Ok(Self::WasmDefaultBuild),
+            "RuntimeContextAppend" => Ok(Self::RuntimeContextAppend),
+            "RuntimeSteerCleanup" => Ok(Self::RuntimeSteerCleanup),
+            other => Err(format!("invalid SessionSystemPromptSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionSystemPromptSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionSystemPromptSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SessionToolCategoryOverrideKind {
+    #[default]
+    #[serde(rename = "Inherit")]
+    Inherit,
+    #[serde(rename = "Enable")]
+    Enable,
+    #[serde(rename = "Disable")]
+    Disable,
+}
+impl SessionToolCategoryOverrideKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit",
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionToolCategoryOverrideKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Inherit" => Ok(Self::Inherit),
+            "Enable" => Ok(Self::Enable),
+            "Disable" => Ok(Self::Disable),
+            other => Err(format!(
+                "invalid SessionToolCategoryOverrideKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionToolCategoryOverrideKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionToolCategoryOverrideKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -641,6 +883,74 @@ pub mod inputs {
         pub all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: bool,
         pub all_discarded_assistant_items_are_skipped_or_materialized: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSessionMetadataPersist {
+        pub schema_version: u64,
+        pub model_present: bool,
+        pub max_tokens: u64,
+        pub structured_output_retries: u64,
+        pub provider: SessionDurableProviderKind,
+        pub self_hosted_server_present: bool,
+        pub provider_params_present: bool,
+        pub tooling_builtins: SessionToolCategoryOverrideKind,
+        pub tooling_shell: SessionToolCategoryOverrideKind,
+        pub tooling_comms: SessionToolCategoryOverrideKind,
+        pub tooling_mob: SessionToolCategoryOverrideKind,
+        pub tooling_memory: SessionToolCategoryOverrideKind,
+        pub tooling_schedule: SessionToolCategoryOverrideKind,
+        pub tooling_workgraph: SessionToolCategoryOverrideKind,
+        pub tooling_image_generation: SessionToolCategoryOverrideKind,
+        pub tooling_web_search: SessionToolCategoryOverrideKind,
+        pub active_skill_count: u64,
+        pub keep_alive: bool,
+        pub comms_name_present: bool,
+        pub peer_meta_present: bool,
+        pub realm_id_present: bool,
+        pub instance_id_present: bool,
+        pub backend_present: bool,
+        pub config_generation_present: bool,
+        pub auth_binding_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSessionBuildStatePersist {
+        pub system_prompt_present: bool,
+        pub output_schema_present: bool,
+        pub hook_entry_count: u64,
+        pub disabled_hook_count: u64,
+        pub budget_limits_present: bool,
+        pub recoverable_tool_count: u64,
+        pub silent_comms_intent_count: u64,
+        pub max_inline_peer_notifications_present: bool,
+        pub app_context_present: bool,
+        pub additional_instruction_count: u64,
+        pub shell_env_count: u64,
+        pub mob_tool_authority_context_present: bool,
+        pub mob_tool_authority_context_generated: bool,
+        pub call_timeout_override: SessionCallTimeoutOverrideKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreSessionBuildState {
+        pub system_prompt_present: bool,
+        pub output_schema_present: bool,
+        pub hook_entry_count: u64,
+        pub disabled_hook_count: u64,
+        pub budget_limits_present: bool,
+        pub recoverable_tool_count: u64,
+        pub silent_comms_intent_count: u64,
+        pub max_inline_peer_notifications_present: bool,
+        pub app_context_present: bool,
+        pub additional_instruction_count: u64,
+        pub shell_env_count: u64,
+        pub mob_tool_authority_context_present: bool,
+        pub call_timeout_override: SessionCallTimeoutOverrideKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSystemPromptMutation {
+        pub source: SessionSystemPromptSource,
+        pub prompt_present: bool,
+        pub prompt_byte_count: u64,
+        pub replacing_existing: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -666,6 +976,10 @@ pub enum Input {
     ResolveRealtimeAssistantTurnInterrupted(inputs::ResolveRealtimeAssistantTurnInterrupted),
     ResolveRealtimeMaterializeCandidate(inputs::ResolveRealtimeMaterializeCandidate),
     RestoreRealtimeTranscriptState(inputs::RestoreRealtimeTranscriptState),
+    AuthorizeSessionMetadataPersist(inputs::AuthorizeSessionMetadataPersist),
+    AuthorizeSessionBuildStatePersist(inputs::AuthorizeSessionBuildStatePersist),
+    RestoreSessionBuildState(inputs::RestoreSessionBuildState),
+    AuthorizeSystemPromptMutation(inputs::AuthorizeSystemPromptMutation),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -707,6 +1021,12 @@ impl Input {
                 InputKind::ResolveRealtimeMaterializeCandidate
             }
             Self::RestoreRealtimeTranscriptState(_) => InputKind::RestoreRealtimeTranscriptState,
+            Self::AuthorizeSessionMetadataPersist(_) => InputKind::AuthorizeSessionMetadataPersist,
+            Self::AuthorizeSessionBuildStatePersist(_) => {
+                InputKind::AuthorizeSessionBuildStatePersist
+            }
+            Self::RestoreSessionBuildState(_) => InputKind::RestoreSessionBuildState,
+            Self::AuthorizeSystemPromptMutation(_) => InputKind::AuthorizeSystemPromptMutation,
         }
     }
 }
@@ -733,6 +1053,10 @@ pub enum InputKind {
     ResolveRealtimeAssistantTurnInterrupted,
     ResolveRealtimeMaterializeCandidate,
     RestoreRealtimeTranscriptState,
+    AuthorizeSessionMetadataPersist,
+    AuthorizeSessionBuildStatePersist,
+    RestoreSessionBuildState,
+    AuthorizeSystemPromptMutation,
 }
 
 pub mod effects {
@@ -804,6 +1128,14 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptSnapshotRestoreAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionMetadataPersistAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionBuildStatePersistAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionBuildStateRestoreAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SystemPromptMutationAuthorized {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -823,6 +1155,10 @@ pub enum Effect {
     RealtimeTranscriptSnapshotRestoreAuthorized(
         effects::RealtimeTranscriptSnapshotRestoreAuthorized,
     ),
+    SessionMetadataPersistAuthorized(effects::SessionMetadataPersistAuthorized),
+    SessionBuildStatePersistAuthorized(effects::SessionBuildStatePersistAuthorized),
+    SessionBuildStateRestoreAuthorized(effects::SessionBuildStateRestoreAuthorized),
+    SystemPromptMutationAuthorized(effects::SystemPromptMutationAuthorized),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -839,6 +1175,10 @@ pub enum EffectKind {
     RealtimeTranscriptEventResolved,
     RealtimeMaterializeCandidateResolved,
     RealtimeTranscriptSnapshotRestoreAuthorized,
+    SessionMetadataPersistAuthorized,
+    SessionBuildStatePersistAuthorized,
+    SessionBuildStateRestoreAuthorized,
+    SystemPromptMutationAuthorized,
 }
 
 #[allow(non_camel_case_types)]
@@ -898,6 +1238,10 @@ pub enum TransitionId {
     ResolveRealtimeMaterializeAssistant,
     ResolveRealtimeMaterializeAssistantMissingCompletion,
     AuthorizeRestoreRealtimeTranscriptState,
+    AuthorizeSessionMetadataPersist,
+    AuthorizeSessionBuildStatePersist,
+    RestoreSessionBuildState,
+    AuthorizeSystemPromptMutation,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

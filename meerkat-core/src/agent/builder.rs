@@ -452,7 +452,7 @@ impl AgentBuilder {
             session
                 .set_system_prompt_with_source(
                     prompt,
-                    crate::generated::session_durable_config_authority::SessionSystemPromptSource::ExplicitBuild,
+                    crate::session_durable_config_authority::SessionSystemPromptSource::ExplicitBuild,
                 )
                 .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
                     message: err.to_string(),
@@ -464,7 +464,7 @@ impl AgentBuilder {
                 session
                     .set_system_prompt_with_source(
                         SystemPromptConfig::new().compose().await,
-                        crate::generated::session_durable_config_authority::SessionSystemPromptSource::DefaultBuild,
+                        crate::session_durable_config_authority::SessionSystemPromptSource::DefaultBuild,
                     )
                     .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
                         message: err.to_string(),
@@ -475,7 +475,7 @@ impl AgentBuilder {
                 session
                     .set_system_prompt_with_source(
                         String::new(),
-                        crate::generated::session_durable_config_authority::SessionSystemPromptSource::WasmDefaultBuild,
+                        crate::session_durable_config_authority::SessionSystemPromptSource::WasmDefaultBuild,
                     )
                     .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
                         message: err.to_string(),

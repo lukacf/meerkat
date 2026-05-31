@@ -1661,6 +1661,30 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local realtime-transcript snapshot restore authorization consumed in-process by the session restore path",
         ),
+        (
+            "SessionDocumentMachine",
+            "SessionMetadataPersistAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local session-metadata persist admission consumed in-process by the meerkat-core session_durable_config_authority shell, which passes the original SessionMetadata through unchanged on admit",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionBuildStatePersistAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local build-state persist admission consumed in-process by the meerkat-core session_durable_config_authority shell, which passes the original SessionBuildState through unchanged on admit",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionBuildStateRestoreAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local build-state restore authorization consumed in-process by the meerkat-core session_durable_config_authority shell restore path",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SystemPromptMutationAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local system-prompt mutation admission consumed in-process by the meerkat-core session_durable_config_authority shell, which applies the original prompt unchanged on admit",
+        ),
         //
         // =========================================================================
         // WorkAttentionLifecycleMachine

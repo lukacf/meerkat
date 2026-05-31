@@ -68,6 +68,7 @@ pub mod runtime_epoch;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod session_durable_config_authority;
 pub mod session_migrations;
 pub mod session_recovery;
 pub mod session_store;

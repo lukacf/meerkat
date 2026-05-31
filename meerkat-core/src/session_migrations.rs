@@ -40,7 +40,8 @@
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-use crate::generated::{session_durable_config_authority, session_persistence_version_authority};
+use crate::generated::session_persistence_version_authority;
+use crate::session_durable_config_authority;
 use crate::{Session, SessionMetadata};
 
 /// Salvaged-migration payload carried by [`SessionMigrationError::Partial`].

@@ -140,6 +140,94 @@ fn no_canonical_machine_is_a_stateless_classifier() {
     }
 }
 
+/// Witness-purity ratchet (LUC-524, P0 Dogma Invariant 1): the
+/// `SessionPersistenceVersionAuthorityMachine` is a NON-canonical generated
+/// WITNESS — a pure version encoder/decoder. It stamps a constant current
+/// version and accepts a persisted version iff it equals the current or the
+/// single legacy default (a pure equality), then returns the current constant.
+/// It must never silently grow into session lifecycle / per-session authority:
+/// that would smuggle a semantic reducer behind a "witness" that no canonical
+/// TLA proof covers.
+///
+/// This ratchet pins the witness to its pure shape so any future edit that adds
+/// a per-session `Map` registry, a second lifecycle phase, a non-self-loop
+/// transition, or an effect beyond the two pure version verdicts fails loudly
+/// and forces an explicit re-classification (fold into a canonical machine, or
+/// keep as a witness with a justified ratchet update).
+#[test]
+fn session_persistence_version_witness_stays_a_pure_version_encoder() {
+    use meerkat_machine_schema::catalog::dsl::dsl_session_persistence_version_authority_machine as persistence_version_machine;
+
+    fn contains_map(ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Map(_, _) => true,
+            TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+                contains_map(inner)
+            }
+            _ => false,
+        }
+    }
+
+    let schema = persistence_version_machine();
+
+    // (1) No per-entity registry state. A version encoder owns only the
+    // scalar current/legacy version constants — never a per-session `Map`
+    // lifecycle registry. This is the structural line between a witness and a
+    // canonical per-session authority.
+    assert!(
+        !schema
+            .state
+            .fields
+            .iter()
+            .any(|field| contains_map(&field.ty)),
+        "persistence-version witness must own no Map registry state; \
+         a per-entity registry means it has grown into session authority and \
+         must be folded into a canonical machine"
+    );
+
+    // (2) Single lifecycle phase with an empty terminal set and every
+    // transition self-looping: no lifecycle progression, no terminality. A
+    // pure encoder has no states to move between.
+    assert_eq!(
+        schema.state.phase.variants.len(),
+        1,
+        "persistence-version witness must stay single-phase (no lifecycle)"
+    );
+    assert!(
+        schema.state.terminal_phases.is_empty(),
+        "persistence-version witness must own no terminal phases (no lifecycle)"
+    );
+    assert!(
+        schema
+            .transitions
+            .iter()
+            .all(|transition| transition.from.iter().all(|from| *from == transition.to)),
+        "persistence-version witness transitions must all self-loop (no lifecycle progression)"
+    );
+
+    // (3) The emitted decision set is EXACTLY the two pure version verdicts:
+    // a constant-version stamp and an equality-checked restore. No admission,
+    // mint, or lifecycle effect may appear — those would be facts->conclusion
+    // reductions that belong in a canonical machine.
+    let mut effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str().to_owned())
+        .collect::<Vec<_>>();
+    effect_names.sort();
+    assert_eq!(
+        effect_names,
+        vec![
+            "VersionRestoreAuthorized".to_string(),
+            "VersionStampAuthorized".to_string(),
+        ],
+        "persistence-version witness must emit only the two pure version verdicts \
+         (constant stamp + equality-checked restore); any other effect is a \
+         semantic reduction that must move to a canonical machine"
+    );
+}
+
 #[test]
 fn workgraph_machine_state_wire_retains_topology_projection_fields() {
     let value = serde_json::json!({

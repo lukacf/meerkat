@@ -610,6 +610,39 @@ pub enum MemberWaitClassificationKind {
     MissingRuntimeMaterial,
 }
 
+/// Pure flow-topology rule-match verdict. The shell extracts this from the
+/// declarative `TopologyRules` via `evaluate_topology` and feeds it to
+/// MobMachine as an observation; MobMachine — not the shell — derives the
+/// admission verdict from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFlowDelegationEdgeRuleVerdictKind {
+    #[default]
+    Allow,
+    Deny,
+}
+
+/// Configured topology enforcement mode for a flow delegation edge. Mirrors
+/// the shell `PolicyMode`; fed alongside the rule verdict so MobMachine can
+/// decide whether a denial blocks (Strict) or merely warns (Advisory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFlowDelegationEdgeModeKind {
+    #[default]
+    Advisory,
+    Strict,
+}
+
+/// Machine-owned admission verdict for a flow delegation edge. The shell
+/// mirrors this: `DeniedStrict` blocks the delegation step
+/// (`MobError::TopologyViolation`), `DeniedAdvisory` emits an advisory notice
+/// and proceeds, `Admitted` proceeds silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFlowDelegationEdgeAdmissionKind {
+    #[default]
+    Admitted,
+    DeniedStrict,
+    DeniedAdvisory,
+}
+
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SubmitWorkRejectReasonKind {
@@ -1639,6 +1672,82 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn flow_topology_edge_admission_verdict_is_decided_by_machine() {
+        // Allow rule -> Admitted, regardless of mode.
+        let mut authority = MobMachineAuthority::new();
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveFlowDelegationEdgeAdmission {
+                from_role: "lead".to_owned(),
+                to_role: "worker".to_owned(),
+                rule_verdict: MobFlowDelegationEdgeRuleVerdictKind::Allow,
+                mode: MobFlowDelegationEdgeModeKind::Strict,
+            },
+        )
+        .expect("allow rule should resolve an admission verdict");
+        assert!(transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::FlowDelegationEdgeAdmissionResolved {
+                    admission: MobFlowDelegationEdgeAdmissionKind::Admitted,
+                    ..
+                }
+            )
+        }));
+
+        // Deny rule + Strict mode -> DeniedStrict (the shell mirrors this as a
+        // TopologyViolation block). The block decision is the machine's, not
+        // the shell's.
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveFlowDelegationEdgeAdmission {
+                from_role: "lead".to_owned(),
+                to_role: "worker".to_owned(),
+                rule_verdict: MobFlowDelegationEdgeRuleVerdictKind::Deny,
+                mode: MobFlowDelegationEdgeModeKind::Strict,
+            },
+        )
+        .expect("deny rule in strict mode should resolve an admission verdict");
+        assert!(transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::FlowDelegationEdgeAdmissionResolved {
+                    admission: MobFlowDelegationEdgeAdmissionKind::DeniedStrict,
+                    ..
+                }
+            )
+        }));
+
+        // Deny rule + Advisory mode -> DeniedAdvisory (warn-and-proceed).
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveFlowDelegationEdgeAdmission {
+                from_role: "lead".to_owned(),
+                to_role: "worker".to_owned(),
+                rule_verdict: MobFlowDelegationEdgeRuleVerdictKind::Deny,
+                mode: MobFlowDelegationEdgeModeKind::Advisory,
+            },
+        )
+        .expect("deny rule in advisory mode should resolve an admission verdict");
+        let admission = transition.effects().iter().find_map(|effect| match effect {
+            MobMachineEffect::FlowDelegationEdgeAdmissionResolved {
+                from_role,
+                to_role,
+                admission,
+            } => Some((from_role.clone(), to_role.clone(), *admission)),
+            _ => None,
+        });
+        assert_eq!(
+            admission,
+            Some((
+                "lead".to_owned(),
+                "worker".to_owned(),
+                MobFlowDelegationEdgeAdmissionKind::DeniedAdvisory
+            ))
+        );
     }
 
     fn seed_root_frame(

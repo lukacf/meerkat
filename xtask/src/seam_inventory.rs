@@ -1206,6 +1206,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "FlowDelegationEdgeAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Flow topology edge admission verdict (Admitted/DeniedStrict/DeniedAdvisory) is decided by MobMachine; the flow engine mirrors it (Strict-block keyed on DeniedStrict) instead of computing+enforcing the admission",
+        ),
+        (
+            "MobMachine",
             "AuthorizeAgentEventSubscription",
             SeamClassification::SurfaceResultAlignment,
             "Agent event subscription authorization result must align with generated MobMachine target/session truth",

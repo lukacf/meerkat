@@ -117,7 +117,17 @@ impl LeaseFreshnessObserver {
             return Ok(false);
         }
 
-        Ok(lease_epoch_secs_is_fresh_at(lease_expires_at, now))
+        // Freshness is machine-owned. We already drove
+        // `observe_credential_freshness(.., epoch_secs(now), AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)`
+        // above, and AuthMachine classified the lease as `Valid` for this
+        // `now`/window (otherwise `snapshot.phase` would be Expiring/Expired/…
+        // and we would have returned `Ok(false)` at the phase match). The
+        // remaining checks here are cache-coherence (does the cached token
+        // belong to the current lease generation and expiry truth?), NOT a
+        // freshness re-derivation. Once they pass, the machine's `Valid`
+        // verdict IS the freshness answer — the shell must not recompute it
+        // with its own window comparison.
+        Ok(true)
     }
 
     pub(crate) fn expires_at(&self) -> Option<DateTime<Utc>> {
@@ -237,12 +247,6 @@ pub(crate) enum LeaseRefreshLifecycle {
 enum LeaseRefreshStart {
     Started(LeaseRefreshLifecycle),
     WaitForInFlight,
-}
-
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
-fn lease_epoch_secs_is_fresh_at(expires_at: u64, now: DateTime<Utc>) -> bool {
-    let expires_at = i64::try_from(expires_at).unwrap_or(i64::MAX);
-    expires_at.saturating_sub(now.timestamp()) > AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64
 }
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]

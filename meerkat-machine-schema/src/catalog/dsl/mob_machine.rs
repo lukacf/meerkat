@@ -452,6 +452,15 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             ClassifySpawnManyFailure { observation: Enum<MobSpawnManyFailureObservationKind> },
             ClassifyMemberWait { agent_identity: AgentIdentity },
+            // Flow topology edge admission. The shell extracts the pure
+            // rule-match verdict from the declarative `TopologyRules`
+            // (`evaluate_topology`) and the configured enforcement mode, then
+            // feeds both here as a witness. The MobMachine — not the shell —
+            // decides the admission verdict (`Admitted` / `DeniedStrict` /
+            // `DeniedAdvisory`) and the shell mirrors that verdict. The roles
+            // are echoed so the shell can reconstruct the `TopologyViolation`
+            // error / advisory notice from the machine's emitted verdict.
+            ResolveFlowDelegationEdgeAdmission { from_role: String, to_role: String, rule_verdict: Enum<MobFlowDelegationEdgeRuleVerdictKind>, mode: Enum<MobFlowDelegationEdgeModeKind> },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
@@ -676,6 +685,11 @@ macro_rules! mob_catalog_machine_dsl {
             RespawnTopologyRestoreResolved { agent_identity: AgentIdentity, result: Enum<RespawnTopologyRestoreResultKind>, failed_peer_ids: Seq<RespawnTopologyPeerId> },
             SpawnManyFailureClassified { observation: Enum<MobSpawnManyFailureObservationKind>, cause: Enum<MobSpawnManyFailureCauseKind> },
             MemberWaitClassified { agent_identity: AgentIdentity, result: Enum<MemberWaitClassificationKind> },
+            // Machine-owned flow topology edge admission verdict. The shell
+            // mirrors this (DeniedStrict -> TopologyViolation block;
+            // DeniedAdvisory -> advisory notice; Admitted -> proceed) instead
+            // of computing+enforcing the admission itself.
+            FlowDelegationEdgeAdmissionResolved { from_role: String, to_role: String, admission: Enum<MobFlowDelegationEdgeAdmissionKind> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -812,6 +826,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RespawnTopologyRestoreResolved => local,
         disposition SpawnManyFailureClassified => local,
         disposition MemberWaitClassified => local,
+        disposition FlowDelegationEdgeAdmissionResolved => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition SessionProvisionOperationOwnerAuthorized => local,
@@ -1220,6 +1235,45 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Destroyed
             emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::MissingRuntimeMaterial }
+        }
+
+        // Flow topology edge admission. The shell extracts the pure rule-match
+        // verdict (Allow/Deny) from declarative `TopologyRules` and the
+        // enforcement mode; the MobMachine decides the admission verdict the
+        // shell mirrors. No machine state is read or mutated — the rule-match
+        // is a config-only observation — so these are pure classification
+        // transitions across all lifecycle phases, like ClassifyMemberWait.
+        transition ResolveFlowDelegationEdgeAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowDelegationEdgeAdmission { from_role, to_role, rule_verdict, mode }
+            guard "rule_allows_edge" { rule_verdict == MobFlowDelegationEdgeRuleVerdictKind::Allow }
+            update {}
+            to Running
+            emit FlowDelegationEdgeAdmissionResolved { from_role: from_role, to_role: to_role, admission: MobFlowDelegationEdgeAdmissionKind::Admitted }
+        }
+
+        transition ResolveFlowDelegationEdgeAdmissionDeniedStrict {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowDelegationEdgeAdmission { from_role, to_role, rule_verdict, mode }
+            guard "rule_denies_edge_strict_mode" {
+                rule_verdict == MobFlowDelegationEdgeRuleVerdictKind::Deny
+                && mode == MobFlowDelegationEdgeModeKind::Strict
+            }
+            update {}
+            to Running
+            emit FlowDelegationEdgeAdmissionResolved { from_role: from_role, to_role: to_role, admission: MobFlowDelegationEdgeAdmissionKind::DeniedStrict }
+        }
+
+        transition ResolveFlowDelegationEdgeAdmissionDeniedAdvisory {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowDelegationEdgeAdmission { from_role, to_role, rule_verdict, mode }
+            guard "rule_denies_edge_advisory_mode" {
+                rule_verdict == MobFlowDelegationEdgeRuleVerdictKind::Deny
+                && mode == MobFlowDelegationEdgeModeKind::Advisory
+            }
+            update {}
+            to Running
+            emit FlowDelegationEdgeAdmissionResolved { from_role: from_role, to_role: to_role, admission: MobFlowDelegationEdgeAdmissionKind::DeniedAdvisory }
         }
 
         transition ClassifySpawnManyFailureProfileNotFound {
@@ -8069,6 +8123,39 @@ pub enum MobSpawnManyFailureCauseKind {
     StaleEventCursor,
     WorkNotFound,
     Internal,
+}
+
+/// Pure flow-topology rule-match verdict. The shell extracts this from the
+/// declarative `TopologyRules` via `evaluate_topology` and feeds it to
+/// MobMachine as an observation; MobMachine — not the shell — derives the
+/// admission verdict from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFlowDelegationEdgeRuleVerdictKind {
+    #[default]
+    Allow,
+    Deny,
+}
+
+/// Configured topology enforcement mode for a flow delegation edge. Mirrors
+/// the shell `PolicyMode`; fed alongside the rule verdict so MobMachine can
+/// decide whether a denial blocks (Strict) or merely warns (Advisory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFlowDelegationEdgeModeKind {
+    #[default]
+    Advisory,
+    Strict,
+}
+
+/// Machine-owned admission verdict for a flow delegation edge. The shell
+/// mirrors this: `DeniedStrict` blocks the delegation step
+/// (`MobError::TopologyViolation`), `DeniedAdvisory` emits an advisory notice
+/// and proceeds, `Admitted` proceeds silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFlowDelegationEdgeAdmissionKind {
+    #[default]
+    Admitted,
+    DeniedStrict,
+    DeniedAdvisory,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

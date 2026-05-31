@@ -1686,6 +1686,166 @@ impl std::fmt::Display for MobCoordinationWorkIntentStatus {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobFlowDelegationEdgeAdmissionKind {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "DeniedStrict")]
+    DeniedStrict,
+    #[serde(rename = "DeniedAdvisory")]
+    DeniedAdvisory,
+}
+impl MobFlowDelegationEdgeAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::DeniedStrict => "DeniedStrict",
+            Self::DeniedAdvisory => "DeniedAdvisory",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobFlowDelegationEdgeAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "DeniedStrict" => Ok(Self::DeniedStrict),
+            "DeniedAdvisory" => Ok(Self::DeniedAdvisory),
+            other => Err(format!(
+                "invalid MobFlowDelegationEdgeAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobFlowDelegationEdgeAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobFlowDelegationEdgeAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobFlowDelegationEdgeModeKind {
+    #[default]
+    #[serde(rename = "Advisory")]
+    Advisory,
+    #[serde(rename = "Strict")]
+    Strict,
+}
+impl MobFlowDelegationEdgeModeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Advisory => "Advisory",
+            Self::Strict => "Strict",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobFlowDelegationEdgeModeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Advisory" => Ok(Self::Advisory),
+            "Strict" => Ok(Self::Strict),
+            other => Err(format!(
+                "invalid MobFlowDelegationEdgeModeKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobFlowDelegationEdgeModeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobFlowDelegationEdgeModeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobFlowDelegationEdgeRuleVerdictKind {
+    #[default]
+    #[serde(rename = "Allow")]
+    Allow,
+    #[serde(rename = "Deny")]
+    Deny,
+}
+impl MobFlowDelegationEdgeRuleVerdictKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "Allow",
+            Self::Deny => "Deny",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobFlowDelegationEdgeRuleVerdictKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Allow" => Ok(Self::Allow),
+            "Deny" => Ok(Self::Deny),
+            other => Err(format!(
+                "invalid MobFlowDelegationEdgeRuleVerdictKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobFlowDelegationEdgeRuleVerdictKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobFlowDelegationEdgeRuleVerdictKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -3212,6 +3372,13 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveFlowDelegationEdgeAdmission {
+        pub from_role: String,
+        pub to_role: String,
+        pub rule_verdict: MobFlowDelegationEdgeRuleVerdictKind,
+        pub mode: MobFlowDelegationEdgeModeKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -3604,6 +3771,7 @@ pub enum Input {
     AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
     ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
     ClassifyMemberWait(inputs::ClassifyMemberWait),
+    ResolveFlowDelegationEdgeAdmission(inputs::ResolveFlowDelegationEdgeAdmission),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -3708,6 +3876,9 @@ impl Input {
             Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
             Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
             Self::ClassifyMemberWait(_) => InputKind::ClassifyMemberWait,
+            Self::ResolveFlowDelegationEdgeAdmission(_) => {
+                InputKind::ResolveFlowDelegationEdgeAdmission
+            }
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -3829,6 +4000,7 @@ pub enum InputKind {
     AuthorizeSpawnProfile,
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
+    ResolveFlowDelegationEdgeAdmission,
     EnsureMember,
     Reconcile,
     Retire,
@@ -4453,6 +4625,12 @@ pub mod effects {
         pub result: MemberWaitClassificationKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowDelegationEdgeAdmissionResolved {
+        pub from_role: String,
+        pub to_role: String,
+        pub admission: MobFlowDelegationEdgeAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -4708,6 +4886,7 @@ pub enum Effect {
     RespawnTopologyRestoreResolved(effects::RespawnTopologyRestoreResolved),
     SpawnManyFailureClassified(effects::SpawnManyFailureClassified),
     MemberWaitClassified(effects::MemberWaitClassified),
+    FlowDelegationEdgeAdmissionResolved(effects::FlowDelegationEdgeAdmissionResolved),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     SessionProvisionOperationOwnerAuthorized(effects::SessionProvisionOperationOwnerAuthorized),
@@ -4782,6 +4961,7 @@ pub enum EffectKind {
     RespawnTopologyRestoreResolved,
     SpawnManyFailureClassified,
     MemberWaitClassified,
+    FlowDelegationEdgeAdmissionResolved,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     SessionProvisionOperationOwnerAuthorized,
@@ -4846,6 +5026,18 @@ pub enum TransitionId {
     ClassifyMemberWaitMissingRuntimeMaterialStopped,
     ClassifyMemberWaitMissingRuntimeMaterialCompleted,
     ClassifyMemberWaitMissingRuntimeMaterialDestroyed,
+    ResolveFlowDelegationEdgeAdmissionAllowedRunning,
+    ResolveFlowDelegationEdgeAdmissionAllowedStopped,
+    ResolveFlowDelegationEdgeAdmissionAllowedCompleted,
+    ResolveFlowDelegationEdgeAdmissionAllowedDestroyed,
+    ResolveFlowDelegationEdgeAdmissionDeniedStrictRunning,
+    ResolveFlowDelegationEdgeAdmissionDeniedStrictStopped,
+    ResolveFlowDelegationEdgeAdmissionDeniedStrictCompleted,
+    ResolveFlowDelegationEdgeAdmissionDeniedStrictDestroyed,
+    ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryRunning,
+    ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryStopped,
+    ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryCompleted,
+    ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed,
     ClassifySpawnManyFailureProfileNotFoundRunning,
     ClassifySpawnManyFailureProfileNotFoundStopped,
     ClassifySpawnManyFailureProfileNotFoundCompleted,

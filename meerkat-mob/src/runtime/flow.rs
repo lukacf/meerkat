@@ -14,7 +14,9 @@ use crate::definition::{
     PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
-use crate::ids::{AgentIdentity, FlowId, FlowNodeId, FrameId, MeerkatId, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, FlowId, FlowNodeId, FrameId, MeerkatId, ProfileName, RunId, StepId,
+};
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
@@ -324,6 +326,66 @@ impl FlowEngine {
         }
     }
 
+    /// Resolve the flow-topology delegation-edge admission verdict for a
+    /// `from_role -> to_role` edge under the configured enforcement `mode`.
+    ///
+    /// The shell extracts the *pure* rule-match verdict from the declarative
+    /// `TopologyRules` (`MobTopologyService::evaluate` / `evaluate_topology`)
+    /// — a config-only observation, not a semantic decision — and feeds it,
+    /// together with the enforcement mode, to MobMachine as a witness. The
+    /// MACHINE decides the admission verdict (`Admitted` / `DeniedStrict` /
+    /// `DeniedAdvisory`); this method returns that machine-emitted verdict so
+    /// the caller can mirror it. The shell never computes-and-enforces the
+    /// admission itself: it only mirrors what the machine emitted.
+    async fn resolve_topology_edge_admission(
+        &self,
+        from_role: &ProfileName,
+        to_role: &ProfileName,
+        mode: &PolicyMode,
+    ) -> Result<mob_dsl::MobFlowDelegationEdgeAdmissionKind, MobError> {
+        let rule_verdict = match self.topology.evaluate(from_role, to_role) {
+            PolicyDecision::Allow => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Allow,
+            PolicyDecision::Deny => mob_dsl::MobFlowDelegationEdgeRuleVerdictKind::Deny,
+        };
+        let dsl_mode = match mode {
+            PolicyMode::Advisory => mob_dsl::MobFlowDelegationEdgeModeKind::Advisory,
+            PolicyMode::Strict => mob_dsl::MobFlowDelegationEdgeModeKind::Strict,
+        };
+        let effects = self
+            .handle
+            .apply_machine_input_effects(
+                mob_dsl::MobMachineInput::ResolveFlowDelegationEdgeAdmission {
+                    from_role: from_role.as_str().to_owned(),
+                    to_role: to_role.as_str().to_owned(),
+                    rule_verdict,
+                    mode: dsl_mode,
+                },
+            )
+            .await?;
+        let (effect_from_role, effect_to_role, admission) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::FlowDelegationEdgeAdmissionResolved {
+                    from_role,
+                    to_role,
+                    admission,
+                } => Some((from_role, to_role, admission)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted flow topology edge observation but emitted no admission verdict"
+                        .into(),
+                )
+            })?;
+        if effect_from_role != from_role.as_str() || effect_to_role != to_role.as_str() {
+            return Err(MobError::Internal(format!(
+                "MobMachine flow topology admission drift: input=({from_role} -> {to_role}), effect=({effect_from_role} -> {effect_to_role})"
+            )));
+        }
+        Ok(admission)
+    }
+
     /// Canonical step execution: condition -> topology -> targets -> dispatch ->
     /// retry -> schema -> ledger -> events -> supervisor -> FanOut aggregation.
     ///
@@ -388,22 +450,32 @@ impl FlowEngine {
         };
 
         // ── 3. Topology check ──────────────────────────────────────────────
+        // The admission verdict is owned by MobMachine. The shell extracts
+        // only the pure rule-match witness and feeds it (with the enforcement
+        // mode) to the machine; the machine decides Admitted/DeniedStrict/
+        // DeniedAdvisory and the shell MIRRORS that verdict here. Strict-block
+        // is keyed on the MACHINE's `DeniedStrict`, never on a shell-computed
+        // denial.
         if let (Some(topology_spec), Some(from_role)) =
             (&config.topology, &config.orchestrator_role)
-            && matches!(
-                self.topology.evaluate(from_role, &step.role),
-                PolicyDecision::Deny
-            )
         {
-            if matches!(topology_spec.mode, PolicyMode::Strict) {
-                return Err(MobError::TopologyViolation {
-                    from_role: from_role.clone(),
-                    to_role: step.role.clone(),
-                });
+            match self
+                .resolve_topology_edge_admission(from_role, &step.role, &topology_spec.mode)
+                .await?
+            {
+                mob_dsl::MobFlowDelegationEdgeAdmissionKind::Admitted => {}
+                mob_dsl::MobFlowDelegationEdgeAdmissionKind::DeniedStrict => {
+                    return Err(MobError::TopologyViolation {
+                        from_role: from_role.clone(),
+                        to_role: step.role.clone(),
+                    });
+                }
+                mob_dsl::MobFlowDelegationEdgeAdmissionKind::DeniedAdvisory => {
+                    self.emitter
+                        .topology_violation(from_role.clone(), step.role.clone())
+                        .await?;
+                }
             }
-            self.emitter
-                .topology_violation(from_role.clone(), step.role.clone())
-                .await?;
         }
 
         // ── 4. Target selection ────────────────────────────────────────────

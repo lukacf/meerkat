@@ -1971,6 +1971,15 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "MobFlowDelegationEdgeRuleVerdictKind",
+                &["Allow", "Deny"],
+            ),
+            NamedTypeBinding::string_enum("MobFlowDelegationEdgeModeKind", &["Advisory", "Strict"]),
+            NamedTypeBinding::string_enum(
+                "MobFlowDelegationEdgeAdmissionKind",
+                &["Admitted", "DeniedStrict", "DeniedAdvisory"],
+            ),
+            NamedTypeBinding::string_enum(
                 "MobSpawnManyFailureObservationKind",
                 &[
                     "ProfileNotFound",

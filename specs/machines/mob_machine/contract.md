@@ -162,6 +162,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
 - `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
 - `ClassifyMemberWait`(agent_identity: AgentIdentity)
+- `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
@@ -334,6 +335,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RespawnTopologyRestoreResolved`(agent_identity: AgentIdentity, result: RespawnTopologyRestoreResultKind, failed_peer_ids: Seq<RespawnTopologyPeerId>)
 - `SpawnManyFailureClassified`(observation: MobSpawnManyFailureObservationKind, cause: MobSpawnManyFailureCauseKind)
 - `MemberWaitClassified`(agent_identity: AgentIdentity, result: MemberWaitClassificationKind)
+- `FlowDelegationEdgeAdmissionResolved`(from_role: String, to_role: String, admission: MobFlowDelegationEdgeAdmissionKind)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `SessionProvisionOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
@@ -647,6 +649,102 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `runtime_material_missing`
 - Emits: `MemberWaitClassified`
+- To: `Destroyed`
+
+### `ResolveFlowDelegationEdgeAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Running`
+
+### `ResolveFlowDelegationEdgeAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveFlowDelegationEdgeAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Completed`
+
+### `ResolveFlowDelegationEdgeAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_allows_edge`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedStrictRunning`
+- From: `Running`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_strict_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Running`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedStrictStopped`
+- From: `Stopped`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_strict_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedStrictCompleted`
+- From: `Completed`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_strict_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Completed`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedStrictDestroyed`
+- From: `Destroyed`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_strict_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryRunning`
+- From: `Running`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_advisory_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Running`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryStopped`
+- From: `Stopped`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_advisory_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryCompleted`
+- From: `Completed`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_advisory_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
+- To: `Completed`
+
+### `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed`
+- From: `Destroyed`
+- On: `ResolveFlowDelegationEdgeAdmission`(from_role, to_role, rule_verdict, mode)
+- Guards:
+  - `rule_denies_edge_advisory_mode`
+- Emits: `FlowDelegationEdgeAdmissionResolved`
 - To: `Destroyed`
 
 ### `ClassifySpawnManyFailureProfileNotFoundRunning`

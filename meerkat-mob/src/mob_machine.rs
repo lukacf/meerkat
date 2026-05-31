@@ -307,6 +307,7 @@ pub enum MobMachineCatalogInput {
     AuthorizeSpawnProfile,
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
+    ResolveFlowDelegationEdgeAdmission,
     EnsureMember,
     Reconcile,
     Retire,
@@ -403,6 +404,7 @@ impl MobMachineCatalogInput {
         Self::AuthorizeSpawnProfile,
         Self::ClassifySpawnManyFailure,
         Self::ClassifyMemberWait,
+        Self::ResolveFlowDelegationEdgeAdmission,
         Self::EnsureMember,
         Self::Reconcile,
         Self::Retire,
@@ -506,6 +508,9 @@ impl MobMachineCatalogInput {
             Self::AuthorizeSpawnProfile => MobMachineInputVariant::AuthorizeSpawnProfile,
             Self::ClassifySpawnManyFailure => MobMachineInputVariant::ClassifySpawnManyFailure,
             Self::ClassifyMemberWait => MobMachineInputVariant::ClassifyMemberWait,
+            Self::ResolveFlowDelegationEdgeAdmission => {
+                MobMachineInputVariant::ResolveFlowDelegationEdgeAdmission
+            }
             Self::EnsureMember => MobMachineInputVariant::EnsureMember,
             Self::Reconcile => MobMachineInputVariant::Reconcile,
             Self::Retire => MobMachineInputVariant::Retire,
@@ -662,6 +667,7 @@ impl MobMachineCatalogInput {
             Self::AuthorizeSpawnProfile => "AuthorizeSpawnProfile",
             Self::ClassifySpawnManyFailure => "ClassifySpawnManyFailure",
             Self::ClassifyMemberWait => "ClassifyMemberWait",
+            Self::ResolveFlowDelegationEdgeAdmission => "ResolveFlowDelegationEdgeAdmission",
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
             Self::Retire => "Retire",
@@ -945,6 +951,15 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ClassifySpawnManyFailure,
         reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Flow topology edge admission is decided by MobMachine from the
+        // shell's pure rule-match witness; the flow engine drives this input
+        // during step execution, so it is a runtime-internal flow-projection
+        // authority input (like the loop until-condition feedback inputs),
+        // not a surface command.
+        input: MobMachineCatalogInput::ResolveFlowDelegationEdgeAdmission,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeSpawnProfile,

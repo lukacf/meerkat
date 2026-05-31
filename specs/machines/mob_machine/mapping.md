@@ -103,6 +103,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyMemberWaitMissingRuntimeMaterialDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ResolveFlowDelegationEdgeAdmissionAllowedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionAllowedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionAllowedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionAllowedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedStrictRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedStrictStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedStrictCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedStrictDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
@@ -1656,6 +1692,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MemberWaitClassified`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `FlowDelegationEdgeAdmissionResolved`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

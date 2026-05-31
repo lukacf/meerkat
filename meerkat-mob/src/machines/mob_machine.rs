@@ -677,6 +677,34 @@ pub enum MobSpawnMemberAdmissionKind {
     Allowed,
 }
 
+/// Pure wire-projection bridge rejection cause, mirroring every variant of the
+/// wire `BridgeRejectionCause`. The mob bridge consumer maps the typed wire
+/// cause onto this and feeds it to MobMachine for recovery classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobBridgeRejectionCause {
+    #[default]
+    NotBound,
+    StaleSupervisor,
+    SenderMismatch,
+    AlreadyBound,
+    InvalidBootstrapToken,
+    UnsupportedProtocolVersion,
+    InvalidSupervisorSpec,
+    InvalidPeerSpec,
+    AddressMismatch,
+    Unsupported,
+    Internal,
+}
+
+/// Machine-owned bridge-rejection recovery verdict. The mob shell mirrors this:
+/// `RebindRecover` re-runs `BindMember`, `FatalBubbleUp` bubbles the rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobBridgeRejectionRecovery {
+    #[default]
+    FatalBubbleUp,
+    RebindRecover,
+}
+
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SubmitWorkRejectReasonKind {
@@ -1852,6 +1880,63 @@ mod tests {
                 Some(expected),
                 "for manage={manage} profile={profile} privileged={privileged}"
             );
+        }
+    }
+
+    /// Ratchets the recoverable/fatal partition of bridge rejection causes,
+    /// now sourced from MobMachine instead of the deleted
+    /// `BridgeRejectionCause::class()` shell reducer. Every one of the eleven
+    /// wire causes must resolve to exactly one recovery verdict, and the
+    /// partition must match the historical class() mapping exactly.
+    #[test]
+    fn bridge_rejection_recovery_is_decided_by_machine() {
+        use MobBridgeRejectionCause as Cause;
+        use MobBridgeRejectionRecovery as Recovery;
+        let recoverable = [
+            Cause::NotBound,
+            Cause::StaleSupervisor,
+            Cause::SenderMismatch,
+        ];
+        let fatal = [
+            Cause::AlreadyBound,
+            Cause::InvalidBootstrapToken,
+            Cause::UnsupportedProtocolVersion,
+            Cause::InvalidSupervisorSpec,
+            Cause::InvalidPeerSpec,
+            Cause::AddressMismatch,
+            Cause::Unsupported,
+            Cause::Internal,
+        ];
+        // Defensive completeness: the recoverable + fatal sets must cover all
+        // eleven causes with no overlap, so a forgotten future variant fails to
+        // enumerate here.
+        assert_eq!(
+            recoverable.len() + fatal.len(),
+            11,
+            "every MobBridgeRejectionCause variant must be partitioned"
+        );
+        for (causes, expected) in [
+            (recoverable.as_slice(), Recovery::RebindRecover),
+            (fatal.as_slice(), Recovery::FatalBubbleUp),
+        ] {
+            for cause in causes {
+                let mut authority = MobMachineAuthority::new();
+                let transition = MobMachineMutator::apply(
+                    &mut authority,
+                    MobMachineInput::ClassifyBridgeRejectionRecovery {
+                        rejection_cause: *cause,
+                    },
+                )
+                .expect("bridge rejection cause should resolve a recovery verdict");
+                let verdict = transition.effects().iter().find_map(|effect| match effect {
+                    MobMachineEffect::BridgeRejectionRecoveryClassified {
+                        rejection_cause,
+                        recovery,
+                    } => Some((*rejection_cause, *recovery)),
+                    _ => None,
+                });
+                assert_eq!(verdict, Some((*cause, expected)), "for {cause:?}");
+            }
         }
     }
 

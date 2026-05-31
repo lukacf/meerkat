@@ -405,45 +405,12 @@ pub enum BridgeRejectionCause {
     Internal,
 }
 
-/// Recoverability class of a bridge rejection.
-///
-/// The class is a protocol-level property of each [`BridgeRejectionCause`]
-/// variant — not a decision for downstream helpers to make by pattern
-/// matching on a hardcoded cause set. Callers branch on the class to
-/// decide whether recovery by re-running `BindMember` is appropriate.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum BridgeRejectionClass {
-    /// Member is reachable and protocol-compliant, but its supervisor
-    /// authority is missing or out-of-sync with the caller's. A fresh
-    /// `BindMember` will reconcile.
-    RecoverableBySupervisorRebind,
-    /// The rejection reflects a hard contract violation (protocol
-    /// version, identity, bootstrap proof, invariant) that a fresh bind
-    /// cannot fix. The rejection must bubble up.
-    Fatal,
-}
-
-impl BridgeRejectionCause {
-    /// Protocol-level recoverability class for this rejection cause.
-    pub const fn class(self) -> BridgeRejectionClass {
-        match self {
-            Self::NotBound | Self::StaleSupervisor | Self::SenderMismatch => {
-                BridgeRejectionClass::RecoverableBySupervisorRebind
-            }
-            Self::AlreadyBound
-            | Self::InvalidBootstrapToken
-            | Self::UnsupportedProtocolVersion
-            | Self::InvalidSupervisorSpec
-            | Self::InvalidPeerSpec
-            | Self::AddressMismatch
-            | Self::Unsupported
-            | Self::Internal => BridgeRejectionClass::Fatal,
-        }
-    }
-}
+// The recoverable-vs-fatal recovery verdict for a `BridgeRejectionCause` is a
+// MobMachine-owned semantic fact (mob supervisor-authority recovery lifecycle),
+// decided inside the canonical MobMachine via the
+// `ClassifyBridgeRejectionRecovery` input and mirrored by the mob shell. The
+// wire reply carries only the raw cause; no protocol-level recoverability class
+// is reduced here.
 
 // ---------------------------------------------------------------------------
 // Member runtime state (wire projection)
@@ -1611,9 +1578,10 @@ mod tests {
     // 6. BridgeRejectionCause — snake_case round-trip for every variant.
     // -----------------------------------------------------------------------
     //
-    // Mob-side fallback logic (see `should_fall_back_to_bind`) branches on
-    // typed causes. Any accidental rename or new variant that skipped the
-    // snake_case convention would silently change fallback behavior, so pin
+    // The mob side maps these typed causes onto the MobMachine
+    // `ClassifyBridgeRejectionRecovery` input, which owns the recoverable-vs-
+    // fatal recovery verdict. Any accidental rename or new variant that skipped
+    // the snake_case convention would silently change recovery behavior, so pin
     // the full matrix.
 
     #[test]

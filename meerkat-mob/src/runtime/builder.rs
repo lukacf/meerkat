@@ -323,6 +323,78 @@ fn apply_seeded_mob_input_collect_transition(
     Ok(transition)
 }
 
+/// Map a typed wire bridge rejection cause onto the MobMachine observation
+/// enum. The wire cause is `#[non_exhaustive]`; any future variant the mob does
+/// not yet understand maps to `Internal`, which MobMachine classifies as
+/// `FatalBubbleUp` — failing closed (no recovery) on an unrecognized cause.
+fn seeded_mob_bridge_rejection_cause(
+    cause: super::bridge_protocol::BridgeRejectionCause,
+) -> crate::machines::mob_machine::MobBridgeRejectionCause {
+    use super::bridge_protocol::BridgeRejectionCause as Wire;
+    use crate::machines::mob_machine::MobBridgeRejectionCause as Mob;
+    match cause {
+        Wire::NotBound => Mob::NotBound,
+        Wire::StaleSupervisor => Mob::StaleSupervisor,
+        Wire::SenderMismatch => Mob::SenderMismatch,
+        Wire::AlreadyBound => Mob::AlreadyBound,
+        Wire::InvalidBootstrapToken => Mob::InvalidBootstrapToken,
+        Wire::UnsupportedProtocolVersion => Mob::UnsupportedProtocolVersion,
+        Wire::InvalidSupervisorSpec => Mob::InvalidSupervisorSpec,
+        Wire::InvalidPeerSpec => Mob::InvalidPeerSpec,
+        Wire::AddressMismatch => Mob::AddressMismatch,
+        Wire::Unsupported => Mob::Unsupported,
+        Wire::Internal => Mob::Internal,
+        _ => Mob::Internal,
+    }
+}
+
+/// Mirror MobMachine's bridge-rejection recovery verdict for a typed wire
+/// rejection cause, using the resume builder's seeded `dsl_authority`.
+///
+/// The resume builder owns the MobMachine authority during reconciliation. When
+/// `reconcile_peer_only_trust` returns a rejection observation, the builder —
+/// not the provisioner — classifies the carried cause here. Returns `true` only
+/// for `RebindRecover`; fails closed (returns an error) if the machine emits no
+/// verdict.
+fn classify_seeded_bridge_rejection_recovery(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    cause: super::bridge_protocol::BridgeRejectionCause,
+    context: &'static str,
+) -> Result<bool, MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let rejection_cause = seeded_mob_bridge_rejection_cause(cause);
+    let transition = apply_seeded_mob_input_collect_transition(
+        authority,
+        mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { rejection_cause },
+        context,
+    )?;
+    let (effect_cause, recovery) = transition
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::BridgeRejectionRecoveryClassified {
+                rejection_cause,
+                recovery,
+            } => Some((*rejection_cause, *recovery)),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            MobError::Internal(
+                "MobMachine accepted bridge rejection cause but emitted no recovery verdict".into(),
+            )
+        })?;
+    if effect_cause != rejection_cause {
+        return Err(MobError::Internal(format!(
+            "MobMachine bridge-rejection recovery drift: input={rejection_cause:?}, effect={effect_cause:?}"
+        )));
+    }
+    Ok(matches!(
+        recovery,
+        mob_dsl::MobBridgeRejectionRecovery::RebindRecover
+    ))
+}
+
 fn seeded_mob_topology_freshness_authority<P>(
     authority: &crate::machines::mob_machine::MobMachineAuthority,
     topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
@@ -2930,6 +3002,23 @@ impl MobBuilder {
                 .reconcile_peer_only_trust(&entry.member_ref, None, None)
                 .await?;
             if let Some(rebind_observation) = report.rebind_required {
+                // The provisioner surfaced the raw rejection cause without
+                // classifying it. MobMachine — via the seeded `dsl_authority` we
+                // own here — decides whether the cause is recoverable by rebind.
+                let should_rebind = classify_seeded_bridge_rejection_recovery(
+                    dsl_authority,
+                    rebind_observation.rejection_cause,
+                    "resume_peer_only_rebind_classify_recovery",
+                )?;
+                if !should_rebind {
+                    return Err(MobError::BridgeCommandRejected {
+                        cause: rebind_observation.rejection_cause,
+                        reason: format!(
+                            "resume peer-only supervisor authorization for '{}' was rejected with a fatal cause",
+                            entry.agent_identity
+                        ),
+                    });
+                }
                 let (updated_member_ref, rebind_authority) =
                     apply_resume_peer_only_rebind_authority(
                         dsl_authority,
@@ -3080,11 +3169,19 @@ impl MobBuilder {
                 let report = provisioner
                     .reconcile_peer_only_trust(&entry.member_ref, Some(&desired_peer_trust), None)
                     .await?;
-                if report.rebind_required.is_some() {
-                    return Err(MobError::WiringError(format!(
-                        "resume peer-only trust for '{}' required rebind after MobMachine rebind prepass",
-                        entry.agent_identity
-                    )));
+                if let Some(rebind_observation) = report.rebind_required {
+                    // The rebind prepass already reconciled supervisor authority
+                    // for this member, so a rejection here is bubbled up with
+                    // its raw cause; the recoverable-vs-fatal verdict is
+                    // MobMachine-owned and not re-derived in this trust-overlay
+                    // reconcile path.
+                    return Err(MobError::BridgeCommandRejected {
+                        cause: rebind_observation.rejection_cause,
+                        reason: format!(
+                            "resume peer-only trust reconcile for '{}' was rejected after MobMachine rebind prepass",
+                            entry.agent_identity
+                        ),
+                    });
                 }
                 continue;
             };

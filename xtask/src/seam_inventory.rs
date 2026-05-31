@@ -1224,6 +1224,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "BridgeRejectionRecoveryClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Bridge-rejection recovery (RebindRecover/FatalBubbleUp) is decided by MobMachine from the raw wire rejection cause; the mob shell mirrors it (RebindRecover -> re-run BindMember; FatalBubbleUp -> bubble up) instead of reducing the cause into a recoverable-vs-fatal conclusion itself",
+        ),
+        (
+            "MobMachine",
             "AuthorizeAgentEventSubscription",
             SeamClassification::SurfaceResultAlignment,
             "Agent event subscription authorization result must align with generated MobMachine target/session truth",

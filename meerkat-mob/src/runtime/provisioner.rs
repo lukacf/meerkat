@@ -61,6 +61,11 @@ const DEFERRED_TURN_EVENT_CHANNEL_CAPACITY: usize = 1024;
 pub(crate) struct PeerOnlyRebindObservation {
     pub observed_peer: TrustedPeerDescriptor,
     pub bootstrap_token: super::bridge_protocol::BridgeBootstrapToken,
+    /// The raw typed wire rejection cause carried up to the machine-owning
+    /// caller. The provisioner does NOT reduce this into a recoverable-vs-fatal
+    /// conclusion — that semantic verdict is owned by MobMachine and decided by
+    /// the caller (resume builder) via `classify_bridge_rejection_recovery`.
+    pub rejection_cause: super::bridge_protocol::BridgeRejectionCause,
 }
 
 #[derive(Debug, Clone)]
@@ -2789,8 +2794,14 @@ impl MultiBackendProvisioner {
             .send_bridge_command(peer, &command, Duration::from_secs(30))
             .await?;
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
+            // The provisioner does NOT own the recoverable-vs-fatal verdict for
+            // a rejection cause — that is a MobMachine-owned fact. When a
+            // binding is present we hoist the raw typed cause up to the
+            // machine-owning caller (resume builder) instead of self-classifying.
+            // When `rebind_authority` is already present, the caller has classified
+            // the cause as recoverable and minted the rebind authority, so we
+            // proceed with the inline bind path.
             if let Some(cause) = rejection.typed_cause()
-                && super::bridge_fallback::should_fall_back_to_bind(cause)
                 && let Some((peer_id, address, bootstrap_token, pubkey)) = binding
             {
                 let effective_bootstrap_token =
@@ -2804,6 +2815,7 @@ impl MultiBackendProvisioner {
                         rebind_required: Some(PeerOnlyRebindObservation {
                             observed_peer: expected_peer,
                             bootstrap_token: effective_bootstrap_token,
+                            rejection_cause: cause,
                         }),
                     });
                 };
@@ -3102,11 +3114,15 @@ impl MobProvisioner for MultiBackendProvisioner {
                         None,
                     )
                     .await?;
-                if authorization.rebind_required.is_some() {
-                    return Err(MobError::WiringError(
-                        "peer-only retire rebound requires MobMachine member peer authority"
-                            .to_string(),
-                    ));
+                if let Some(observation) = authorization.rebind_required {
+                    // No MobMachine authority is reachable on the retire path,
+                    // so any rejection is bubbled up uniformly. The recoverable-
+                    // vs-fatal verdict is MobMachine-owned and not re-derived
+                    // here; the raw rejection cause is surfaced as-is.
+                    return Err(MobError::BridgeCommandRejected {
+                        cause: observation.rejection_cause,
+                        reason: "peer-only retire was rejected by the remote member".to_string(),
+                    });
                 }
                 let peer = authorization.peer;
                 let payload = self.bridge_supervisor_payload().await?;
@@ -3148,11 +3164,14 @@ impl MobProvisioner for MultiBackendProvisioner {
                         None,
                     )
                     .await?;
-                if authorization.rebind_required.is_some() {
-                    return Err(MobError::WiringError(
-                        "peer-only interrupt rebound requires MobMachine member peer authority"
-                            .to_string(),
-                    ));
+                if let Some(observation) = authorization.rebind_required {
+                    // No MobMachine authority is reachable on the interrupt
+                    // path, so any rejection is bubbled up uniformly without
+                    // re-deriving the MobMachine-owned recovery verdict.
+                    return Err(MobError::BridgeCommandRejected {
+                        cause: observation.rejection_cause,
+                        reason: "peer-only interrupt was rejected by the remote member".to_string(),
+                    });
                 }
                 let peer = authorization.peer;
                 let payload = self.bridge_supervisor_payload().await?;
@@ -3218,11 +3237,16 @@ impl MobProvisioner for MultiBackendProvisioner {
                         None,
                     )
                     .await?;
-                if authorization.rebind_required.is_some() {
-                    return Err(MobError::WiringError(
-                        "peer-only turn rebound requires MobMachine member peer authority"
+                if let Some(observation) = authorization.rebind_required {
+                    // start_turn runs in a detached task with no MobMachine
+                    // authority reachable, so any rejection is bubbled up
+                    // uniformly without re-deriving the MobMachine-owned
+                    // recovery verdict.
+                    return Err(MobError::BridgeCommandRejected {
+                        cause: observation.rejection_cause,
+                        reason: "peer-only turn delivery was rejected by the remote member"
                             .to_string(),
-                    ));
+                    });
                 }
                 let peer = authorization.peer;
                 let authority = self.supervisor_bridge.authority().await;

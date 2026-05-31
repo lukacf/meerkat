@@ -165,6 +165,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
 - `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_present: Bool, privileged_args_present: Bool)
+- `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
@@ -340,6 +341,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FlowDelegationEdgeAdmissionResolved`(from_role: String, to_role: String, admission: MobFlowDelegationEdgeAdmissionKind)
 - `RemoteMemberRuntimeTerminalityClassified`(observed_state: MobRemoteMemberRuntimeObservedState, terminality: MobRemoteMemberRuntimeTerminality)
 - `SpawnMemberAdmissionResolved`(admission: MobSpawnMemberAdmissionKind)
+- `BridgeRejectionRecoveryClassified`(rejection_cause: MobBridgeRejectionCause, recovery: MobBridgeRejectionRecovery)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `SessionProvisionOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
@@ -941,6 +943,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ClassifyBridgeRejectionRecoveryRebindRunning`
+- From: `Running`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_recoverable_by_rebind`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Running`
+
+### `ClassifyBridgeRejectionRecoveryRebindStopped`
+- From: `Stopped`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_recoverable_by_rebind`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Stopped`
+
+### `ClassifyBridgeRejectionRecoveryRebindCompleted`
+- From: `Completed`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_recoverable_by_rebind`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Completed`
+
+### `ClassifyBridgeRejectionRecoveryRebindDestroyed`
+- From: `Destroyed`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_recoverable_by_rebind`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Destroyed`
+
+### `ClassifyBridgeRejectionRecoveryFatalRunning`
+- From: `Running`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_fatal`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Running`
+
+### `ClassifyBridgeRejectionRecoveryFatalStopped`
+- From: `Stopped`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_fatal`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Stopped`
+
+### `ClassifyBridgeRejectionRecoveryFatalCompleted`
+- From: `Completed`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_fatal`
+- Emits: `BridgeRejectionRecoveryClassified`
+- To: `Completed`
+
+### `ClassifyBridgeRejectionRecoveryFatalDestroyed`
+- From: `Destroyed`
+- On: `ClassifyBridgeRejectionRecovery`(rejection_cause)
+- Guards:
+  - `rejection_fatal`
+- Emits: `BridgeRejectionRecoveryClassified`
 - To: `Destroyed`
 
 ### `ClassifySpawnManyFailureProfileNotFoundRunning`

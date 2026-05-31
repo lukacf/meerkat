@@ -477,6 +477,16 @@ macro_rules! mob_catalog_machine_dsl {
             // shell — composes these into the Allow/Deny admission verdict, which
             // the shell mirrors (Deny -> access_denied).
             ResolveSpawnMemberAdmission { manage_scope_present: bool, profile_scope_present: bool, privileged_args_present: bool },
+            // Bridge-rejection recovery classification. When a mob sends a
+            // bridge command that requires an already-bound supervisor (e.g.
+            // `AuthorizeSupervisor`) and the member replies with a typed
+            // rejection cause (a pure wire projection), MobMachine — not a
+            // handwritten shell helper — owns whether that cause is recoverable
+            // by re-running `BindMember` (`RebindRecover`) or must bubble up as
+            // fatal (`FatalBubbleUp`). The machine-owning caller (actor /
+            // resume builder) mirrors the emitted recovery verdict to gate the
+            // real rebind control flow.
+            ClassifyBridgeRejectionRecovery { rejection_cause: Enum<MobBridgeRejectionCause> },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
@@ -715,6 +725,11 @@ macro_rules! mob_catalog_machine_dsl {
             // The tool shell mirrors this (Denied -> access_denied; Allowed ->
             // proceed) instead of composing+enforcing the admission itself.
             SpawnMemberAdmissionResolved { admission: Enum<MobSpawnMemberAdmissionKind> },
+            // Machine-owned bridge-rejection recovery verdict. The mob shell
+            // mirrors this (RebindRecover -> re-run BindMember; FatalBubbleUp ->
+            // bubble the rejection up) instead of reducing the raw wire cause
+            // into a recoverable-vs-fatal conclusion itself.
+            BridgeRejectionRecoveryClassified { rejection_cause: Enum<MobBridgeRejectionCause>, recovery: Enum<MobBridgeRejectionRecovery> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -854,6 +869,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition FlowDelegationEdgeAdmissionResolved => local,
         disposition RemoteMemberRuntimeTerminalityClassified => local,
         disposition SpawnMemberAdmissionResolved => local,
+        disposition BridgeRejectionRecoveryClassified => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition SessionProvisionOperationOwnerAuthorized => local,
@@ -1388,6 +1404,48 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit SpawnMemberAdmissionResolved { admission: MobSpawnMemberAdmissionKind::Denied }
+        }
+
+        // --- Bridge-rejection recovery classification ---
+        //
+        // The mob bridge consumer receives a typed wire rejection cause when an
+        // `AuthorizeSupervisor` command is rejected. The cause is a pure wire
+        // projection; MobMachine owns whether it is recoverable by re-running
+        // `BindMember`. Pure classification across all lifecycle phases, like
+        // ClassifyRemoteMemberRuntimeObservation. NotBound / StaleSupervisor /
+        // SenderMismatch indicate the member is reachable but its supervisor
+        // authority is out of sync — a fresh bind reconciles. Every other cause
+        // is a hard contract violation that a rebind cannot fix.
+
+        transition ClassifyBridgeRejectionRecoveryRebind {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyBridgeRejectionRecovery { rejection_cause }
+            guard "rejection_recoverable_by_rebind" {
+                rejection_cause == MobBridgeRejectionCause::NotBound
+                || rejection_cause == MobBridgeRejectionCause::StaleSupervisor
+                || rejection_cause == MobBridgeRejectionCause::SenderMismatch
+            }
+            update {}
+            to Running
+            emit BridgeRejectionRecoveryClassified { rejection_cause: rejection_cause, recovery: MobBridgeRejectionRecovery::RebindRecover }
+        }
+
+        transition ClassifyBridgeRejectionRecoveryFatal {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyBridgeRejectionRecovery { rejection_cause }
+            guard "rejection_fatal" {
+                rejection_cause == MobBridgeRejectionCause::AlreadyBound
+                || rejection_cause == MobBridgeRejectionCause::InvalidBootstrapToken
+                || rejection_cause == MobBridgeRejectionCause::UnsupportedProtocolVersion
+                || rejection_cause == MobBridgeRejectionCause::InvalidSupervisorSpec
+                || rejection_cause == MobBridgeRejectionCause::InvalidPeerSpec
+                || rejection_cause == MobBridgeRejectionCause::AddressMismatch
+                || rejection_cause == MobBridgeRejectionCause::Unsupported
+                || rejection_cause == MobBridgeRejectionCause::Internal
+            }
+            update {}
+            to Running
+            emit BridgeRejectionRecoveryClassified { rejection_cause: rejection_cause, recovery: MobBridgeRejectionRecovery::FatalBubbleUp }
         }
 
         transition ClassifySpawnManyFailureProfileNotFound {
@@ -8304,6 +8362,34 @@ pub enum MobSpawnMemberAdmissionKind {
     #[default]
     Denied,
     Allowed,
+}
+
+/// Pure wire-projection bridge rejection cause, mirroring every variant of the
+/// wire `BridgeRejectionCause`. The mob bridge consumer maps the typed wire
+/// cause onto this and feeds it to MobMachine for recovery classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobBridgeRejectionCause {
+    #[default]
+    NotBound,
+    StaleSupervisor,
+    SenderMismatch,
+    AlreadyBound,
+    InvalidBootstrapToken,
+    UnsupportedProtocolVersion,
+    InvalidSupervisorSpec,
+    InvalidPeerSpec,
+    AddressMismatch,
+    Unsupported,
+    Internal,
+}
+
+/// Machine-owned bridge-rejection recovery verdict. The mob shell mirrors this:
+/// `RebindRecover` re-runs `BindMember`, `FatalBubbleUp` bubbles the rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobBridgeRejectionRecovery {
+    #[default]
+    FatalBubbleUp,
+    RebindRecover,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

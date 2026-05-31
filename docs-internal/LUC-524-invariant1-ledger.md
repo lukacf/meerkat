@@ -207,3 +207,41 @@ cause up; classify via MobMachine where &mut authority lives), and on the no-reb
 trait paths drop the cosmetic class branch (return the rejection error uniformly, since
 recovery is structurally impossible there). That removes class()/should_fall_back_to_bind
 without a transport-layer machine handle. To be designed + folded before final review.
+
+### Site 3 (bridge-rejection recovery class) — FOLDED (hoist resolution)
+Resolved the layering obstacle by HOISTING the classification out of the transport-layer
+provisioner up to the machine-owning callers (not threading a machine into the provisioner).
+- MobMachine DSL: ClassifyBridgeRejectionRecovery { rejection_cause: MobBridgeRejectionCause }
+  emitting BridgeRejectionRecoveryClassified { rejection_cause, recovery: MobBridgeRejectionRecovery
+  (RebindRecover|FatalBubbleUp) }. Mapping matches the deleted class() exactly
+  (NotBound|StaleSupervisor|SenderMismatch -> RebindRecover; other 8 -> FatalBubbleUp).
+  Closed-world registered (CatalogInput + ALL + input_variant + name + classification record +
+  run.rs macro/match + machines mirror enums + seam_inventory). Kernel regenerated.
+- Seams (mirror + fail-closed + drift-check): actor.rs classify_bridge_rejection_recovery
+  (used at the actor's ensure_supervisor_authorized + handle_rotate_supervisor); builder.rs
+  classify_seeded_bridge_rejection_recovery (resume two-call dance, uses dsl_authority).
+- Provisioner: ensure_supervisor_authorized no longer calls class()/should_fall_back_to_bind;
+  on a rejection with binding present it hoists the raw typed cause UP to the machine-owning
+  caller; inline rebind path retained for the already-classified (rebind_authority present) case.
+- Trait paths (retire/interrupt/start_turn, no machine, no rebind authority): bubble up the raw
+  rejection cause uniformly; the bespoke "requires MobMachine member peer authority" WiringError
+  (itself a shell recoverability claim) removed per the no-shell-semantic-conclusion rule.
+- DELETED: bridge_fallback.rs (whole file) + mod decl; BridgeRejectionCause::class() +
+  BridgeRejectionClass enum in meerkat-contracts (schema-neutral: absent from emitted schemas,
+  version parity clean, 0 schema/SDK churn). 3 fallback ratchet tests folded into a machine-backed
+  bridge_rejection_recovery_is_decided_by_machine test (11-variant partition).
+
+### EARLIER-BATCH PARITY GAP — found + fixed (verification-gap correction)
+While verifying Site 3 I discovered meerkat-machine-codegen::runtime_alphabet_parity was FAILING
+(2 tests): MeerkatMachine inputs ClassifyTurnTerminalCauseClass + ResolveTurnSurfaceResult (added
+to the DSL in the earlier terminal-surface de-theming batch) were generated input variants but
+classified as NEITHER surface command NOR runtime-internal. ROOT CAUSE: I had never run the
+`meerkat-machine-codegen` test crate in any prior batch (my gate set ran -p meerkat-mob/-schedule/
+-machine-schema but not -machine-codegen), so this gap rode silently through ecbc0a5eb, b51107b57,
+33b9bdb4d. FIX: declared both as runtime-internal in BOTH hand-lists that the parity test asserts
+equal — MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS (meerkat-machine-schema dsl/mod.rs) and the
+meerkat_machine_runtime_internal_inputs! RunExecutionLifecycle region (meerkat-runtime
+meerkat_machine_types.rs). These ARE surface-result classification authorities (the agent loop
+reports typed terminal (outcome,cause) facts; the machine owns the projection to the public
+surface-result class), so runtime-internal is correct. Result: codegen parity 94/94 (was 92/2).
+GATE-SET CORRECTION: meerkat-machine-codegen nextest is now part of final verification.

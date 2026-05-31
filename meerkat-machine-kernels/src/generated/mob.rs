@@ -1458,6 +1458,144 @@ impl std::fmt::Display for MemberWaitClassificationKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobBridgeRejectionCause {
+    #[default]
+    #[serde(rename = "NotBound")]
+    NotBound,
+    #[serde(rename = "StaleSupervisor")]
+    StaleSupervisor,
+    #[serde(rename = "SenderMismatch")]
+    SenderMismatch,
+    #[serde(rename = "AlreadyBound")]
+    AlreadyBound,
+    #[serde(rename = "InvalidBootstrapToken")]
+    InvalidBootstrapToken,
+    #[serde(rename = "UnsupportedProtocolVersion")]
+    UnsupportedProtocolVersion,
+    #[serde(rename = "InvalidSupervisorSpec")]
+    InvalidSupervisorSpec,
+    #[serde(rename = "InvalidPeerSpec")]
+    InvalidPeerSpec,
+    #[serde(rename = "AddressMismatch")]
+    AddressMismatch,
+    #[serde(rename = "Unsupported")]
+    Unsupported,
+    #[serde(rename = "Internal")]
+    Internal,
+}
+impl MobBridgeRejectionCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotBound => "NotBound",
+            Self::StaleSupervisor => "StaleSupervisor",
+            Self::SenderMismatch => "SenderMismatch",
+            Self::AlreadyBound => "AlreadyBound",
+            Self::InvalidBootstrapToken => "InvalidBootstrapToken",
+            Self::UnsupportedProtocolVersion => "UnsupportedProtocolVersion",
+            Self::InvalidSupervisorSpec => "InvalidSupervisorSpec",
+            Self::InvalidPeerSpec => "InvalidPeerSpec",
+            Self::AddressMismatch => "AddressMismatch",
+            Self::Unsupported => "Unsupported",
+            Self::Internal => "Internal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobBridgeRejectionCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotBound" => Ok(Self::NotBound),
+            "StaleSupervisor" => Ok(Self::StaleSupervisor),
+            "SenderMismatch" => Ok(Self::SenderMismatch),
+            "AlreadyBound" => Ok(Self::AlreadyBound),
+            "InvalidBootstrapToken" => Ok(Self::InvalidBootstrapToken),
+            "UnsupportedProtocolVersion" => Ok(Self::UnsupportedProtocolVersion),
+            "InvalidSupervisorSpec" => Ok(Self::InvalidSupervisorSpec),
+            "InvalidPeerSpec" => Ok(Self::InvalidPeerSpec),
+            "AddressMismatch" => Ok(Self::AddressMismatch),
+            "Unsupported" => Ok(Self::Unsupported),
+            "Internal" => Ok(Self::Internal),
+            other => Err(format!("invalid MobBridgeRejectionCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobBridgeRejectionCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobBridgeRejectionCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobBridgeRejectionRecovery {
+    #[default]
+    #[serde(rename = "FatalBubbleUp")]
+    FatalBubbleUp,
+    #[serde(rename = "RebindRecover")]
+    RebindRecover,
+}
+impl MobBridgeRejectionRecovery {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FatalBubbleUp => "FatalBubbleUp",
+            Self::RebindRecover => "RebindRecover",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobBridgeRejectionRecovery {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FatalBubbleUp" => Ok(Self::FatalBubbleUp),
+            "RebindRecover" => Ok(Self::RebindRecover),
+            other => Err(format!(
+                "invalid MobBridgeRejectionRecovery value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobBridgeRejectionRecovery {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobBridgeRejectionRecovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobCoordinationEventKind {
     #[default]
     #[serde(rename = "WorkIntentRecorded")]
@@ -3565,6 +3703,10 @@ pub mod inputs {
         pub privileged_args_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyBridgeRejectionRecovery {
+        pub rejection_cause: MobBridgeRejectionCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -3960,6 +4102,7 @@ pub enum Input {
     ResolveFlowDelegationEdgeAdmission(inputs::ResolveFlowDelegationEdgeAdmission),
     ClassifyRemoteMemberRuntimeObservation(inputs::ClassifyRemoteMemberRuntimeObservation),
     ResolveSpawnMemberAdmission(inputs::ResolveSpawnMemberAdmission),
+    ClassifyBridgeRejectionRecovery(inputs::ClassifyBridgeRejectionRecovery),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -4071,6 +4214,7 @@ impl Input {
                 InputKind::ClassifyRemoteMemberRuntimeObservation
             }
             Self::ResolveSpawnMemberAdmission(_) => InputKind::ResolveSpawnMemberAdmission,
+            Self::ClassifyBridgeRejectionRecovery(_) => InputKind::ClassifyBridgeRejectionRecovery,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -4195,6 +4339,7 @@ pub enum InputKind {
     ResolveFlowDelegationEdgeAdmission,
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
+    ClassifyBridgeRejectionRecovery,
     EnsureMember,
     Reconcile,
     Retire,
@@ -4834,6 +4979,11 @@ pub mod effects {
         pub admission: MobSpawnMemberAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BridgeRejectionRecoveryClassified {
+        pub rejection_cause: MobBridgeRejectionCause,
+        pub recovery: MobBridgeRejectionRecovery,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -5092,6 +5242,7 @@ pub enum Effect {
     FlowDelegationEdgeAdmissionResolved(effects::FlowDelegationEdgeAdmissionResolved),
     RemoteMemberRuntimeTerminalityClassified(effects::RemoteMemberRuntimeTerminalityClassified),
     SpawnMemberAdmissionResolved(effects::SpawnMemberAdmissionResolved),
+    BridgeRejectionRecoveryClassified(effects::BridgeRejectionRecoveryClassified),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     SessionProvisionOperationOwnerAuthorized(effects::SessionProvisionOperationOwnerAuthorized),
@@ -5169,6 +5320,7 @@ pub enum EffectKind {
     FlowDelegationEdgeAdmissionResolved,
     RemoteMemberRuntimeTerminalityClassified,
     SpawnMemberAdmissionResolved,
+    BridgeRejectionRecoveryClassified,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     SessionProvisionOperationOwnerAuthorized,
@@ -5269,6 +5421,14 @@ pub enum TransitionId {
     ResolveSpawnMemberAdmissionDeniedStopped,
     ResolveSpawnMemberAdmissionDeniedCompleted,
     ResolveSpawnMemberAdmissionDeniedDestroyed,
+    ClassifyBridgeRejectionRecoveryRebindRunning,
+    ClassifyBridgeRejectionRecoveryRebindStopped,
+    ClassifyBridgeRejectionRecoveryRebindCompleted,
+    ClassifyBridgeRejectionRecoveryRebindDestroyed,
+    ClassifyBridgeRejectionRecoveryFatalRunning,
+    ClassifyBridgeRejectionRecoveryFatalStopped,
+    ClassifyBridgeRejectionRecoveryFatalCompleted,
+    ClassifyBridgeRejectionRecoveryFatalDestroyed,
     ClassifySpawnManyFailureProfileNotFoundRunning,
     ClassifySpawnManyFailureProfileNotFoundStopped,
     ClassifySpawnManyFailureProfileNotFoundCompleted,

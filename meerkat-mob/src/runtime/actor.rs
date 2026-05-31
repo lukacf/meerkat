@@ -711,6 +711,33 @@ fn remote_member_runtime_observed_state(
     })
 }
 
+/// Map a typed wire bridge rejection cause onto the MobMachine observation
+/// enum. The wire cause is `#[non_exhaustive]`; any future variant the mob does
+/// not yet understand maps to `Internal`, which MobMachine classifies as
+/// `FatalBubbleUp` — failing closed (no recovery) on an unrecognized cause.
+fn mob_bridge_rejection_cause(
+    cause: super::bridge_protocol::BridgeRejectionCause,
+) -> mob_dsl::MobBridgeRejectionCause {
+    use super::bridge_protocol::BridgeRejectionCause as Wire;
+    use mob_dsl::MobBridgeRejectionCause as Mob;
+    match cause {
+        Wire::NotBound => Mob::NotBound,
+        Wire::StaleSupervisor => Mob::StaleSupervisor,
+        Wire::SenderMismatch => Mob::SenderMismatch,
+        Wire::AlreadyBound => Mob::AlreadyBound,
+        Wire::InvalidBootstrapToken => Mob::InvalidBootstrapToken,
+        Wire::UnsupportedProtocolVersion => Mob::UnsupportedProtocolVersion,
+        Wire::InvalidSupervisorSpec => Mob::InvalidSupervisorSpec,
+        Wire::InvalidPeerSpec => Mob::InvalidPeerSpec,
+        Wire::AddressMismatch => Mob::AddressMismatch,
+        Wire::Unsupported => Mob::Unsupported,
+        Wire::Internal => Mob::Internal,
+        // Fail closed: an unknown future wire cause is treated as a hard
+        // (fatal) rejection that no rebind can recover.
+        _ => Mob::Internal,
+    }
+}
+
 /// Render forked conversation messages as a text context block for the new member.
 fn render_fork_context(
     source_member_id: &MeerkatId,
@@ -2444,10 +2471,11 @@ impl MobActor {
             .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
             .await?;
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
-            if let Some(cause) = rejection.typed_cause()
-                && super::bridge_fallback::should_fall_back_to_bind(cause)
-                && let Some(binding) = binding
-            {
+            let should_rebind = match rejection.typed_cause() {
+                Some(cause) => self.classify_bridge_rejection_recovery(cause)?,
+                None => false,
+            };
+            if should_rebind && let Some(binding) = binding {
                 let authorized_bind = self
                     .bind_peer_only_member_for_binding(peer, binding)
                     .await?;
@@ -2815,6 +2843,51 @@ impl MobActor {
         Ok(matches!(
             terminality,
             mob_dsl::MobRemoteMemberRuntimeTerminality::Terminal
+        ))
+    }
+
+    /// Mirror MobMachine's bridge-rejection recovery verdict for a typed wire
+    /// rejection cause.
+    ///
+    /// When an `AuthorizeSupervisor` command is rejected, the bridge consumer
+    /// extracts the pure wire rejection cause; MobMachine — not this shell —
+    /// owns whether that cause is recoverable by re-running `BindMember`
+    /// (`RebindRecover`) or must bubble up as fatal (`FatalBubbleUp`). We feed
+    /// the mapped cause and mirror the emitted verdict, returning `true` only
+    /// for `RebindRecover`. Fails closed (returns an error) if the machine emits
+    /// no verdict.
+    fn classify_bridge_rejection_recovery(
+        &mut self,
+        cause: super::bridge_protocol::BridgeRejectionCause,
+    ) -> Result<bool, MobError> {
+        let rejection_cause = mob_bridge_rejection_cause(cause);
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { rejection_cause },
+            "classify_bridge_rejection_recovery",
+        )?;
+        let (effect_cause, recovery) = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::BridgeRejectionRecoveryClassified {
+                    rejection_cause,
+                    recovery,
+                } => Some((rejection_cause, recovery)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted bridge rejection cause but emitted no recovery verdict"
+                        .into(),
+                )
+            })?;
+        if effect_cause != rejection_cause {
+            return Err(MobError::Internal(format!(
+                "MobMachine bridge-rejection recovery drift: input={rejection_cause:?}, effect={effect_cause:?}"
+            )));
+        }
+        Ok(matches!(
+            recovery,
+            mob_dsl::MobBridgeRejectionRecovery::RebindRecover
         ))
     }
 
@@ -14701,9 +14774,11 @@ impl MobActor {
                         if let Some(rejection) =
                             Self::bridge_rejection_reply(next_payload.protocol_version, &value)
                         {
-                            if let Some(cause) = rejection.typed_cause()
-                                && super::bridge_fallback::should_fall_back_to_bind(cause)
-                            {
+                            let should_rebind = match rejection.typed_cause() {
+                                Some(cause) => self.classify_bridge_rejection_recovery(cause)?,
+                                None => false,
+                            };
+                            if should_rebind {
                                 let bind = self
                                     .bind_peer_only_member_for_binding_with_payload(
                                         &peer,

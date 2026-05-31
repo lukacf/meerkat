@@ -310,6 +310,7 @@ pub enum MobMachineCatalogInput {
     ResolveFlowDelegationEdgeAdmission,
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
+    ClassifyBridgeRejectionRecovery,
     EnsureMember,
     Reconcile,
     Retire,
@@ -409,6 +410,7 @@ impl MobMachineCatalogInput {
         Self::ResolveFlowDelegationEdgeAdmission,
         Self::ClassifyRemoteMemberRuntimeObservation,
         Self::ResolveSpawnMemberAdmission,
+        Self::ClassifyBridgeRejectionRecovery,
         Self::EnsureMember,
         Self::Reconcile,
         Self::Retire,
@@ -520,6 +522,9 @@ impl MobMachineCatalogInput {
             }
             Self::ResolveSpawnMemberAdmission => {
                 MobMachineInputVariant::ResolveSpawnMemberAdmission
+            }
+            Self::ClassifyBridgeRejectionRecovery => {
+                MobMachineInputVariant::ClassifyBridgeRejectionRecovery
             }
             Self::EnsureMember => MobMachineInputVariant::EnsureMember,
             Self::Reconcile => MobMachineInputVariant::Reconcile,
@@ -682,6 +687,7 @@ impl MobMachineCatalogInput {
                 "ClassifyRemoteMemberRuntimeObservation"
             }
             Self::ResolveSpawnMemberAdmission => "ResolveSpawnMemberAdmission",
+            Self::ClassifyBridgeRejectionRecovery => "ClassifyBridgeRejectionRecovery",
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
             Self::Retire => "Retire",
@@ -990,6 +996,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // standalone surface command.
         input: MobMachineCatalogInput::ResolveSpawnMemberAdmission,
         reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Bridge-rejection recovery class is decided by MobMachine from the
+        // bridge consumer's pure wire rejection-cause observation during
+        // supervisor (re)authorization — a runtime-internal observation
+        // classification authority, not a surface command.
+        input: MobMachineCatalogInput::ClassifyBridgeRejectionRecovery,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeSpawnProfile,

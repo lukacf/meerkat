@@ -211,6 +211,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSpawnMemberAdmissionDeniedDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ClassifyBridgeRejectionRecoveryRebindRunning`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryRebindStopped`
+  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`
+  - scenarios: `retire-respawn-destroy`, `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryRebindCompleted`
+  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryRebindDestroyed`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryFatalRunning`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryFatalStopped`
+  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`
+  - scenarios: `retire-respawn-destroy`, `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryFatalCompleted`
+  - anchors: `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
+- `ClassifyBridgeRejectionRecoveryFatalDestroyed`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
@@ -1773,6 +1797,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SpawnMemberAdmissionResolved`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `BridgeRejectionRecoveryClassified`
+  - anchors: `mob_owner_bridge_cleanup_authority`
+  - scenarios: `owner-bridge-cleanup`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

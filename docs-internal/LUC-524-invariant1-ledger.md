@@ -245,3 +245,22 @@ meerkat_machine_types.rs). These ARE surface-result classification authorities (
 reports typed terminal (outcome,cause) facts; the machine owns the projection to the public
 surface-result class), so runtime-internal is correct. Result: codegen parity 94/94 (was 92/2).
 GATE-SET CORRECTION: meerkat-machine-codegen nextest is now part of final verification.
+
+## BROAD VERIFICATION (pre-final-review, after sweep-tail draining)
+After discovering the codegen-parity gap (verification-gap correction), ran the broad gates that
+my prior narrow gate set had skipped:
+- clippy --workspace --all-targets --all-features -D warnings: CLEAN (exit 0).
+- nextest --workspace: 7753 passed, 1 load-flaky, 180 skipped. The single failure
+  (rkat test_prepare_run_mob_tools_does_not_hold_registry_lock_for_context_lifetime, a fixed-2s
+  tokio timeout) is CPU-starvation timing flakiness under the saturated 7754-test parallel run:
+  passes deterministically isolated (~0.6s x3, 1.3s warmup), predates this branch (PR #660), and
+  its code path (prepare_run_mob_tools / acquire_mob_registry_lock — a function-scoped guard) is
+  untouched by LUC-524. A real lock-held regression would fail isolated too; it does not. Left
+  as-is (out-of-scope pre-existing test; modifying it would be masking).
+- machine-check-drift up to date (10 machines, 6 compositions); codegen parity 94/94; version
+  parity + 0 schema/SDK churn; schema-contract ratchets 4 pass; seam-inventory --strict 0 debt.
+GATE-SET CORRECTION recorded: meerkat-machine-codegen + broad workspace nextest are now mandatory
+final gates for machine-authority work (they catch the command-vs-runtime-internal classification
+gap that drift + ratchets do not).
+
+Next: final class re-sweep + two independent blind dogma reviews (read-only) for convergence.

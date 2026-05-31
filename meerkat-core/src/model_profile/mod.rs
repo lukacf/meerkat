@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn uncatalogued_model_returns_none_for_known_provider() {
         assert!(profile_for(Provider::OpenAI, "gpt-5.9-future").is_none());
-        assert!(profile_for(Provider::Anthropic, "claude-opus-4-7-20260501-preview").is_none());
+        assert!(profile_for(Provider::Anthropic, "claude-opus-4-8-20260501-preview").is_none());
         assert!(profile_for(Provider::Gemini, "gemini-4-future").is_none());
     }
 
@@ -198,8 +198,8 @@ mod tests {
 
     #[test]
     fn claude_profile_vision_and_image_tool_results_true() {
-        let profile = profile_for(Provider::Anthropic, "claude-opus-4-6")
-            .expect("claude-opus-4-6 must have a profile");
+        let profile = profile_for(Provider::Anthropic, "claude-opus-4-8")
+            .expect("claude-opus-4-8 must have a profile");
         assert!(profile.vision, "Anthropic models must support vision");
         assert!(
             profile.image_tool_results,
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn anthropic_opus_has_longer_timeout_than_haiku() {
-        let opus = profile_for(Provider::Anthropic, "claude-opus-4-6").unwrap();
+        let opus = profile_for(Provider::Anthropic, "claude-opus-4-8").unwrap();
         let haiku = profile_for(Provider::Anthropic, "claude-haiku-4-5-20251001").unwrap();
         assert!(
             opus.call_timeout_secs.unwrap() > haiku.call_timeout_secs.unwrap(),
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn anthropic_supports_web_search() {
-        let profile = profile_for(Provider::Anthropic, "claude-opus-4-6").unwrap();
+        let profile = profile_for(Provider::Anthropic, "claude-opus-4-8").unwrap();
         assert!(profile.supports_web_search);
     }
 

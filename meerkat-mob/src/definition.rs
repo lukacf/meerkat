@@ -645,7 +645,7 @@ id = "code-review"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 skills = ["orchestrator-skill"]
 peer_description = "Coordinates code review"
 external_addressable = true
@@ -695,7 +695,7 @@ path = "skills/reviewer.md"
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
             .unwrap();
-        assert_eq!(lead.model, "claude-opus-4-6");
+        assert_eq!(lead.model, "claude-opus-4-8");
         assert!(lead.tools.mob);
         assert!(lead.tools.comms);
         assert!(lead.external_addressable);
@@ -748,7 +748,7 @@ path = "skills/reviewer.md"
                 m.insert(
                     ProfileName::from("lead"),
                     ProfileBinding::Inline(Profile {
-                        model: "claude-opus-4-6".to_string(),
+                        model: "claude-opus-4-8".to_string(),
                         skills: vec!["skill-a".to_string()],
                         tools: ToolConfig::default(),
                         peer_description: "The leader".to_string(),

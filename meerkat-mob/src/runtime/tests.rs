@@ -2932,7 +2932,7 @@ fn sample_definition() -> MobDefinition {
     profiles.insert(
         ProfileName::from("lead"),
         ProfileBinding::Inline(Profile {
-            model: "claude-opus-4-6".into(),
+            model: "claude-opus-4-8".into(),
             skills: vec![],
             tools: ToolConfig {
                 builtins: true,
@@ -5576,7 +5576,7 @@ async fn test_mob_builder_allows_spec_warnings() {
 id = "warn-mob"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 
 [flows.demo]
 
@@ -5611,7 +5611,7 @@ async fn test_mob_builder_blocks_spec_errors() {
 id = "error-mob"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 
 [flows.demo]
 
@@ -5649,7 +5649,7 @@ async fn test_mob_resume_allows_spec_warnings() {
 id = "warn-resume-mob"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 
 [flows.demo]
 
@@ -5705,7 +5705,7 @@ async fn test_mob_resume_blocks_spec_errors() {
 id = "error-resume-mob"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 
 [flows.demo]
 

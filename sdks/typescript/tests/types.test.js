@@ -2518,7 +2518,7 @@ describe("Parity wrappers", () => {
     const created = await client.createMobProfile("worker", { model: "claude-sonnet-4-6" });
     const got = await client.getMobProfile("missing");
     const listed = await client.listMobProfiles();
-    const updated = await client.updateMobProfile("worker", { model: "claude-opus-4-6" }, 1);
+    const updated = await client.updateMobProfile("worker", { model: "claude-opus-4-8" }, 1);
     const deleted = await client.deleteMobProfile("worker", 2);
 
     assert.equal(spawnedOne.agentIdentity, "worker-0");

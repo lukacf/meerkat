@@ -10,7 +10,7 @@
 //!   via `MemberHandle::send(ContentInput::Blocks)`
 //! - **Artist** forwards the current-turn image through the agent-facing `send_message`
 //!   tool using typed `image_ref` blocks
-//! - **Guesser A** (Claude Opus 4.6) — lead guesser, literal/shapes perspective
+//! - **Guesser A** (Claude Opus 4.8) — lead guesser, literal/shapes perspective
 //! - **Guesser B** (Gemini 3.1 Pro) — emotions/mood perspective
 //! - **Guesser C** (GPT-5.4) — context/narrative perspective
 //! - Guessers discuss via peer-to-peer comms, then guesser-a sends consensus to artist
@@ -161,7 +161,7 @@ fn pictionary_definition() -> MobDefinition {
     profiles.insert(
         ProfileName::from("guesser-a"),
         ProfileBinding::Inline(comms_profile(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             "guesser-a (Opus) — lead, literal/shapes",
         )),
     );
@@ -1167,7 +1167,7 @@ async fn standalone_pictionary_multimodal_correctness_stress() {
     println!("  AI PICTIONARY — Multimodal Cross-Model Comms Stress Test");
     println!("  Image gen: Gemini flash-image-preview (raw reqwest)");
     println!("  Artist:    Claude Sonnet 4.5 (validates guesses)");
-    println!("  Guesser A: Claude Opus 4.6 (lead — literal/shapes)");
+    println!("  Guesser A: Claude Opus 4.8 (lead — literal/shapes)");
     println!("  Guesser B: Gemini 3.1 Pro (emotions/mood)");
     println!("  Guesser C: GPT-5.4 (context/narrative)");
     println!("============================================================\n");

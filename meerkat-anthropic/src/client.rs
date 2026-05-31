@@ -974,7 +974,7 @@ impl LlmClient for AnthropicClient {
             let mut betas: Vec<String> = Vec::new();
 
             // Legacy thinking (type: "enabled") requires interleaved-thinking header
-            // Adaptive thinking (Opus 4.6) does NOT need this header
+            // Adaptive thinking does NOT need this header.
             let thinking_type = body.get("thinking")
                 .and_then(|t| t.get("type"))
                 .and_then(|t| t.as_str());
@@ -2210,10 +2210,10 @@ mod tests {
     }
 
     #[test]
-    fn test_request_omits_temperature_for_opus_47() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_request_omits_temperature_for_opus_48() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
         let request = LlmRequest::new(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3);
@@ -2221,16 +2221,16 @@ mod tests {
         let body = client.build_request_body(&request)?;
         assert!(
             body.get("temperature").is_none(),
-            "claude-opus-4-7 requests must not include temperature (API rejects non-default)",
+            "claude-opus-4-8 requests must not include temperature (API rejects non-default)",
         );
         Ok(())
     }
 
     #[test]
-    fn test_request_keeps_temperature_for_opus_46() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_request_keeps_temperature_for_sonnet_46() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-sonnet-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3);
@@ -2239,17 +2239,17 @@ mod tests {
         let temp = body
             .get("temperature")
             .and_then(Value::as_f64)
-            .expect("temperature should be present for opus 4.6");
+            .expect("temperature should be present for sonnet 4.6");
         assert!((temp - 0.3).abs() < 1e-6);
         Ok(())
     }
 
     #[test]
-    fn test_request_internal_flag_forces_temperature_on_opus_47()
+    fn test_request_internal_flag_forces_temperature_on_opus_48()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
         let request = LlmRequest::new(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3)
@@ -2536,7 +2536,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Opus 4.6: Adaptive thinking & effort parameter tests
+    // Opus 4.8: Adaptive thinking & effort parameter tests
     // =========================================================================
 
     #[test]
@@ -2544,7 +2544,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2569,7 +2569,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2587,11 +2587,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_body_effort_xhigh_opus_47() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_request_body_effort_xhigh_opus_48() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| t.effort = Some(AnthropicEffort::XHigh));
@@ -2608,7 +2608,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| t.effort = Some(AnthropicEffort::Max));
@@ -2638,7 +2638,7 @@ mod tests {
             "strict": true
         }))?;
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2662,7 +2662,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2705,7 +2705,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2724,7 +2724,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2748,7 +2748,7 @@ mod tests {
             "trigger": {"type": "input_tokens", "value": 100_000}
         });
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_anthropic_tag_merge(|t| {
@@ -2791,7 +2791,7 @@ mod tests {
         });
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![
                 Message::User(UserMessage::text("Question".to_string())),
                 assistant_msg,
@@ -2835,7 +2835,7 @@ mod tests {
         });
 
         let request = LlmRequest::new(
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             vec![
                 Message::User(UserMessage::text("Continue".to_string())),
                 assistant_msg,

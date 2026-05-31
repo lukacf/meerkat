@@ -2926,7 +2926,7 @@ capabilities = [{capability_values}]
             },
             "profiles": {
                 "lead": {
-                    "model": "claude-opus-4-6",
+                    "model": "claude-opus-4-8",
                     "tools": {
                         "comms": true,
                         "mob": true
@@ -3144,7 +3144,7 @@ capabilities = [{capability_values}]
             "id": "mob-web-helper-payload",
             "orchestrator": { "profile": "lead" },
             "profiles": {
-                "lead": { "model": "claude-opus-4-6", "tools": { "mob": true, "comms": true } },
+                "lead": { "model": "claude-opus-4-8", "tools": { "mob": true, "comms": true } },
                 "worker": { "model": "claude-sonnet-4-5", "tools": { "mob": true, "comms": true } }
             }
         }))

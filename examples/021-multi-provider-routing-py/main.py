@@ -111,11 +111,11 @@ Model selection strategies:
 
 1. COST OPTIMIZATION
    - Simple tasks → claude-sonnet-4-6 or gemini-3.5-flash
-   - Complex tasks → claude-opus-4-7 or gpt-5.5
+   - Complex tasks → claude-opus-4-8 or gpt-5.5
 
 2. CAPABILITY-BASED
    - Code generation → claude-sonnet-4-6 (strong at code)
-   - Reasoning → claude-opus-4-7 with thinking, or gpt-5.5 high effort
+   - Reasoning → claude-opus-4-8 with thinking, or gpt-5.5 high effort
    - Speed → gemini-3.5-flash
 
 3. FALLBACK CHAIN
@@ -124,7 +124,7 @@ Model selection strategies:
    - Meerkat's retry policy handles transient failures
 
 4. PER-AGENT ROUTING (in mobs)
-   - Orchestrator: claude-opus-4-7 (complex planning)
+   - Orchestrator: claude-opus-4-8 (complex planning)
    - Workers: claude-sonnet-4-6 (execution)
    - Validators: gemini-3.5-flash (fast checks)
 """)

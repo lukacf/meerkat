@@ -23,13 +23,13 @@ mod tests {
 
     #[test]
     fn supports_temperature_uses_catalog_rows() {
-        assert!(!supports_temperature("claude-opus-4-7"));
-        assert!(supports_temperature("claude-opus-4-6"));
+        assert!(!supports_temperature("claude-opus-4-8"));
+        assert!(supports_temperature("claude-sonnet-4-6"));
     }
 
     #[test]
     fn supports_temperature_unknown_model_is_conservative() {
-        assert!(!supports_temperature("claude-opus-4-7-20260501-preview"));
+        assert!(!supports_temperature("claude-opus-4-8-20260501-preview"));
         assert!(!supports_temperature("claude-future-5"));
     }
 }

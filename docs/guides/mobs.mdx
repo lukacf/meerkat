@@ -98,7 +98,7 @@ A small mob definition has profiles and optional wiring:
   "orchestrator": { "profile": "lead" },
   "profiles": {
     "lead": {
-      "model": "claude-opus-4-6",
+      "model": "claude-opus-4-8",
       "peer_description": "Coordinates triage and assigns work",
       "tools": {
         "builtins": true,
@@ -150,7 +150,7 @@ Mobs do not use prefabs or templates in 0.6.23. Create mobs from
         "definition": {
           "id": "release-triage",
           "profiles": {
-            "lead": { "model": "claude-opus-4-6" },
+            "lead": { "model": "claude-opus-4-8" },
             "analyst": { "model": "claude-sonnet-4-6" }
           }
         }
@@ -180,7 +180,7 @@ Mobs do not use prefabs or templates in 0.6.23. Create mobs from
         definition={
             "id": "release-triage",
             "profiles": {
-                "lead": {"model": "claude-opus-4-6"},
+                "lead": {"model": "claude-opus-4-8"},
                 "analyst": {"model": "claude-sonnet-4-6"},
             },
         }
@@ -199,7 +199,7 @@ Mobs do not use prefabs or templates in 0.6.23. Create mobs from
       definition: {
         id: "release-triage",
         profiles: {
-          lead: { model: "claude-opus-4-6" },
+          lead: { model: "claude-opus-4-8" },
           analyst: { model: "claude-sonnet-4-6" },
         },
       },

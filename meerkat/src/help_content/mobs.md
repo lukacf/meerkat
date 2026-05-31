@@ -169,7 +169,7 @@ id = "my-mob"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 external_addressable = true
 
 [profiles.lead.tools]

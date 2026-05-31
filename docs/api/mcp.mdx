@@ -247,7 +247,7 @@ Start a new Meerkat agent session with the given prompt.
 {
   "prompt": "Analyze this code for bugs",
   "system_prompt": "You are a senior code reviewer.",
-  "model": "claude-opus-4-6",
+  "model": "claude-opus-4-8",
   "max_tokens": 4096,
   "provider": "anthropic",
   "output_schema": {
@@ -305,7 +305,7 @@ Start a new Meerkat agent session with the given prompt.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="config default">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.5"`).
+  Model name (e.g. `"claude-opus-4-8"`, `"gpt-5.5"`).
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
@@ -672,11 +672,11 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "providers": [
     {
       "provider": "anthropic",
-      "default_model_id": "claude-opus-4-7",
+      "default_model_id": "claude-opus-4-8",
       "models": [
         {
-          "id": "claude-opus-4-7",
-          "display_name": "Claude Opus 4.7",
+          "id": "claude-opus-4-8",
+          "display_name": "Claude Opus 4.8",
           "tier": "recommended",
           "context_window": 1000000,
           "max_output_tokens": 128000,

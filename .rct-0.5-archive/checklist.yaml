@@ -10,7 +10,7 @@ harness_config:
     model: gpt-5.4
   default_reviewer:
     cli: claude
-    model: claude-opus-4-6
+    model: claude-opus-4-8
   build_test:
     check_command: cargo check --workspace
     build_command: cargo build --workspace

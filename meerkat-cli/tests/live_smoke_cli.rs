@@ -724,7 +724,7 @@ async fn inner_e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::erro
                 "config",
                 "set",
                 "--toml",
-                "[agent]\nmodel = \"claude-opus-4-6\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n",
+                "[agent]\nmodel = \"claude-opus-4-8\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n",
                 "--expected-generation",
                 &baseline_generation.to_string(),
             ])

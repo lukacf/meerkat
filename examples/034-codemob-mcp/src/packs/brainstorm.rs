@@ -61,7 +61,7 @@ impl Pack for BrainstormPack {
                 "synthesizer",
                 "synthesizer-skill",
                 "Idea synthesizer",
-                "claude-opus-4-7",
+                "claude-opus-4-8",
             ),
         ];
 

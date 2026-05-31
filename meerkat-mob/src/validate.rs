@@ -293,7 +293,7 @@ mod tests {
 
     fn base_profile() -> Profile {
         Profile {
-            model: "claude-opus-4-6".to_string(),
+            model: "claude-opus-4-8".to_string(),
             skills: vec![],
             tools: ToolConfig::default(),
             peer_description: "test".to_string(),

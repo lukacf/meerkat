@@ -61,7 +61,7 @@ impl Pack for ReviewPack {
                 "synthesizer",
                 "synthesizer-skill",
                 "Review synthesizer",
-                "claude-opus-4-7",
+                "claude-opus-4-8",
             ),
         ];
 

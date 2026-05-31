@@ -4264,7 +4264,7 @@ impl LoginProvider {
 
     fn legacy_sample_models(self) -> &'static [&'static str] {
         match self {
-            Self::Anthropic => &["claude-sonnet-4-6", "claude-opus-4-6"],
+            Self::Anthropic => &["claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-6"],
             Self::OpenAi => &["gpt-5.4"],
             Self::Google => &["gemini-3.1-flash-lite"],
         }
@@ -13005,6 +13005,39 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[test]
+    fn test_cli_interactive_oauth_config_heals_legacy_anthropic_opus_defaults() {
+        for legacy_model in ["claude-opus-4-6", "claude-opus-4-7"] {
+            let mut config = Config::default();
+
+            assert!(ensure_cli_interactive_oauth_config(
+                LoginProvider::Anthropic,
+                &mut config
+            ));
+            let realm = config.realm.get_mut("dev").expect("dev realm");
+            realm
+                .binding
+                .get_mut("anthropic_oauth")
+                .expect("anthropic oauth binding")
+                .default_model = Some(legacy_model.to_string());
+
+            assert!(
+                ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config),
+                "legacy model {legacy_model} should be healed to the current Anthropic default"
+            );
+
+            let realm = config.realm.get("dev").expect("dev realm");
+            assert_eq!(
+                realm
+                    .binding
+                    .get("anthropic_oauth")
+                    .and_then(|binding| binding.default_model.as_deref()),
+                meerkat_core::model_profile::catalog::default_model("anthropic")
+            );
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
     fn test_cli_interactive_google_oauth_config_includes_code_assist_base_url() {
         let mut config = Config::default();
 
@@ -18183,7 +18216,7 @@ capabilities = ["definitely_missing_capability"]
             &dispatcher_a,
             "t-create",
             "mob_create",
-            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]
@@ -18256,7 +18289,7 @@ capabilities = ["definitely_missing_capability"]
             &dispatcher,
             "t-create-runtime",
             "mob_create",
-            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
@@ -18566,6 +18599,10 @@ capabilities = ["definitely_missing_capability"]
 
     #[test]
     fn test_infer_provider_anthropic() {
+        assert_eq!(
+            Provider::infer_from_model("claude-opus-4-8"),
+            Some(Provider::Anthropic)
+        );
         assert_eq!(
             Provider::infer_from_model("claude-opus-4-7"),
             Some(Provider::Anthropic)

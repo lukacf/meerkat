@@ -323,15 +323,15 @@ impl OpaqueProviderBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicThinkingConfig {
-    /// Opus 4.6 adaptive thinking — provider picks the budget.
+    /// Adaptive thinking — provider picks the budget.
     Adaptive,
     /// Explicit budget — model emits at most `budget_tokens` tokens of
     /// reasoning before the assistant text.
     Enabled { budget_tokens: u32 },
 }
 
-/// Typed shape of Anthropic's response-effort knob (Opus 4.6+).
-/// `XHigh` is the Opus 4.7 extended-high effort level.
+/// Typed shape of Anthropic's response-effort knob.
+/// `XHigh` is the Opus 4.8 / 4.7 extended-high effort level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicEffort {
@@ -404,7 +404,7 @@ pub struct AnthropicProviderTag {
     /// Override top-k sampling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
-    /// Response-effort knob (Opus 4.6+).
+    /// Response-effort knob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<AnthropicEffort>,
     /// Structured-output schema (forces JSON-schema output envelope).
@@ -413,7 +413,7 @@ pub struct AnthropicProviderTag {
     /// Data-residency override for inference routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_geo: Option<AnthropicInferenceGeo>,
-    /// Automatic compaction configuration (Opus 4.6, beta).
+    /// Automatic compaction configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<AnthropicCompactionConfig>,
     /// Context-window opt-in (1M beta).

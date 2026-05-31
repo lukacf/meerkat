@@ -4058,7 +4058,7 @@ mod tests {
         let create_args = serde_json::value::RawValue::from_string(
             json!({
                 "name": "worker",
-                "profile": sample_profile_json("claude-opus-4-6")
+                "profile": sample_profile_json("claude-opus-4-8")
             })
             .to_string(),
         )
@@ -4091,7 +4091,7 @@ mod tests {
         let got: serde_json::Value =
             serde_json::from_str(&get_result.result.text_content()).unwrap();
         assert_eq!(got["name"], "worker");
-        assert_eq!(got["profile"]["model"], "claude-opus-4-6");
+        assert_eq!(got["profile"]["model"], "claude-opus-4-8");
 
         // List
         let list_args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
@@ -4171,7 +4171,7 @@ mod tests {
         let create_args = serde_json::value::RawValue::from_string(
             json!({
                 "name": "worker",
-                "profile": sample_profile_json("claude-opus-4-6")
+                "profile": sample_profile_json("claude-opus-4-8")
             })
             .to_string(),
         )
@@ -4218,7 +4218,7 @@ mod tests {
         let create_args = serde_json::value::RawValue::from_string(
             json!({
                 "name": "stale",
-                "profile": sample_profile_json("claude-opus-4-6")
+                "profile": sample_profile_json("claude-opus-4-8")
             })
             .to_string(),
         )
@@ -4629,7 +4629,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_spawn_tooling_profile_source_populates_override_profile() {
         let surface = surface_with_parent_tools();
-        let expected_model = "claude-opus-4-6".to_string();
+        let expected_model = "claude-opus-4-8".to_string();
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
                 model: expected_model.clone(),

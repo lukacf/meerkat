@@ -2663,7 +2663,7 @@ api_style = "chat_completions"
     #[test]
     fn test_provider_infer_from_model() {
         assert_eq!(
-            Provider::infer_from_model("claude-opus-4-6"),
+            Provider::infer_from_model("claude-opus-4-8"),
             Some(Provider::Anthropic)
         );
         assert_eq!(

@@ -13,7 +13,7 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
 ## Mob Architecture
 ```
                     ┌──────────────┐
-    User prompt ──→ │     Lead     │ (claude-opus-4-7)
+    User prompt ──→ │     Lead     │ (claude-opus-4-8)
                     │ Orchestrator │
                     │              │
                     │ mob.spawn()  │

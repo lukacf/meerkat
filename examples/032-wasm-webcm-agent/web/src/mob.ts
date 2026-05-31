@@ -56,7 +56,7 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
   // Main agent: prefer Anthropic Opus
   let main: string;
   let mainKey: string;
-  if (hasAnthropic) { main = "claude-opus-4-7"; mainKey = keys.anthropic!; }
+  if (hasAnthropic) { main = "claude-opus-4-8"; mainKey = keys.anthropic!; }
   else if (hasOpenAI) { main = "gpt-5.5"; mainKey = keys.openai!; }
   else { main = "gemini-3.1-pro-preview"; mainKey = keys.gemini!; }
 

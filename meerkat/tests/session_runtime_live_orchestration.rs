@@ -36,11 +36,11 @@ use meerkat_core::{Provider, SessionLlmIdentity};
 
 #[test]
 fn precheck_b19_fires_before_b18_for_non_realtime_non_openai() {
-    let err = apply_precheck_gates(Provider::Anthropic, "claude-opus-4-7", false)
+    let err = apply_precheck_gates(Provider::Anthropic, "claude-opus-4-8", false)
         .expect_err("non-realtime should fail B19");
     match err {
         LiveOpenPrecheckError::ModelNotRealtime { model, provider } => {
-            assert_eq!(model, "claude-opus-4-7");
+            assert_eq!(model, "claude-opus-4-8");
             assert_eq!(provider, "anthropic");
         }
         other => panic!("expected ModelNotRealtime, got {other:?}"),
@@ -505,7 +505,7 @@ mod orchestrator_e2e {
 
     /// `precheck_live_open` must reject a deferred staged session whose
     /// effective LLM identity is not realtime-capable. The catalog
-    /// flags claude-opus-4-7 (Anthropic) as non-realtime, so the B19
+    /// flags claude-opus-4-8 (Anthropic) as non-realtime, so the B19
     /// gate fires (B18 is the no-OpenAI gate but B19 is more
     /// specific).
     #[tokio::test]
@@ -514,7 +514,7 @@ mod orchestrator_e2e {
         let orch = orchestrator(&fx);
 
         let session_id = SessionId::new();
-        let slot = staged_slot("claude-opus-4-7", meerkat_core::Provider::Anthropic);
+        let slot = staged_slot("claude-opus-4-8", meerkat_core::Provider::Anthropic);
         fx.staged_sessions
             .stage(session_id.clone(), slot)
             .await
@@ -526,7 +526,7 @@ mod orchestrator_e2e {
             .expect_err("non-realtime staged session must be rejected");
         match err {
             LiveOpenPrecheckError::ModelNotRealtime { model, provider } => {
-                assert_eq!(model, "claude-opus-4-7");
+                assert_eq!(model, "claude-opus-4-8");
                 assert_eq!(provider, "anthropic");
             }
             other => panic!("expected ModelNotRealtime, got {other:?}"),

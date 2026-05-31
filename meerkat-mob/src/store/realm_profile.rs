@@ -83,17 +83,17 @@ pub(crate) mod contract_tests {
     }
 
     pub async fn test_create_and_get(store: &dyn RealmProfileStore) {
-        let profile = sample_profile("claude-opus-4-6");
+        let profile = sample_profile("claude-opus-4-8");
         let stored = store.create("worker", &profile).await.unwrap();
         assert_eq!(stored.name, "worker");
-        assert_eq!(stored.profile.model, "claude-opus-4-6");
+        assert_eq!(stored.profile.model, "claude-opus-4-8");
         assert_eq!(stored.revision, 1);
         assert!(stored.created_at <= Utc::now());
         assert!(stored.updated_at <= Utc::now());
 
         let fetched = store.get("worker").await.unwrap().unwrap();
         assert_eq!(fetched.name, "worker");
-        assert_eq!(fetched.profile.model, "claude-opus-4-6");
+        assert_eq!(fetched.profile.model, "claude-opus-4-8");
         assert_eq!(fetched.revision, 1);
     }
 
@@ -103,7 +103,7 @@ pub(crate) mod contract_tests {
     }
 
     pub async fn test_create_duplicate_fails(store: &dyn RealmProfileStore) {
-        let profile = sample_profile("claude-opus-4-6");
+        let profile = sample_profile("claude-opus-4-8");
         store.create("dup", &profile).await.unwrap();
         let err = store.create("dup", &profile).await.unwrap_err();
         assert!(
@@ -113,7 +113,7 @@ pub(crate) mod contract_tests {
     }
 
     pub async fn test_update_with_correct_revision(store: &dyn RealmProfileStore) {
-        let profile_v1 = sample_profile("claude-opus-4-6");
+        let profile_v1 = sample_profile("claude-opus-4-8");
         let created = store.create("evolve", &profile_v1).await.unwrap();
         assert_eq!(created.revision, 1);
 
@@ -129,7 +129,7 @@ pub(crate) mod contract_tests {
     }
 
     pub async fn test_update_with_wrong_revision(store: &dyn RealmProfileStore) {
-        let profile = sample_profile("claude-opus-4-6");
+        let profile = sample_profile("claude-opus-4-8");
         store.create("stale", &profile).await.unwrap();
 
         let err = store.update("stale", &profile, 99).await.unwrap_err();
@@ -140,7 +140,7 @@ pub(crate) mod contract_tests {
     }
 
     pub async fn test_update_nonexistent(store: &dyn RealmProfileStore) {
-        let profile = sample_profile("claude-opus-4-6");
+        let profile = sample_profile("claude-opus-4-8");
         let err = store.update("ghost", &profile, 1).await.unwrap_err();
         assert!(
             matches!(err, MobStoreError::NotFound(_)),
@@ -149,19 +149,19 @@ pub(crate) mod contract_tests {
     }
 
     pub async fn test_delete_with_correct_revision(store: &dyn RealmProfileStore) {
-        let profile = sample_profile("claude-opus-4-6");
+        let profile = sample_profile("claude-opus-4-8");
         store.create("doomed", &profile).await.unwrap();
 
         let deleted = store.delete("doomed", 1).await.unwrap();
         assert_eq!(deleted.name, "doomed");
-        assert_eq!(deleted.profile.model, "claude-opus-4-6");
+        assert_eq!(deleted.profile.model, "claude-opus-4-8");
 
         let fetched = store.get("doomed").await.unwrap();
         assert!(fetched.is_none());
     }
 
     pub async fn test_delete_with_wrong_revision(store: &dyn RealmProfileStore) {
-        let profile = sample_profile("claude-opus-4-6");
+        let profile = sample_profile("claude-opus-4-8");
         store.create("safe", &profile).await.unwrap();
 
         let err = store.delete("safe", 99).await.unwrap_err();

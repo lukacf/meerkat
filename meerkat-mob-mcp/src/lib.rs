@@ -4599,7 +4599,7 @@ mod tests {
                     "orchestrator": {"profile": "lead"},
                     "profiles": {
                         "lead": {
-                            "model": "claude-opus-4-6",
+                            "model": "claude-opus-4-8",
                             "tools": {"comms": true, "mob": true},
                             "external_addressable": true
                         }
@@ -4742,7 +4742,7 @@ mod tests {
             },
             "profiles": {
                 "lead": {
-                    "model": "claude-opus-4-6",
+                    "model": "claude-opus-4-8",
                     "external_addressable": true,
                     "peer_description": "Lead",
                     "tools": {
@@ -4835,7 +4835,7 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
+        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -4974,7 +4974,7 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
+        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -5159,7 +5159,7 @@ mod tests {
                     "orchestrator": {"profile": "lead"},
                     "profiles": {
                         "lead": {
-                            "model": "claude-opus-4-6",
+                            "model": "claude-opus-4-8",
                             "tools": {"comms": true},
                             "external_addressable": true
                         },
@@ -5214,7 +5214,7 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
 
         call_tool(
@@ -5332,7 +5332,7 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
@@ -5371,7 +5371,7 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
@@ -5995,7 +5995,7 @@ mod tests {
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         state
-            .realm_profile_create("worker", &sample_realm_profile("claude-opus-4-6"))
+            .realm_profile_create("worker", &sample_realm_profile("claude-opus-4-8"))
             .await
             .expect("create persistent realm profile");
 
@@ -6007,7 +6007,7 @@ mod tests {
             .await
             .expect("get restored realm profile")
             .expect("restored profile should exist");
-        assert_eq!(fetched.profile.model, "claude-opus-4-6");
+        assert_eq!(fetched.profile.model, "claude-opus-4-8");
     }
 
     #[tokio::test]

@@ -523,7 +523,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("lead"),
             ProfileBinding::Inline(Profile {
-                model: "claude-opus-4-6".into(),
+                model: "claude-opus-4-8".into(),
                 skills: vec!["leader-skill".into()],
                 tools: ToolConfig {
                     builtins: true,
@@ -638,7 +638,7 @@ mod tests {
         resumed_session
             .set_session_metadata(SessionMetadata {
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model: "claude-opus-4-6".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 max_tokens: 2048,
                 structured_output_retries: 2,
                 provider: meerkat_core::Provider::Anthropic,
@@ -1690,7 +1690,7 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        assert_eq!(config.model, "claude-opus-4-6");
+        assert_eq!(config.model, "claude-opus-4-8");
     }
 
     #[tokio::test]
@@ -1718,7 +1718,7 @@ mod tests {
         .expect("build_agent_config");
 
         let req = to_create_session_request(&config, "Hello mob".to_string().into());
-        assert_eq!(req.model, "claude-opus-4-6");
+        assert_eq!(req.model, "claude-opus-4-8");
         assert_eq!(req.prompt.text_content(), "Hello mob");
         assert!(req.system_prompt.is_some());
         assert_eq!(

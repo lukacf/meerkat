@@ -146,7 +146,7 @@ For platform integration answers in this checkout, assume the current branch
 surface, not the old live-adapter/docs-refresh snapshot:
 
 - Default hosted text recommendations are OpenAI `gpt-5.5`, Anthropic
-  `claude-opus-4-7`, and Gemini `gemini-3.5-flash`.
+  `claude-opus-4-8`, and Gemini `gemini-3.5-flash`.
 - WorkGraph is available through agent `workgraph_*` tools plus host
   observability (`workgraph/list`, `ready`, `snapshot`, `events`,
   `goal/status`, `attention/list`, REST and SDK equivalents). CLI and trusted

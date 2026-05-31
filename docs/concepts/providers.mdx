@@ -20,14 +20,13 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
 
     | Model | Context | Max output | Best for |
     |-------|---------|------------|----------|
-    | `claude-opus-4-7` | 1M | 128K | Default Anthropic recommendation |
-    | `claude-opus-4-6` | 1M | 128K | Supported Opus fallback |
+    | `claude-opus-4-8` | 1M | 128K | Default Anthropic recommendation |
     | `claude-sonnet-4-6` | 1M | 64K | Balanced performance and cost |
     | `claude-sonnet-4-5` | 200K | 64K | Legacy supported Sonnet |
 
     ```toml config.toml (active realm)
     [agent]
-    model = "claude-opus-4-7"
+    model = "claude-opus-4-8"
     max_tokens_per_turn = 16384
     ```
   </Tab>

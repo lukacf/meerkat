@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -491,6 +491,342 @@ AddEvidenceFailed(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
+ClassifyPublicErrorNotFoundAbsent(kind) ==
+    /\ phase = "Absent"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorNotFoundOpen(kind) ==
+    /\ phase = "Open"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorNotFoundInProgress(kind) ==
+    /\ phase = "InProgress"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorNotFoundBlocked(kind) ==
+    /\ phase = "Blocked"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorNotFoundCompleted(kind) ==
+    /\ phase = "Completed"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorNotFoundCancelled(kind) ==
+    /\ phase = "Cancelled"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorNotFoundFailed(kind) ==
+    /\ phase = "Failed"
+    /\ ((kind = "NotFound") \/ (kind = "AttentionNotFound"))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictAbsent(kind) ==
+    /\ phase = "Absent"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictOpen(kind) ==
+    /\ phase = "Open"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictInProgress(kind) ==
+    /\ phase = "InProgress"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictBlocked(kind) ==
+    /\ phase = "Blocked"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictCompleted(kind) ==
+    /\ phase = "Completed"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictCancelled(kind) ==
+    /\ phase = "Cancelled"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorConflictFailed(kind) ==
+    /\ phase = "Failed"
+    /\ ((kind = "StaleRevision") \/ (kind = "Conflict"))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionAbsent(kind) ==
+    /\ phase = "Absent"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionOpen(kind) ==
+    /\ phase = "Open"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionInProgress(kind) ==
+    /\ phase = "InProgress"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionBlocked(kind) ==
+    /\ phase = "Blocked"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionCompleted(kind) ==
+    /\ phase = "Completed"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionCancelled(kind) ==
+    /\ phase = "Cancelled"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidTransitionFailed(kind) ==
+    /\ phase = "Failed"
+    /\ (kind = "InvalidTransition")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsAbsent(kind) ==
+    /\ phase = "Absent"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsOpen(kind) ==
+    /\ phase = "Open"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsInProgress(kind) ==
+    /\ phase = "InProgress"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsBlocked(kind) ==
+    /\ phase = "Blocked"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsCompleted(kind) ==
+    /\ phase = "Completed"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsCancelled(kind) ==
+    /\ phase = "Cancelled"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorInvalidArgumentsFailed(kind) ==
+    /\ phase = "Failed"
+    /\ ((kind = "InvalidInput") \/ (kind = "InvalidTimestampMillis"))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableAbsent(kind) ==
+    /\ phase = "Absent"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableOpen(kind) ==
+    /\ phase = "Open"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableInProgress(kind) ==
+    /\ phase = "InProgress"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableBlocked(kind) ==
+    /\ phase = "Blocked"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableCompleted(kind) ==
+    /\ phase = "Completed"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableCancelled(kind) ==
+    /\ phase = "Cancelled"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorCapabilityUnavailableFailed(kind) ==
+    /\ phase = "Failed"
+    /\ (kind = "UnsupportedBackend")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorAbsent(kind) ==
+    /\ phase = "Absent"
+    /\ (kind = "Store")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorOpen(kind) ==
+    /\ phase = "Open"
+    /\ (kind = "Store")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorInProgress(kind) ==
+    /\ phase = "InProgress"
+    /\ (kind = "Store")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorBlocked(kind) ==
+    /\ phase = "Blocked"
+    /\ (kind = "Store")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorCompleted(kind) ==
+    /\ phase = "Completed"
+    /\ (kind = "Store")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorCancelled(kind) ==
+    /\ phase = "Cancelled"
+    /\ (kind = "Store")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicErrorStoreErrorFailed(kind) ==
+    /\ phase = "Failed"
+    /\ (kind = "Store")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
 Next ==
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
@@ -522,6 +858,48 @@ Next ==
     \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceCompleted(expected_revision, evidence_kind, confirming_owner_key)
     \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceCancelled(expected_revision, evidence_kind, confirming_owner_key)
     \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceFailed(expected_revision, evidence_kind, confirming_owner_key)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundAbsent(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundOpen(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundInProgress(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundBlocked(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundCompleted(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundCancelled(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorNotFoundFailed(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictAbsent(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictOpen(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictInProgress(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictBlocked(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictCompleted(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictCancelled(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorConflictFailed(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionAbsent(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionOpen(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionInProgress(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionBlocked(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionCompleted(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionCancelled(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidTransitionFailed(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsAbsent(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsOpen(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsInProgress(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsBlocked(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsCompleted(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsCancelled(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorInvalidArgumentsFailed(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableAbsent(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableOpen(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableInProgress(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableBlocked(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableCompleted(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableCancelled(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorCapabilityUnavailableFailed(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorAbsent(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorOpen(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorInProgress(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorBlocked(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorCompleted(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorCancelled(kind)
+    \/ \E kind \in WorkGraphErrorKindValues : ClassifyPublicErrorStoreErrorFailed(kind)
     \/ TerminalStutter
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))

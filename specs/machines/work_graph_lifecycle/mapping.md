@@ -107,6 +107,132 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AddEvidenceFailed`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `ClassifyPublicErrorNotFoundAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorNotFoundOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorNotFoundInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorNotFoundBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorNotFoundCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorNotFoundCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorNotFoundFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorConflictFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidTransitionFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorInvalidArgumentsFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorCapabilityUnavailableFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyPublicErrorStoreErrorFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
 
 ### Effects
 - `Created`
@@ -133,6 +259,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EvidenceAdded`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `WorkGraphPublicErrorClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
 
 ### Invariants
 - `absent_has_zero_revision`

@@ -3924,8 +3924,7 @@ fn workgraph_public_error_class_to_api(
         meerkat::WorkGraphPublicErrorClass::CapabilityUnavailable => {
             ApiError::ServiceUnavailable(message)
         }
-        meerkat::WorkGraphPublicErrorClass::StoreError
-        | meerkat::WorkGraphPublicErrorClass::InternalError => ApiError::Internal(message),
+        meerkat::WorkGraphPublicErrorClass::StoreError => ApiError::Internal(message),
     }
 }
 

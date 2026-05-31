@@ -2502,13 +2502,14 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 "WorkGraphErrorKind",
                 &[
                     "NotFound",
+                    "AttentionNotFound",
                     "StaleRevision",
                     "Conflict",
                     "InvalidTransition",
                     "InvalidInput",
                     "InvalidTimestampMillis",
-                    "UnsupportedBackend",
                     "Store",
+                    "UnsupportedBackend",
                 ],
             ),
             NamedTypeBinding::string_enum(

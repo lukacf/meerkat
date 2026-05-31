@@ -1566,7 +1566,7 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "WorkGraphLifecycleMachine",
-            "PublicErrorClassified",
+            "WorkGraphPublicErrorClassified",
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph public error classification must align with canonical WorkGraph error truth",
         ),

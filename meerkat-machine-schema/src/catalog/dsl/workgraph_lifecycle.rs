@@ -170,6 +170,66 @@ pub enum WorkEvidenceKind {
     ReviewerConfirmation,
 }
 
+/// Typed discriminant the shell extracts from a `WorkGraphError` and feeds back
+/// into the machine. This is a pure typed extraction (one variant per
+/// `WorkGraphError` variant); the shell performs NO grouping — the
+/// variant->public-class POLICY lives in the `ClassifyWorkGraphPublicError`
+/// transitions below, owned by this canonical machine.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphErrorKind {
+    #[default]
+    NotFound,
+    AttentionNotFound,
+    StaleRevision,
+    Conflict,
+    InvalidTransition,
+    InvalidInput,
+    InvalidTimestampMillis,
+    Store,
+    UnsupportedBackend,
+}
+
+/// Machine-owned public error classification surfaced to REST/RPC callers. The
+/// machine is the sole authority for the many-to-one grouping of internal error
+/// kinds into this public vocabulary (see the `ClassifyWorkGraphPublicError`
+/// transitions). Shells mirror the emitted class; they do not decide it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphPublicErrorClass {
+    #[default]
+    NotFound,
+    Conflict,
+    InvalidTransition,
+    InvalidArguments,
+    CapabilityUnavailable,
+    StoreError,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -294,6 +354,11 @@ machine! {
                 evidence_kind: Enum<WorkEvidenceKind>,
                 confirming_owner_key: Option<WorkOwnerKey>,
             },
+            // Public error-class classification. The shell extracts a typed
+            // WorkGraphErrorKind from a WorkGraphError (pure typed extraction)
+            // and feeds it back here; this machine owns the variant->class
+            // POLICY and emits WorkGraphPublicErrorClassified.
+            ClassifyWorkGraphPublicError { kind: Enum<WorkGraphErrorKind> },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -305,6 +370,10 @@ machine! {
             LinkValidated,
             Closed { terminal_state: WorkLifecycleState, at_utc_ms: u64 },
             EvidenceAdded,
+            WorkGraphPublicErrorClassified {
+                kind: Enum<WorkGraphErrorKind>,
+                public_class: Enum<WorkGraphPublicErrorClass>,
+            },
         }
 
         invariant absent_has_zero_revision {
@@ -431,6 +500,7 @@ machine! {
         disposition LinkValidated => local,
         disposition Closed => routed [WorkAttentionLifecycleMachine],
         disposition EvidenceAdded => local,
+        disposition WorkGraphPublicErrorClassified => local,
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
@@ -981,6 +1051,102 @@ machine! {
             }
             to Failed
             emit EvidenceAdded
+        }
+
+        // --- Public error-class classification ---
+        //
+        // The public WorkGraph error class surfaced via REST/RPC is a machine
+        // fact. The shell extracts a typed WorkGraphErrorKind from the internal
+        // WorkGraphError (pure typed extraction, no grouping) and feeds it back
+        // here; the transitions below own the many-to-one variant->class POLICY.
+        // Each transition self-loops in every lifecycle phase (classification
+        // never mutates lifecycle state) and emits exactly one public class.
+
+        transition ClassifyPublicErrorNotFound {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "not_found_class" {
+                kind == WorkGraphErrorKind::NotFound
+                || kind == WorkGraphErrorKind::AttentionNotFound
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::NotFound
+            }
+        }
+
+        transition ClassifyPublicErrorConflict {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "conflict_class" {
+                kind == WorkGraphErrorKind::StaleRevision
+                || kind == WorkGraphErrorKind::Conflict
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::Conflict
+            }
+        }
+
+        transition ClassifyPublicErrorInvalidTransition {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "invalid_transition_class" {
+                kind == WorkGraphErrorKind::InvalidTransition
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::InvalidTransition
+            }
+        }
+
+        transition ClassifyPublicErrorInvalidArguments {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "invalid_arguments_class" {
+                kind == WorkGraphErrorKind::InvalidInput
+                || kind == WorkGraphErrorKind::InvalidTimestampMillis
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::InvalidArguments
+            }
+        }
+
+        transition ClassifyPublicErrorCapabilityUnavailable {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "capability_unavailable_class" {
+                kind == WorkGraphErrorKind::UnsupportedBackend
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::CapabilityUnavailable
+            }
+        }
+
+        transition ClassifyPublicErrorStoreError {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyWorkGraphPublicError { kind }
+            guard "store_error_class" {
+                kind == WorkGraphErrorKind::Store
+            }
+            update {}
+            to Absent
+            emit WorkGraphPublicErrorClassified {
+                kind: kind,
+                public_class: WorkGraphPublicErrorClass::StoreError
+            }
         }
     }
 }

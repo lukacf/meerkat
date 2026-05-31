@@ -12,16 +12,12 @@ use crate::types::{
     WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkGraphPublicErrorClass {
-    NotFound,
-    Conflict,
-    InvalidTransition,
-    InvalidArguments,
-    CapabilityUnavailable,
-    StoreError,
-    InternalError,
-}
+/// Machine-owned public error classification surfaced to REST/RPC callers.
+///
+/// Re-exported from the canonical `WorkGraphLifecycleMachine` DSL: the machine
+/// is the sole authority for the variant->class POLICY (see
+/// `WorkGraphMachine::public_error_class`). Surfaces mirror the emitted class.
+pub use wg_dsl::WorkGraphPublicErrorClass;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkAttentionMachine;
@@ -91,24 +87,53 @@ impl WorkGraphMachine {
         validate_item_machine_projection(item)
     }
 
+    /// Resolve the public error class for a `WorkGraphError`.
+    ///
+    /// The shell performs only a pure typed extraction of the error variant
+    /// into a `WorkGraphErrorKind` discriminant (one kind per variant, no
+    /// grouping). The variant->class POLICY is owned by the canonical
+    /// `WorkGraphLifecycleMachine`: this drives the machine's
+    /// `ClassifyWorkGraphPublicError` input and mirrors the emitted
+    /// `WorkGraphPublicErrorClassified` effect. The shell decides nothing.
     pub fn public_error_class(
         error: &WorkGraphError,
     ) -> Result<WorkGraphPublicErrorClass, WorkGraphError> {
-        Ok(match error {
-            WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => {
-                WorkGraphPublicErrorClass::NotFound
+        let kind = work_graph_error_kind(error);
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyWorkGraphPublicError { kind },
+        )
+        .map_err(|transition_error| {
+            WorkGraphError::Store(format!(
+                "generated WorkGraph public error classification refused kind {kind:?}: {transition_error:?}"
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::WorkGraphPublicErrorClassified {
+                kind: emitted_kind,
+                public_class,
+            } = effect
+            {
+                if *emitted_kind != kind {
+                    return Err(WorkGraphError::Store(format!(
+                        "generated WorkGraph public error classification emitted kind {emitted_kind:?} while classifying {kind:?}"
+                    )));
+                }
+                if classified.replace(*public_class).is_some() {
+                    return Err(WorkGraphError::Store(format!(
+                        "generated WorkGraph public error classification emitted multiple classes for kind {kind:?}"
+                    )));
+                }
             }
-            WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => {
-                WorkGraphPublicErrorClass::Conflict
-            }
-            WorkGraphError::InvalidTransition(_) => WorkGraphPublicErrorClass::InvalidTransition,
-            WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
-                WorkGraphPublicErrorClass::InvalidArguments
-            }
-            WorkGraphError::UnsupportedBackend(_) => {
-                WorkGraphPublicErrorClass::CapabilityUnavailable
-            }
-            WorkGraphError::Store(_) => WorkGraphPublicErrorClass::StoreError,
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "generated WorkGraph public error classification did not emit a class for kind {kind:?}"
+            ))
         })
     }
 
@@ -474,6 +499,26 @@ impl WorkGraphMachine {
             },
         )?;
         Ok(())
+    }
+}
+
+/// Pure typed extraction of a `WorkGraphError` into the machine's typed
+/// error-kind discriminant. This is a 1:1 variant->kind map with NO grouping;
+/// the many-to-one variant->public-class POLICY lives in the canonical
+/// `WorkGraphLifecycleMachine`, not here.
+fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
+    match error {
+        WorkGraphError::NotFound { .. } => wg_dsl::WorkGraphErrorKind::NotFound,
+        WorkGraphError::AttentionNotFound { .. } => wg_dsl::WorkGraphErrorKind::AttentionNotFound,
+        WorkGraphError::StaleRevision { .. } => wg_dsl::WorkGraphErrorKind::StaleRevision,
+        WorkGraphError::Conflict(_) => wg_dsl::WorkGraphErrorKind::Conflict,
+        WorkGraphError::InvalidTransition(_) => wg_dsl::WorkGraphErrorKind::InvalidTransition,
+        WorkGraphError::InvalidInput(_) => wg_dsl::WorkGraphErrorKind::InvalidInput,
+        WorkGraphError::InvalidTimestampMillis { .. } => {
+            wg_dsl::WorkGraphErrorKind::InvalidTimestampMillis
+        }
+        WorkGraphError::Store(_) => wg_dsl::WorkGraphErrorKind::Store,
+        WorkGraphError::UnsupportedBackend(_) => wg_dsl::WorkGraphErrorKind::UnsupportedBackend,
     }
 }
 
@@ -1158,6 +1203,71 @@ mod tests {
         let error =
             WorkGraphMachine::block_item(item, 7, now).expect_err("stale transition should fail");
         assert!(matches!(error, WorkGraphError::StaleRevision { .. }));
+    }
+
+    #[test]
+    fn public_error_class_is_machine_owned() {
+        use crate::types::{WorkAttentionBindingId, WorkNamespace};
+
+        let cases: &[(WorkGraphError, WorkGraphPublicErrorClass)] = &[
+            (
+                WorkGraphError::not_found(
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    WorkItemId::generated(),
+                ),
+                WorkGraphPublicErrorClass::NotFound,
+            ),
+            (
+                WorkGraphError::attention_not_found(
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    WorkAttentionBindingId::generated(),
+                ),
+                WorkGraphPublicErrorClass::NotFound,
+            ),
+            (
+                WorkGraphError::StaleRevision {
+                    id: WorkItemId::generated(),
+                    expected: 1,
+                    actual: 2,
+                },
+                WorkGraphPublicErrorClass::Conflict,
+            ),
+            (
+                WorkGraphError::Conflict("conflict".to_string()),
+                WorkGraphPublicErrorClass::Conflict,
+            ),
+            (
+                WorkGraphError::InvalidTransition("bad".to_string()),
+                WorkGraphPublicErrorClass::InvalidTransition,
+            ),
+            (
+                WorkGraphError::InvalidInput("bad".to_string()),
+                WorkGraphPublicErrorClass::InvalidArguments,
+            ),
+            (
+                WorkGraphError::InvalidTimestampMillis {
+                    field: "due_at",
+                    millis: -1,
+                },
+                WorkGraphPublicErrorClass::InvalidArguments,
+            ),
+            (
+                WorkGraphError::Store("store".to_string()),
+                WorkGraphPublicErrorClass::StoreError,
+            ),
+            (
+                WorkGraphError::UnsupportedBackend("backend".to_string()),
+                WorkGraphPublicErrorClass::CapabilityUnavailable,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let class = WorkGraphMachine::public_error_class(error)
+                .expect("machine must classify every WorkGraphError variant");
+            assert_eq!(class, *expected, "unexpected public class for {error:?}");
+        }
     }
 
     #[test]

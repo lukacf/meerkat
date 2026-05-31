@@ -42,6 +42,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
 - `AddEvidence`(expected_revision: u64, evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>)
+- `ClassifyWorkGraphPublicError`(kind: WorkGraphErrorKind)
 
 ## Signals
 
@@ -54,6 +55,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LinkValidated`
 - `Closed`(terminal_state: WorkLifecycleState, at_utc_ms: u64)
 - `EvidenceAdded`
+- `WorkGraphPublicErrorClassified`(kind: WorkGraphErrorKind, public_class: WorkGraphPublicErrorClass)
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
@@ -331,6 +333,342 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - ``
   - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
+- To: `Failed`
+
+### `ClassifyPublicErrorNotFoundAbsent`
+- From: `Absent`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorNotFoundOpen`
+- From: `Open`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Open`
+
+### `ClassifyPublicErrorNotFoundInProgress`
+- From: `InProgress`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `InProgress`
+
+### `ClassifyPublicErrorNotFoundBlocked`
+- From: `Blocked`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Blocked`
+
+### `ClassifyPublicErrorNotFoundCompleted`
+- From: `Completed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Completed`
+
+### `ClassifyPublicErrorNotFoundCancelled`
+- From: `Cancelled`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Cancelled`
+
+### `ClassifyPublicErrorNotFoundFailed`
+- From: `Failed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `not_found_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Failed`
+
+### `ClassifyPublicErrorConflictAbsent`
+- From: `Absent`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorConflictOpen`
+- From: `Open`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Open`
+
+### `ClassifyPublicErrorConflictInProgress`
+- From: `InProgress`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `InProgress`
+
+### `ClassifyPublicErrorConflictBlocked`
+- From: `Blocked`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Blocked`
+
+### `ClassifyPublicErrorConflictCompleted`
+- From: `Completed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Completed`
+
+### `ClassifyPublicErrorConflictCancelled`
+- From: `Cancelled`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Cancelled`
+
+### `ClassifyPublicErrorConflictFailed`
+- From: `Failed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `conflict_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Failed`
+
+### `ClassifyPublicErrorInvalidTransitionAbsent`
+- From: `Absent`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorInvalidTransitionOpen`
+- From: `Open`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Open`
+
+### `ClassifyPublicErrorInvalidTransitionInProgress`
+- From: `InProgress`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `InProgress`
+
+### `ClassifyPublicErrorInvalidTransitionBlocked`
+- From: `Blocked`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Blocked`
+
+### `ClassifyPublicErrorInvalidTransitionCompleted`
+- From: `Completed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Completed`
+
+### `ClassifyPublicErrorInvalidTransitionCancelled`
+- From: `Cancelled`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Cancelled`
+
+### `ClassifyPublicErrorInvalidTransitionFailed`
+- From: `Failed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_transition_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Failed`
+
+### `ClassifyPublicErrorInvalidArgumentsAbsent`
+- From: `Absent`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorInvalidArgumentsOpen`
+- From: `Open`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Open`
+
+### `ClassifyPublicErrorInvalidArgumentsInProgress`
+- From: `InProgress`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `InProgress`
+
+### `ClassifyPublicErrorInvalidArgumentsBlocked`
+- From: `Blocked`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Blocked`
+
+### `ClassifyPublicErrorInvalidArgumentsCompleted`
+- From: `Completed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Completed`
+
+### `ClassifyPublicErrorInvalidArgumentsCancelled`
+- From: `Cancelled`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Cancelled`
+
+### `ClassifyPublicErrorInvalidArgumentsFailed`
+- From: `Failed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `invalid_arguments_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Failed`
+
+### `ClassifyPublicErrorCapabilityUnavailableAbsent`
+- From: `Absent`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorCapabilityUnavailableOpen`
+- From: `Open`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Open`
+
+### `ClassifyPublicErrorCapabilityUnavailableInProgress`
+- From: `InProgress`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `InProgress`
+
+### `ClassifyPublicErrorCapabilityUnavailableBlocked`
+- From: `Blocked`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Blocked`
+
+### `ClassifyPublicErrorCapabilityUnavailableCompleted`
+- From: `Completed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Completed`
+
+### `ClassifyPublicErrorCapabilityUnavailableCancelled`
+- From: `Cancelled`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Cancelled`
+
+### `ClassifyPublicErrorCapabilityUnavailableFailed`
+- From: `Failed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `capability_unavailable_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Failed`
+
+### `ClassifyPublicErrorStoreErrorAbsent`
+- From: `Absent`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Absent`
+
+### `ClassifyPublicErrorStoreErrorOpen`
+- From: `Open`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Open`
+
+### `ClassifyPublicErrorStoreErrorInProgress`
+- From: `InProgress`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `InProgress`
+
+### `ClassifyPublicErrorStoreErrorBlocked`
+- From: `Blocked`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Blocked`
+
+### `ClassifyPublicErrorStoreErrorCompleted`
+- From: `Completed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Completed`
+
+### `ClassifyPublicErrorStoreErrorCancelled`
+- From: `Cancelled`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
+- To: `Cancelled`
+
+### `ClassifyPublicErrorStoreErrorFailed`
+- From: `Failed`
+- On: `ClassifyWorkGraphPublicError`(kind)
+- Guards:
+  - `store_error_class`
+- Emits: `WorkGraphPublicErrorClassified`
 - To: `Failed`
 
 ## Coverage

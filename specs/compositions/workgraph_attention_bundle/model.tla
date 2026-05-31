@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for workgraph_attention_bundle.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -977,6 +977,804 @@ workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confir
        /\ model_step_count' = model_step_count + 1
 
 
+workgraph_ClassifyPublicErrorNotFoundAbsent(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorNotFoundOpen(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorNotFoundInProgress(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorNotFoundBlocked(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorNotFoundCompleted(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorNotFoundCancelled(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorNotFoundFailed(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ ((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound"))
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "NotFound"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorNotFoundFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorNotFoundFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictAbsent(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictOpen(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictInProgress(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictBlocked(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictCompleted(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictCancelled(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorConflictFailed(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ ((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict"))
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "Conflict"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorConflictFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorConflictFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionAbsent(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionOpen(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionInProgress(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionBlocked(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionCompleted(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionCancelled(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidTransitionFailed(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.kind = "InvalidTransition")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidTransition"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidTransitionFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidTransitionFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsAbsent(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsOpen(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsInProgress(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsBlocked(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsCompleted(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsCancelled(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorInvalidArgumentsFailed(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ ((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "InvalidArguments"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorInvalidArgumentsFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorInvalidArgumentsFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableAbsent(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableOpen(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableInProgress(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableBlocked(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableCompleted(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableCancelled(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorCapabilityUnavailableFailed(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.kind = "UnsupportedBackend")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "CapabilityUnavailable"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorCapabilityUnavailableFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorCapabilityUnavailableFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorAbsent(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorOpen(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorInProgress(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorBlocked(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorCompleted(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorCancelled(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicErrorStoreErrorFailed(arg_kind) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyWorkGraphPublicError"
+       /\ packet.payload.kind = arg_kind
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.kind = "Store")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "WorkGraphPublicErrorClassified", payload |-> [kind |-> packet.payload.kind, public_class |-> "StoreError"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicErrorStoreErrorFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicErrorStoreErrorFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 workgraph_absent_has_zero_revision == ((workgraph_phase # "Absent") \/ (workgraph_revision = 0))
 workgraph_live_has_positive_revision == ((workgraph_phase = "Absent") \/ (workgraph_revision > 0))
 workgraph_topology_snapshot_is_stateless == ((workgraph_topology_item_keys = {}) \/ (workgraph_topology_edge_keys = {}) \/ (workgraph_phase = "Absent"))
@@ -1191,6 +1989,48 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Completed") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
     \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Cancelled") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
     \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Failed") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ (((packet.payload.kind = "NotFound") \/ (packet.payload.kind = "AttentionNotFound")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ (((packet.payload.kind = "StaleRevision") \/ (packet.payload.kind = "Conflict")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "InvalidTransition"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ (((packet.payload.kind = "InvalidInput") \/ (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "UnsupportedBackend"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((packet.payload.kind = "Store"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((packet.payload.kind = "Store"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.kind = "Store"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.kind = "Store"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "Store"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "Store"))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "Store"))
 
 EntryPacketAdmissible_attention(packet) ==
     \/ /\ (packet.variant = "Pause") /\ (attention_phase = "Active") /\ ((attention_revision = packet.payload.expected_revision))
@@ -1271,6 +2111,48 @@ CoreNext ==
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundAbsent(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundOpen(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundInProgress(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundBlocked(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundCompleted(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundCancelled(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundFailed(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictAbsent(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictOpen(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictInProgress(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictBlocked(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictCompleted(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictCancelled(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictFailed(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionAbsent(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionOpen(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionInProgress(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionBlocked(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionCompleted(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionCancelled(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionFailed(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsAbsent(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsOpen(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsInProgress(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsBlocked(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsCompleted(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsCancelled(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsFailed(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableAbsent(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableOpen(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableInProgress(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableBlocked(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableCompleted(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableCancelled(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableFailed(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorAbsent(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorOpen(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorInProgress(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorBlocked(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorCompleted(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorCancelled(arg_kind)
+    \/ \E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorFailed(arg_kind)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision)
@@ -1340,6 +2222,52 @@ WitnessFairness_close_stops_attention_route_2 ==
     /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
     /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
     /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundAbsent(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundOpen(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundInProgress(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundBlocked(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundCompleted(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundCancelled(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorNotFoundFailed(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictAbsent(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictOpen(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictInProgress(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictBlocked(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictCompleted(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictCancelled(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorConflictFailed(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionAbsent(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionOpen(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionInProgress(arg_kind))
+
+WitnessFairness_close_stops_attention_route_3 ==
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionBlocked(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionCompleted(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionCancelled(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidTransitionFailed(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsAbsent(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsOpen(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsInProgress(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsBlocked(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsCompleted(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsCancelled(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorInvalidArgumentsFailed(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableAbsent(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableOpen(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableInProgress(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableBlocked(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableCompleted(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableCancelled(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorCapabilityUnavailableFailed(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorAbsent(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorOpen(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorInProgress(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorBlocked(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorCompleted(arg_kind))
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorCancelled(arg_kind))
+
+WitnessFairness_close_stops_attention_route_4 ==
+    /\ WF_vars(\E arg_kind \in WorkGraphErrorKindValues : workgraph_ClassifyPublicErrorStoreErrorFailed(arg_kind))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision))
@@ -1354,6 +2282,8 @@ WitnessSpec_close_stops_attention_route ==
     /\ [] [WitnessNext_close_stops_attention_route]_vars
     /\ WitnessFairness_close_stops_attention_route_1
     /\ WitnessFairness_close_stops_attention_route_2
+    /\ WitnessFairness_close_stops_attention_route_3
+    /\ WitnessFairness_close_stops_attention_route_4
 
 WitnessRouteObserved_close_stops_attention_route_work_item_close_stops_attention == <> RouteObserved_work_item_close_stops_attention
 WitnessTransitionObserved_close_stops_attention_route_workgraph_CreateOpen == <> (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")

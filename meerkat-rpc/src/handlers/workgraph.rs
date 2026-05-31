@@ -54,7 +54,7 @@ fn map_workgraph_public_error_class(
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
             message,
         ),
-        WorkGraphPublicErrorClass::StoreError | WorkGraphPublicErrorClass::InternalError => {
+        WorkGraphPublicErrorClass::StoreError => {
             RpcResponse::error(id, error::INTERNAL_ERROR, message)
         }
     }

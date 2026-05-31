@@ -24059,3 +24059,36 @@ async fn attach_mob_ingress_promotes_from_session_owned() {
         other => panic!("expected MobOwned after promotion, got {other:?}"),
     }
 }
+
+/// The transcript-edit session-liveness verdict is MeerkatMachine-owned: the
+/// `SESSION_BUSY` disjunction (`runtime_running || has_active_inputs => busy`)
+/// must be emitted from the two pure boolean observations the shell extracts.
+/// This pins both outcomes through the machine-backed adapter, proving the fold
+/// preserved the exact pre-fold shell policy.
+#[tokio::test]
+async fn machine_owns_transcript_edit_admission_verdict() {
+    use crate::meerkat_machine::dsl::TranscriptEditAdmissionKind as Verdict;
+
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let verdict = |runtime_running, has_active_inputs| {
+        let adapter = &adapter;
+        let session_id = session_id.clone();
+        async move {
+            adapter
+                .resolve_transcript_edit_admission(&session_id, runtime_running, has_active_inputs)
+                .await
+                .expect("machine must emit a transcript-edit admission verdict")
+        }
+    };
+
+    // Idle with no active inputs is the only admissible combination.
+    assert_eq!(verdict(false, false).await, Verdict::Admissible);
+
+    // Running OR active-inputs => denied busy (the disjunction).
+    assert_eq!(verdict(true, false).await, Verdict::DeniedBusy);
+    assert_eq!(verdict(false, true).await, Verdict::DeniedBusy);
+    assert_eq!(verdict(true, true).await, Verdict::DeniedBusy);
+}

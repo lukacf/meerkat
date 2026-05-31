@@ -2111,6 +2111,20 @@ pub enum SupervisorBindMaterialAdmissionKind {
     InvalidBootstrapToken,
 }
 
+/// Generated session-liveness verdict for an attempted transcript edit (fork /
+/// rewrite / restore). Owns the disjunction the shell previously decided inline:
+/// a session is busy for transcript-edit purposes iff its runtime is running OR
+/// it has any active inputs. The shell extracts the two pure boolean
+/// observations (`runtime_running`, `has_active_inputs`) it already computes and
+/// mirrors this verdict — `Admissible` -> `Ok(())`, `DeniedBusy` -> the existing
+/// `SESSION_BUSY` rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TranscriptEditAdmissionKind {
+    #[default]
+    Admissible,
+    DeniedBusy,
+}
+
 /// Generated admission result for `AuthorizeSupervisor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SupervisorAuthorizeAdmissionResultKind {
@@ -3822,6 +3836,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 expected_peer_id_matches: bool,
                 bootstrap_token_matches: bool,
             },
+            // Transcript-edit session-liveness admission: the `SESSION_BUSY`
+            // disjunction the shell previously decided inline (a session is busy
+            // for fork / rewrite / restore iff its runtime is running OR it holds
+            // any active inputs). The shell supplies the two pure boolean
+            // observations it already computes (`runtime_running`,
+            // `has_active_inputs`); the machine emits the typed verdict.
+            ResolveTranscriptEditAdmission {
+                runtime_running: bool,
+                has_active_inputs: bool,
+            },
             ResolveSupervisorAuthorizeAdmission {
                 supervisor_peer_id: String,
                 supervisor_epoch: u64,
@@ -4442,6 +4466,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             SupervisorBindMaterialAdmissionResolved {
                 verdict: Enum<SupervisorBindMaterialAdmissionKind>,
             },
+            TranscriptEditAdmissionResolved {
+                verdict: Enum<TranscriptEditAdmissionKind>,
+            },
             SupervisorAuthorizeAdmissionResolved {
                 result: Enum<SupervisorAuthorizeAdmissionResultKind>,
                 rejection: Option<Enum<SupervisorAuthorizeRejectionKind>>,
@@ -4616,6 +4643,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LocalEndpointChanged => external,
         disposition SupervisorBindAdmissionResolved => local,
         disposition SupervisorBindMaterialAdmissionResolved => local,
+        disposition TranscriptEditAdmissionResolved => local,
         disposition SupervisorAuthorizeAdmissionResolved => local,
         disposition SessionLlmReconfigurePlanResolved => local,
         disposition PeerProjectionChanged => external,
@@ -18342,6 +18370,78 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit SupervisorBindMaterialAdmissionResolved {
                 verdict: SupervisorBindMaterialAdmissionKind::Accept
+            }
+        }
+
+        // ResolveTranscriptEditAdmission: generated authority for the
+        // session-liveness `SESSION_BUSY` verdict an attempted transcript edit
+        // (fork / rewrite / restore) formerly decided inline in the shell. The
+        // shell supplies the two pure boolean observations it already computes
+        // (`runtime_running`, `has_active_inputs`) and mirrors the emitted
+        // verdict. The disjunction policy is encoded directly:
+        // `runtime_running || has_active_inputs` => DeniedBusy, else Admissible.
+        // This is a phase-preserving self-loop classifier — it never mutates
+        // lifecycle state — so it is modeled per observable phase (Idle /
+        // Attached / Running) the session authority may hold when a transcript
+        // edit is attempted, landing back on its own phase.
+        transition ResolveTranscriptEditAdmissionIdleBusy {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "busy_disjunction" { runtime_running || has_active_inputs }
+            update {}
+            to Idle
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::DeniedBusy
+            }
+        }
+        transition ResolveTranscriptEditAdmissionIdleAdmissible {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "idle_no_active" { !runtime_running && !has_active_inputs }
+            update {}
+            to Idle
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::Admissible
+            }
+        }
+        transition ResolveTranscriptEditAdmissionAttachedBusy {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "busy_disjunction" { runtime_running || has_active_inputs }
+            update {}
+            to Attached
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::DeniedBusy
+            }
+        }
+        transition ResolveTranscriptEditAdmissionAttachedAdmissible {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "attached_no_active" { !runtime_running && !has_active_inputs }
+            update {}
+            to Attached
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::Admissible
+            }
+        }
+        transition ResolveTranscriptEditAdmissionRunningBusy {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "busy_disjunction" { runtime_running || has_active_inputs }
+            update {}
+            to Running
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::DeniedBusy
+            }
+        }
+        transition ResolveTranscriptEditAdmissionRunningAdmissible {
+            on input ResolveTranscriptEditAdmission { runtime_running, has_active_inputs }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "running_no_active" { !runtime_running && !has_active_inputs }
+            update {}
+            to Running
+            emit TranscriptEditAdmissionResolved {
+                verdict: TranscriptEditAdmissionKind::Admissible
             }
         }
 

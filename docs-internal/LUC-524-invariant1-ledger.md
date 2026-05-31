@@ -324,3 +324,33 @@ Gates: drift 10/6; check clean; runtime 1036 + machine-codegen 94 pass; ratchets
 
 Convergence round 1 actions COMPLETE (both genuine candidates folded: workgraph tool-surface +
 supervisor bind material admission; 4 LOWs defended with evidence). Re-running convergence for two-clean.
+
+## CONVERGENCE ROUND 2 (re-sweep + blind reviews; beta failed infra, re-run pending)
+alpha found 1 genuine MEDIUM (workgraph_link edge-kind admission); beta failed to emit (infra, not a
+finding); sweep found 6 (2 it rates defensible itself, 1 known-pending, 3 genuine-ish). All my round-1
+folds confirmed CLEAN by both sweep + alpha. Actions:
+
+### FOLDED — workgraph_link attention-scoped edge-kind admission (alpha MEDIUM) -> WorkAttentionLifecycle
+tool_surface.rs validate_attention_scoped_call workgraph_link branch decided which WorkEdgeKind values
+(Parent|Related|DerivedFrom) are permitted for attention-scoped link via an in-shell matches!, denying
+others. FOLD: ClassifyAttentionAuthority now emits typed capability bits can_link_parent/can_link_related/
+can_link_derived_from (no WorkEdgeKind strings in the machine); shell is a pure WorkEdgeKind->bit decoder
+(attention_link_kind_capability), fails closed. ProjectedAttentionAuthority wire type extended -> schemas
++ SDKs regenerated, parity clean. Test pins permitted/denied edge kinds via the machine path.
+
+### FOLDED — transcript-edit/fork session-liveness admission (sweep MEDIUM) -> MeerkatMachine
+session_runtime.rs reject_active_transcript_edit composed runtime_running || has_active_inputs ->
+SESSION_BUSY (disjunction policy = shell folklore over two MeerkatMachine-owned facts). FOLD: MeerkatMachine
+ResolveTranscriptEditAdmission { runtime_running, has_active_inputs } -> TranscriptEditAdmissionResolved
+{ verdict: Admissible|DeniedBusy }; 6 phase-preserving self-loop transitions encode the disjunction.
+Declared runtime-internal in BOTH parity lists (MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS + macro
+InputQueueLifecycle region). Adapter resolve_transcript_edit_admission via apply_session_dsl_input; shell
+extracts the two booleans, mirrors DeniedBusy->SESSION_BUSY (same message), fails closed. staged_sessions
+not-materialized guard preserved. MeerkatMachine-local enum, no wire change. Test covers both outcomes.
+Gates: drift 10/6; check clean; workgraph+rpc+runtime+machine-codegen 1774 passed; ratchet pass; seam 0 debt;
+version parity + schema regen coherent.
+
+### Still open (round 2 tail, to assess/fold before re-review): oauth registry capacity (latent duplicate
+of AuthMachine confirm_oauth_durable_admission -> delete); pre-admission reservation release (LOW liveness);
+model hot-swap eligibility (known pending project_hot_swap_machine_gap); MCP teardown + create_item
+(sweep-rated defensible). beta to be re-run for two-clean.

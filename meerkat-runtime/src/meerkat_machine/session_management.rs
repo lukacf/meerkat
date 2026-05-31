@@ -1546,6 +1546,51 @@ impl MeerkatMachine {
         }
     }
 
+    /// Resolve the session-liveness verdict for an attempted transcript edit
+    /// (fork / rewrite / restore) through MeerkatMachine authority.
+    ///
+    /// The `SESSION_BUSY` disjunction (`runtime_running || has_active_inputs =>
+    /// busy`) is a MeerkatMachine-owned fact. The shell extracts the two pure
+    /// boolean observations it already computes — `runtime_running` from
+    /// `runtime_state` and `has_active_inputs` from `list_active_inputs` — and
+    /// mirrors the verdict emitted here. The classifier is a phase-preserving
+    /// self-loop, so it never mutates lifecycle state. The caller fails closed
+    /// (denies the edit) on any error.
+    pub async fn resolve_transcript_edit_admission(
+        &self,
+        session_id: &SessionId,
+        runtime_running: bool,
+        has_active_inputs: bool,
+    ) -> Result<crate::meerkat_machine::dsl::TranscriptEditAdmissionKind, RuntimeDriverError> {
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveTranscriptEditAdmission {
+                    runtime_running,
+                    has_active_inputs,
+                },
+                "ResolveTranscriptEditAdmission",
+            )
+            .await
+            .map_err(RuntimeDriverError::Internal)?;
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| {
+                match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::TranscriptEditAdmissionResolved {
+                    verdict,
+                } => Some(*verdict),
+                _ => None,
+            }
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "transcript-edit admission emitted no authority verdict".to_string(),
+                )
+            })
+    }
+
     /// Request cancellation at the next safe boundary for the currently-running turn.
     pub async fn cancel_after_boundary(
         &self,

@@ -952,6 +952,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "TranscriptEditAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Transcript-edit session-liveness verdict (runtime_running || has_active_inputs => SESSION_BUSY) must align with the shell mirror in reject_active_transcript_edit",
+        ),
+        (
+            "MeerkatMachine",
             "SupervisorAuthorizeAdmissionResolved",
             SeamClassification::SurfaceResultAlignment,
             "Supervisor authorize admission projection must align with generated supervisor authorization truth",

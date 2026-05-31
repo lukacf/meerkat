@@ -517,6 +517,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DetachIngress`
 - `ResolveSupervisorBindAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `ResolveSupervisorBindMaterialAdmission`(address_matches: Bool, sender_matches_supervisor: Bool, expected_peer_id_matches: Bool, bootstrap_token_matches: Bool)
+- `ResolveTranscriptEditAdmission`(runtime_running: Bool, has_active_inputs: Bool)
 - `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `BindSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
@@ -696,6 +697,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LocalEndpointChanged`(endpoint: Option<PeerEndpoint>)
 - `SupervisorBindAdmissionResolved`(result: SupervisorBindAdmissionResultKind, rejection: Option<SupervisorBindRejectionKind>)
 - `SupervisorBindMaterialAdmissionResolved`(verdict: SupervisorBindMaterialAdmissionKind)
+- `TranscriptEditAdmissionResolved`(verdict: TranscriptEditAdmissionKind)
 - `SupervisorAuthorizeAdmissionResolved`(result: SupervisorAuthorizeAdmissionResultKind, rejection: Option<SupervisorAuthorizeRejectionKind>, previous_name: Option<String>, previous_peer_id: Option<String>, previous_address: Option<String>, previous_signing_public_key: Option<String>, previous_epoch: Option<u64>)
 - `SupervisorBridgeCommandAdmissionResolved`(result: SupervisorBridgeCommandAdmissionResultKind, rejection: Option<SupervisorBridgeCommandRejectionKind>)
 - `SessionLlmReconfigurePlanResolved`(previous_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface: Option<SessionLlmCapabilitySurface>, capability_changed: Bool, previous_capability_base_filter: ToolFilter, current_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool, revision_bumped: Bool, active_visibility_revision: u64)
@@ -14608,6 +14610,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `expected_peer_id_matches`
   - `bootstrap_token_matches`
 - Emits: `SupervisorBindMaterialAdmissionResolved`
+- To: `Running`
+
+### `ResolveTranscriptEditAdmissionIdleBusy`
+- From: `Idle`
+- On: `ResolveTranscriptEditAdmission`(runtime_running, has_active_inputs)
+- Guards:
+  - `busy_disjunction`
+- Emits: `TranscriptEditAdmissionResolved`
+- To: `Idle`
+
+### `ResolveTranscriptEditAdmissionIdleAdmissible`
+- From: `Idle`
+- On: `ResolveTranscriptEditAdmission`(runtime_running, has_active_inputs)
+- Guards:
+  - `idle_no_active`
+- Emits: `TranscriptEditAdmissionResolved`
+- To: `Idle`
+
+### `ResolveTranscriptEditAdmissionAttachedBusy`
+- From: `Attached`
+- On: `ResolveTranscriptEditAdmission`(runtime_running, has_active_inputs)
+- Guards:
+  - `busy_disjunction`
+- Emits: `TranscriptEditAdmissionResolved`
+- To: `Attached`
+
+### `ResolveTranscriptEditAdmissionAttachedAdmissible`
+- From: `Attached`
+- On: `ResolveTranscriptEditAdmission`(runtime_running, has_active_inputs)
+- Guards:
+  - `attached_no_active`
+- Emits: `TranscriptEditAdmissionResolved`
+- To: `Attached`
+
+### `ResolveTranscriptEditAdmissionRunningBusy`
+- From: `Running`
+- On: `ResolveTranscriptEditAdmission`(runtime_running, has_active_inputs)
+- Guards:
+  - `busy_disjunction`
+- Emits: `TranscriptEditAdmissionResolved`
+- To: `Running`
+
+### `ResolveTranscriptEditAdmissionRunningAdmissible`
+- From: `Running`
+- On: `ResolveTranscriptEditAdmission`(runtime_running, has_active_inputs)
+- Guards:
+  - `running_no_active`
+- Emits: `TranscriptEditAdmissionResolved`
 - To: `Running`
 
 ### `ResolveSupervisorAuthorizeAdmissionNotBoundIdle`

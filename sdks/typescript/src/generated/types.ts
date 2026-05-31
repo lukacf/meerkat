@@ -881,6 +881,9 @@ export interface ProjectedAttentionAuthority {
   can_create: boolean;
   can_get: boolean;
   can_link: boolean;
+  can_link_derived_from: boolean;
+  can_link_parent: boolean;
+  can_link_related: boolean;
   can_release: boolean;
   can_update: boolean;
 }

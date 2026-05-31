@@ -1198,6 +1198,9 @@ class ProjectedAttentionAuthority:
     can_create: bool
     can_get: bool
     can_link: bool
+    can_link_derived_from: bool
+    can_link_parent: bool
+    can_link_related: bool
     can_release: bool
     can_update: bool
     can_close_own_review_item: Optional[bool] = None

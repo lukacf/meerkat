@@ -136,6 +136,9 @@ machine! {
                 can_block: bool,
                 can_create: bool,
                 can_link: bool,
+                can_link_parent: bool,
+                can_link_related: bool,
+                can_link_derived_from: bool,
                 can_close_own_review_item: bool,
                 can_close_if_policy_allows: bool,
             },
@@ -191,6 +194,27 @@ machine! {
         // edges) is a Coordinate-stance authority.
         helper attention_can_link(mode: WorkAttentionMode) -> bool {
             mode == WorkAttentionMode::Coordinate
+        }
+
+        // Which edge kinds an attention-scoped link may create is itself a
+        // machine-owned admission verdict over the attention stance, emitted as
+        // typed per-kind capability bits. The machine never names domain
+        // edge-kind strings; the shell mechanically maps a parsed edge kind to
+        // its bit and fails closed for any kind without a bit (today: Blocks and
+        // Supersedes carry no bit, so they are denied). Each kind is permitted
+        // exactly when an attention-scoped link is reachable at all — i.e. the
+        // Coordinate stance that owns graph wiring — preserving the pre-fold
+        // fixed allow-list of parent/related/derived_from.
+        helper attention_can_link_parent(mode: WorkAttentionMode) -> bool {
+            attention_can_link(mode)
+        }
+
+        helper attention_can_link_related(mode: WorkAttentionMode) -> bool {
+            attention_can_link(mode)
+        }
+
+        helper attention_can_link_derived_from(mode: WorkAttentionMode) -> bool {
+            attention_can_link(mode)
         }
 
         helper attention_can_close_own_review_item(
@@ -392,6 +416,9 @@ machine! {
                 can_block: attention_can_block(mode),
                 can_create: attention_can_create(mode),
                 can_link: attention_can_link(mode),
+                can_link_parent: attention_can_link_parent(mode),
+                can_link_related: attention_can_link_related(mode),
+                can_link_derived_from: attention_can_link_derived_from(mode),
                 can_close_own_review_item: attention_can_close_own_review_item(mode, delegated_authority),
                 can_close_if_policy_allows: attention_can_close_if_policy_allows(mode, delegated_authority)
             }

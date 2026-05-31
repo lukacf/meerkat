@@ -176,6 +176,9 @@ impl WorkAttentionMachine {
                 can_block,
                 can_create,
                 can_link,
+                can_link_parent,
+                can_link_related,
+                can_link_derived_from,
                 can_close_own_review_item,
                 can_close_if_policy_allows,
             } = effect
@@ -188,6 +191,9 @@ impl WorkAttentionMachine {
                     can_block: *can_block,
                     can_create: *can_create,
                     can_link: *can_link,
+                    can_link_parent: *can_link_parent,
+                    can_link_related: *can_link_related,
+                    can_link_derived_from: *can_link_derived_from,
                     can_close_own_review_item: *can_close_own_review_item,
                     can_close_if_policy_allows: *can_close_if_policy_allows,
                 };

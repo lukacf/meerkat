@@ -3635,6 +3635,18 @@ pub enum SupervisorBindMaterialAdmissionKind {
     InvalidBootstrapToken,
 }
 
+/// Generated session-liveness verdict for an attempted transcript edit (fork /
+/// rewrite / restore). Owns the `SESSION_BUSY` disjunction the shell previously
+/// decided inline: a session is busy iff its runtime is running OR it holds any
+/// active inputs. The shell extracts the two pure boolean observations
+/// (`runtime_running`, `has_active_inputs`) and mirrors this verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TranscriptEditAdmissionKind {
+    #[default]
+    Admissible,
+    DeniedBusy,
+}
+
 /// Generated admission result for `AuthorizeSupervisor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SupervisorAuthorizeAdmissionResultKind {

@@ -3158,6 +3158,15 @@
           "can_link": {
             "type": "boolean"
           },
+          "can_link_derived_from": {
+            "type": "boolean"
+          },
+          "can_link_parent": {
+            "type": "boolean"
+          },
+          "can_link_related": {
+            "type": "boolean"
+          },
           "can_release": {
             "type": "boolean"
           },
@@ -3173,6 +3182,9 @@
           "can_block",
           "can_create",
           "can_link",
+          "can_link_parent",
+          "can_link_related",
+          "can_link_derived_from",
           "can_close_if_policy_allows"
         ],
         "type": "object"
@@ -4094,6 +4106,15 @@
           "can_link": {
             "type": "boolean"
           },
+          "can_link_derived_from": {
+            "type": "boolean"
+          },
+          "can_link_parent": {
+            "type": "boolean"
+          },
+          "can_link_related": {
+            "type": "boolean"
+          },
           "can_release": {
             "type": "boolean"
           },
@@ -4109,6 +4130,9 @@
           "can_block",
           "can_create",
           "can_link",
+          "can_link_parent",
+          "can_link_related",
+          "can_link_derived_from",
           "can_close_if_policy_allows"
         ],
         "type": "object"
@@ -19196,6 +19220,15 @@
       "can_link": {
         "type": "boolean"
       },
+      "can_link_derived_from": {
+        "type": "boolean"
+      },
+      "can_link_parent": {
+        "type": "boolean"
+      },
+      "can_link_related": {
+        "type": "boolean"
+      },
       "can_release": {
         "type": "boolean"
       },
@@ -19211,6 +19244,9 @@
       "can_block",
       "can_create",
       "can_link",
+      "can_link_parent",
+      "can_link_related",
+      "can_link_derived_from",
       "can_close_if_policy_allows"
     ],
     "title": "ProjectedAttentionAuthority",

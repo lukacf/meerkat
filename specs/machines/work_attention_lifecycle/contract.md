@@ -28,7 +28,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttentionSuperseded`(revision: u64)
 - `AttentionStopped`(revision: u64)
 - `AttentionEligibilityClassified`(eligible: Bool)
-- `AttentionAuthorityClassified`(can_get: Bool, can_add_evidence: Bool, can_release: Bool, can_update: Bool, can_block: Bool, can_create: Bool, can_link: Bool, can_close_own_review_item: Bool, can_close_if_policy_allows: Bool)
+- `AttentionAuthorityClassified`(can_get: Bool, can_add_evidence: Bool, can_release: Bool, can_update: Bool, can_block: Bool, can_create: Bool, can_link: Bool, can_link_parent: Bool, can_link_related: Bool, can_link_derived_from: Bool, can_close_own_review_item: Bool, can_close_if_policy_allows: Bool)
 
 ## Helpers
 - `attention_is_adversarial`(mode: WorkAttentionMode) -> `Bool`
@@ -39,6 +39,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `attention_can_block`(mode: WorkAttentionMode) -> `Bool`
 - `attention_can_create`(mode: WorkAttentionMode) -> `Bool`
 - `attention_can_link`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link_parent`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link_related`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link_derived_from`(mode: WorkAttentionMode) -> `Bool`
 - `attention_can_close_own_review_item`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
 - `attention_can_close_if_policy_allows`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
 

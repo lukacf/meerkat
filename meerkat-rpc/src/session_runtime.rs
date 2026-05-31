@@ -7124,6 +7124,12 @@ impl SessionRuntime {
     }
 
     async fn reject_active_transcript_edit(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        // The two observations are MeerkatMachine-owned facts the shell extracts:
+        // the runtime lifecycle phase (`runtime_running`) and the active-input
+        // ledger (`has_active_inputs`). The `SESSION_BUSY` disjunction over them
+        // is itself a MeerkatMachine-owned admission verdict — the shell routes
+        // the two pure booleans through the machine and mirrors the verdict,
+        // failing closed (deny) if no verdict is available.
         let runtime_running = self
             .runtime_adapter
             .runtime_state(session_id)
@@ -7134,7 +7140,14 @@ impl SessionRuntime {
             .list_active_inputs(session_id)
             .await
             .is_ok_and(|inputs| !inputs.is_empty());
-        if runtime_running || has_active_inputs {
+        let session_busy = matches!(
+            self.runtime_adapter
+                .resolve_transcript_edit_admission(session_id, runtime_running, has_active_inputs)
+                .await,
+            Ok(meerkat_runtime::meerkat_machine::dsl::TranscriptEditAdmissionKind::DeniedBusy)
+                | Err(_)
+        );
+        if session_busy {
             return Err(RpcError {
                 code: error::SESSION_BUSY,
                 message: format!(

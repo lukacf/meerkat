@@ -1141,6 +1141,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "TranscriptEditAdmissionKind",
+                &["Admissible", "DeniedBusy"],
+            ),
+            NamedTypeBinding::string_enum(
                 "SupervisorAuthorizeAdmissionResultKind",
                 &["Proceed", "IdempotentAck", "Reject"],
             ),
@@ -1755,6 +1759,7 @@ runtime_internal_inputs!(
         ResolveSupervisorBindAdmission,
         ResolveSupervisorBindMaterialAdmission,
         ResolveSupervisorBridgeCommandAdmission,
+        ResolveTranscriptEditAdmission,
         ResolveTurnSurfaceResult,
         ResolveUserInterruptPublicResult,
         ResolveWaitAllAdmission,

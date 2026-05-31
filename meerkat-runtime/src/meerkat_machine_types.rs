@@ -677,6 +677,7 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveAdmissionValidation,
         ResolveInputPublicLifecycle,
         ResolveInputPublicTerminalOutcome,
+        ResolveTranscriptEditAdmission,
         RegisterAcceptedIdempotency,
         ResolveStagedRollback,
         RetryRequested,

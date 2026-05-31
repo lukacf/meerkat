@@ -1453,6 +1453,9 @@ pub struct ProjectedAttentionAuthority {
     pub can_block: bool,
     pub can_create: bool,
     pub can_link: bool,
+    pub can_link_parent: bool,
+    pub can_link_related: bool,
+    pub can_link_derived_from: bool,
     #[serde(default)]
     pub can_close_own_review_item: bool,
     pub can_close_if_policy_allows: bool,

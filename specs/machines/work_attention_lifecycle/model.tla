@@ -38,6 +38,9 @@ attention_can_add_evidence(mode) == (mode # "Observe")
 attention_can_get(mode) == ((mode = "Pursue") \/ (mode = "Coordinate") \/ (mode = "Review") \/ (mode = "Falsify") \/ (mode = "Judge") \/ (mode = "Observe"))
 attention_is_adversarial(mode) == ((mode = "Review") \/ (mode = "Falsify") \/ (mode = "Observe"))
 attention_can_close_if_policy_allows(mode, delegated_authority) == ((delegated_authority = "CloseIfPolicyAllows") /\ (attention_is_adversarial(mode) = FALSE))
+attention_can_link_derived_from(mode) == attention_can_link(mode)
+attention_can_link_related(mode) == attention_can_link(mode)
+attention_can_link_parent(mode) == attention_can_link(mode)
 
 Init ==
     /\ phase = "Active"

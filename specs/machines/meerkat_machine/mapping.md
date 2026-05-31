@@ -4397,6 +4397,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSupervisorBindMaterialAdmissionAcceptRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ResolveTranscriptEditAdmissionIdleBusy`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTranscriptEditAdmissionIdleAdmissible`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTranscriptEditAdmissionAttachedBusy`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTranscriptEditAdmissionAttachedAdmissible`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTranscriptEditAdmissionRunningBusy`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveTranscriptEditAdmissionRunningAdmissible`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveSupervisorAuthorizeAdmissionNotBoundIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `ops_completion_and_waiters`
@@ -5164,6 +5182,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SupervisorBindMaterialAdmissionResolved`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`
+- `TranscriptEditAdmissionResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `SupervisorAuthorizeAdmissionResolved`
   - anchors: `meerkat_machine`
   - scenarios: `live_topology_and_supervision`

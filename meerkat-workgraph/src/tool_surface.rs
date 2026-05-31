@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AttentionContextProjection, AttentionProjectionRequest, CloseWorkItemRequest,
-    GoalRequestCloseRequest, WorkEdgeKind, WorkGraphService, handle_workgraph_tools_call,
-    workgraph_tools_list,
+    GoalRequestCloseRequest, ProjectedAttentionAuthority, WorkEdgeKind, WorkGraphService,
+    handle_workgraph_tools_call, workgraph_tools_list,
 };
 
 pub const WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY: &str = "workgraph.attention_projection";
@@ -387,6 +387,28 @@ fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTre
     allowed
 }
 
+/// Pure mechanical decoder from a parsed `WorkEdgeKind` to the machine-emitted
+/// per-kind link capability bit.
+///
+/// The admission policy ("which edge kinds may an attention-scoped link
+/// create") is owned by the canonical `WorkAttentionLifecycleMachine`'s
+/// `ClassifyAttentionAuthority` verdict, mirrored into `projection.authority` as
+/// typed `can_link_{parent,related,derived_from}` bits. This holds NO policy: it
+/// is a fixed `WorkEdgeKind -> capability-bit` mapping (an acceptable witness
+/// encoder). Edge kinds with no capability bit (`Blocks`, `Supersedes`) return
+/// `None`, which the caller treats as denied (fail closed).
+fn attention_link_kind_capability(
+    authority: &ProjectedAttentionAuthority,
+    kind: WorkEdgeKind,
+) -> Option<bool> {
+    match kind {
+        WorkEdgeKind::Parent => Some(authority.can_link_parent),
+        WorkEdgeKind::Related => Some(authority.can_link_related),
+        WorkEdgeKind::DerivedFrom => Some(authority.can_link_derived_from),
+        WorkEdgeKind::Blocks | WorkEdgeKind::Supersedes => None,
+    }
+}
+
 fn validate_attention_scoped_call(
     projection: &AttentionContextProjection,
     name: &str,
@@ -403,19 +425,21 @@ fn validate_attention_scoped_call(
             | "workgraph_add_evidence"
     ) {
         if name == "workgraph_link" {
-            let safe_kind = args
+            // Which edge kinds an attention-scoped link may create is a
+            // WorkAttentionLifecycle-owned admission verdict. The shell is a
+            // pure mechanical `WorkEdgeKind -> capability-bit` decoder over the
+            // machine-emitted authority bits and fails closed: a kind that does
+            // not parse, or whose capability bit is false (or has no bit, i.e.
+            // Blocks/Supersedes), is denied.
+            let permitted = args
                 .get("kind")
                 .and_then(Value::as_str)
                 .and_then(|kind| {
                     serde_json::from_value::<WorkEdgeKind>(Value::String(kind.into())).ok()
                 })
-                .is_some_and(|kind| {
-                    matches!(
-                        kind,
-                        WorkEdgeKind::Parent | WorkEdgeKind::Related | WorkEdgeKind::DerivedFrom
-                    )
-                });
-            if !safe_kind {
+                .and_then(|kind| attention_link_kind_capability(&projection.authority, kind))
+                .unwrap_or(false);
+            if !permitted {
                 return Err(ToolError::ExecutionFailed {
                     message:
                         "attention-scoped workgraph_link only permits parent, related, or derived_from edges"
@@ -651,6 +675,93 @@ mod tests {
             expect(&["workgraph_get", "workgraph_add_evidence", "workgraph_close",]),
             "Judge with close-if-policy-allows"
         );
+    }
+
+    /// The set of edge kinds an attention-scoped `workgraph_link` may create is
+    /// now decided by the canonical `WorkAttentionLifecycleMachine`'s
+    /// `ClassifyAttentionAuthority` verdict (mirrored into
+    /// `projection.authority.can_link_{parent,related,derived_from}`); the shell
+    /// is a pure `WorkEdgeKind -> capability-bit` decoder that fails closed. This
+    /// pins the post-fold permitted/denied edge kinds to the exact pre-fold
+    /// fixed allow-list through the machine-backed projection.
+    #[tokio::test]
+    async fn attention_scoped_link_edge_kind_admission_matches_pre_fold_behavior() {
+        async fn projection_for(mode: WorkAttentionMode) -> AttentionContextProjection {
+            let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+            let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-0000000000bb")
+                .expect("valid session id");
+            let goal = service
+                .create_goal(GoalCreateRequest {
+                    realm_id: None,
+                    namespace: None,
+                    title: "Link admission item".to_string(),
+                    description: None,
+                    target: GoalAttentionTarget::Session { session_id },
+                    mode,
+                    completion_policy: WorkCompletionPolicy::SelfAttest,
+                    delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                    projection_policy: AttentionProjectionPolicy::default(),
+                })
+                .await
+                .expect("create goal");
+            service
+                .attention_projection(crate::AttentionProjectionRequest {
+                    binding_id: goal.attention.binding_id,
+                    realm_id: None,
+                    namespace: None,
+                })
+                .await
+                .expect("projection")
+                .projection
+        }
+
+        fn link_call(projection: &AttentionContextProjection, kind: &str) -> Result<(), ToolError> {
+            let item_id = projection.work_ref.item_id.as_str();
+            validate_attention_scoped_call(
+                projection,
+                "workgraph_link",
+                &json!({
+                    "kind": kind,
+                    "from_id": item_id,
+                    "to_id": "some-other-item",
+                }),
+            )
+        }
+
+        // Coordinate is the only stance that owns graph wiring, so its machine
+        // verdict permits exactly parent/related/derived_from and denies the
+        // kinds with no capability bit (blocks/supersedes).
+        let coordinate = projection_for(WorkAttentionMode::Coordinate).await;
+        assert!(coordinate.authority.can_link, "Coordinate can link");
+        assert!(coordinate.authority.can_link_parent);
+        assert!(coordinate.authority.can_link_related);
+        assert!(coordinate.authority.can_link_derived_from);
+        for kind in ["parent", "related", "derived_from"] {
+            assert!(
+                link_call(&coordinate, kind).is_ok(),
+                "Coordinate must permit {kind} link"
+            );
+        }
+        for kind in ["blocks", "supersedes"] {
+            assert!(
+                link_call(&coordinate, kind).is_err(),
+                "Coordinate must deny {kind} link (no capability bit)"
+            );
+        }
+
+        // A stance that cannot link at all (Pursue) has every per-kind bit false,
+        // so even parent/related/derived_from are denied — fail closed.
+        let pursue = projection_for(WorkAttentionMode::Pursue).await;
+        assert!(!pursue.authority.can_link, "Pursue cannot link");
+        assert!(!pursue.authority.can_link_parent);
+        assert!(!pursue.authority.can_link_related);
+        assert!(!pursue.authority.can_link_derived_from);
+        for kind in ["parent", "related", "derived_from", "blocks", "supersedes"] {
+            assert!(
+                link_call(&pursue, kind).is_err(),
+                "Pursue must deny {kind} link"
+            );
+        }
     }
 
     #[tokio::test]

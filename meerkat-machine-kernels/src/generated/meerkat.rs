@@ -9023,6 +9023,58 @@ pub type ToolVisibilityWitness =
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum TranscriptEditAdmissionKind {
+    #[default]
+    #[serde(rename = "Admissible")]
+    Admissible,
+    #[serde(rename = "DeniedBusy")]
+    DeniedBusy,
+}
+impl TranscriptEditAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admissible => "Admissible",
+            Self::DeniedBusy => "DeniedBusy",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TranscriptEditAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admissible" => Ok(Self::Admissible),
+            "DeniedBusy" => Ok(Self::DeniedBusy),
+            other => Err(format!(
+                "invalid TranscriptEditAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TranscriptEditAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TranscriptEditAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum TurnCancellationReason {
     #[default]
     #[serde(rename = "Observed")]
@@ -11350,6 +11402,11 @@ pub mod inputs {
         pub bootstrap_token_matches: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveTranscriptEditAdmission {
+        pub runtime_running: bool,
+        pub has_active_inputs: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSupervisorAuthorizeAdmission {
         pub supervisor_peer_id: String,
         pub supervisor_epoch: u64,
@@ -11702,6 +11759,7 @@ pub enum Input {
     DetachIngress(inputs::DetachIngress),
     ResolveSupervisorBindAdmission(inputs::ResolveSupervisorBindAdmission),
     ResolveSupervisorBindMaterialAdmission(inputs::ResolveSupervisorBindMaterialAdmission),
+    ResolveTranscriptEditAdmission(inputs::ResolveTranscriptEditAdmission),
     ResolveSupervisorAuthorizeAdmission(inputs::ResolveSupervisorAuthorizeAdmission),
     BindSupervisor(inputs::BindSupervisor),
     AuthorizeSupervisor(inputs::AuthorizeSupervisor),
@@ -12029,6 +12087,7 @@ impl Input {
             Self::ResolveSupervisorBindMaterialAdmission(_) => {
                 InputKind::ResolveSupervisorBindMaterialAdmission
             }
+            Self::ResolveTranscriptEditAdmission(_) => InputKind::ResolveTranscriptEditAdmission,
             Self::ResolveSupervisorAuthorizeAdmission(_) => {
                 InputKind::ResolveSupervisorAuthorizeAdmission
             }
@@ -12309,6 +12368,7 @@ pub enum InputKind {
     DetachIngress,
     ResolveSupervisorBindAdmission,
     ResolveSupervisorBindMaterialAdmission,
+    ResolveTranscriptEditAdmission,
     ResolveSupervisorAuthorizeAdmission,
     BindSupervisor,
     AuthorizeSupervisor,
@@ -13140,6 +13200,10 @@ pub mod effects {
         pub verdict: SupervisorBindMaterialAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TranscriptEditAdmissionResolved {
+        pub verdict: TranscriptEditAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SupervisorAuthorizeAdmissionResolved {
         pub result: SupervisorAuthorizeAdmissionResultKind,
         pub rejection: Option<SupervisorAuthorizeRejectionKind>,
@@ -13323,6 +13387,7 @@ pub enum Effect {
     LocalEndpointChanged(effects::LocalEndpointChanged),
     SupervisorBindAdmissionResolved(effects::SupervisorBindAdmissionResolved),
     SupervisorBindMaterialAdmissionResolved(effects::SupervisorBindMaterialAdmissionResolved),
+    TranscriptEditAdmissionResolved(effects::TranscriptEditAdmissionResolved),
     SupervisorAuthorizeAdmissionResolved(effects::SupervisorAuthorizeAdmissionResolved),
     SupervisorBridgeCommandAdmissionResolved(effects::SupervisorBridgeCommandAdmissionResolved),
     SessionLlmReconfigurePlanResolved(effects::SessionLlmReconfigurePlanResolved),
@@ -13472,6 +13537,7 @@ pub enum EffectKind {
     LocalEndpointChanged,
     SupervisorBindAdmissionResolved,
     SupervisorBindMaterialAdmissionResolved,
+    TranscriptEditAdmissionResolved,
     SupervisorAuthorizeAdmissionResolved,
     SupervisorBridgeCommandAdmissionResolved,
     SessionLlmReconfigurePlanResolved,
@@ -14939,6 +15005,12 @@ pub enum TransitionId {
     ResolveSupervisorBindMaterialAdmissionAcceptIdle,
     ResolveSupervisorBindMaterialAdmissionAcceptAttached,
     ResolveSupervisorBindMaterialAdmissionAcceptRunning,
+    ResolveTranscriptEditAdmissionIdleBusy,
+    ResolveTranscriptEditAdmissionIdleAdmissible,
+    ResolveTranscriptEditAdmissionAttachedBusy,
+    ResolveTranscriptEditAdmissionAttachedAdmissible,
+    ResolveTranscriptEditAdmissionRunningBusy,
+    ResolveTranscriptEditAdmissionRunningAdmissible,
     ResolveSupervisorAuthorizeAdmissionNotBoundIdle,
     ResolveSupervisorAuthorizeAdmissionNotBoundAttached,
     ResolveSupervisorAuthorizeAdmissionNotBoundRunning,

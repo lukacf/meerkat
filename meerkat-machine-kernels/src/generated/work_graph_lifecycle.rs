@@ -140,6 +140,68 @@ impl std::fmt::Display for WorkEdgeKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkEvidenceKind {
+    #[default]
+    #[serde(rename = "SelfAttest")]
+    SelfAttest,
+    #[serde(rename = "HostConfirmation")]
+    HostConfirmation,
+    #[serde(rename = "PrincipalConfirmation")]
+    PrincipalConfirmation,
+    #[serde(rename = "SupervisorConfirmation")]
+    SupervisorConfirmation,
+    #[serde(rename = "ReviewerConfirmation")]
+    ReviewerConfirmation,
+}
+impl WorkEvidenceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SelfAttest => "SelfAttest",
+            Self::HostConfirmation => "HostConfirmation",
+            Self::PrincipalConfirmation => "PrincipalConfirmation",
+            Self::SupervisorConfirmation => "SupervisorConfirmation",
+            Self::ReviewerConfirmation => "ReviewerConfirmation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkEvidenceKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SelfAttest" => Ok(Self::SelfAttest),
+            "HostConfirmation" => Ok(Self::HostConfirmation),
+            "PrincipalConfirmation" => Ok(Self::PrincipalConfirmation),
+            "SupervisorConfirmation" => Ok(Self::SupervisorConfirmation),
+            "ReviewerConfirmation" => Ok(Self::ReviewerConfirmation),
+            other => Err(format!("invalid WorkEvidenceKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkEvidenceKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkEvidenceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -276,6 +338,10 @@ pub struct State {
     pub completion_reviewer_quorum_threshold: Option<u64>,
     pub terminal_at_utc_ms: Option<u64>,
     pub evidence_count: u64,
+    pub host_confirmation_count: u64,
+    pub principal_confirmation_count: u64,
+    pub supervisor_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
+    pub reviewer_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -362,6 +428,8 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AddEvidence {
         pub expected_revision: u64,
+        pub evidence_kind: WorkEvidenceKind,
+        pub confirming_owner_key: Option<WorkOwnerKey>,
     }
 }
 
@@ -585,5 +653,9 @@ pub fn initial_state() -> State {
         completion_reviewer_quorum_threshold: None,
         terminal_at_utc_ms: None,
         evidence_count: 0,
+        host_confirmation_count: 0,
+        principal_confirmation_count: 0,
+        supervisor_confirmation_owner_keys: Default::default(),
+        reviewer_confirmation_owner_keys: Default::default(),
     }
 }

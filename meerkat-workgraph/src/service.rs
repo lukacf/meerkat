@@ -16,7 +16,7 @@ use crate::types::{
     GoalStatusResult, LinkWorkItemsRequest, ProjectedAttentionAuthority, ReadyWorkFilter,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId,
     WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind,
-    WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot,
+    WorkEvidenceKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot,
     WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
     WorkOwnerKey, WorkOwnerKind, WorkStatus,
 };
@@ -1227,6 +1227,8 @@ fn confirmation_evidence_for_policy(
         }
         WorkCompletionPolicy::HostConfirmed => {
             require_evidence_kind(policy, &evidence, "host_confirmation")?;
+            evidence.confirmation_kind = Some(WorkEvidenceKind::HostConfirmation);
+            evidence.confirming_owner_key = None;
         }
         WorkCompletionPolicy::PrincipalConfirmed => {
             let principal = require_principal(policy, principal)?;
@@ -1237,9 +1239,11 @@ fn confirmation_evidence_for_policy(
                 )));
             }
             require_evidence_kind(policy, &evidence, "principal_confirmation")?;
-            let principal = principal.canonical();
-            evidence.id = principal.clone();
-            evidence.label = Some(principal);
+            let canonical = principal.canonical();
+            evidence.id = canonical.clone();
+            evidence.label = Some(canonical);
+            evidence.confirmation_kind = Some(WorkEvidenceKind::PrincipalConfirmation);
+            evidence.confirming_owner_key = Some(principal.clone());
         }
         WorkCompletionPolicy::Supervisor { owner_key } => {
             let principal = require_principal(policy, principal)?;
@@ -1251,16 +1255,20 @@ fn confirmation_evidence_for_policy(
                 )));
             }
             require_evidence_kind(policy, &evidence, "supervisor_confirmation")?;
-            let owner = owner_key.canonical();
-            evidence.id = owner.clone();
-            evidence.label = Some(owner);
+            let canonical = owner_key.canonical();
+            evidence.id = canonical.clone();
+            evidence.label = Some(canonical);
+            evidence.confirmation_kind = Some(WorkEvidenceKind::SupervisorConfirmation);
+            evidence.confirming_owner_key = Some(owner_key.clone());
         }
         WorkCompletionPolicy::ReviewerQuorum { .. } => {
             let principal = require_principal(policy, principal)?;
             require_evidence_kind(policy, &evidence, "reviewer_confirmation")?;
-            let principal = principal.canonical();
-            evidence.id = principal.clone();
-            evidence.label = Some(principal);
+            let canonical = principal.canonical();
+            evidence.id = canonical.clone();
+            evidence.label = Some(canonical);
+            evidence.confirmation_kind = Some(WorkEvidenceKind::ReviewerConfirmation);
+            evidence.confirming_owner_key = Some(principal.clone());
         }
     }
     Ok(evidence)

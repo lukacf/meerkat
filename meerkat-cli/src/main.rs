@@ -6223,6 +6223,8 @@ async fn handle_workgraph_command(
                         id,
                         label,
                         summary,
+                        confirmation_kind: None,
+                        confirming_owner_key: None,
                     },
                     principal: None,
                     trusted_principal: None,

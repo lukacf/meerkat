@@ -925,6 +925,8 @@ export interface WorkItemRef {
 }
 
 export interface WorkEvidenceRef {
+  confirmation_kind?: unknown;
+  confirming_owner_key?: WorkOwnerKey;
   id: string;
   kind: string;
   label?: string;

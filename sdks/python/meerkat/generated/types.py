@@ -1253,6 +1253,8 @@ class WorkEvidenceRef:
     """Wire payload for WorkEvidenceRef."""
     id: str
     kind: str
+    confirmation_kind: Optional[Any] = None
+    confirming_owner_key: Optional[WorkOwnerKey] = None
     label: Optional[str] = None
     summary: Optional[str] = None
 

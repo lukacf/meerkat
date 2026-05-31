@@ -24,6 +24,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `completion_reviewer_quorum_threshold`: `Option<u64>`
 - `terminal_at_utc_ms`: `Option<u64>`
 - `evidence_count`: `u64`
+- `host_confirmation_count`: `u64`
+- `principal_confirmation_count`: `u64`
+- `supervisor_confirmation_owner_keys`: `Set<WorkOwnerKey>`
+- `reviewer_confirmation_owner_keys`: `Set<WorkOwnerKey>`
 
 ## Inputs
 - `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
@@ -37,7 +41,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CloseCompleted`(expected_revision: u64, at_utc_ms: u64)
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
-- `AddEvidence`(expected_revision: u64)
+- `AddEvidence`(expected_revision: u64, evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>)
 
 ## Signals
 
@@ -53,6 +57,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
+- `completion_policy_is_satisfied`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>, host_confirmation_count: u64, principal_confirmation_count: u64, supervisor_confirmation_owner_keys: Set<WorkOwnerKey>, reviewer_confirmation_owner_keys: Set<WorkOwnerKey>) -> `Bool`
+- `evidence_kind_owner_key_present`(evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>) -> `Bool`
 
 ## Invariants
 - `absent_has_zero_revision`
@@ -203,6 +209,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CloseCompleted`(expected_revision, at_utc_ms)
 - Guards:
   - ``
+  - `completion_policy_satisfied`
 - Emits: `Closed`
 - To: `Completed`
 
@@ -211,6 +218,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CloseCompleted`(expected_revision, at_utc_ms)
 - Guards:
   - ``
+  - `completion_policy_satisfied`
 - Emits: `Closed`
 - To: `Completed`
 
@@ -219,6 +227,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CloseCompleted`(expected_revision, at_utc_ms)
 - Guards:
   - ``
+  - `completion_policy_satisfied`
 - Emits: `Closed`
 - To: `Completed`
 
@@ -272,49 +281,55 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AddEvidenceOpen`
 - From: `Open`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_kind, confirming_owner_key)
 - Guards:
   - ``
+  - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
 - To: `Open`
 
 ### `AddEvidenceInProgress`
 - From: `InProgress`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_kind, confirming_owner_key)
 - Guards:
   - ``
+  - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
 - To: `InProgress`
 
 ### `AddEvidenceBlocked`
 - From: `Blocked`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_kind, confirming_owner_key)
 - Guards:
   - ``
+  - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
 - To: `Blocked`
 
 ### `AddEvidenceCompleted`
 - From: `Completed`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_kind, confirming_owner_key)
 - Guards:
   - ``
+  - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
 - To: `Completed`
 
 ### `AddEvidenceCancelled`
 - From: `Cancelled`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_kind, confirming_owner_key)
 - Guards:
   - ``
+  - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
 - To: `Cancelled`
 
 ### `AddEvidenceFailed`
 - From: `Failed`
-- On: `AddEvidence`(expected_revision)
+- On: `AddEvidence`(expected_revision, evidence_kind, confirming_owner_key)
 - Guards:
   - ``
+  - `owner_key_present_for_kind`
 - Emits: `EvidenceAdded`
 - To: `Failed`
 

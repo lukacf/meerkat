@@ -2452,6 +2452,16 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 &["Principal", "Agent", "Session", "Mob", "Label"],
             ),
             NamedTypeBinding::string_enum(
+                "WorkEvidenceKind",
+                &[
+                    "SelfAttest",
+                    "HostConfirmation",
+                    "PrincipalConfirmation",
+                    "SupervisorConfirmation",
+                    "ReviewerConfirmation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "WorkGraphErrorKind",
                 &[
                     "NotFound",

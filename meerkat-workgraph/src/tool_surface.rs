@@ -978,6 +978,8 @@ mod tests {
                     id: "acceptance-1".to_string(),
                     label: Some("accepted".to_string()),
                     summary: None,
+                    confirmation_kind: None,
+                    confirming_owner_key: None,
                 },
                 principal: None,
                 trusted_principal: None,

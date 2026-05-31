@@ -3,19 +3,21 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 SetOfWorkDependencyPathKeyValuesCi == {{}}
 SetOfWorkEdgeKeyValuesCi == {{}}
+SetOfWorkOwnerKeyValuesCi == {{}}
 WorkDependencyPathKeyValuesCi == {}
 WorkEdgeKeyValuesCi == {}
 WorkOwnerKeyValuesCi == {}
 
 SetOfWorkDependencyPathKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
 SetOfWorkEdgeKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesDeep == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
 WorkDependencyPathKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkEdgeKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesDeep == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
@@ -36,10 +38,12 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count
+VARIABLES phase, model_step_count, revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys
 
-vars == << phase, model_step_count, revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+vars == << phase, model_step_count, revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
+evidence_kind_owner_key_present(evidence_kind, confirming_owner_key) == (IF (evidence_kind = "SupervisorConfirmation") THEN (confirming_owner_key # None) ELSE (IF (evidence_kind = "ReviewerConfirmation") THEN (confirming_owner_key # None) ELSE TRUE))
+completion_policy_is_satisfied(policy, supervisor_owner_key, reviewer_quorum_threshold, arg_host_confirmation_count, arg_principal_confirmation_count, arg_supervisor_confirmation_owner_keys, arg_reviewer_confirmation_owner_keys) == (IF (policy = "SelfAttest") THEN TRUE ELSE (IF (policy = "HostConfirmed") THEN (arg_host_confirmation_count > 0) ELSE (IF (policy = "PrincipalConfirmed") THEN (arg_principal_confirmation_count > 0) ELSE (IF (policy = "Supervisor") THEN ((supervisor_owner_key # None) /\ ((IF "value" \in DOMAIN supervisor_owner_key THEN supervisor_owner_key["value"] ELSE None) \in arg_supervisor_confirmation_owner_keys)) ELSE ((reviewer_quorum_threshold # None) /\ (Cardinality(arg_reviewer_confirmation_owner_keys) >= (IF "value" \in DOMAIN reviewer_quorum_threshold THEN reviewer_quorum_threshold["value"] ELSE None)))))))
 completion_policy_payload_valid(policy, supervisor_owner_key, reviewer_quorum_threshold) == (IF (policy = "Supervisor") THEN ((supervisor_owner_key # None) /\ (reviewer_quorum_threshold = None)) ELSE (IF (policy = "ReviewerQuorum") THEN ((supervisor_owner_key = None) /\ (reviewer_quorum_threshold # None) /\ ((IF "value" \in DOMAIN reviewer_quorum_threshold THEN reviewer_quorum_threshold["value"] ELSE None) > 0)) ELSE ((supervisor_owner_key = None) /\ (reviewer_quorum_threshold = None))))
 
 Init ==
@@ -62,6 +66,10 @@ Init ==
     /\ completion_reviewer_quorum_threshold = None
     /\ terminal_at_utc_ms = None
     /\ evidence_count = 0
+    /\ host_confirmation_count = 0
+    /\ principal_confirmation_count = 0
+    /\ supervisor_confirmation_owner_keys = {}
+    /\ reviewer_confirmation_owner_keys = {}
 
 TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Cancelled" \/ phase = "Failed"
@@ -80,7 +88,7 @@ CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, a
     /\ completion_policy' = arg_completion_policy
     /\ completion_supervisor_owner_key' = arg_completion_supervisor_owner_key
     /\ completion_reviewer_quorum_threshold' = arg_completion_reviewer_quorum_threshold
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count) ==
@@ -96,7 +104,7 @@ CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms
     /\ completion_policy' = arg_completion_policy
     /\ completion_supervisor_owner_key' = arg_completion_supervisor_owner_key
     /\ completion_reviewer_quorum_threshold' = arg_completion_reviewer_quorum_threshold
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count) ==
@@ -113,7 +121,7 @@ UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoo
     /\ completion_policy' = arg_completion_policy
     /\ completion_supervisor_owner_key' = arg_completion_supervisor_owner_key
     /\ completion_reviewer_quorum_threshold' = arg_completion_reviewer_quorum_threshold
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count) ==
@@ -130,7 +138,7 @@ UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, ar
     /\ completion_policy' = arg_completion_policy
     /\ completion_supervisor_owner_key' = arg_completion_supervisor_owner_key
     /\ completion_reviewer_quorum_threshold' = arg_completion_reviewer_quorum_threshold
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count) ==
@@ -147,7 +155,7 @@ UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_s
     /\ completion_policy' = arg_completion_policy
     /\ completion_supervisor_owner_key' = arg_completion_supervisor_owner_key
     /\ completion_reviewer_quorum_threshold' = arg_completion_reviewer_quorum_threshold
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -163,7 +171,7 @@ ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     /\ claim_owner_key' = Some(owner_key)
     /\ claimed_at_utc_ms' = Some(now_utc_ms)
     /\ lease_expires_at_utc_ms' = arg_lease_expires_at_utc_ms
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -182,7 +190,7 @@ ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expir
     /\ claim_owner_key' = Some(owner_key)
     /\ claimed_at_utc_ms' = Some(now_utc_ms)
     /\ lease_expires_at_utc_ms' = arg_lease_expires_at_utc_ms
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 ReleaseInProgress(expected_revision) ==
@@ -194,7 +202,7 @@ ReleaseInProgress(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 BlockOpen(expected_revision) ==
@@ -206,7 +214,7 @@ BlockOpen(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 BlockInProgress(expected_revision) ==
@@ -218,7 +226,7 @@ BlockInProgress(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 BlockBlocked(expected_revision) ==
@@ -230,7 +238,7 @@ BlockBlocked(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
@@ -239,7 +247,7 @@ RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
@@ -248,7 +256,7 @@ RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
@@ -257,7 +265,7 @@ RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==
@@ -270,12 +278,13 @@ ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==
     /\ ((kind # "Parent") \/ ((reverse_path_key \in parent_reachability) = FALSE))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseOpenCompleted(expected_revision, at_utc_ms) ==
     /\ phase = "Open"
     /\ (revision = expected_revision)
+    /\ completion_policy_is_satisfied(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
@@ -283,12 +292,13 @@ CloseOpenCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseInProgressCompleted(expected_revision, at_utc_ms) ==
     /\ phase = "InProgress"
     /\ (revision = expected_revision)
+    /\ completion_policy_is_satisfied(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
@@ -296,12 +306,13 @@ CloseInProgressCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseBlockedCompleted(expected_revision, at_utc_ms) ==
     /\ phase = "Blocked"
     /\ (revision = expected_revision)
+    /\ completion_policy_is_satisfied(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
@@ -309,7 +320,7 @@ CloseBlockedCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseOpenCancelled(expected_revision, at_utc_ms) ==
@@ -322,7 +333,7 @@ CloseOpenCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseInProgressCancelled(expected_revision, at_utc_ms) ==
@@ -335,7 +346,7 @@ CloseInProgressCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseBlockedCancelled(expected_revision, at_utc_ms) ==
@@ -348,7 +359,7 @@ CloseBlockedCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseOpenFailed(expected_revision, at_utc_ms) ==
@@ -361,7 +372,7 @@ CloseOpenFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseInProgressFailed(expected_revision, at_utc_ms) ==
@@ -374,7 +385,7 @@ CloseInProgressFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
 CloseBlockedFailed(expected_revision, at_utc_ms) ==
@@ -387,66 +398,96 @@ CloseBlockedFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
-AddEvidenceOpen(expected_revision) ==
+AddEvidenceOpen(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ phase = "Open"
     /\ (revision = expected_revision)
+    /\ evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
+    /\ host_confirmation_count' = IF (evidence_kind = "HostConfirmation") THEN (host_confirmation_count) + 1 ELSE host_confirmation_count
+    /\ principal_confirmation_count' = IF (evidence_kind = "PrincipalConfirmation") THEN (principal_confirmation_count) + 1 ELSE principal_confirmation_count
+    /\ supervisor_confirmation_owner_keys' = IF (evidence_kind = "SupervisorConfirmation") THEN (supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE supervisor_confirmation_owner_keys
+    /\ reviewer_confirmation_owner_keys' = IF (evidence_kind = "ReviewerConfirmation") THEN (reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE reviewer_confirmation_owner_keys
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
-AddEvidenceInProgress(expected_revision) ==
+AddEvidenceInProgress(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ phase = "InProgress"
     /\ (revision = expected_revision)
+    /\ evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
+    /\ host_confirmation_count' = IF (evidence_kind = "HostConfirmation") THEN (host_confirmation_count) + 1 ELSE host_confirmation_count
+    /\ principal_confirmation_count' = IF (evidence_kind = "PrincipalConfirmation") THEN (principal_confirmation_count) + 1 ELSE principal_confirmation_count
+    /\ supervisor_confirmation_owner_keys' = IF (evidence_kind = "SupervisorConfirmation") THEN (supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE supervisor_confirmation_owner_keys
+    /\ reviewer_confirmation_owner_keys' = IF (evidence_kind = "ReviewerConfirmation") THEN (reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE reviewer_confirmation_owner_keys
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
-AddEvidenceBlocked(expected_revision) ==
+AddEvidenceBlocked(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ phase = "Blocked"
     /\ (revision = expected_revision)
+    /\ evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
+    /\ host_confirmation_count' = IF (evidence_kind = "HostConfirmation") THEN (host_confirmation_count) + 1 ELSE host_confirmation_count
+    /\ principal_confirmation_count' = IF (evidence_kind = "PrincipalConfirmation") THEN (principal_confirmation_count) + 1 ELSE principal_confirmation_count
+    /\ supervisor_confirmation_owner_keys' = IF (evidence_kind = "SupervisorConfirmation") THEN (supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE supervisor_confirmation_owner_keys
+    /\ reviewer_confirmation_owner_keys' = IF (evidence_kind = "ReviewerConfirmation") THEN (reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE reviewer_confirmation_owner_keys
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
-AddEvidenceCompleted(expected_revision) ==
+AddEvidenceCompleted(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ phase = "Completed"
     /\ (revision = expected_revision)
+    /\ evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
+    /\ host_confirmation_count' = IF (evidence_kind = "HostConfirmation") THEN (host_confirmation_count) + 1 ELSE host_confirmation_count
+    /\ principal_confirmation_count' = IF (evidence_kind = "PrincipalConfirmation") THEN (principal_confirmation_count) + 1 ELSE principal_confirmation_count
+    /\ supervisor_confirmation_owner_keys' = IF (evidence_kind = "SupervisorConfirmation") THEN (supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE supervisor_confirmation_owner_keys
+    /\ reviewer_confirmation_owner_keys' = IF (evidence_kind = "ReviewerConfirmation") THEN (reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE reviewer_confirmation_owner_keys
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
-AddEvidenceCancelled(expected_revision) ==
+AddEvidenceCancelled(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ phase = "Cancelled"
     /\ (revision = expected_revision)
+    /\ evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
+    /\ host_confirmation_count' = IF (evidence_kind = "HostConfirmation") THEN (host_confirmation_count) + 1 ELSE host_confirmation_count
+    /\ principal_confirmation_count' = IF (evidence_kind = "PrincipalConfirmation") THEN (principal_confirmation_count) + 1 ELSE principal_confirmation_count
+    /\ supervisor_confirmation_owner_keys' = IF (evidence_kind = "SupervisorConfirmation") THEN (supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE supervisor_confirmation_owner_keys
+    /\ reviewer_confirmation_owner_keys' = IF (evidence_kind = "ReviewerConfirmation") THEN (reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE reviewer_confirmation_owner_keys
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
-AddEvidenceFailed(expected_revision) ==
+AddEvidenceFailed(expected_revision, evidence_kind, confirming_owner_key) ==
     /\ phase = "Failed"
     /\ (revision = expected_revision)
+    /\ evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
+    /\ host_confirmation_count' = IF (evidence_kind = "HostConfirmation") THEN (host_confirmation_count) + 1 ELSE host_confirmation_count
+    /\ principal_confirmation_count' = IF (evidence_kind = "PrincipalConfirmation") THEN (principal_confirmation_count) + 1 ELSE principal_confirmation_count
+    /\ supervisor_confirmation_owner_keys' = IF (evidence_kind = "SupervisorConfirmation") THEN (supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE supervisor_confirmation_owner_keys
+    /\ reviewer_confirmation_owner_keys' = IF (evidence_kind = "ReviewerConfirmation") THEN (reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN confirming_owner_key THEN confirming_owner_key["value"] ELSE None)}) ELSE reviewer_confirmation_owner_keys
     /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms >>
 
 
@@ -475,12 +516,12 @@ Next ==
     \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : CloseOpenFailed(expected_revision, at_utc_ms)
     \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : CloseInProgressFailed(expected_revision, at_utc_ms)
     \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : CloseBlockedFailed(expected_revision, at_utc_ms)
-    \/ \E expected_revision \in {revision} : AddEvidenceOpen(expected_revision)
-    \/ \E expected_revision \in {revision} : AddEvidenceInProgress(expected_revision)
-    \/ \E expected_revision \in {revision} : AddEvidenceBlocked(expected_revision)
-    \/ \E expected_revision \in {revision} : AddEvidenceCompleted(expected_revision)
-    \/ \E expected_revision \in {revision} : AddEvidenceCancelled(expected_revision)
-    \/ \E expected_revision \in {revision} : AddEvidenceFailed(expected_revision)
+    \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceOpen(expected_revision, evidence_kind, confirming_owner_key)
+    \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceInProgress(expected_revision, evidence_kind, confirming_owner_key)
+    \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceBlocked(expected_revision, evidence_kind, confirming_owner_key)
+    \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceCompleted(expected_revision, evidence_kind, confirming_owner_key)
+    \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceCancelled(expected_revision, evidence_kind, confirming_owner_key)
+    \/ \E expected_revision \in {revision} : \E evidence_kind \in WorkEvidenceKindValues : \E confirming_owner_key \in OptionWorkOwnerKeyValues : AddEvidenceFailed(expected_revision, evidence_kind, confirming_owner_key)
     \/ TerminalStutter
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))
@@ -495,8 +536,8 @@ non_supervisor_policy_has_no_owner == ((completion_policy = "Supervisor") \/ (co
 reviewer_quorum_policy_has_positive_threshold == ((completion_policy # "ReviewerQuorum") \/ ((completion_reviewer_quorum_threshold # None) /\ ((IF "value" \in DOMAIN completion_reviewer_quorum_threshold THEN completion_reviewer_quorum_threshold["value"] ELSE None) > 0)))
 non_reviewer_quorum_policy_has_no_threshold == ((completion_policy = "ReviewerQuorum") \/ (completion_reviewer_quorum_threshold = None))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(topology_item_keys) <= 1 /\ Cardinality(topology_edge_keys) <= 1 /\ Cardinality(blocks_reachability) <= 1 /\ Cardinality(parent_reachability) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(topology_item_keys) <= 2 /\ Cardinality(topology_edge_keys) <= 2 /\ Cardinality(blocks_reachability) <= 2 /\ Cardinality(parent_reachability) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(topology_item_keys) <= 1 /\ Cardinality(topology_edge_keys) <= 1 /\ Cardinality(blocks_reachability) <= 1 /\ Cardinality(parent_reachability) <= 1 /\ Cardinality(supervisor_confirmation_owner_keys) <= 1 /\ Cardinality(reviewer_confirmation_owner_keys) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(topology_item_keys) <= 2 /\ Cardinality(topology_edge_keys) <= 2 /\ Cardinality(blocks_reachability) <= 2 /\ Cardinality(parent_reachability) <= 2 /\ Cardinality(supervisor_confirmation_owner_keys) <= 2 /\ Cardinality(reviewer_confirmation_owner_keys) <= 2
 
 Spec == Init /\ [][Next]_vars
 

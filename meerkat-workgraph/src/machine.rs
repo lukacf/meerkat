@@ -8,8 +8,8 @@ use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifec
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionStatus,
-    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
-    WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
+    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,13 +364,6 @@ impl WorkGraphMachine {
         request: CloseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        if request.status.is_terminal_success() && !completion_policy_is_satisfied(&item) {
-            return Err(WorkGraphError::InvalidTransition(format!(
-                "work item {} completion policy {} is not satisfied",
-                item.id,
-                completion_policy_name(&item.completion_policy)
-            )));
-        }
         let dsl_input = match request.status {
             WorkStatus::Completed => wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
                 expected_revision: request.expected_revision,
@@ -410,11 +403,23 @@ impl WorkGraphMachine {
         request: AddEvidenceRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        let evidence_kind = request
+            .evidence
+            .confirmation_kind
+            .unwrap_or(crate::types::WorkEvidenceKind::SelfAttest)
+            .to_machine();
+        let confirming_owner_key = request
+            .evidence
+            .confirming_owner_key
+            .as_ref()
+            .map(crate::types::work_owner_key_to_machine);
         let dsl_state = apply_item_dsl(
             &item,
             item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
                 expected_revision: request.expected_revision,
+                evidence_kind,
+                confirming_owner_key,
             },
             Some(request.expected_revision),
         )?;
@@ -470,43 +475,6 @@ impl WorkGraphMachine {
         )?;
         Ok(())
     }
-}
-
-pub(crate) fn completion_policy_is_satisfied(item: &WorkItem) -> bool {
-    match &item.completion_policy {
-        WorkCompletionPolicy::SelfAttest => true,
-        WorkCompletionPolicy::HostConfirmed => item
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "host_confirmation"),
-        WorkCompletionPolicy::PrincipalConfirmed => item
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "principal_confirmation"),
-        WorkCompletionPolicy::Supervisor { owner_key } => {
-            let owner = owner_key.canonical();
-            item.evidence_refs.iter().any(|evidence| {
-                evidence.kind == "supervisor_confirmation"
-                    && (evidence.id == owner || evidence.label.as_deref() == Some(owner.as_str()))
-            })
-        }
-        WorkCompletionPolicy::ReviewerQuorum { threshold } => {
-            let reviewers = item
-                .evidence_refs
-                .iter()
-                .filter(|evidence| evidence.kind == "reviewer_confirmation")
-                .filter_map(reviewer_identity)
-                .collect::<BTreeSet<_>>();
-            reviewers.len() >= usize::from(*threshold)
-        }
-    }
-}
-
-fn reviewer_identity(evidence: &WorkEvidenceRef) -> Option<&str> {
-    evidence
-        .label
-        .as_deref()
-        .or_else(|| (!evidence.id.is_empty()).then_some(evidence.id.as_str()))
 }
 
 pub(crate) fn completion_policy_name(policy: &WorkCompletionPolicy) -> &'static str {
@@ -901,10 +869,19 @@ fn seconds_to_duration(seconds: u64) -> Duration {
 mod tests {
     use super::*;
     use crate::types::{
-        ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest, WorkOwner, WorkOwnerKey,
+        AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest,
+        WorkEvidenceKind, WorkEvidenceRef, WorkOwner, WorkOwnerKey,
     };
 
     fn create(title: &str, now: DateTime<Utc>) -> WorkItem {
+        create_with_policy(title, WorkCompletionPolicy::SelfAttest, now)
+    }
+
+    fn create_with_policy(
+        title: &str,
+        completion_policy: WorkCompletionPolicy,
+        now: DateTime<Utc>,
+    ) -> WorkItem {
         WorkGraphMachine::create_item(
             CreateWorkItemRequest {
                 realm_id: None,
@@ -912,7 +889,7 @@ mod tests {
                 title: title.to_string(),
                 description: None,
                 priority: Default::default(),
-                completion_policy: Default::default(),
+                completion_policy,
                 labels: BTreeSet::new(),
                 due_at: None,
                 not_before: None,
@@ -1005,13 +982,19 @@ mod tests {
     #[test]
     fn completed_close_is_completion_policy_gated_by_machine() {
         let now = Utc::now();
-        let mut item = create("needs host confirmation", now);
-        item.completion_policy = WorkCompletionPolicy::HostConfirmed;
+        let item = create_with_policy(
+            "needs host confirmation",
+            WorkCompletionPolicy::HostConfirmed,
+            now,
+        );
 
+        // The machine's completion_policy_satisfied guard refuses the
+        // CloseCompleted transition while no host confirmation evidence has
+        // been recorded.
         let error = WorkGraphMachine::close_item(
             item.clone(),
             CloseWorkItemRequest {
-                id: item.id,
+                id: item.id.clone(),
                 realm_id: None,
                 namespace: None,
                 expected_revision: 1,
@@ -1021,6 +1004,151 @@ mod tests {
         )
         .expect_err("machine must reject completed close without policy evidence");
         assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        // Once typed host-confirmation evidence is recorded, the machine's
+        // owned host_confirmation_count satisfies the policy and the close
+        // transition is admitted.
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                evidence: WorkEvidenceRef {
+                    kind: "host_confirmation".to_string(),
+                    id: "acceptance".to_string(),
+                    label: None,
+                    summary: None,
+                    confirmation_kind: Some(WorkEvidenceKind::HostConfirmation),
+                    confirming_owner_key: None,
+                },
+            },
+            now,
+        )
+        .expect("record host confirmation evidence");
+
+        let (closed, _) = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("machine admits close once host confirmation is satisfied");
+        assert_eq!(closed.status, WorkStatus::Completed);
+    }
+
+    #[test]
+    fn reviewer_quorum_close_requires_distinct_reviewers() {
+        let now = Utc::now();
+        let item = create_with_policy(
+            "needs two reviewers",
+            WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+            now,
+        );
+
+        let reviewer_evidence = |reviewer: &str| WorkEvidenceRef {
+            kind: "reviewer_confirmation".to_string(),
+            id: reviewer.to_string(),
+            label: Some(reviewer.to_string()),
+            summary: None,
+            confirmation_kind: Some(WorkEvidenceKind::ReviewerConfirmation),
+            confirming_owner_key: Some(
+                WorkOwnerKey::principal(reviewer).expect("reviewer principal"),
+            ),
+        };
+
+        // One distinct reviewer is short of the quorum: machine refuses close.
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                evidence: reviewer_evidence("alice"),
+            },
+            now,
+        )
+        .expect("record first reviewer");
+
+        let error = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect_err("single reviewer must not satisfy a quorum of two");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        // A duplicate confirmation from the same reviewer does not advance the
+        // distinct-reviewer count; the machine still refuses.
+        let expected_revision = item.revision;
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision,
+                evidence: reviewer_evidence("alice"),
+            },
+            now,
+        )
+        .expect("record duplicate reviewer");
+
+        let error = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect_err("duplicate reviewer must not satisfy a quorum of two");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        // A second distinct reviewer reaches the quorum; machine admits close.
+        let expected_revision = item.revision;
+        let (item, _) = WorkGraphMachine::add_evidence(
+            item,
+            AddEvidenceRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision,
+                evidence: reviewer_evidence("bob"),
+            },
+            now,
+        )
+        .expect("record second reviewer");
+
+        let (closed, _) = WorkGraphMachine::close_item(
+            item.clone(),
+            CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status: WorkStatus::Completed,
+            },
+            now,
+        )
+        .expect("two distinct reviewers satisfy the quorum");
+        assert_eq!(closed.status, WorkStatus::Completed);
     }
 
     #[test]

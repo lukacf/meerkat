@@ -365,6 +365,8 @@ async fn goal_confirmation_and_close_are_policy_gated() {
                 id: "acceptance-1".to_string(),
                 label: Some("accepted".to_string()),
                 summary: Some("Host accepted the result".to_string()),
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: None,
             trusted_principal: None,
@@ -443,6 +445,8 @@ async fn goal_confirm_and_request_close_reject_stale_item_revision() {
                 id: "acceptance-1".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: None,
             trusted_principal: None,
@@ -577,6 +581,8 @@ async fn raw_evidence_cannot_satisfy_reserved_completion_policy() {
                 id: "spoofed".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
         })
         .await
@@ -622,6 +628,8 @@ async fn public_self_attest_confirm_rejects_reserved_completion_evidence() {
                 id: "spoofed".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
         })
         .await
@@ -647,6 +655,8 @@ async fn create_rejects_reserved_completion_evidence() {
                 id: "spoofed".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             }],
             ..CreateWorkItemRequest::default()
         })
@@ -823,6 +833,8 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 id: "approval".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: Some(WorkOwnerKey::principal("other").expect("principal")),
             trusted_principal: Some(WorkOwnerKey::principal("other").expect("principal")),
@@ -845,6 +857,8 @@ async fn supervisor_goal_confirmation_requires_named_supervisor() {
                 id: "approval".to_string(),
                 label: None,
                 summary: None,
+                confirmation_kind: None,
+                confirming_owner_key: None,
             },
             principal: Some(supervisor.clone()),
             trusted_principal: Some(supervisor.clone()),
@@ -1751,6 +1765,8 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
             id: "confirmation-1".to_string(),
             label: Some("accepted".to_string()),
             summary: None,
+            confirmation_kind: None,
+            confirming_owner_key: None,
         },
         principal: Some(WorkOwnerKey::principal("user").expect("principal")),
         trusted_principal: Some(WorkOwnerKey::principal("user").expect("principal")),

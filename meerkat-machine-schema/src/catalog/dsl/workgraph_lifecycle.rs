@@ -147,6 +147,29 @@ pub enum WorkCompletionPolicy {
     ReviewerQuorum,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEvidenceKind {
+    #[default]
+    SelfAttest,
+    HostConfirmation,
+    PrincipalConfirmation,
+    SupervisorConfirmation,
+    ReviewerConfirmation,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -171,6 +194,15 @@ machine! {
             completion_reviewer_quorum_threshold: Option<u64>,
             terminal_at_utc_ms: Option<u64>,
             evidence_count: u64,
+            // Machine-owned, per-kind confirmation accounting. The producer
+            // classifies each piece of confirmation evidence into a typed
+            // WorkEvidenceKind; the machine records it here so the completion
+            // policy satisfaction decision is computed from owned state, not a
+            // shell reducer scanning string `evidence.kind` values.
+            host_confirmation_count: u64,
+            principal_confirmation_count: u64,
+            supervisor_confirmation_owner_keys: Set<WorkOwnerKey>,
+            reviewer_confirmation_owner_keys: Set<WorkOwnerKey>,
         }
 
         init(Absent) {
@@ -191,6 +223,10 @@ machine! {
             completion_reviewer_quorum_threshold = None,
             terminal_at_utc_ms = None,
             evidence_count = 0,
+            host_confirmation_count = 0,
+            principal_confirmation_count = 0,
+            supervisor_confirmation_owner_keys = EmptySet,
+            reviewer_confirmation_owner_keys = EmptySet,
         }
 
         terminal [Completed, Cancelled, Failed]
@@ -253,7 +289,11 @@ machine! {
             CloseCompleted { expected_revision: u64, at_utc_ms: u64 },
             CloseCancelled { expected_revision: u64, at_utc_ms: u64 },
             CloseFailed { expected_revision: u64, at_utc_ms: u64 },
-            AddEvidence { expected_revision: u64 },
+            AddEvidence {
+                expected_revision: u64,
+                evidence_kind: Enum<WorkEvidenceKind>,
+                confirming_owner_key: Option<WorkOwnerKey>,
+            },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -313,6 +353,51 @@ machine! {
                         && reviewer_quorum_threshold.get("value") > 0
                 } else {
                     supervisor_owner_key == None && reviewer_quorum_threshold == None
+                }
+            }
+        }
+
+        helper completion_policy_is_satisfied(
+            policy: WorkCompletionPolicy,
+            supervisor_owner_key: Option<WorkOwnerKey>,
+            reviewer_quorum_threshold: Option<u64>,
+            host_confirmation_count: u64,
+            principal_confirmation_count: u64,
+            supervisor_confirmation_owner_keys: Set<WorkOwnerKey>,
+            reviewer_confirmation_owner_keys: Set<WorkOwnerKey>
+        ) -> bool {
+            if policy == WorkCompletionPolicy::SelfAttest {
+                true
+            } else {
+                if policy == WorkCompletionPolicy::HostConfirmed {
+                    host_confirmation_count > 0
+                } else {
+                    if policy == WorkCompletionPolicy::PrincipalConfirmed {
+                        principal_confirmation_count > 0
+                    } else {
+                        if policy == WorkCompletionPolicy::Supervisor {
+                            supervisor_owner_key != None
+                                && supervisor_confirmation_owner_keys.contains(supervisor_owner_key.get("value"))
+                        } else {
+                            reviewer_quorum_threshold != None
+                                && reviewer_confirmation_owner_keys.len() >= reviewer_quorum_threshold.get("value")
+                        }
+                    }
+                }
+            }
+        }
+
+        helper evidence_kind_owner_key_present(
+            evidence_kind: WorkEvidenceKind,
+            confirming_owner_key: Option<WorkOwnerKey>
+        ) -> bool {
+            if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                confirming_owner_key != None
+            } else {
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    confirming_owner_key != None
+                } else {
+                    true
                 }
             }
         }
@@ -586,6 +671,17 @@ machine! {
         transition CloseOpenCompleted {
             on input CloseCompleted { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "completion_policy_satisfied" {
+                completion_policy_is_satisfied(
+                    self.completion_policy,
+                    self.completion_supervisor_owner_key,
+                    self.completion_reviewer_quorum_threshold,
+                    self.host_confirmation_count,
+                    self.principal_confirmation_count,
+                    self.supervisor_confirmation_owner_keys,
+                    self.reviewer_confirmation_owner_keys
+                )
+            }
             update {
                 self.revision += 1;
                 self.claim_owner_key = None;
@@ -600,6 +696,17 @@ machine! {
         transition CloseInProgressCompleted {
             on input CloseCompleted { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "completion_policy_satisfied" {
+                completion_policy_is_satisfied(
+                    self.completion_policy,
+                    self.completion_supervisor_owner_key,
+                    self.completion_reviewer_quorum_threshold,
+                    self.host_confirmation_count,
+                    self.principal_confirmation_count,
+                    self.supervisor_confirmation_owner_keys,
+                    self.reviewer_confirmation_owner_keys
+                )
+            }
             update {
                 self.revision += 1;
                 self.claim_owner_key = None;
@@ -614,6 +721,17 @@ machine! {
         transition CloseBlockedCompleted {
             on input CloseCompleted { expected_revision, at_utc_ms }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "completion_policy_satisfied" {
+                completion_policy_is_satisfied(
+                    self.completion_policy,
+                    self.completion_supervisor_owner_key,
+                    self.completion_reviewer_quorum_threshold,
+                    self.host_confirmation_count,
+                    self.principal_confirmation_count,
+                    self.supervisor_confirmation_owner_keys,
+                    self.reviewer_confirmation_owner_keys
+                )
+            }
             update {
                 self.revision += 1;
                 self.claim_owner_key = None;
@@ -710,66 +828,156 @@ machine! {
         }
 
         transition AddEvidenceOpen {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Open
             emit EvidenceAdded
         }
 
         transition AddEvidenceInProgress {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to InProgress
             emit EvidenceAdded
         }
 
         transition AddEvidenceBlocked {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Blocked
             emit EvidenceAdded
         }
 
         transition AddEvidenceCompleted {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Completed && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Completed
             emit EvidenceAdded
         }
 
         transition AddEvidenceCancelled {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Cancelled && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Cancelled
             emit EvidenceAdded
         }
 
         transition AddEvidenceFailed {
-            on input AddEvidence { expected_revision }
+            on input AddEvidence { expected_revision, evidence_kind, confirming_owner_key }
             guard { self.lifecycle_phase == Phase::Failed && self.revision == expected_revision }
+            guard "owner_key_present_for_kind" {
+                evidence_kind_owner_key_present(evidence_kind, confirming_owner_key)
+            }
             update {
                 self.revision += 1;
                 self.evidence_count += 1;
+                if evidence_kind == WorkEvidenceKind::HostConfirmation {
+                    self.host_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::PrincipalConfirmation {
+                    self.principal_confirmation_count += 1;
+                }
+                if evidence_kind == WorkEvidenceKind::SupervisorConfirmation {
+                    self.supervisor_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
+                if evidence_kind == WorkEvidenceKind::ReviewerConfirmation {
+                    self.reviewer_confirmation_owner_keys.insert(confirming_owner_key.get("value"));
+                }
             }
             to Failed
             emit EvidenceAdded
@@ -842,6 +1050,14 @@ struct WorkGraphLifecycleMachineStateWire {
     completion_reviewer_quorum_threshold: Option<u64>,
     terminal_at_utc_ms: Option<u64>,
     evidence_count: u64,
+    #[serde(default)]
+    host_confirmation_count: u64,
+    #[serde(default)]
+    principal_confirmation_count: u64,
+    #[serde(default)]
+    supervisor_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
+    #[serde(default)]
+    reviewer_confirmation_owner_keys: std::collections::BTreeSet<WorkOwnerKey>,
 }
 
 impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWire {
@@ -865,6 +1081,10 @@ impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWir
             completion_reviewer_quorum_threshold: state.completion_reviewer_quorum_threshold,
             terminal_at_utc_ms: state.terminal_at_utc_ms,
             evidence_count: state.evidence_count,
+            host_confirmation_count: state.host_confirmation_count,
+            principal_confirmation_count: state.principal_confirmation_count,
+            supervisor_confirmation_owner_keys: state.supervisor_confirmation_owner_keys.clone(),
+            reviewer_confirmation_owner_keys: state.reviewer_confirmation_owner_keys.clone(),
         }
     }
 }
@@ -890,6 +1110,10 @@ impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState
             completion_reviewer_quorum_threshold: wire.completion_reviewer_quorum_threshold,
             terminal_at_utc_ms: wire.terminal_at_utc_ms,
             evidence_count: wire.evidence_count,
+            host_confirmation_count: wire.host_confirmation_count,
+            principal_confirmation_count: wire.principal_confirmation_count,
+            supervisor_confirmation_owner_keys: wire.supervisor_confirmation_owner_keys,
+            reviewer_confirmation_owner_keys: wire.reviewer_confirmation_owner_keys,
         }
     }
 }

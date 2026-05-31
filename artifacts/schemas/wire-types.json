@@ -3172,12 +3172,54 @@
         ],
         "type": "string"
       },
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkEvidenceRef": {
         "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
+            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
             "type": "string"
           },
           "label": {
@@ -3217,6 +3259,31 @@
           "item_id"
         ],
         "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       },
       "WorkStatus": {
         "enum": [
@@ -4025,12 +4092,54 @@
         ],
         "type": "string"
       },
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkEvidenceRef": {
         "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
+            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
             "type": "string"
           },
           "label": {
@@ -4070,6 +4179,31 @@
           "item_id"
         ],
         "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       },
       "WorkStatus": {
         "enum": [
@@ -10187,12 +10321,54 @@
   },
   "GoalConfirmRequest": {
     "$defs": {
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
       "WorkEvidenceRef": {
         "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
+            "description": "Opaque provenance/display label for the evidence. NOT used to classify\nevidence for the completion-policy satisfaction decision — see\n[`WorkEvidenceRef::confirmation_kind`].",
             "type": "string"
           },
           "label": {
@@ -10213,6 +10389,31 @@
           "id"
         ],
         "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",

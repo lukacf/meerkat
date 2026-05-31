@@ -3,25 +3,28 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for workgraph_attention_bundle.
 
-CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkAttentionBindingKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 SetOfWorkDependencyPathKeyValuesCi == {{}}
 SetOfWorkEdgeKeyValuesCi == {{}}
+SetOfWorkOwnerKeyValuesCi == {{}}
 WorkDependencyPathKeyValuesCi == {}
 WorkEdgeKeyValuesCi == {}
 WorkOwnerKeyValuesCi == {}
 
 SetOfWorkDependencyPathKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
 SetOfWorkEdgeKeyValuesDeep == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesDeep == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
 WorkDependencyPathKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"], [kind |-> "Related", from_item_key |-> "workitemkey_3", to_item_key |-> "workitemkey_3"]}
 WorkEdgeKeyValuesDeep == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"], [kind |-> "Related", from_item_key |-> "workitemkey_3", to_item_key |-> "workitemkey_3"]}
 WorkOwnerKeyValuesDeep == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"], [kind |-> "Session", id |-> "alpha"]}
 
 SetOfWorkDependencyPathKeyValuesWitnessclose_stops_attention_route == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
 SetOfWorkEdgeKeyValuesWitnessclose_stops_attention_route == {{}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"]}, {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}}
+SetOfWorkOwnerKeyValuesWitnessclose_stops_attention_route == {{}, {[kind |-> "Principal", id |-> "alpha"]}, {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}}
 WorkDependencyPathKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkEdgeKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Blocks", from_item_key |-> "workitemkey_1", to_item_key |-> "workitemkey_1"], [kind |-> "Parent", from_item_key |-> "workitemkey_2", to_item_key |-> "workitemkey_2"]}
 WorkOwnerKeyValuesWitnessclose_stops_attention_route == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
@@ -94,8 +97,8 @@ RouteDeliveryKind(route_name) ==
 
 RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))
 
-VARIABLES workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
-vars == << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+VARIABLES workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
+vars == << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 RoutePackets == SeqElements(pending_routes) \cup delivered_routes
 PendingActors == {ActorOfMachine(packet.machine) : packet \in SeqElements(pending_inputs)}
@@ -120,6 +123,10 @@ BaseInit ==
     /\ workgraph_completion_reviewer_quorum_threshold = None
     /\ workgraph_terminal_at_utc_ms = None
     /\ workgraph_evidence_count = 0
+    /\ workgraph_host_confirmation_count = 0
+    /\ workgraph_principal_confirmation_count = 0
+    /\ workgraph_supervisor_confirmation_owner_keys = {}
+    /\ workgraph_reviewer_confirmation_owner_keys = {}
     /\ attention_phase = "Active"
     /\ attention_revision = 1
     /\ attention_paused_until_utc_ms = None
@@ -144,6 +151,10 @@ WitnessInit_close_stops_attention_route ==
     /\ observed_inputs = {[machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]}
     /\ witness_current_script_input = [machine |-> "workgraph", variant |-> "CreateOpen", payload |-> [completion_policy |-> "SelfAttest", completion_reviewer_quorum_threshold |-> None, completion_supervisor_owner_key |-> None, due_at_utc_ms |-> None, not_before_utc_ms |-> None, snoozed_until_utc_ms |-> None, unresolved_blocker_count |-> 0], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:1", source_machine |-> "external_entry", source_effect |-> "CreateOpen", effect_id |-> 0]
     /\ witness_remaining_script_inputs = <<[machine |-> "workgraph", variant |-> "CloseCompleted", payload |-> [at_utc_ms |-> 1, expected_revision |-> 1], source_kind |-> "entry", source_route |-> "witness:close_stops_attention_route:2", source_machine |-> "external_entry", source_effect |-> "CloseCompleted", effect_id |-> 0]>>
+
+workgraph__evidence_kind_owner_key_present(evidence_kind, confirming_owner_key) == (IF (evidence_kind = "SupervisorConfirmation") THEN (confirming_owner_key # None) ELSE (IF (evidence_kind = "ReviewerConfirmation") THEN (confirming_owner_key # None) ELSE TRUE))
+
+workgraph__completion_policy_is_satisfied(policy, supervisor_owner_key, reviewer_quorum_threshold, arg_host_confirmation_count, arg_principal_confirmation_count, arg_supervisor_confirmation_owner_keys, arg_reviewer_confirmation_owner_keys) == (IF (policy = "SelfAttest") THEN TRUE ELSE (IF (policy = "HostConfirmed") THEN (arg_host_confirmation_count > 0) ELSE (IF (policy = "PrincipalConfirmed") THEN (arg_principal_confirmation_count > 0) ELSE (IF (policy = "Supervisor") THEN ((supervisor_owner_key # None) /\ ((IF "value" \in DOMAIN supervisor_owner_key THEN supervisor_owner_key["value"] ELSE None) \in arg_supervisor_confirmation_owner_keys)) ELSE ((reviewer_quorum_threshold # None) /\ (Cardinality(arg_reviewer_confirmation_owner_keys) >= (IF "value" \in DOMAIN reviewer_quorum_threshold THEN reviewer_quorum_threshold["value"] ELSE None)))))))
 
 workgraph__completion_policy_payload_valid(policy, supervisor_owner_key, reviewer_quorum_threshold) == (IF (policy = "Supervisor") THEN ((supervisor_owner_key # None) /\ (reviewer_quorum_threshold = None)) ELSE (IF (policy = "ReviewerQuorum") THEN ((supervisor_owner_key = None) /\ (reviewer_quorum_threshold # None) /\ ((IF "value" \in DOMAIN reviewer_quorum_threshold THEN reviewer_quorum_threshold["value"] ELSE None) > 0)) ELSE ((supervisor_owner_key = None) /\ (reviewer_quorum_threshold = None))))
 
@@ -170,7 +181,7 @@ workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until
        /\ workgraph_completion_policy' = packet.payload.completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -203,7 +214,7 @@ workgraph_CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_un
        /\ workgraph_completion_policy' = packet.payload.completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -238,7 +249,7 @@ workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_ut
        /\ workgraph_completion_policy' = packet.payload.completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -273,7 +284,7 @@ workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_bef
        /\ workgraph_completion_policy' = packet.payload.completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -308,7 +319,7 @@ workgraph_UpdateBlocked(arg_expected_revision, arg_due_at_utc_ms, arg_not_before
        /\ workgraph_completion_policy' = packet.payload.completion_policy
        /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
        /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -338,7 +349,7 @@ workgraph_ClaimOpen(arg_expected_revision, arg_owner_key, arg_now_utc_ms, arg_le
        /\ workgraph_claim_owner_key' = Some(packet.payload.owner_key)
        /\ workgraph_claimed_at_utc_ms' = Some(packet.payload.now_utc_ms)
        /\ workgraph_lease_expires_at_utc_ms' = packet.payload.lease_expires_at_utc_ms
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -371,7 +382,7 @@ workgraph_ClaimExpiredInProgress(arg_expected_revision, arg_owner_key, arg_now_u
        /\ workgraph_claim_owner_key' = Some(packet.payload.owner_key)
        /\ workgraph_claimed_at_utc_ms' = Some(packet.payload.now_utc_ms)
        /\ workgraph_lease_expires_at_utc_ms' = packet.payload.lease_expires_at_utc_ms
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -394,7 +405,7 @@ workgraph_ReleaseInProgress(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -417,7 +428,7 @@ workgraph_BlockOpen(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -440,7 +451,7 @@ workgraph_BlockInProgress(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -463,7 +474,7 @@ workgraph_BlockBlocked(arg_expected_revision) ==
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -483,7 +494,7 @@ workgraph_RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
        /\ workgraph_phase' = "Open"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -503,7 +514,7 @@ workgraph_RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
        /\ workgraph_phase' = "InProgress"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -523,7 +534,7 @@ workgraph_RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
        /\ workgraph_phase' = "Blocked"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -551,7 +562,7 @@ workgraph_ValidateLink(arg_kind, arg_from_item_key, arg_to_item_key, arg_edge_ke
        /\ ((packet.payload.kind # "Blocks") \/ ((packet.payload.reverse_path_key \in workgraph_blocks_reachability) = FALSE))
        /\ ((packet.payload.kind # "Parent") \/ ((packet.payload.reverse_path_key \in workgraph_parent_reachability) = FALSE))
        /\ workgraph_phase' = "Absent"
-       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -570,13 +581,14 @@ workgraph_CloseOpenCompleted(arg_expected_revision, arg_at_utc_ms) ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__completion_policy_is_satisfied(workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys)
        /\ workgraph_phase' = "Completed"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -596,13 +608,14 @@ workgraph_CloseInProgressCompleted(arg_expected_revision, arg_at_utc_ms) ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__completion_policy_is_satisfied(workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys)
        /\ workgraph_phase' = "Completed"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -622,13 +635,14 @@ workgraph_CloseBlockedCompleted(arg_expected_revision, arg_at_utc_ms) ==
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__completion_policy_is_satisfied(workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys)
        /\ workgraph_phase' = "Completed"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_claim_owner_key' = None
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -654,7 +668,7 @@ workgraph_CloseOpenCancelled(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -680,7 +694,7 @@ workgraph_CloseInProgressCancelled(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -706,7 +720,7 @@ workgraph_CloseBlockedCancelled(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -732,7 +746,7 @@ workgraph_CloseOpenFailed(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -758,7 +772,7 @@ workgraph_CloseInProgressFailed(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -784,7 +798,7 @@ workgraph_CloseBlockedFailed(arg_expected_revision, arg_at_utc_ms) ==
        /\ workgraph_claimed_at_utc_ms' = None
        /\ workgraph_lease_expires_at_utc_ms' = None
        /\ workgraph_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ \E route_owner_ctx_work_item_close_stops_attention_expected_revision \in {attention_revision} :
            /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)])
            /\ observed_inputs' = observed_inputs \cup {[machine |-> "attention", variant |-> "Stop", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, expected_revision |-> route_owner_ctx_work_item_close_stops_attention_expected_revision], source_kind |-> "route", source_route |-> "work_item_close_stops_attention", source_machine |-> "workgraph", source_effect |-> "Closed", effect_id |-> (model_step_count + 1)]}
@@ -795,17 +809,24 @@ workgraph_CloseBlockedFailed(arg_expected_revision, arg_at_utc_ms) ==
            /\ model_step_count' = model_step_count + 1
 
 
-workgraph_AddEvidenceOpen(arg_expected_revision) ==
+workgraph_AddEvidenceOpen(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "AddEvidence"
        /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.evidence_kind = arg_evidence_kind
+       /\ packet.payload.confirming_owner_key = arg_confirming_owner_key
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key)
        /\ workgraph_phase' = "Open"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_evidence_count' = (workgraph_evidence_count) + 1
+       /\ workgraph_host_confirmation_count' = IF (packet.payload.evidence_kind = "HostConfirmation") THEN (workgraph_host_confirmation_count) + 1 ELSE workgraph_host_confirmation_count
+       /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
+       /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
+       /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
        /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -816,17 +837,24 @@ workgraph_AddEvidenceOpen(arg_expected_revision) ==
        /\ model_step_count' = model_step_count + 1
 
 
-workgraph_AddEvidenceInProgress(arg_expected_revision) ==
+workgraph_AddEvidenceInProgress(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "AddEvidence"
        /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.evidence_kind = arg_evidence_kind
+       /\ packet.payload.confirming_owner_key = arg_confirming_owner_key
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key)
        /\ workgraph_phase' = "InProgress"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_evidence_count' = (workgraph_evidence_count) + 1
+       /\ workgraph_host_confirmation_count' = IF (packet.payload.evidence_kind = "HostConfirmation") THEN (workgraph_host_confirmation_count) + 1 ELSE workgraph_host_confirmation_count
+       /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
+       /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
+       /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
        /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -837,17 +865,24 @@ workgraph_AddEvidenceInProgress(arg_expected_revision) ==
        /\ model_step_count' = model_step_count + 1
 
 
-workgraph_AddEvidenceBlocked(arg_expected_revision) ==
+workgraph_AddEvidenceBlocked(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "AddEvidence"
        /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.evidence_kind = arg_evidence_kind
+       /\ packet.payload.confirming_owner_key = arg_confirming_owner_key
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key)
        /\ workgraph_phase' = "Blocked"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_evidence_count' = (workgraph_evidence_count) + 1
+       /\ workgraph_host_confirmation_count' = IF (packet.payload.evidence_kind = "HostConfirmation") THEN (workgraph_host_confirmation_count) + 1 ELSE workgraph_host_confirmation_count
+       /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
+       /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
+       /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
        /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -858,17 +893,24 @@ workgraph_AddEvidenceBlocked(arg_expected_revision) ==
        /\ model_step_count' = model_step_count + 1
 
 
-workgraph_AddEvidenceCompleted(arg_expected_revision) ==
+workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "AddEvidence"
        /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.evidence_kind = arg_evidence_kind
+       /\ packet.payload.confirming_owner_key = arg_confirming_owner_key
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key)
        /\ workgraph_phase' = "Completed"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_evidence_count' = (workgraph_evidence_count) + 1
+       /\ workgraph_host_confirmation_count' = IF (packet.payload.evidence_kind = "HostConfirmation") THEN (workgraph_host_confirmation_count) + 1 ELSE workgraph_host_confirmation_count
+       /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
+       /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
+       /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
        /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -879,17 +921,24 @@ workgraph_AddEvidenceCompleted(arg_expected_revision) ==
        /\ model_step_count' = model_step_count + 1
 
 
-workgraph_AddEvidenceCancelled(arg_expected_revision) ==
+workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "AddEvidence"
        /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.evidence_kind = arg_evidence_kind
+       /\ packet.payload.confirming_owner_key = arg_confirming_owner_key
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key)
        /\ workgraph_phase' = "Cancelled"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_evidence_count' = (workgraph_evidence_count) + 1
+       /\ workgraph_host_confirmation_count' = IF (packet.payload.evidence_kind = "HostConfirmation") THEN (workgraph_host_confirmation_count) + 1 ELSE workgraph_host_confirmation_count
+       /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
+       /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
+       /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
        /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -900,17 +949,24 @@ workgraph_AddEvidenceCancelled(arg_expected_revision) ==
        /\ model_step_count' = model_step_count + 1
 
 
-workgraph_AddEvidenceFailed(arg_expected_revision) ==
+workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "workgraph"
        /\ packet.variant = "AddEvidence"
        /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.evidence_kind = arg_evidence_kind
+       /\ packet.payload.confirming_owner_key = arg_confirming_owner_key
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
        /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key)
        /\ workgraph_phase' = "Failed"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_evidence_count' = (workgraph_evidence_count) + 1
+       /\ workgraph_host_confirmation_count' = IF (packet.payload.evidence_kind = "HostConfirmation") THEN (workgraph_host_confirmation_count) + 1 ELSE workgraph_host_confirmation_count
+       /\ workgraph_principal_confirmation_count' = IF (packet.payload.evidence_kind = "PrincipalConfirmation") THEN (workgraph_principal_confirmation_count) + 1 ELSE workgraph_principal_confirmation_count
+       /\ workgraph_supervisor_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "SupervisorConfirmation") THEN (workgraph_supervisor_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_supervisor_confirmation_owner_keys
+       /\ workgraph_reviewer_confirmation_owner_keys' = IF (packet.payload.evidence_kind = "ReviewerConfirmation") THEN (workgraph_reviewer_confirmation_owner_keys \cup {(IF "value" \in DOMAIN packet.payload.confirming_owner_key THEN packet.payload.confirming_owner_key["value"] ELSE None)}) ELSE workgraph_reviewer_confirmation_owner_keys
        /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -945,7 +1001,7 @@ attention_PauseActive(arg_expected_revision, arg_until_utc_ms) ==
        /\ attention_phase' = "Paused"
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = packet.payload.until_utc_ms
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -967,7 +1023,7 @@ attention_PausePaused(arg_expected_revision, arg_until_utc_ms) ==
        /\ attention_phase' = "Paused"
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = packet.payload.until_utc_ms
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -988,7 +1044,7 @@ attention_ResumePaused(arg_expected_revision) ==
        /\ attention_phase' = "Active"
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = None
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1013,7 +1069,7 @@ attention_SupersedeActive(arg_expected_revision, arg_superseded_by_binding_key, 
        /\ attention_paused_until_utc_ms' = None
        /\ attention_superseded_by_binding_key' = Some(packet.payload.superseded_by_binding_key)
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1038,7 +1094,7 @@ attention_SupersedePaused(arg_expected_revision, arg_superseded_by_binding_key, 
        /\ attention_paused_until_utc_ms' = None
        /\ attention_superseded_by_binding_key' = Some(packet.payload.superseded_by_binding_key)
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1061,7 +1117,7 @@ attention_StopActive(arg_expected_revision, arg_at_utc_ms) ==
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = None
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_superseded_by_binding_key, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_superseded_by_binding_key, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1084,7 +1140,7 @@ attention_StopPaused(arg_expected_revision, arg_at_utc_ms) ==
        /\ attention_revision' = (attention_revision) + 1
        /\ attention_paused_until_utc_ms' = None
        /\ attention_terminal_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_superseded_by_binding_key, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_superseded_by_binding_key, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1097,6 +1153,10 @@ attention_StopPaused(arg_expected_revision, arg_at_utc_ms) ==
 attention_live_has_no_terminal_time == (((attention_phase # "Active") /\ (attention_phase # "Paused")) \/ (attention_terminal_at_utc_ms = None))
 attention_paused_has_pause_state == ((attention_phase = "Paused") \/ (attention_paused_until_utc_ms = None))
 attention_superseded_records_successor == ((attention_phase # "Superseded") \/ (attention_superseded_by_binding_key # None))
+
+workgraph__entry_packet__evidence_kind_owner_key_present(evidence_kind, confirming_owner_key) == (IF (evidence_kind = "SupervisorConfirmation") THEN (confirming_owner_key # None) ELSE (IF (evidence_kind = "ReviewerConfirmation") THEN (confirming_owner_key # None) ELSE TRUE))
+
+workgraph__entry_packet__completion_policy_is_satisfied(policy, supervisor_owner_key, reviewer_quorum_threshold, arg_host_confirmation_count, arg_principal_confirmation_count, arg_supervisor_confirmation_owner_keys, arg_reviewer_confirmation_owner_keys) == (IF (policy = "SelfAttest") THEN TRUE ELSE (IF (policy = "HostConfirmed") THEN (arg_host_confirmation_count > 0) ELSE (IF (policy = "PrincipalConfirmed") THEN (arg_principal_confirmation_count > 0) ELSE (IF (policy = "Supervisor") THEN ((supervisor_owner_key # None) /\ ((IF "value" \in DOMAIN supervisor_owner_key THEN supervisor_owner_key["value"] ELSE None) \in arg_supervisor_confirmation_owner_keys)) ELSE ((reviewer_quorum_threshold # None) /\ (Cardinality(arg_reviewer_confirmation_owner_keys) >= (IF "value" \in DOMAIN reviewer_quorum_threshold THEN reviewer_quorum_threshold["value"] ELSE None)))))))
 
 workgraph__entry_packet__completion_policy_payload_valid(policy, supervisor_owner_key, reviewer_quorum_threshold) == (IF (policy = "Supervisor") THEN ((supervisor_owner_key # None) /\ (reviewer_quorum_threshold = None)) ELSE (IF (policy = "ReviewerQuorum") THEN ((supervisor_owner_key = None) /\ (reviewer_quorum_threshold # None) /\ ((IF "value" \in DOMAIN reviewer_quorum_threshold THEN reviewer_quorum_threshold["value"] ELSE None) > 0)) ELSE ((supervisor_owner_key = None) /\ (reviewer_quorum_threshold = None))))
 
@@ -1116,21 +1176,21 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "RefreshEligibility") /\ (workgraph_phase = "InProgress")
     \/ /\ (packet.variant = "RefreshEligibility") /\ (workgraph_phase = "Blocked")
     \/ /\ (packet.variant = "ValidateLink") /\ (workgraph_phase = "Absent") /\ ((packet.payload.from_item_key \in workgraph_topology_item_keys)) /\ ((packet.payload.to_item_key \in workgraph_topology_item_keys)) /\ ((packet.payload.from_item_key # packet.payload.to_item_key)) /\ (((packet.payload.edge_key \in workgraph_topology_edge_keys) = FALSE)) /\ (((packet.payload.kind # "Blocks") \/ ((packet.payload.reverse_path_key \in workgraph_blocks_reachability) = FALSE))) /\ (((packet.payload.kind # "Parent") \/ ((packet.payload.reverse_path_key \in workgraph_parent_reachability) = FALSE)))
-    \/ /\ (packet.variant = "CloseCompleted") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "CloseCompleted") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "CloseCompleted") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision))
+    \/ /\ (packet.variant = "CloseCompleted") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_is_satisfied(workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys))
+    \/ /\ (packet.variant = "CloseCompleted") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_is_satisfied(workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys))
+    \/ /\ (packet.variant = "CloseCompleted") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_is_satisfied(workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys))
     \/ /\ (packet.variant = "CloseCancelled") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision))
     \/ /\ (packet.variant = "CloseCancelled") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision))
     \/ /\ (packet.variant = "CloseCancelled") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision))
     \/ /\ (packet.variant = "CloseFailed") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision))
     \/ /\ (packet.variant = "CloseFailed") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision))
     \/ /\ (packet.variant = "CloseFailed") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Completed") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Cancelled") /\ ((workgraph_revision = packet.payload.expected_revision))
-    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Failed") /\ ((workgraph_revision = packet.payload.expected_revision))
+    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
+    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
+    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
+    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Completed") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
+    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Cancelled") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
+    \/ /\ (packet.variant = "AddEvidence") /\ (workgraph_phase = "Failed") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__evidence_kind_owner_key_present(packet.payload.evidence_kind, packet.payload.confirming_owner_key))
 
 EntryPacketAdmissible_attention(packet) ==
     \/ /\ (packet.variant = "Pause") /\ (attention_phase = "Active") /\ ((attention_revision = packet.payload.expected_revision))
@@ -1155,7 +1215,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -1177,7 +1237,7 @@ WitnessInjectNext_close_stops_attention_route ==
     /\ witness_current_script_input' = next_script_input
     /\ witness_remaining_script_inputs' = next_remaining_script_inputs
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << workgraph_phase, workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 CoreNext ==
     \/ DeliverQueuedRoute
@@ -1205,12 +1265,12 @@ CoreNext ==
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseOpenFailed(arg_expected_revision, arg_at_utc_ms)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseInProgressFailed(arg_expected_revision, arg_at_utc_ms)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseBlockedFailed(arg_expected_revision, arg_at_utc_ms)
-    \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceOpen(arg_expected_revision)
-    \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceInProgress(arg_expected_revision)
-    \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceBlocked(arg_expected_revision)
-    \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceCompleted(arg_expected_revision)
-    \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceCancelled(arg_expected_revision)
-    \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceFailed(arg_expected_revision)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceOpen(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceInProgress(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceBlocked(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision)
@@ -1238,9 +1298,9 @@ RouteObserved_work_item_close_stops_attention == \E packet \in RoutePackets : pa
 RouteCoverage_work_item_close_stops_attention == (RouteObserved_work_item_close_stops_attention \/ ~RouteObserved_work_item_close_stops_attention)
 CoverageInstrumentation == RouteCoverage_work_item_close_stops_attention
 
-CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0
-DeepStateConstraint == /\ model_step_count <= 6 /\ Len(pending_inputs) <= 2 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 6 /\ Cardinality(workgraph_topology_item_keys) <= 2 /\ Cardinality(workgraph_topology_edge_keys) <= 2 /\ Cardinality(workgraph_blocks_reachability) <= 2 /\ Cardinality(workgraph_parent_reachability) <= 2
-WitnessStateConstraint_close_stops_attention_route == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 3 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0
+CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
+DeepStateConstraint == /\ model_step_count <= 6 /\ Len(pending_inputs) <= 2 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 6 /\ Cardinality(workgraph_topology_item_keys) <= 2 /\ Cardinality(workgraph_topology_edge_keys) <= 2 /\ Cardinality(workgraph_blocks_reachability) <= 2 /\ Cardinality(workgraph_parent_reachability) <= 2 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 2 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 2
+WitnessStateConstraint_close_stops_attention_route == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 11 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 1 /\ Cardinality(emitted_effects) <= 3 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(workgraph_topology_item_keys) <= 0 /\ Cardinality(workgraph_topology_edge_keys) <= 0 /\ Cardinality(workgraph_blocks_reachability) <= 0 /\ Cardinality(workgraph_parent_reachability) <= 0 /\ Cardinality(workgraph_supervisor_confirmation_owner_keys) <= 0 /\ Cardinality(workgraph_reviewer_confirmation_owner_keys) <= 0
 
 Spec ==
     /\ Init
@@ -1274,12 +1334,12 @@ WitnessFairness_close_stops_attention_route_1 ==
 
 WitnessFairness_close_stops_attention_route_2 ==
     /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_at_utc_ms \in 0..2 : workgraph_CloseBlockedFailed(arg_expected_revision, arg_at_utc_ms))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceOpen(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceInProgress(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceBlocked(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceCompleted(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceCancelled(arg_expected_revision))
-    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : workgraph_AddEvidenceFailed(arg_expected_revision))
+    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceOpen(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
+    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceInProgress(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
+    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceBlocked(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
+    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCompleted(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
+    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceCancelled(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
+    /\ WF_vars(\E arg_expected_revision \in {workgraph_revision} : \E arg_evidence_kind \in WorkEvidenceKindValues : \E arg_confirming_owner_key \in OptionWorkOwnerKeyValues : workgraph_AddEvidenceFailed(arg_expected_revision, arg_evidence_kind, arg_confirming_owner_key))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision))

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.28] - 2026-05-31
+
+Meerkat 0.6.28 updates the Anthropic default catalog target to Claude Opus
+4.8 and refreshes the surrounding examples, docs, and capability metadata.
+
+### Changed
+
+- **Anthropic Opus 4.8 default** (#743) — promotes the default Anthropic
+  catalog model from `claude-opus-4-7` to `claude-opus-4-8`, retargets
+  examples/tests/docs away from older Opus defaults, and keeps Opus 4.7 only
+  where it remains an intentional legacy or fallback catalog entry.
+- **Opus 4.8 capability metadata** (#743) — documents the current Opus 4.8 API
+  behavior around adaptive thinking, `xhigh` effort, fast mode, beta/header
+  handling, and unsupported non-default sampling knobs.
+
 ## [0.6.27] - 2026-05-28
 
 Meerkat 0.6.27 hardens mob lifecycle cleanup when session-bound members fail

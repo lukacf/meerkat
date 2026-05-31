@@ -165,6 +165,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
 - `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_present: Bool, privileged_args_present: Bool)
+- `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
 - `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
@@ -341,6 +342,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FlowDelegationEdgeAdmissionResolved`(from_role: String, to_role: String, admission: MobFlowDelegationEdgeAdmissionKind)
 - `RemoteMemberRuntimeTerminalityClassified`(observed_state: MobRemoteMemberRuntimeObservedState, terminality: MobRemoteMemberRuntimeTerminality)
 - `SpawnMemberAdmissionResolved`(admission: MobSpawnMemberAdmissionKind)
+- `CurrentMobAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
 - `BridgeRejectionRecoveryClassified`(rejection_cause: MobBridgeRejectionCause, recovery: MobBridgeRejectionRecovery)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
@@ -943,6 +945,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveCurrentMobAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Running`
+
+### `ResolveCurrentMobAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveCurrentMobAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Completed`
+
+### `ResolveCurrentMobAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `manage_scope_allows`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveCurrentMobAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `no_manage_scope_denies`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Running`
+
+### `ResolveCurrentMobAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `no_manage_scope_denies`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveCurrentMobAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `no_manage_scope_denies`
+- Emits: `CurrentMobAdmissionResolved`
+- To: `Completed`
+
+### `ResolveCurrentMobAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveCurrentMobAdmission`(can_manage_mob)
+- Guards:
+  - `no_manage_scope_denies`
+- Emits: `CurrentMobAdmissionResolved`
 - To: `Destroyed`
 
 ### `ClassifyBridgeRejectionRecoveryRebindRunning`

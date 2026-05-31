@@ -13,10 +13,6 @@ use super::{parse_params, parse_session_id_for_runtime};
 pub use meerkat_contracts::{CommsPeersParams, CommsSendParams};
 use meerkat_contracts::{CommsPeersResult, CommsSendResult};
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 fn normalize_send_error(
     peer_name: Option<&str>,
     error: &meerkat_core::comms::SendError,
@@ -36,16 +32,14 @@ fn normalize_send_error(
                 "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
             })
         }
-        meerkat_core::comms::SendError::Internal(message)
-            if peer_name.is_some() && is_transport_internal(message) =>
-        {
+        meerkat_core::comms::SendError::Transport(details) if peer_name.is_some() => {
             let peer = peer_name.unwrap_or("<unknown>");
             serde_json::json!({
                 "code": "peer_unreachable",
                 "peer": peer,
                 "reason": "transport_error",
                 "message": format!("peer '{peer}' is unreachable: transport_error"),
-                "details": message,
+                "details": details,
             })
         }
         other => serde_json::json!({

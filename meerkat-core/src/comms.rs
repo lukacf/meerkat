@@ -1826,6 +1826,14 @@ pub enum SendError {
     Validation(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// The envelope could not reach the peer because the underlying transport
+    /// (socket/IO) failed. Semantically distinct from `PeerOffline` (peer
+    /// reachable but did not ack) and from `Internal` (host-side logic
+    /// error): this is a connectivity failure surfaced as the
+    /// `peer_unreachable` / `transport_error` wire class. Carries the
+    /// transport cause for diagnostics (`details` payloads).
+    #[error("transport error: {0}")]
+    Transport(String),
     /// Receiver admitted the envelope-transport but rejected it at ingress
     /// for a typed policy reason (untrusted sender, full inbox, etc.). This
     /// is semantically distinct from `PeerOffline` — transport worked,

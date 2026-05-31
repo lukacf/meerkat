@@ -677,6 +677,16 @@ pub enum MobSpawnMemberAdmissionKind {
     Allowed,
 }
 
+/// Machine-owned per-mob operator admission verdict for current-mob-scoped
+/// tools. The tool shell mirrors this: `Denied` -> `access_denied`, `Allowed`
+/// -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCurrentMobAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
 /// Pure wire-projection bridge rejection cause, mirroring every variant of the
 /// wire `BridgeRejectionCause`. The mob bridge consumer maps the typed wire
 /// cause onto this and feeds it to MobMachine for recovery classification.
@@ -1879,6 +1889,30 @@ mod tests {
                 admission,
                 Some(expected),
                 "for manage={manage} profile={profile} privileged={privileged}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_mob_admission_is_decided_by_machine() {
+        use MobCurrentMobAdmissionKind as Admission;
+        // can_manage_mob -> expected verdict.
+        let cases = [(true, Admission::Allowed), (false, Admission::Denied)];
+        for (can_manage_mob, expected) in cases {
+            let mut authority = MobMachineAuthority::new();
+            let transition = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ResolveCurrentMobAdmission { can_manage_mob },
+            )
+            .expect("current-mob admission should resolve a verdict");
+            let admission = transition.effects().iter().find_map(|effect| match effect {
+                MobMachineEffect::CurrentMobAdmissionResolved { admission } => Some(*admission),
+                _ => None,
+            });
+            assert_eq!(
+                admission,
+                Some(expected),
+                "for can_manage_mob={can_manage_mob}"
             );
         }
     }

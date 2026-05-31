@@ -28,20 +28,6 @@ pub(crate) struct IngressClassificationContext {
     pub(crate) inproc_namespace: Option<String>,
 }
 
-/// Result of classifying an inbox item.
-///
-/// `None` from `classify()` means the item should be dropped at ingress
-/// (e.g., untrusted sender when `require_peer_auth` is enabled).
-#[cfg(test)]
-pub(crate) struct ClassificationResult {
-    pub(crate) class: PeerInputClass,
-    pub(crate) auth: PeerIngressAuthDecision,
-    pub(crate) from_peer: Option<String>,
-    pub(crate) from_peer_id: Option<String>,
-    pub(crate) lifecycle_peer: Option<String>,
-    pub(crate) response_terminality: Option<TerminalityClass>,
-}
-
 /// Classified ingress descriptor for one inbox item.
 ///
 /// Carries the typed classification produced at ingress so the classified
@@ -330,29 +316,6 @@ impl IngressClassificationContext {
                 })
             }
         }
-    }
-
-    /// Classify an inbox item. Returns `None` when the item should be dropped
-    /// at ingress (untrusted sender with `require_peer_auth` enabled).
-    #[cfg(test)]
-    pub(crate) fn classify(&self, item: &InboxItem) -> Option<ClassificationResult> {
-        self.prepare(item.clone()).and_then(|prepared| {
-            let drop_untrusted_external = matches!(prepared.item, InboxItem::External { .. })
-                && self.require_peer_auth
-                && !prepared.trusted_sender
-                && !prepared.auth.is_exempt();
-            if drop_untrusted_external {
-                return None;
-            }
-            Some(ClassificationResult {
-                class: prepared.class,
-                auth: prepared.auth,
-                from_peer: prepared.from_peer,
-                from_peer_id: prepared.ingress_fact.canonical_peer_id_string(),
-                lifecycle_peer: prepared.lifecycle_peer,
-                response_terminality: prepared.response_terminality,
-            })
-        })
     }
 }
 
@@ -741,12 +704,12 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         let expected_peer_id = sender.public_key().to_peer_id().to_string();
         assert_eq!(result.class, PeerInputClass::ActionableMessage);
         assert_eq!(result.from_peer.as_deref(), Some("sender-agent"));
         assert_eq!(
-            result.from_peer_id.as_deref(),
+            result.ingress_fact.canonical_peer_id_string().as_deref(),
             Some(expected_peer_id.as_str())
         );
         assert!(result.lifecycle_peer.is_none());
@@ -809,12 +772,12 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         let expected_peer_id = sender.public_key().to_peer_id().to_string();
         assert_eq!(result.class, PeerInputClass::ActionableRequest);
         assert_eq!(result.from_peer.as_deref(), Some("sender-agent"));
         assert_eq!(
-            result.from_peer_id.as_deref(),
+            result.ingress_fact.canonical_peer_id_string().as_deref(),
             Some(expected_peer_id.as_str())
         );
     }
@@ -835,11 +798,11 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::ResponseTerminal);
         let expected_peer_id = sender.public_key().to_peer_id().to_string();
         assert_eq!(
-            result.from_peer_id.as_deref(),
+            result.ingress_fact.canonical_peer_id_string().as_deref(),
             Some(expected_peer_id.as_str())
         );
         assert_eq!(
@@ -862,7 +825,7 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::Ack);
     }
 
@@ -881,7 +844,7 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PeerLifecycleAdded);
         assert_eq!(result.lifecycle_peer.as_deref(), Some("new-agent"));
     }
@@ -901,7 +864,7 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PeerLifecycleRetired);
         assert_eq!(result.lifecycle_peer.as_deref(), Some("old-agent"));
     }
@@ -921,7 +884,7 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::SilentRequest);
     }
 
@@ -942,29 +905,8 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::SilentRequest);
-    }
-
-    #[test]
-    fn classify_untrusted_sender_auth_required_drops_at_ingress() {
-        let sender = make_keypair();
-        let trusted = TrustedPeers::new(); // sender NOT trusted
-        let ctx = make_context(true, trusted, vec![]);
-        let envelope = make_envelope(
-            &sender,
-            MessageKind::Message {
-                blocks: None,
-                body: "hello".to_string(),
-                handling_mode: None,
-            },
-        );
-        let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item);
-        assert!(
-            result.is_none(),
-            "untrusted input must be dropped at ingress"
-        );
     }
 
     #[test]
@@ -994,7 +936,7 @@ mod tests {
         );
         let item = InboxItem::External { envelope };
         let result = ctx
-            .classify(&item)
+            .prepare(item)
             .expect("bind_member should remain admissible");
         assert_eq!(result.class, PeerInputClass::ActionableRequest);
         assert_eq!(
@@ -1009,7 +951,7 @@ mod tests {
         );
         let expected_peer_id = sender.public_key().to_peer_id().to_string();
         assert_eq!(
-            result.from_peer_id.as_deref(),
+            result.ingress_fact.canonical_peer_id_string().as_deref(),
             Some(expected_peer_id.as_str())
         );
     }
@@ -1034,7 +976,7 @@ mod tests {
             },
         );
 
-        let result = ctx.classify(&InboxItem::External { envelope });
+        let result = ctx.prepare(InboxItem::External { envelope });
 
         assert!(
             result.is_none(),
@@ -1058,7 +1000,7 @@ mod tests {
             },
         );
 
-        let result = ctx.classify(&InboxItem::External { envelope });
+        let result = ctx.prepare(InboxItem::External { envelope });
 
         assert!(
             result.is_none(),
@@ -1096,7 +1038,7 @@ mod tests {
         ];
 
         for kind in external_cases {
-            let result = ctx.classify(&InboxItem::External {
+            let result = ctx.prepare(InboxItem::External {
                 envelope: make_envelope(&sender, kind),
             });
             assert!(
@@ -1105,7 +1047,7 @@ mod tests {
             );
         }
 
-        let plain_result = ctx.classify(&InboxItem::PlainEvent {
+        let plain_result = ctx.prepare(InboxItem::PlainEvent {
             blocks: None,
             body: "event body".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
@@ -1130,7 +1072,7 @@ mod tests {
             vec![],
             Some(auth_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
-        let auth_result = auth_ctx.classify(&InboxItem::External {
+        let auth_result = auth_ctx.prepare(InboxItem::External {
             envelope: make_envelope(
                 &sender,
                 MessageKind::Request {
@@ -1159,7 +1101,7 @@ mod tests {
             Some(lifecycle_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
         let lifecycle = lifecycle_ctx
-            .classify(&InboxItem::External {
+            .prepare(InboxItem::External {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Request {
@@ -1184,7 +1126,7 @@ mod tests {
             Some(response_machine.clone() as Arc<dyn meerkat_core::handles::PeerCommsHandle>),
         );
         let response = response_ctx
-            .classify(&InboxItem::External {
+            .prepare(InboxItem::External {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Response {
@@ -1208,28 +1150,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_untrusted_legacy_bridge_intent_drops_at_ingress() {
-        let sender = make_keypair();
-        let trusted = TrustedPeers::new(); // sender NOT trusted yet
-        let ctx = make_context(true, trusted, vec![]);
-        let envelope = make_envelope(
-            &sender,
-            MessageKind::Request {
-                intent: "mob.runtime.bind_member".to_string(),
-                params: serde_json::json!({}),
-                blocks: None,
-                handling_mode: None,
-            },
-        );
-        let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item);
-        assert!(
-            result.is_none(),
-            "legacy bridge intents should no longer bypass auth at ingress"
-        );
-    }
-
-    #[test]
     fn machine_handoff_precedes_silent_routing_and_lifecycle_extraction() {
         let sender = make_keypair();
         let trusted = make_trusted_peers("orchestrator", &sender.public_key());
@@ -1242,7 +1162,7 @@ mod tests {
         );
 
         let silent = ctx
-            .classify(&InboxItem::External {
+            .prepare(InboxItem::External {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Request {
@@ -1257,7 +1177,7 @@ mod tests {
         assert_eq!(silent.class, PeerInputClass::SilentRequest);
 
         let lifecycle = ctx
-            .classify(&InboxItem::External {
+            .prepare(InboxItem::External {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Request {
@@ -1323,7 +1243,7 @@ mod tests {
             interaction_id: None,
             render_metadata: None,
         };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PlainEvent);
         assert!(result.from_peer.is_none());
     }
@@ -1394,7 +1314,7 @@ mod tests {
             blocks: None,
             render_metadata: None,
         };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PlainEvent);
     }
 
@@ -1413,7 +1333,7 @@ mod tests {
             },
         );
         let item = InboxItem::External { envelope };
-        let result = ctx.classify(&item).expect("should classify");
+        let result = ctx.prepare(item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PeerLifecycleAdded);
         assert_eq!(result.lifecycle_peer.as_deref(), Some("orchestrator"));
     }

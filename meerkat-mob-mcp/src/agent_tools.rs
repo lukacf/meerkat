@@ -337,13 +337,29 @@ impl AgentMobToolSurface {
         tool_name: &str,
         mob_id: &MobId,
     ) -> Result<(), ToolError> {
-        if self
+        // Pure observation extracted from the machine-owned operator-scope
+        // projection. MobMachine — not this surface — decides the Allow/Deny
+        // verdict; we mirror it (Denied -> access_denied). Fails closed.
+        let can_manage_mob = self
             .authority_context_snapshot()
-            .can_manage_mob(mob_id.as_str())
-        {
-            return Ok(());
+            .can_manage_mob(mob_id.as_str());
+        let handle = self.state.handle_for(mob_id).await.map_err(|error| {
+            ToolError::execution_failed(format!(
+                "tool '{tool_name}' current-mob admission failed: {error}"
+            ))
+        })?;
+        let admission = handle
+            .resolve_current_mob_admission(can_manage_mob)
+            .await
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{tool_name}' current-mob admission failed: {error}"
+                ))
+            })?;
+        match admission {
+            meerkat_mob::CurrentMobAdmission::Allowed => Ok(()),
+            meerkat_mob::CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        Err(ToolError::access_denied(tool_name))
     }
 
     async fn ensure_spawn_member_scope(

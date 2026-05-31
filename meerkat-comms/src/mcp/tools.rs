@@ -534,7 +534,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
                 "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
                 peer_for_errors.as_deref().unwrap_or("<unknown>")
             ),
-            SendError::Internal(inner) if is_transport_internal(&inner) => {
+            SendError::Transport(inner) => {
                 format!(
                     "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
                     peer_for_errors.as_deref().unwrap_or("<unknown>")
@@ -659,10 +659,6 @@ fn format_router_send_error(peer_name: &str, error: crate::router::SendError) ->
             )
         }
     }
-}
-
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {

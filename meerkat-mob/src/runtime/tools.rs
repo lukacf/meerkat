@@ -536,12 +536,21 @@ impl MobOperatorToolDispatcher {
         }
     }
 
-    fn ensure_current_mob_scope(&self, tool_name: &str) -> Result<(), ToolError> {
+    async fn ensure_current_mob_scope(&self, tool_name: &str) -> Result<(), ToolError> {
+        // Pure observation extracted from the machine-owned operator-scope
+        // projection. MobMachine — not this shell — decides the Allow/Deny
+        // verdict; we mirror it (Denied -> access_denied). Fails closed.
         let mob_id = self.handle.definition().id.as_str();
-        if self.authority_context.can_manage_mob(mob_id) {
-            return Ok(());
+        let can_manage_mob = self.authority_context.can_manage_mob(mob_id);
+        let admission = self
+            .handle
+            .resolve_current_mob_admission(can_manage_mob)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            CurrentMobAdmission::Allowed => Ok(()),
+            CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        Err(ToolError::access_denied(tool_name))
     }
 
     fn can_manage_current_mob(&self) -> bool {
@@ -828,7 +837,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         if self.tools.iter().any(|tool| tool.name == call.name)
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
         {
-            self.ensure_current_mob_scope(call.name)?;
+            self.ensure_current_mob_scope(call.name).await?;
         } else if matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
             && !self.can_spawn_any_profile_in_current_mob()
         {

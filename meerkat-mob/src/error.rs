@@ -250,6 +250,16 @@ pub enum MobError {
     #[error("mob actor reply channel closed")]
     ActorReplyChannelClosed,
 
+    /// A bridge session could not be located in any live mob authority roster
+    /// (and is not owned by service-reported or persisted authority either),
+    /// so live-handle retirement cannot resolve a member to retire.
+    ///
+    /// This is a typed recovery-class observation: callers that already hold
+    /// independent evidence the bridge session is mob-owned (e.g. bridge-session
+    /// scoped mobs) may proceed to scoped cleanup instead of failing.
+    #[error("bridge session not found in any live mob authority: {bridge_session_id}")]
+    BridgeSessionNotInLiveAuthority { bridge_session_id: String },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),
@@ -504,6 +514,9 @@ mod tests {
                 actual: FenceToken::new(0),
             },
             MobError::WorkNotFound(WorkRef::new()),
+            MobError::BridgeSessionNotInLiveAuthority {
+                bridge_session_id: "sess-1".to_string(),
+            },
             MobError::Internal("i".to_string()),
         ];
     }

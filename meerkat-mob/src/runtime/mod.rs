@@ -115,11 +115,12 @@ pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
-    ExternalMemberBindingMode, ExternalMemberForwardingHookRef, ExternalMemberForwardingHooks,
-    ExternalMemberForwardingStatus, ExternalMemberObservationSnapshot, ExternalMemberOwnerRef,
-    ExternalMemberReachability, ExternalMemberRebindStatus, ExternalPeerBindingSpec, HelperOptions,
-    HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError,
-    MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
+    CurrentMobAdmission, ExternalMemberBindingMode, ExternalMemberForwardingHookRef,
+    ExternalMemberForwardingHooks, ExternalMemberForwardingStatus,
+    ExternalMemberObservationSnapshot, ExternalMemberOwnerRef, ExternalMemberReachability,
+    ExternalMemberRebindStatus, ExternalPeerBindingSpec, HelperOptions, HelperResult,
+    MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError, MobDestroyReport,
+    MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
     MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
     PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,

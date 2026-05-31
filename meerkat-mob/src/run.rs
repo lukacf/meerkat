@@ -370,6 +370,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ResolveFlowDelegationEdgeAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
@@ -1517,6 +1518,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ResolveFlowDelegationEdgeAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }

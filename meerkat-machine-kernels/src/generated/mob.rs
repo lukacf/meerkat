@@ -1838,6 +1838,58 @@ impl std::fmt::Display for MobCoordinationWorkIntentStatus {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobCurrentMobAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Allowed")]
+    Allowed,
+}
+impl MobCurrentMobAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::Allowed => "Allowed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobCurrentMobAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "Allowed" => Ok(Self::Allowed),
+            other => Err(format!(
+                "invalid MobCurrentMobAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobCurrentMobAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobCurrentMobAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobFlowDelegationEdgeAdmissionKind {
     #[default]
     #[serde(rename = "Admitted")]
@@ -3703,6 +3755,10 @@ pub mod inputs {
         pub privileged_args_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveCurrentMobAdmission {
+        pub can_manage_mob: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyBridgeRejectionRecovery {
         pub rejection_cause: MobBridgeRejectionCause,
     }
@@ -4102,6 +4158,7 @@ pub enum Input {
     ResolveFlowDelegationEdgeAdmission(inputs::ResolveFlowDelegationEdgeAdmission),
     ClassifyRemoteMemberRuntimeObservation(inputs::ClassifyRemoteMemberRuntimeObservation),
     ResolveSpawnMemberAdmission(inputs::ResolveSpawnMemberAdmission),
+    ResolveCurrentMobAdmission(inputs::ResolveCurrentMobAdmission),
     ClassifyBridgeRejectionRecovery(inputs::ClassifyBridgeRejectionRecovery),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
@@ -4214,6 +4271,7 @@ impl Input {
                 InputKind::ClassifyRemoteMemberRuntimeObservation
             }
             Self::ResolveSpawnMemberAdmission(_) => InputKind::ResolveSpawnMemberAdmission,
+            Self::ResolveCurrentMobAdmission(_) => InputKind::ResolveCurrentMobAdmission,
             Self::ClassifyBridgeRejectionRecovery(_) => InputKind::ClassifyBridgeRejectionRecovery,
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
@@ -4339,6 +4397,7 @@ pub enum InputKind {
     ResolveFlowDelegationEdgeAdmission,
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
+    ResolveCurrentMobAdmission,
     ClassifyBridgeRejectionRecovery,
     EnsureMember,
     Reconcile,
@@ -4979,6 +5038,10 @@ pub mod effects {
         pub admission: MobSpawnMemberAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CurrentMobAdmissionResolved {
+        pub admission: MobCurrentMobAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BridgeRejectionRecoveryClassified {
         pub rejection_cause: MobBridgeRejectionCause,
         pub recovery: MobBridgeRejectionRecovery,
@@ -5242,6 +5305,7 @@ pub enum Effect {
     FlowDelegationEdgeAdmissionResolved(effects::FlowDelegationEdgeAdmissionResolved),
     RemoteMemberRuntimeTerminalityClassified(effects::RemoteMemberRuntimeTerminalityClassified),
     SpawnMemberAdmissionResolved(effects::SpawnMemberAdmissionResolved),
+    CurrentMobAdmissionResolved(effects::CurrentMobAdmissionResolved),
     BridgeRejectionRecoveryClassified(effects::BridgeRejectionRecoveryClassified),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
@@ -5320,6 +5384,7 @@ pub enum EffectKind {
     FlowDelegationEdgeAdmissionResolved,
     RemoteMemberRuntimeTerminalityClassified,
     SpawnMemberAdmissionResolved,
+    CurrentMobAdmissionResolved,
     BridgeRejectionRecoveryClassified,
     WiringGraphChanged,
     MemberSessionBindingChanged,
@@ -5421,6 +5486,14 @@ pub enum TransitionId {
     ResolveSpawnMemberAdmissionDeniedStopped,
     ResolveSpawnMemberAdmissionDeniedCompleted,
     ResolveSpawnMemberAdmissionDeniedDestroyed,
+    ResolveCurrentMobAdmissionAllowedRunning,
+    ResolveCurrentMobAdmissionAllowedStopped,
+    ResolveCurrentMobAdmissionAllowedCompleted,
+    ResolveCurrentMobAdmissionAllowedDestroyed,
+    ResolveCurrentMobAdmissionDeniedRunning,
+    ResolveCurrentMobAdmissionDeniedStopped,
+    ResolveCurrentMobAdmissionDeniedCompleted,
+    ResolveCurrentMobAdmissionDeniedDestroyed,
     ClassifyBridgeRejectionRecoveryRebindRunning,
     ClassifyBridgeRejectionRecoveryRebindStopped,
     ClassifyBridgeRejectionRecoveryRebindCompleted,

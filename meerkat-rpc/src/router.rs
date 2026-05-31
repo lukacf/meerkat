@@ -59,10 +59,6 @@ impl meerkat_live::LiveToolDispatcher for RuntimeLiveToolDispatcher {
     }
 }
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 #[cfg(feature = "mob")]
 fn mob_destroy_cleanup_error_response(
     id: Option<crate::protocol::RpcId>,
@@ -2600,9 +2596,7 @@ impl MethodRouter {
                             "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
                         })
                     }
-                    meerkat_core::comms::SendError::Internal(details)
-                        if peer_name.is_some() && is_transport_internal(details) =>
-                    {
+                    meerkat_core::comms::SendError::Transport(details) if peer_name.is_some() => {
                         let peer = peer_name.as_deref().unwrap_or("<unknown>");
                         json!({
                             "code": "peer_unreachable",

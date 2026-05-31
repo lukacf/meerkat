@@ -2680,10 +2680,6 @@ pub struct CommsPeersRequest {
     pub session_id: String,
 }
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 /// POST /comms/send — dispatch a canonical comms command.
 async fn comms_send(
     State(state): State<AppState>,
@@ -2744,7 +2740,7 @@ fn normalize_rest_comms_send_error(
                 }),
             }
         }
-        meerkat_core::comms::SendError::Internal(details) if is_transport_internal(details) => {
+        meerkat_core::comms::SendError::Transport(details) => {
             let peer = peer_name.unwrap_or("<unknown>");
             ApiError::InternalWithData {
                 message: format!(
@@ -9117,6 +9113,37 @@ mod tests {
                 assert_eq!(
                     details.get("message").and_then(Value::as_str),
                     Some("internal: boom")
+                );
+            }
+            other => panic!("expected structured internal error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_rest_comms_send_error_transport_maps_to_peer_unreachable() {
+        let err = normalize_rest_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Transport(
+                "Transport error: connection refused".into(),
+            ),
+        );
+        match err {
+            ApiError::InternalWithData {
+                message,
+                code,
+                details,
+            } => {
+                assert!(message.starts_with("peer_unreachable:"));
+                assert_eq!(code, "peer_unreachable");
+                assert_eq!(details.get("peer").and_then(Value::as_str), Some("peer-a"));
+                assert_eq!(
+                    details.get("reason").and_then(Value::as_str),
+                    Some("transport_error")
+                );
+                assert_eq!(
+                    details.get("details").and_then(Value::as_str),
+                    Some("Transport error: connection refused")
                 );
             }
             other => panic!("expected structured internal error, got {other:?}"),

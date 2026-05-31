@@ -154,8 +154,6 @@ fn destroy_report_summary(report: &meerkat_mob::MobDestroyReport) -> String {
 }
 
 type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
-const BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY: &str =
-    "bridge session not found in any live mob authority:";
 
 #[doc(hidden)]
 #[derive(Default)]
@@ -875,15 +873,6 @@ impl MobMcpState {
     }
 
     #[doc(hidden)]
-    pub fn is_missing_bridge_session_retire_error(error: &MobError) -> bool {
-        matches!(
-            error,
-            MobError::Internal(message)
-                if message.starts_with(BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY)
-        )
-    }
-
-    #[doc(hidden)]
     pub async fn archive_mob_owned_bridge_session_with_cleanup(
         &self,
         bridge_session_id: &SessionId,
@@ -909,7 +898,7 @@ impl MobMcpState {
                     .map_err(|error| error.into_session_error(cleanup_context))?;
                 Ok(true)
             }
-            Err(error) if Self::is_missing_bridge_session_retire_error(&error) => {
+            Err(MobError::BridgeSessionNotInLiveAuthority { .. }) => {
                 if self
                     .has_bridge_session_scoped_mobs(&bridge_session_key)
                     .await
@@ -966,9 +955,9 @@ impl MobMcpState {
                         ))
                     });
             }
-            return Err(MobError::Internal(format!(
-                "{BRIDGE_SESSION_MISSING_FROM_LIVE_MOB_AUTHORITY} {bridge_session_id}"
-            )));
+            return Err(MobError::BridgeSessionNotInLiveAuthority {
+                bridge_session_id: bridge_session_id.to_string(),
+            });
         };
         self.mob_retire(&mob_id, identity).await
     }
@@ -5435,6 +5424,29 @@ mod tests {
                 .is_none(),
             "archive fallback must remove the persisted session snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn test_retire_member_unknown_bridge_session_returns_typed_recovery_variant() {
+        // A bridge session that lives in no live roster, is not service-reported,
+        // and is not persisted must surface the TYPED recovery class
+        // (BridgeSessionNotInLiveAuthority) rather than an Internal string the
+        // consumer has to re-parse by message prefix.
+        let svc = Arc::new(MockSessionSvc::new());
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
+        let state = Arc::new(MobMcpState::new(session_service));
+
+        let unknown = SessionId::new();
+        let err = state
+            .retire_member_by_bridge_session_id(&unknown)
+            .await
+            .expect_err("unknown bridge session must not retire successfully");
+        match err {
+            MobError::BridgeSessionNotInLiveAuthority { bridge_session_id } => {
+                assert_eq!(bridge_session_id, unknown.to_string());
+            }
+            other => panic!("expected typed BridgeSessionNotInLiveAuthority, got {other:?}"),
+        }
     }
 
     fn flow_enabled_definition() -> serde_json::Value {

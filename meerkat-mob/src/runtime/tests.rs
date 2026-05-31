@@ -37067,6 +37067,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
         MobError::ActorCommandChannelClosed => "actor_command_channel_closed".to_string(),
         MobError::ActorReplyChannelClosed => "actor_reply_channel_closed".to_string(),
+        MobError::BridgeSessionNotInLiveAuthority { .. } => {
+            "bridge_session_not_in_live_authority".to_string()
+        }
         MobError::Internal(reason) => format!("internal:{reason}"),
     }
 }

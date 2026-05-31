@@ -372,3 +372,41 @@ model hot-swap eligibility (known pending project_hot_swap_machine_gap); MCP tea
   no constructor); sweep-rated defensible.
 These are projections of machine-decided facts / idempotent cleanup / pure equality — not shell-decided
 semantic verdicts over machine-owned lifecycle facts. Re-running convergence (round 3) for two-clean.
+
+## CONVERGENCE ROUND 3 (re-sweep + 2 blind reviews)
+beta CLEAN; alpha found 2 (ensure_current_mob_scope MEDIUM + resolver staleness LOW); sweep found 6
+(1 MEDIUM-certain mob-mcp string folklore + 5 LOW). Folded the 4 genuine (string folklore + dead path
+are forbidden regardless of severity):
+
+### FOLDED — mob-mcp recovery-class STRING FOLKLORE -> typed MobError variant (sweep MEDIUM certain; branch namesake)
+meerkat-mob-mcp round-tripped a recovery class through MobError::Internal(format!("{PREFIX} {id}")) +
+consumer message.starts_with(PREFIX). Added typed MobError::BridgeSessionNotInLiveAuthority { bridge_session_id };
+producer returns it, consumer matches the typed discriminant; deleted the const + is_missing_bridge_session_retire_error.
+MobError not wire-contracted (schema-neutral).
+
+### FOLDED — comms-send transport STRING FOLKLORE -> typed SendError variant (sweep LOW likely)
+is_transport_internal classified SendError::Internal via starts_with("Transport error:"/"IO error:") at 5
+sites (rpc handlers+router x2, rest, mcp-server, comms mcp tools). Added SendError::Transport(String) emitted
+at the construction site (comms_runtime.rs); all 5 consumers match the typed discriminant; deleted all
+is_transport_internal helpers. Exact emitted codes/reasons (peer_unreachable/transport_error) preserved.
+
+### FOLDED (DELETED) — dead shadow admission authority ClassificationSink::classify (sweep LOW likely)
+classify() + drop_untrusted_external had ZERO production callers (live path: inbox.rs admit_peer_receive ->
+resolve_peer_ingress_receive -> PeerIngressReceiveOutcome::DroppedUntrustedSender). Deleted classify() +
+ClassificationResult + the 2 dead-verdict tests; migrated ~20 classification-semantics tests to the live prepare() path.
+
+### FOLDED — ensure_current_mob_scope per-mob operator admission -> MobMachine (alpha MEDIUM)
+tools.rs ensure_current_mob_scope + mob-mcp agent_tools ensure_mob_scope_authority decided Allow/Deny in-shell
+from can_manage_mob. Added MobMachine ResolveCurrentMobAdmission { can_manage_mob } -> CurrentMobAdmissionResolved
+{ MobCurrentMobAdmissionKind Allowed|Denied } (mirrors Site 4 ResolveSpawnMemberAdmission plumbing + MobHandle
+resolve_current_mob_admission seam). Both surfaces extract can_manage_mob, mirror Allowed->Ok/Denied->access_denied,
+fail closed. Declared runtime-internal (OperatorScopeAdmissionAuthority).
+
+Gates: drift 10/6; broad check clean (incl rest+mcp-server); machine-codegen 94 pass; affected crates 3514 passed;
+classifier ratchet pass; seam 0 debt.
+
+### Round-3 LOWs DEFENDED: resolver staleness collapse (binary projection of the ratcheted pure ordering witness
+marker_relation_for_tokens_and_snapshot: Matches->proceed else->stale-reject; not a new conclusion); retry.rs
+recoverable/fatal (sweep-acknowledged: MeerkatMachine RecoverableFailure transition fully revalidates via
+llm_failure_kind_recoverable + retries_remaining guards); oauth validate_oauth_login_target + session_runtime
+deferred-restore (LOW/possible, to re-confirm next round). Re-running convergence (round 4) for two-clean.

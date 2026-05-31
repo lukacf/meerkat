@@ -130,15 +130,16 @@ pub use runtime::bridge_protocol::{
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
 pub use runtime::{
-    ExternalPeerBindingSpec, HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle,
-    MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
-    MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
-    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
-    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberCustomizer,
-    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
-    SupervisorRotationReport, WorkDeliveryReceipt,
+    CurrentMobAdmission, ExternalPeerBindingSpec, HelperOptions, HelperResult,
+    MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobBuilder, MobDestroyError,
+    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
+    MobEventsSubscriptionConfig, MobHandle, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobSpawnManyFailure, MobState,
+    MobUnreachablePeer, MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget,
+    PreviousMemberCleanupReport, SpawnContinuityIntent, SpawnCustomizationContext,
+    SpawnMemberAdmission, SpawnMemberCustomizer, SpawnMemberSpec, SpawnPolicy, SpawnResult,
+    SpawnSource, SpawnSpec, SpawnSystemPromptOverride, SupervisorRotationReport,
+    WorkDeliveryReceipt,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};

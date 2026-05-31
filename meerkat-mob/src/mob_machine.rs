@@ -310,6 +310,7 @@ pub enum MobMachineCatalogInput {
     ResolveFlowDelegationEdgeAdmission,
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
+    ResolveCurrentMobAdmission,
     ClassifyBridgeRejectionRecovery,
     EnsureMember,
     Reconcile,
@@ -410,6 +411,7 @@ impl MobMachineCatalogInput {
         Self::ResolveFlowDelegationEdgeAdmission,
         Self::ClassifyRemoteMemberRuntimeObservation,
         Self::ResolveSpawnMemberAdmission,
+        Self::ResolveCurrentMobAdmission,
         Self::ClassifyBridgeRejectionRecovery,
         Self::EnsureMember,
         Self::Reconcile,
@@ -523,6 +525,7 @@ impl MobMachineCatalogInput {
             Self::ResolveSpawnMemberAdmission => {
                 MobMachineInputVariant::ResolveSpawnMemberAdmission
             }
+            Self::ResolveCurrentMobAdmission => MobMachineInputVariant::ResolveCurrentMobAdmission,
             Self::ClassifyBridgeRejectionRecovery => {
                 MobMachineInputVariant::ClassifyBridgeRejectionRecovery
             }
@@ -687,6 +690,7 @@ impl MobMachineCatalogInput {
                 "ClassifyRemoteMemberRuntimeObservation"
             }
             Self::ResolveSpawnMemberAdmission => "ResolveSpawnMemberAdmission",
+            Self::ResolveCurrentMobAdmission => "ResolveCurrentMobAdmission",
             Self::ClassifyBridgeRejectionRecovery => "ClassifyBridgeRejectionRecovery",
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
@@ -867,6 +871,7 @@ pub enum MobMachineRuntimeInternalReason {
     RuntimeRejectionFeedback,
     SurfaceResultClassificationAuthority,
     SpawnProfileAuthority,
+    OperatorScopeAdmissionAuthority,
     OwnerBridgeSessionAuthority,
     SpawnPolicyFeedbackAuthority,
     SessionIngressDetachFeedback,
@@ -996,6 +1001,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // standalone surface command.
         input: MobMachineCatalogInput::ResolveSpawnMemberAdmission,
         reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Per-mob operator admission for current-mob tools is decided by
+        // MobMachine from the tool surface's pure manage-scope observation;
+        // the tool surface drives this as an operator-scope admission input,
+        // not a standalone surface command.
+        input: MobMachineCatalogInput::ResolveCurrentMobAdmission,
+        reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         // Bridge-rejection recovery class is decided by MobMachine from the

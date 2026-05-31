@@ -2014,6 +2014,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["NonTerminal", "Terminal"],
             ),
             NamedTypeBinding::string_enum("MobSpawnMemberAdmissionKind", &["Denied", "Allowed"]),
+            NamedTypeBinding::string_enum("MobCurrentMobAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum(
                 "MobBridgeRejectionCause",
                 &[
@@ -2239,6 +2240,7 @@ runtime_internal_inputs!(
         ResolveFlowDelegationEdgeAdmission,
         ClassifyRemoteMemberRuntimeObservation,
         ResolveSpawnMemberAdmission,
+        ResolveCurrentMobAdmission,
         ClassifyBridgeRejectionRecovery,
         CreateFrameSeed,
         CreateLoopSeed,

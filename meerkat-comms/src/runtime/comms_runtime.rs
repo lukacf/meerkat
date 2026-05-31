@@ -2395,7 +2395,7 @@ impl CommsRuntime {
             }
             Err(
                 error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
-            ) => Err(SendError::Internal(error.to_string())),
+            ) => Err(SendError::Transport(error.to_string())),
         }
     }
 
@@ -7062,8 +7062,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(result, Err(SendError::Internal(_))),
-            "transport failure should surface as internal send error, got: {result:?}"
+            matches!(result, Err(SendError::Transport(_))),
+            "transport failure should surface as a typed transport send error, got: {result:?}"
         );
 
         let peers = CoreCommsRuntime::peers(&sender).await;

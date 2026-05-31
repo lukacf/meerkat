@@ -2863,9 +2863,7 @@ fn normalize_mcp_comms_send_error(
                 "reason": "offline_or_no_ack",
             })),
         ),
-        meerkat_core::comms::SendError::Internal(details)
-            if peer_name.is_some() && is_transport_internal(details) =>
-        {
+        meerkat_core::comms::SendError::Transport(details) if peer_name.is_some() => {
             ToolCallError::new(
                 -32603,
                 format!(
@@ -2889,11 +2887,6 @@ fn normalize_mcp_comms_send_error(
             })),
         ),
     }
-}
-
-#[cfg(feature = "comms")]
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 fn help_provider_to_mcp_provider(
@@ -5156,6 +5149,33 @@ mod tests {
         assert_eq!(
             data.get("reason").and_then(Value::as_str),
             Some("offline_or_no_ack")
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_mcp_comms_send_error_transport_maps_to_peer_unreachable() {
+        let err = normalize_mcp_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Transport(
+                "Transport error: connection refused".into(),
+            ),
+        );
+        assert_eq!(err.code, -32603);
+        assert!(err.message.starts_with("peer_unreachable:"));
+        let data = err.data.expect("structured error data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some("peer_unreachable")
+        );
+        assert_eq!(data.get("peer").and_then(Value::as_str), Some("peer-a"));
+        assert_eq!(
+            data.get("reason").and_then(Value::as_str),
+            Some("transport_error")
+        );
+        assert_eq!(
+            data.get("details").and_then(Value::as_str),
+            Some("Transport error: connection refused")
         );
     }
 

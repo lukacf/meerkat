@@ -211,6 +211,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSpawnMemberAdmissionDeniedDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `ResolveCurrentMobAdmissionAllowedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCurrentMobAdmissionAllowedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveCurrentMobAdmissionAllowedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCurrentMobAdmissionAllowedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveCurrentMobAdmissionDeniedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCurrentMobAdmissionDeniedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `ResolveCurrentMobAdmissionDeniedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `ResolveCurrentMobAdmissionDeniedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
 - `ClassifyBridgeRejectionRecoveryRebindRunning`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
@@ -1797,6 +1821,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SpawnMemberAdmissionResolved`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+- `CurrentMobAdmissionResolved`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`
+  - scenarios: `event-subscriptions-and-notices`
 - `BridgeRejectionRecoveryClassified`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`

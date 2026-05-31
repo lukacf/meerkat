@@ -46,6 +46,15 @@ pub enum SpawnMemberAdmission {
     Denied,
 }
 
+/// Machine-decided per-mob operator admission verdict for current-mob-scoped
+/// tools, mirrored by tool surfaces. `Denied` maps to a tool `access_denied`
+/// error; `Allowed` proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentMobAdmission {
+    Allowed,
+    Denied,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MobMemberSnapshot {
@@ -686,6 +695,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         }
         MobError::WorkNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::WorkNotFound,
         MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
+        MobError::BridgeSessionNotInLiveAuthority { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         MobError::Internal(_) => mob_dsl::MobSpawnManyFailureObservationKind::Internal,
@@ -5248,6 +5260,44 @@ impl MobHandle {
         Ok(match admission {
             mob_dsl::MobSpawnMemberAdmissionKind::Allowed => SpawnMemberAdmission::Allowed,
             mob_dsl::MobSpawnMemberAdmissionKind::Denied => SpawnMemberAdmission::Denied,
+        })
+    }
+
+    /// Resolve the per-mob operator admission verdict for current-mob-scoped
+    /// tools.
+    ///
+    /// The tool surface extracts a single raw observation — whether the
+    /// operator holds manage scope over the current mob (a machine-owned
+    /// operator-scope projection) — and feeds it here. MobMachine, not the
+    /// tool surface, decides the Allow/Deny verdict; the surface mirrors the
+    /// returned verdict (`CurrentMobAdmission::Denied` -> `access_denied`).
+    /// Fails closed if the machine emits no verdict.
+    pub async fn resolve_current_mob_admission(
+        &self,
+        can_manage_mob: bool,
+    ) -> Result<CurrentMobAdmission, MobError> {
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveCurrentMobAdmission {
+                can_manage_mob,
+            })
+            .await?;
+        let admission = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::CurrentMobAdmissionResolved { admission } => {
+                    Some(admission)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted current-mob admission observation but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        Ok(match admission {
+            mob_dsl::MobCurrentMobAdmissionKind::Allowed => CurrentMobAdmission::Allowed,
+            mob_dsl::MobCurrentMobAdmissionKind::Denied => CurrentMobAdmission::Denied,
         })
     }
 

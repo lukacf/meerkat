@@ -1236,6 +1236,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "CurrentMobAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Per-mob operator admission for current-mob tools (Allowed/Denied) is decided by MobMachine from the raw manage-scope observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
+        ),
+        (
+            "MobMachine",
             "BridgeRejectionRecoveryClassified",
             SeamClassification::SurfaceResultAlignment,
             "Bridge-rejection recovery (RebindRecover/FatalBubbleUp) is decided by MobMachine from the raw wire rejection cause; the mob shell mirrors it (RebindRecover -> re-run BindMember; FatalBubbleUp -> bubble up) instead of reducing the cause into a recoverable-vs-fatal conclusion itself",

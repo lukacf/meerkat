@@ -477,6 +477,13 @@ macro_rules! mob_catalog_machine_dsl {
             // shell — composes these into the Allow/Deny admission verdict, which
             // the shell mirrors (Deny -> access_denied).
             ResolveSpawnMemberAdmission { manage_scope_present: bool, profile_scope_present: bool, privileged_args_present: bool },
+            // Per-mob operator admission for current-mob-scoped tools. The tool
+            // shell extracts a single pure observation — whether the operator
+            // holds manage scope over the current mob (a machine-owned
+            // operator-scope projection) — and feeds it here. MobMachine — not
+            // the tool shell — decides the Allow/Deny admission verdict, which
+            // the shell mirrors (Deny -> access_denied).
+            ResolveCurrentMobAdmission { can_manage_mob: bool },
             // Bridge-rejection recovery classification. When a mob sends a
             // bridge command that requires an already-bound supervisor (e.g.
             // `AuthorizeSupervisor`) and the member replies with a typed
@@ -725,6 +732,10 @@ macro_rules! mob_catalog_machine_dsl {
             // The tool shell mirrors this (Denied -> access_denied; Allowed ->
             // proceed) instead of composing+enforcing the admission itself.
             SpawnMemberAdmissionResolved { admission: Enum<MobSpawnMemberAdmissionKind> },
+            // Machine-owned per-mob operator admission verdict for current-mob
+            // tools. The tool shell mirrors this (Denied -> access_denied;
+            // Allowed -> proceed) instead of composing the admission itself.
+            CurrentMobAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
             // Machine-owned bridge-rejection recovery verdict. The mob shell
             // mirrors this (RebindRecover -> re-run BindMember; FatalBubbleUp ->
             // bubble the rejection up) instead of reducing the raw wire cause
@@ -869,6 +880,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition FlowDelegationEdgeAdmissionResolved => local,
         disposition RemoteMemberRuntimeTerminalityClassified => local,
         disposition SpawnMemberAdmissionResolved => local,
+        disposition CurrentMobAdmissionResolved => local,
         disposition BridgeRejectionRecoveryClassified => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
@@ -1404,6 +1416,31 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit SpawnMemberAdmissionResolved { admission: MobSpawnMemberAdmissionKind::Denied }
+        }
+
+        // --- Current-mob operator admission ---
+        //
+        // The tool surface extracts a single raw observation (whether the
+        // operator holds manage scope over the current mob) and feeds it here;
+        // MobMachine decides the Allow/Deny verdict. Pure classification across
+        // all phases.
+
+        transition ResolveCurrentMobAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveCurrentMobAdmission { can_manage_mob }
+            guard "manage_scope_allows" { can_manage_mob == true }
+            update {}
+            to Running
+            emit CurrentMobAdmissionResolved { admission: MobCurrentMobAdmissionKind::Allowed }
+        }
+
+        transition ResolveCurrentMobAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveCurrentMobAdmission { can_manage_mob }
+            guard "no_manage_scope_denies" { can_manage_mob == false }
+            update {}
+            to Running
+            emit CurrentMobAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
         }
 
         // --- Bridge-rejection recovery classification ---
@@ -8359,6 +8396,16 @@ pub enum MobRemoteMemberRuntimeTerminality {
 /// shell mirrors this: `Denied` -> `access_denied`, `Allowed` -> proceed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MobSpawnMemberAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+/// Machine-owned per-mob operator admission verdict for current-mob-scoped
+/// tools. The tool shell mirrors this: `Denied` -> `access_denied`, `Allowed`
+/// -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCurrentMobAdmissionKind {
     #[default]
     Denied,
     Allowed,

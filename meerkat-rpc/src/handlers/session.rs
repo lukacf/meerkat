@@ -847,6 +847,7 @@ pub async fn handle_inject_context(
         text: params.text,
         source: params.source,
         idempotency_key: params.idempotency_key,
+        source_kind: meerkat_core::session::SystemContextSource::Normal,
     };
 
     match runtime.append_system_context(&session_id, req).await {

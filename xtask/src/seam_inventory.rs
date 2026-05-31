@@ -1619,6 +1619,30 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local durable snapshot recovery acknowledgement consumed in-process by the session restore path",
         ),
+        (
+            "SessionDocumentMachine",
+            "SystemContextAppendResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local runtime system-context append disposition mirrored onto the session SessionSystemContextState pending/seen collections inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SystemContextPendingApplyItemResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local per-append apply/discard decision (keyed on the typed SystemContextSource marker) mirrored onto the session applied/seen collections inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SystemContextSteerCleanupItemResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local per-item transient runtime-steer discard decision (keyed on the typed SystemContextSource marker) mirrored onto the session pending/applied/seen collections inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SystemContextSnapshotRestoreAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local system-context snapshot restore authorization consumed in-process by the session restore path",
+        ),
         //
         // =========================================================================
         // WorkAttentionLifecycleMachine

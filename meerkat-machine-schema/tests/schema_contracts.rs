@@ -75,6 +75,12 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
         // independent lifecycle and is consumed as a generated helper that
         // feeds SessionTurnAdmissionMachine — it must NOT be canonical.
         "PendingContinuationAdmissionMachine",
+        // System-context append/apply/discard decisions and the runtime-steer
+        // marker are folded into SessionDocumentMachine's system-context
+        // region (LUC-524, P0 Dogma Invariant 1). The former standalone
+        // SessionSystemContextAuthorityMachine — a stateless classifier whose
+        // real reducer logic was hand-coded in the xtask emitter — is deleted.
+        "SessionSystemContextAuthorityMachine",
     ] {
         assert!(
             !names.iter().any(|name| name == absorbed),

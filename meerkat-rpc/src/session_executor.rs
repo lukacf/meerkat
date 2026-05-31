@@ -270,6 +270,7 @@ fn pending_system_context_appends_from_primitive(
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         })
         .collect()
 }

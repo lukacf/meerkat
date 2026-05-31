@@ -1470,6 +1470,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                         text: append.text,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
+                        source_kind: append.source_kind,
                     },
                     append.accepted_at,
                 )
@@ -4603,6 +4604,7 @@ mod runtime_turn_metadata_tests {
                             text: append.text.clone(),
                             source: append.source.clone(),
                             idempotency_key: append.idempotency_key.clone(),
+                            source_kind: append.source_kind,
                         },
                         append.accepted_at,
                     )
@@ -4983,6 +4985,7 @@ mod runtime_turn_metadata_tests {
                             text: "terminal peer context".to_string(),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+                            source_kind: meerkat_core::session::SystemContextSource::Normal,
                             accepted_at: meerkat_core::time_compat::SystemTime::now(),
                         }],
                         Some(RuntimeTurnMetadata {
@@ -5047,6 +5050,7 @@ mod runtime_turn_metadata_tests {
             text: "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string(),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
         let baseline_ticks = session_context_handle.ticks().len();
@@ -5154,6 +5158,7 @@ mod runtime_turn_metadata_tests {
             text: "active-turn steer context".to_string(),
             source: Some("console:steer:test".to_string()),
             idempotency_key: Some("console:steer:test".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
 
@@ -5256,6 +5261,7 @@ mod runtime_turn_metadata_tests {
                     text: "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
                     source: Some("console:steer:stale".to_string()),
                     idempotency_key: Some("console:steer:stale".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
             )
@@ -5328,6 +5334,7 @@ mod runtime_turn_metadata_tests {
                     text: "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
                     source: Some("console:steer:wrong-run".to_string()),
                     idempotency_key: Some("console:steer:wrong-run".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
             )
@@ -5397,12 +5404,14 @@ mod runtime_turn_metadata_tests {
                         text: "first staged context".to_string(),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at,
                     },
                     PendingSystemContextAppend {
                         text: "conflicting staged context".to_string(),
                         source: Some("console:steer:test".to_string()),
                         idempotency_key: Some("console:steer:conflict".to_string()),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at,
                     },
                 ],
@@ -5482,6 +5491,7 @@ mod runtime_turn_metadata_tests {
                             text: "must not leak before setup succeeds".to_string(),
                             source: Some("peer_response_terminal:test:req".to_string()),
                             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+                            source_kind: meerkat_core::session::SystemContextSource::Normal,
                             accepted_at: meerkat_core::time_compat::SystemTime::now(),
                         }],
                         Some(RuntimeTurnMetadata {

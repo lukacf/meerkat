@@ -37,6 +37,22 @@ pub enum SessionInitialPromptStageDecision {
     Store,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SystemContextAppendDecision {
+    #[default]
+    Staged,
+    Duplicate,
+    RejectEmpty,
+    RejectConflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SystemContextSource {
+    #[default]
+    Normal,
+    RuntimeSteer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionDocumentInput {
     MarkSessionInitialTurnPending {
@@ -71,6 +87,23 @@ pub enum SessionDocumentInput {
     ResolveSessionFirstTurnOverridesAllowed {
         session_id: SessionDocumentKey,
     },
+    ResolveSystemContextAppend {
+        trimmed_text_byte_count: u64,
+        idempotency_key_present: bool,
+        existing_key_matches: bool,
+        existing_key_conflicts: bool,
+        active_turn_scoped: bool,
+    },
+    ResolveSystemContextPendingApplyItem {
+        source_kind: SystemContextSource,
+    },
+    ResolveSystemContextSteerCleanupItem {
+        source_kind: SystemContextSource,
+    },
+    RestoreSystemContextSnapshot {
+        active_keys_have_known_pending_or_seen: bool,
+        seen_keys_match_known_appends: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +127,19 @@ pub enum SessionDocumentEffect {
         restore_tool_results: bool,
     },
     SessionFirstTurnPhaseRecovered,
+    SystemContextAppendResolved {
+        decision: SystemContextAppendDecision,
+        active_turn_scoped: bool,
+    },
+    SystemContextPendingApplyItemResolved {
+        promote_to_applied: bool,
+        mark_seen_applied: bool,
+        remove_seen: bool,
+    },
+    SystemContextSteerCleanupItemResolved {
+        discard: bool,
+    },
+    SystemContextSnapshotRestoreAuthorized,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +191,15 @@ enum SessionDocumentTransition {
     RestoreSessionConsumedInputs,
     RestoreSessionConsumedInputsNoPhaseRollback,
     RecoverSessionFirstTurnPhase,
+    ResolveSystemContextAppendEmpty,
+    ResolveSystemContextAppendConflict,
+    ResolveSystemContextAppendDuplicate,
+    ResolveSystemContextAppendNew,
+    ResolveSystemContextPendingApplyItemRuntimeSteer,
+    ResolveSystemContextPendingApplyItemNormal,
+    ResolveSystemContextSteerCleanupItemRuntimeSteer,
+    ResolveSystemContextSteerCleanupItemNormal,
+    RestoreSystemContextSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -642,6 +697,191 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolveSystemContextAppend {
+                trimmed_text_byte_count,
+                idempotency_key_present,
+                existing_key_matches,
+                existing_key_conflicts,
+                active_turn_scoped,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (append_is_empty(trimmed_text_byte_count))
+                {
+                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendEmpty);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((append_is_empty(trimmed_text_byte_count) == false)
+                        && (append_is_conflict(idempotency_key_present, existing_key_conflicts)))
+                {
+                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendConflict);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((append_is_empty(trimmed_text_byte_count) == false)
+                        && (append_is_duplicate(
+                            idempotency_key_present,
+                            existing_key_matches,
+                            existing_key_conflicts,
+                        )))
+                {
+                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendDuplicate);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((append_is_empty(trimmed_text_byte_count) == false)
+                        && (append_is_new(
+                            idempotency_key_present,
+                            existing_key_matches,
+                            existing_key_conflicts,
+                        )))
+                {
+                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendNew);
+                }
+                let transition = Self::single_transition(matches, "ResolveSystemContextAppend")?;
+                match transition {
+                    SessionDocumentTransition::ResolveSystemContextAppendEmpty => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
+                            decision: SystemContextAppendDecision::RejectEmpty,
+                            active_turn_scoped: active_turn_scoped,
+                        }])
+                    }
+                    SessionDocumentTransition::ResolveSystemContextAppendConflict => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
+                            decision: SystemContextAppendDecision::RejectConflict,
+                            active_turn_scoped: active_turn_scoped,
+                        }])
+                    }
+                    SessionDocumentTransition::ResolveSystemContextAppendDuplicate => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
+                            decision: SystemContextAppendDecision::Duplicate,
+                            active_turn_scoped: active_turn_scoped,
+                        }])
+                    }
+                    SessionDocumentTransition::ResolveSystemContextAppendNew => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
+                            decision: SystemContextAppendDecision::Staged,
+                            active_turn_scoped: active_turn_scoped,
+                        }])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveSystemContextAppend_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveSystemContextPendingApplyItem { source_kind } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (source_kind == SystemContextSource::RuntimeSteer)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveSystemContextPendingApplyItemRuntimeSteer,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (source_kind == SystemContextSource::Normal)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveSystemContextPendingApplyItemNormal,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveSystemContextPendingApplyItem")?;
+                match transition {
+                    SessionDocumentTransition::ResolveSystemContextPendingApplyItemRuntimeSteer => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextPendingApplyItemResolved {
+                                promote_to_applied: false,
+                                mark_seen_applied: false,
+                                remove_seen: true,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveSystemContextPendingApplyItemNormal => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextPendingApplyItemResolved {
+                                promote_to_applied: true,
+                                mark_seen_applied: true,
+                                remove_seen: false,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveSystemContextPendingApplyItem_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveSystemContextSteerCleanupItem { source_kind } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (source_kind == SystemContextSource::RuntimeSteer)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveSystemContextSteerCleanupItemRuntimeSteer,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (source_kind == SystemContextSource::Normal)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveSystemContextSteerCleanupItemNormal,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveSystemContextSteerCleanupItem")?;
+                match transition {
+                    SessionDocumentTransition::ResolveSystemContextSteerCleanupItemRuntimeSteer => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextSteerCleanupItemResolved {
+                                discard: true,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveSystemContextSteerCleanupItemNormal => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextSteerCleanupItemResolved {
+                                discard: false,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveSystemContextSteerCleanupItem_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RestoreSystemContextSnapshot {
+                active_keys_have_known_pending_or_seen,
+                seen_keys_match_known_appends,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((active_keys_have_known_pending_or_seen) && (seen_keys_match_known_appends))
+                {
+                    matches.push(SessionDocumentTransition::RestoreSystemContextSnapshot);
+                }
+                let transition = Self::single_transition(matches, "RestoreSystemContextSnapshot")?;
+                match transition {
+                    SessionDocumentTransition::RestoreSystemContextSnapshot => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextSnapshotRestoreAuthorized,
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RestoreSystemContextSnapshot_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -726,6 +966,48 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ResolveSessionFirstTurnOverridesAllowed { session_id },
         )
     }
+
+    pub fn resolve_system_context_append(
+        &mut self,
+        trimmed_text_byte_count: u64,
+        idempotency_key_present: bool,
+        existing_key_matches: bool,
+        existing_key_conflicts: bool,
+        active_turn_scoped: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveSystemContextAppend {
+            trimmed_text_byte_count,
+            idempotency_key_present,
+            existing_key_matches,
+            existing_key_conflicts,
+            active_turn_scoped,
+        })
+    }
+
+    pub fn resolve_system_context_pending_apply_item(
+        &mut self,
+        source_kind: SystemContextSource,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveSystemContextPendingApplyItem { source_kind })
+    }
+
+    pub fn resolve_system_context_steer_cleanup_item(
+        &mut self,
+        source_kind: SystemContextSource,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveSystemContextSteerCleanupItem { source_kind })
+    }
+
+    pub fn restore_system_context_snapshot(
+        &mut self,
+        active_keys_have_known_pending_or_seen: bool,
+        seen_keys_match_known_appends: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RestoreSystemContextSnapshot {
+            active_keys_have_known_pending_or_seen,
+            seen_keys_match_known_appends,
+        })
+    }
 }
 
 fn phase_allows_initial_turn_overrides(phase: SessionFirstTurnPhase) -> bool {
@@ -734,6 +1016,31 @@ fn phase_allows_initial_turn_overrides(phase: SessionFirstTurnPhase) -> bool {
 
 fn should_store_initial_prompt(phase: SessionFirstTurnPhase, prompt_has_content: bool) -> bool {
     (phase == SessionFirstTurnPhase::Pending) && (prompt_has_content)
+}
+
+fn append_is_empty(trimmed_text_byte_count: u64) -> bool {
+    trimmed_text_byte_count == 0
+}
+
+fn append_is_conflict(idempotency_key_present: bool, existing_key_conflicts: bool) -> bool {
+    (idempotency_key_present) && (existing_key_conflicts)
+}
+
+fn append_is_duplicate(
+    idempotency_key_present: bool,
+    existing_key_matches: bool,
+    existing_key_conflicts: bool,
+) -> bool {
+    (idempotency_key_present) && (existing_key_matches) && (existing_key_conflicts == false)
+}
+
+fn append_is_new(
+    idempotency_key_present: bool,
+    existing_key_matches: bool,
+    existing_key_conflicts: bool,
+) -> bool {
+    (idempotency_key_present == false)
+        || ((existing_key_matches == false) && (existing_key_conflicts == false))
 }
 
 impl Default for SessionDocumentMachineAuthority {

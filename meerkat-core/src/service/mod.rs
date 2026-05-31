@@ -1179,6 +1179,17 @@ pub struct AppendSystemContextRequest {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Typed provenance: whether this append is a transient runtime steer.
+    ///
+    /// The producer of a runtime-steer append sets
+    /// [`crate::session::SystemContextSource::RuntimeSteer`]; the default
+    /// (`Normal`) covers every durable append. This typed marker is the
+    /// canonical replacement for the retired `runtime:steer:` string prefix.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::session::SystemContextSource::is_normal"
+    )]
+    pub source_kind: crate::session::SystemContextSource,
 }
 
 /// Result of appending runtime system context to a session.

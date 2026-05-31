@@ -4409,6 +4409,7 @@ mod tests {
             text: "Authoritative peer token is birch seventeen.".to_string(),
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }])
     }
@@ -4595,6 +4596,7 @@ mod tests {
             text: "Authoritative peer token is birch seventeen.".to_string(),
             source: Some("peer_response_terminal:analyst:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
@@ -4625,6 +4627,7 @@ mod tests {
             .to_string(),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
@@ -4675,6 +4678,7 @@ mod tests {
             text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
 
@@ -4793,6 +4797,7 @@ mod tests {
             text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}".to_string(),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
         let events = openai_realtime_history_events(&seed_messages, &runtime_system_context);
@@ -7710,6 +7715,7 @@ mod tests {
             text: "peer terminal: pty=42".to_string(),
             source: Some("peer_terminal".to_string()),
             idempotency_key: Some("k1".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: SystemTime::UNIX_EPOCH,
         }];
 

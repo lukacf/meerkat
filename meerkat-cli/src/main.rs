@@ -6960,6 +6960,7 @@ fn cli_terminal_pre_turn_context_appends(
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         })
         .collect()
 }

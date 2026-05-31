@@ -3848,6 +3848,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         text: append.text,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
+                        source_kind: append.source_kind,
                     },
                     append.accepted_at,
                 )
@@ -8623,6 +8624,7 @@ mod tests {
                     text: append.text,
                     source: append.source,
                     idempotency_key: append.idempotency_key,
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
                 append.accepted_at,
             )
@@ -10317,6 +10319,7 @@ mod tests {
             text: "failed-turn context must not leak".to_string(),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
         req.runtime.turn_metadata = Some(
@@ -10453,6 +10456,7 @@ mod tests {
                     text: "context-only apply waits for machine commit".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("deferred-context-only-apply".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![InputId::new()],
@@ -10548,6 +10552,7 @@ mod tests {
                     text: "reserved context apply waits for machine commit".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("deferred-reserved-context-apply".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 RunApplyBoundary::Immediate,
@@ -11016,6 +11021,7 @@ mod tests {
                             .to_string(),
                     ),
                     idempotency_key: Some("req-123".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
                 },
             ))
@@ -11084,6 +11090,7 @@ mod tests {
                             .to_string(),
                     ),
                     idempotency_key: Some("req-123".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
                 },
             ))
@@ -11386,6 +11393,7 @@ mod tests {
                     text: "runtime notice".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-persistent-archive".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -13904,6 +13912,7 @@ mod tests {
                     text: "capacity-bounded context append".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("ctx-capacity".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![InputId::new()],
@@ -13929,6 +13938,7 @@ mod tests {
                     text: "capacity-bounded context append after archive".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("ctx-capacity-after-archive".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![InputId::new()],
@@ -14481,6 +14491,7 @@ mod tests {
                         text: "context during archive".to_string(),
                         source: Some("test".to_string()),
                         idempotency_key: Some("archive-race".to_string()),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                         accepted_at: meerkat_core::time_compat::SystemTime::now(),
                     }],
                     vec![meerkat_core::lifecycle::InputId::new()],
@@ -14912,6 +14923,7 @@ mod tests {
                     text: "runtime notice".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-persistent-live".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -14961,6 +14973,7 @@ mod tests {
                     text: "runtime notice".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-save-failure".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15009,6 +15022,7 @@ mod tests {
                     text: "queued live append".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-export-merge".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
                 meerkat_core::time_compat::SystemTime::now(),
             )
@@ -15048,6 +15062,7 @@ mod tests {
                     text: "runtime notice".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-unknown".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15528,6 +15543,7 @@ mod tests {
                     text: "runtime-backed control context".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("control-projection-failure".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15702,6 +15718,7 @@ mod tests {
                     text: "Remember runtime-backed context".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("runtime-backed-ctx".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15751,6 +15768,7 @@ mod tests {
                     text: "uncommitted live context".to_string(),
                     source: Some("live".to_string()),
                     idempotency_key: Some("uncommitted".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
             )
@@ -15764,6 +15782,7 @@ mod tests {
                     text: "durable pending context".to_string(),
                     source: Some("api".to_string()),
                     idempotency_key: Some("durable-pending".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15828,6 +15847,7 @@ mod tests {
                     text: "control snapshot should not mint a receipt".to_string(),
                     source: Some("api".to_string()),
                     idempotency_key: Some("no-receipt-control-snapshot".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15920,6 +15940,7 @@ mod tests {
                     text: "runtime append".to_string(),
                     source: Some("api".to_string()),
                     idempotency_key: Some("runtime-base".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -15986,6 +16007,7 @@ mod tests {
                     text: "persisted runtime append".to_string(),
                     source: Some("api".to_string()),
                     idempotency_key: Some("persisted-runtime-append".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -16996,6 +17018,7 @@ mod tests {
                     text: "prefer store".to_string(),
                     source: Some("api".to_string()),
                     idempotency_key: Some("store-base".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -17162,6 +17185,7 @@ mod tests {
                         text: format!("{mode} store-only append must fail closed"),
                         source: Some("api".to_string()),
                         idempotency_key: Some(format!("store-only-{mode}-append")),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                     },
                 )
                 .await
@@ -17380,6 +17404,7 @@ mod tests {
                     text: "recover me".to_string(),
                     source: Some("system-generated:test".to_string()),
                     idempotency_key: None,
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![InputId::new()],
@@ -17512,6 +17537,7 @@ mod tests {
                     text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![InputId::new()],
@@ -17611,6 +17637,7 @@ mod tests {
             idempotency_key: Some(
                 "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string(),
             ),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
 
@@ -17694,6 +17721,7 @@ mod tests {
                     text: "project this durable event".to_string(),
                     source: Some("test".to_string()),
                     idempotency_key: Some("test".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![InputId::new()],

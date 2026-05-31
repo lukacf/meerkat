@@ -147,6 +147,116 @@ impl std::fmt::Display for SessionInitialPromptStageDecision {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SystemContextAppendDecision {
+    #[default]
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Duplicate")]
+    Duplicate,
+    #[serde(rename = "RejectEmpty")]
+    RejectEmpty,
+    #[serde(rename = "RejectConflict")]
+    RejectConflict,
+}
+impl SystemContextAppendDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Staged => "Staged",
+            Self::Duplicate => "Duplicate",
+            Self::RejectEmpty => "RejectEmpty",
+            Self::RejectConflict => "RejectConflict",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SystemContextAppendDecision {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Staged" => Ok(Self::Staged),
+            "Duplicate" => Ok(Self::Duplicate),
+            "RejectEmpty" => Ok(Self::RejectEmpty),
+            "RejectConflict" => Ok(Self::RejectConflict),
+            other => Err(format!(
+                "invalid SystemContextAppendDecision value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SystemContextAppendDecision {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SystemContextAppendDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SystemContextSource {
+    #[default]
+    #[serde(rename = "Normal")]
+    Normal,
+    #[serde(rename = "RuntimeSteer")]
+    RuntimeSteer,
+}
+impl SystemContextSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::RuntimeSteer => "RuntimeSteer",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SystemContextSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Normal" => Ok(Self::Normal),
+            "RuntimeSteer" => Ok(Self::RuntimeSteer),
+            other => Err(format!("invalid SystemContextSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SystemContextSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SystemContextSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -214,6 +324,27 @@ pub mod inputs {
     pub struct ResolveSessionFirstTurnOverridesAllowed {
         pub session_id: SessionId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSystemContextAppend {
+        pub trimmed_text_byte_count: u64,
+        pub idempotency_key_present: bool,
+        pub existing_key_matches: bool,
+        pub existing_key_conflicts: bool,
+        pub active_turn_scoped: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSystemContextPendingApplyItem {
+        pub source_kind: SystemContextSource,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSystemContextSteerCleanupItem {
+        pub source_kind: SystemContextSource,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreSystemContextSnapshot {
+        pub active_keys_have_known_pending_or_seen: bool,
+        pub seen_keys_match_known_appends: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -226,6 +357,10 @@ pub enum Input {
     RestoreSessionConsumedInputs(inputs::RestoreSessionConsumedInputs),
     RecoverSessionFirstTurnPhase(inputs::RecoverSessionFirstTurnPhase),
     ResolveSessionFirstTurnOverridesAllowed(inputs::ResolveSessionFirstTurnOverridesAllowed),
+    ResolveSystemContextAppend(inputs::ResolveSystemContextAppend),
+    ResolveSystemContextPendingApplyItem(inputs::ResolveSystemContextPendingApplyItem),
+    ResolveSystemContextSteerCleanupItem(inputs::ResolveSystemContextSteerCleanupItem),
+    RestoreSystemContextSnapshot(inputs::RestoreSystemContextSnapshot),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -240,6 +375,14 @@ impl Input {
             Self::ResolveSessionFirstTurnOverridesAllowed(_) => {
                 InputKind::ResolveSessionFirstTurnOverridesAllowed
             }
+            Self::ResolveSystemContextAppend(_) => InputKind::ResolveSystemContextAppend,
+            Self::ResolveSystemContextPendingApplyItem(_) => {
+                InputKind::ResolveSystemContextPendingApplyItem
+            }
+            Self::ResolveSystemContextSteerCleanupItem(_) => {
+                InputKind::ResolveSystemContextSteerCleanupItem
+            }
+            Self::RestoreSystemContextSnapshot(_) => InputKind::RestoreSystemContextSnapshot,
         }
     }
 }
@@ -253,6 +396,10 @@ pub enum InputKind {
     RestoreSessionConsumedInputs,
     RecoverSessionFirstTurnPhase,
     ResolveSessionFirstTurnOverridesAllowed,
+    ResolveSystemContextAppend,
+    ResolveSystemContextPendingApplyItem,
+    ResolveSystemContextSteerCleanupItem,
+    RestoreSystemContextSnapshot,
 }
 
 pub mod effects {
@@ -283,6 +430,23 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionFirstTurnPhaseRecovered {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SystemContextAppendResolved {
+        pub decision: SystemContextAppendDecision,
+        pub active_turn_scoped: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SystemContextPendingApplyItemResolved {
+        pub promote_to_applied: bool,
+        pub mark_seen_applied: bool,
+        pub remove_seen: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SystemContextSteerCleanupItemResolved {
+        pub discard: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SystemContextSnapshotRestoreAuthorized {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -293,6 +457,10 @@ pub enum Effect {
     SessionToolResultsStageResolved(effects::SessionToolResultsStageResolved),
     SessionConsumedInputsRestoreResolved(effects::SessionConsumedInputsRestoreResolved),
     SessionFirstTurnPhaseRecovered(effects::SessionFirstTurnPhaseRecovered),
+    SystemContextAppendResolved(effects::SystemContextAppendResolved),
+    SystemContextPendingApplyItemResolved(effects::SystemContextPendingApplyItemResolved),
+    SystemContextSteerCleanupItemResolved(effects::SystemContextSteerCleanupItemResolved),
+    SystemContextSnapshotRestoreAuthorized(effects::SystemContextSnapshotRestoreAuthorized),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -302,6 +470,10 @@ pub enum EffectKind {
     SessionToolResultsStageResolved,
     SessionConsumedInputsRestoreResolved,
     SessionFirstTurnPhaseRecovered,
+    SystemContextAppendResolved,
+    SystemContextPendingApplyItemResolved,
+    SystemContextSteerCleanupItemResolved,
+    SystemContextSnapshotRestoreAuthorized,
 }
 
 #[allow(non_camel_case_types)]
@@ -323,6 +495,15 @@ pub enum TransitionId {
     RestoreSessionConsumedInputs,
     RestoreSessionConsumedInputsNoPhaseRollback,
     RecoverSessionFirstTurnPhase,
+    ResolveSystemContextAppendEmpty,
+    ResolveSystemContextAppendConflict,
+    ResolveSystemContextAppendDuplicate,
+    ResolveSystemContextAppendNew,
+    ResolveSystemContextPendingApplyItemRuntimeSteer,
+    ResolveSystemContextPendingApplyItemNormal,
+    ResolveSystemContextSteerCleanupItemRuntimeSteer,
+    ResolveSystemContextSteerCleanupItemNormal,
+    RestoreSystemContextSnapshot,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

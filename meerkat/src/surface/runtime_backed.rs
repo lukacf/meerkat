@@ -647,6 +647,8 @@ fn pending_system_context_appends(
             },
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
+            // Durable keyed conversation context append — not a transient steer.
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         })
         .collect()

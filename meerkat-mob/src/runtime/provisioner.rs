@@ -1693,6 +1693,8 @@ fn pending_system_context_appends_for_runtime_executor(
             text: render_runtime_context_append_text(&append.content),
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
+            // Durable keyed conversation context append — not a transient steer.
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at,
         })
         .collect()

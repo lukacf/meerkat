@@ -4234,6 +4234,7 @@ mod tests {
                     text: "STEER_MARKER_visible_after_tool".to_string(),
                     source: Some("test:active-steer".to_string()),
                     idempotency_key: Some("test:active-steer".to_string()),
+                    source_kind: crate::session::SystemContextSource::RuntimeSteer,
                 },
                 crate::time_compat::SystemTime::now(),
             )

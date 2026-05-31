@@ -14,7 +14,6 @@ use crate::generated::{
     session_document, session_durable_config_authority, session_persistence_version_authority,
     session_realtime_transcript_authority,
     session_realtime_transcript_authority::SessionRealtimeTranscriptState,
-    session_system_context_authority,
 };
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
@@ -792,7 +791,7 @@ impl std::fmt::Debug for SystemContextStateHandle {
 
 impl SystemContextStateHandle {
     pub fn new(state: SessionSystemContextState) -> Result<Self, serde_json::Error> {
-        let state = session_system_context_authority::restore_system_context_state(state)
+        let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         Ok(Self {
             inner: Arc::new(std::sync::Mutex::new(state)),
@@ -819,7 +818,7 @@ impl SystemContextStateHandle {
         &self,
         state: SessionSystemContextState,
     ) -> Result<(), serde_json::Error> {
-        let state = session_system_context_authority::restore_system_context_state(state)
+        let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         match self.inner.lock() {
             Ok(mut guard) => {
@@ -837,7 +836,7 @@ impl SystemContextStateHandle {
         &self,
         state: SessionSystemContextState,
     ) -> Result<bool, serde_json::Error> {
-        let state = session_system_context_authority::restore_system_context_state(state)
+        let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
@@ -860,9 +859,8 @@ impl SystemContextStateHandle {
         current: &SessionSystemContextState,
         replacement: SessionSystemContextState,
     ) -> Result<bool, serde_json::Error> {
-        let replacement =
-            session_system_context_authority::restore_system_context_state(replacement)
-                .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let replacement = system_context_authority::restore_system_context_state(replacement)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -993,6 +991,50 @@ pub struct SessionSystemContextState {
     pub(crate) active_turn_pending_keys: std::collections::BTreeSet<String>,
 }
 
+/// Typed provenance class for a runtime system-context append.
+///
+/// Canonical replacement for the retired `runtime:steer:` string-prefix
+/// folklore. The PRODUCER of a runtime-steer append (the runtime input
+/// projection in `meerkat-runtime`) constructs it with
+/// [`SystemContextSource::RuntimeSteer`]; everything else is
+/// [`SystemContextSource::Normal`]. No code reclassifies a `source` string
+/// into this fact — it is set once at construction and the machine guards the
+/// typed field.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemContextSource {
+    /// A durable, non-transient runtime context append (peer responses, etc.).
+    #[default]
+    Normal,
+    /// A transient operator/peer steer append that must not survive past the
+    /// turn it steers and must not be promoted to the durable applied set.
+    RuntimeSteer,
+}
+
+impl From<SystemContextSource> for session_document::SystemContextSource {
+    fn from(value: SystemContextSource) -> Self {
+        match value {
+            SystemContextSource::Normal => Self::Normal,
+            SystemContextSource::RuntimeSteer => Self::RuntimeSteer,
+        }
+    }
+}
+
+impl SystemContextSource {
+    /// Whether this is the default (`Normal`) provenance. Used by
+    /// `skip_serializing_if` so durable appends serialize without the field.
+    #[must_use]
+    pub fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    /// Whether this append is a transient runtime steer.
+    #[must_use]
+    pub fn is_runtime_steer(&self) -> bool {
+        matches!(self, Self::RuntimeSteer)
+    }
+}
+
 /// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1002,6 +1044,9 @@ pub struct PendingSystemContextAppend {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Typed provenance: whether this append is a transient runtime steer.
+    #[serde(default, skip_serializing_if = "SystemContextSource::is_normal")]
+    pub source_kind: SystemContextSource,
     pub accepted_at: SystemTime,
 }
 
@@ -1323,6 +1368,10 @@ pub struct SeenSystemContextKey {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Typed provenance carried from the append, so runtime-steer cleanup can
+    /// match seen entries by the typed marker rather than a `source` prefix.
+    #[serde(default, skip_serializing_if = "SystemContextSource::is_normal")]
+    pub source_kind: SystemContextSource,
     pub state: SeenSystemContextState,
 }
 
@@ -1377,7 +1426,7 @@ impl SessionSystemContextState {
         req: &AppendSystemContextRequest,
         accepted_at: SystemTime,
     ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        session_system_context_authority::stage_append(self, req, accepted_at, false)
+        system_context_authority::stage_append(self, req, accepted_at, false)
     }
 
     fn stage_append_with_generated_authority(
@@ -1386,7 +1435,7 @@ impl SessionSystemContextState {
         accepted_at: SystemTime,
         active_turn_scoped: bool,
     ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        session_system_context_authority::stage_append(self, req, accepted_at, active_turn_scoped)
+        system_context_authority::stage_append(self, req, accepted_at, active_turn_scoped)
     }
 
     /// Stage an append that is scoped to the currently-active turn only.
@@ -1405,13 +1454,13 @@ impl SessionSystemContextState {
 
     /// Mark all currently-pending appends as applied and clear the pending queue.
     pub fn mark_pending_applied(&mut self) {
-        session_system_context_authority::mark_pending_applied(self);
+        system_context_authority::mark_pending_applied(self);
     }
 
     /// Discard active-turn-only appends that were not consumed by the turn's
     /// next LLM boundary.
     pub fn discard_unapplied_active_turn_pending(&mut self) -> Vec<PendingSystemContextAppend> {
-        session_system_context_authority::discard_unapplied_active_turn_pending(self)
+        system_context_authority::discard_unapplied_active_turn_pending(self)
     }
 
     /// Discard specific active-turn-only appends that are still pending.
@@ -1424,9 +1473,28 @@ impl SessionSystemContextState {
         &mut self,
         idempotency_keys: &[String],
     ) -> Vec<PendingSystemContextAppend> {
-        session_system_context_authority::discard_active_turn_pending_by_keys(
+        system_context_authority::discard_active_turn_pending_by_keys(self, idempotency_keys)
+    }
+
+    /// Authorize this snapshot through the canonical
+    /// [`session_document::SessionDocumentMachine`] system-context restore
+    /// transition, returning the state unchanged on success.
+    pub fn restore_from_snapshot(self) -> Result<Self, SystemContextStageError> {
+        system_context_authority::restore_system_context_state(self)
+    }
+
+    /// Record the machine-authorized applied system-context blocks, returning
+    /// the appends that are newly applied (and thus need rendering into the
+    /// system prompt by the caller).
+    pub fn record_applied_blocks(
+        &mut self,
+        appends: &[PendingSystemContextAppend],
+        current_system_prompt: &str,
+    ) -> Vec<PendingSystemContextAppend> {
+        system_context_authority::record_applied_system_context_blocks(
             self,
-            idempotency_keys,
+            appends,
+            current_system_prompt,
         )
     }
 }
@@ -1793,8 +1861,535 @@ pub enum SystemContextStageError {
     },
 }
 
+impl std::fmt::Display for SystemContextStageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(message) => {
+                write!(f, "invalid system-context append request: {message}")
+            }
+            Self::Conflict { key, .. } => {
+                write!(
+                    f,
+                    "system-context append conflict for idempotency key `{key}`"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SystemContextStageError {}
+
+/// Mechanical PRESENTATION helper: render a system-context append into the
+/// display block string that is concatenated into the model-facing system
+/// prompt. This is NOT a decision — it builds the `[Runtime System Context]`
+/// label text for OUTPUT only. The authority for which appends to render and
+/// whether one is a runtime steer lives in the
+/// [`session_document::SessionDocumentMachine`]; this function never inspects
+/// the `source` string to classify anything.
 fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
-    session_system_context_authority::render_system_context_block(append)
+    let mut rendered = String::from(SYSTEM_CONTEXT_RENDER_LABEL);
+    if let Some(source) = &append.source {
+        rendered.push_str("\nsource: ");
+        rendered.push_str(source);
+    }
+    rendered.push_str("\n\n");
+    rendered.push_str(&append.text);
+    rendered
+}
+
+/// Display label prefix for a rendered runtime system-context block.
+///
+/// PRESENTATION only — this is the human/model-facing heading, not a
+/// classification key. Nothing reads this back to make a semantic decision.
+const SYSTEM_CONTEXT_RENDER_LABEL: &str = "[Runtime System Context]";
+
+/// Shell adapter that drives the canonical
+/// [`session_document::SessionDocumentMachine`] system-context region and
+/// mirrors its emitted decisions onto the bulky `SessionSystemContextState`.
+///
+/// The machine owns every SEMANTIC decision (append disposition, per-append
+/// apply/discard from the typed [`SystemContextSource`] marker, snapshot
+/// restore legality). This module performs only the mechanical collection
+/// work — iterating the shell's pending/applied/seen collections and applying
+/// the machine's per-item verdict. It never decides; in particular it never
+/// inspects a `source` string to classify a runtime steer.
+mod system_context_authority {
+    use super::{
+        AppendSystemContextRequest, BTreeSet, PendingSystemContextAppend, SeenSystemContextKey,
+        SeenSystemContextState, SessionSystemContextState, SystemContextSource,
+        SystemContextStageError, SystemTime, render_system_context_block, session_document,
+        usize_to_u64,
+    };
+    use crate::service::AppendSystemContextStatus;
+
+    fn document_authority() -> session_document::SessionDocumentMachineAuthority {
+        session_document::SessionDocumentMachineAuthority::new()
+    }
+
+    /// Resolve the four-way append disposition through the machine.
+    fn resolve_append_decision(
+        trimmed_text_byte_count: u64,
+        idempotency_key_present: bool,
+        existing_key_matches: bool,
+        existing_key_conflicts: bool,
+        active_turn_scoped: bool,
+    ) -> Result<session_document::SystemContextAppendDecision, SystemContextStageError> {
+        let mut authority = document_authority();
+        let effects = authority
+            .resolve_system_context_append(
+                trimmed_text_byte_count,
+                idempotency_key_present,
+                existing_key_matches,
+                existing_key_conflicts,
+                active_turn_scoped,
+            )
+            .map_err(|err| SystemContextStageError::InvalidRequest(err.to_string()))?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                session_document::SessionDocumentEffect::SystemContextAppendResolved {
+                    decision,
+                    ..
+                } => Some(decision),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SystemContextStageError::InvalidRequest(
+                    "generated session document authority returned no append decision".to_string(),
+                )
+            })
+    }
+
+    /// Per-pending-append apply verdict, decided by the machine from the typed
+    /// `source_kind` marker (NOT a `source` string prefix).
+    fn pending_apply_item(source_kind: SystemContextSource) -> Option<(bool, bool, bool)> {
+        let mut authority = document_authority();
+        match authority.resolve_system_context_pending_apply_item(source_kind.into()) {
+            Ok(effects) => effects.into_iter().find_map(|effect| {
+                match effect {
+                session_document::SessionDocumentEffect::SystemContextPendingApplyItemResolved {
+                    promote_to_applied,
+                    mark_seen_applied,
+                    remove_seen,
+                } => Some((promote_to_applied, mark_seen_applied, remove_seen)),
+                _ => None,
+            }
+            }),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated session document authority rejected system-context apply item"
+                );
+                None
+            }
+        }
+    }
+
+    /// Per-item transient-steer discard verdict, decided by the machine from
+    /// the typed `source_kind` marker.
+    fn steer_cleanup_discards(source_kind: SystemContextSource) -> bool {
+        let mut authority = document_authority();
+        match authority.resolve_system_context_steer_cleanup_item(source_kind.into()) {
+            Ok(effects) => effects
+                .into_iter()
+                .find_map(|effect| {
+                    match effect {
+                    session_document::SessionDocumentEffect::SystemContextSteerCleanupItemResolved {
+                        discard,
+                    } => Some(discard),
+                    _ => None,
+                }
+                })
+                .unwrap_or(false),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated session document authority rejected system-context steer cleanup item"
+                );
+                false
+            }
+        }
+    }
+
+    pub(super) fn restore_system_context_state(
+        state: SessionSystemContextState,
+    ) -> Result<SessionSystemContextState, SystemContextStageError> {
+        let active_keys_have_known_pending_or_seen =
+            state.active_turn_pending_keys.iter().all(|key| {
+                state.seen.contains_key(key)
+                    || state
+                        .pending
+                        .iter()
+                        .any(|append| append.idempotency_key.as_ref() == Some(key))
+            });
+        let seen_keys_match_known_appends = state.seen.iter().all(|(key, seen)| {
+            state
+                .pending
+                .iter()
+                .chain(state.applied.iter())
+                .any(|append| {
+                    append.idempotency_key.as_ref() == Some(key)
+                        && seen.text == append.text
+                        && seen.source.as_deref() == append.source.as_deref()
+                })
+        });
+        let mut authority = document_authority();
+        authority
+            .restore_system_context_snapshot(
+                active_keys_have_known_pending_or_seen,
+                seen_keys_match_known_appends,
+            )
+            .map_err(|err| SystemContextStageError::InvalidRequest(err.to_string()))?;
+        Ok(state)
+    }
+
+    pub(super) fn stage_append(
+        state: &mut SessionSystemContextState,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+        active_turn_scoped: bool,
+    ) -> Result<AppendSystemContextStatus, SystemContextStageError> {
+        let text = req.text.trim();
+        let existing = req
+            .idempotency_key
+            .as_ref()
+            .and_then(|key| state.seen.get(key));
+        let existing_key_matches = existing.is_some_and(|existing| {
+            existing.text == text && existing.source.as_deref() == req.source.as_deref()
+        });
+        let existing_key_conflicts = existing.is_some() && !existing_key_matches;
+        let decision = resolve_append_decision(
+            usize_to_u64(text.len()),
+            req.idempotency_key.is_some(),
+            existing_key_matches,
+            existing_key_conflicts,
+            active_turn_scoped,
+        )?;
+
+        match decision {
+            session_document::SystemContextAppendDecision::RejectEmpty => {
+                return Err(SystemContextStageError::InvalidRequest(
+                    "system context text must not be empty".to_string(),
+                ));
+            }
+            session_document::SystemContextAppendDecision::RejectConflict => {
+                let Some(key) = req.idempotency_key.as_ref() else {
+                    return Err(SystemContextStageError::InvalidRequest(
+                        "generated system-context authority rejected append without a key"
+                            .to_string(),
+                    ));
+                };
+                let Some(existing) = existing else {
+                    return Err(SystemContextStageError::InvalidRequest(
+                        "generated system-context authority rejected append without a conflict"
+                            .to_string(),
+                    ));
+                };
+                return Err(SystemContextStageError::Conflict {
+                    key: key.clone(),
+                    existing_text: existing.text.clone(),
+                    existing_source: existing.source.clone(),
+                });
+            }
+            session_document::SystemContextAppendDecision::Duplicate => {
+                return Ok(AppendSystemContextStatus::Duplicate);
+            }
+            session_document::SystemContextAppendDecision::Staged => {}
+        }
+
+        let append = PendingSystemContextAppend {
+            text: text.to_string(),
+            source: req.source.clone(),
+            idempotency_key: req.idempotency_key.clone(),
+            source_kind: req.source_kind,
+            accepted_at,
+        };
+        if let Some(key) = req.idempotency_key.as_ref() {
+            state.seen.insert(
+                key.clone(),
+                SeenSystemContextKey {
+                    text: append.text.clone(),
+                    source: append.source.clone(),
+                    source_kind: append.source_kind,
+                    state: SeenSystemContextState::Pending,
+                },
+            );
+        }
+        if active_turn_scoped && let Some(key) = req.idempotency_key.as_ref() {
+            state.active_turn_pending_keys.insert(key.clone());
+        }
+        state.pending.push(append);
+        Ok(AppendSystemContextStatus::Staged)
+    }
+
+    pub(super) fn mark_pending_applied(state: &mut SessionSystemContextState) {
+        // Promote pending appends to applied per the machine's per-item
+        // verdict (keyed on the typed `source_kind`).
+        let pending = std::mem::take(&mut state.pending);
+        let mut seen_to_remove = Vec::new();
+        for append in &pending {
+            let Some((promote_to_applied, mark_seen_applied, remove_seen)) =
+                pending_apply_item(append.source_kind)
+            else {
+                continue;
+            };
+            if promote_to_applied && !state.applied.contains(append) {
+                state.applied.push(append.clone());
+            }
+            if let Some(key) = append.idempotency_key.as_ref() {
+                if remove_seen {
+                    seen_to_remove.push(key.clone());
+                } else if mark_seen_applied && let Some(seen) = state.seen.get_mut(key) {
+                    seen.state = SeenSystemContextState::Applied;
+                }
+            }
+        }
+        for key in seen_to_remove {
+            state.seen.remove(&key);
+        }
+        state.active_turn_pending_keys.clear();
+    }
+
+    pub(super) fn discard_unapplied_active_turn_pending(
+        state: &mut SessionSystemContextState,
+    ) -> Vec<PendingSystemContextAppend> {
+        if state.active_turn_pending_keys.is_empty() {
+            return Vec::new();
+        }
+        let active_keys = std::mem::take(&mut state.active_turn_pending_keys);
+        let mut discarded = Vec::new();
+        state.pending.retain(|append| {
+            let should_discard = append
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|key| active_keys.contains(key));
+            if should_discard {
+                discarded.push(append.clone());
+            }
+            !should_discard
+        });
+
+        for append in &discarded {
+            if let Some(key) = append.idempotency_key.as_ref()
+                && state
+                    .seen
+                    .get(key)
+                    .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
+            {
+                state.seen.remove(key);
+            }
+        }
+
+        discarded
+    }
+
+    pub(super) fn discard_active_turn_pending_by_keys(
+        state: &mut SessionSystemContextState,
+        idempotency_keys: &[String],
+    ) -> Vec<PendingSystemContextAppend> {
+        if idempotency_keys.is_empty() || state.active_turn_pending_keys.is_empty() {
+            return Vec::new();
+        }
+        let requested_keys: BTreeSet<&str> = idempotency_keys.iter().map(String::as_str).collect();
+        let mut discarded = Vec::new();
+        let mut discarded_keys = Vec::new();
+        state.pending.retain(|append| {
+            let should_discard = append.idempotency_key.as_ref().is_some_and(|key| {
+                requested_keys.contains(key.as_str())
+                    && state.active_turn_pending_keys.contains(key)
+            });
+            if should_discard {
+                if let Some(key) = append.idempotency_key.as_ref() {
+                    discarded_keys.push(key.clone());
+                }
+                discarded.push(append.clone());
+            }
+            !should_discard
+        });
+
+        for key in discarded_keys {
+            state.active_turn_pending_keys.remove(&key);
+            if state
+                .seen
+                .get(&key)
+                .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
+            {
+                state.seen.remove(&key);
+            }
+        }
+
+        discarded
+    }
+
+    pub(super) fn discard_transient_runtime_steer_state(
+        state: &mut SessionSystemContextState,
+    ) -> usize {
+        let mut removed = 0usize;
+
+        let before_pending = state.pending.len();
+        state
+            .pending
+            .retain(|append| !steer_cleanup_discards(append.source_kind));
+        removed += before_pending.saturating_sub(state.pending.len());
+
+        let before_applied = state.applied.len();
+        state
+            .applied
+            .retain(|append| !steer_cleanup_discards(append.source_kind));
+        removed += before_applied.saturating_sub(state.applied.len());
+
+        let before_seen = state.seen.len();
+        state
+            .seen
+            .retain(|_key, seen| !steer_cleanup_discards(seen.source_kind));
+        removed += before_seen.saturating_sub(state.seen.len());
+
+        // Active-turn keys are tracked only by idempotency key, so an active
+        // key is a runtime steer iff its seen entry (or pending append) was.
+        // Recompute the surviving steer keys from the typed seen markers.
+        let before_active = state.active_turn_pending_keys.len();
+        let steer_keys: BTreeSet<String> = state
+            .seen
+            .iter()
+            .filter(|(_key, seen)| steer_cleanup_discards(seen.source_kind))
+            .map(|(key, _seen)| key.clone())
+            .collect();
+        // Any active key whose seen entry was already removed above (because it
+        // was a steer) is no longer present in `seen`; drop those, plus any
+        // still-present steer keys.
+        state
+            .active_turn_pending_keys
+            .retain(|key| state.seen.contains_key(key) && !steer_keys.contains(key));
+        removed += before_active.saturating_sub(state.active_turn_pending_keys.len());
+
+        removed
+    }
+
+    pub(super) fn remove_runtime_steer_blocks_for_rendered(
+        system_prompt: &str,
+        runtime_steer_appends: &[PendingSystemContextAppend],
+    ) -> (String, usize) {
+        if runtime_steer_appends.is_empty() {
+            return (system_prompt.to_string(), 0);
+        }
+        // Build the set of rendered blocks for the typed runtime-steer appends,
+        // then remove those exact rendered blocks from the prompt. The typed
+        // marker is the authority; rendering is mechanical presentation.
+        let steer_blocks: BTreeSet<String> = runtime_steer_appends
+            .iter()
+            .map(render_system_context_block)
+            .collect();
+        let parts = system_prompt
+            .split(super::SYSTEM_CONTEXT_SEPARATOR)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let original_len = parts.len();
+        let retained = parts
+            .into_iter()
+            .filter(|part| !steer_blocks.contains(part))
+            .collect::<Vec<_>>();
+        let removed = original_len.saturating_sub(retained.len());
+        (retained.join(super::SYSTEM_CONTEXT_SEPARATOR), removed)
+    }
+
+    pub(super) fn record_applied_system_context_blocks(
+        state: &mut SessionSystemContextState,
+        appends: &[PendingSystemContextAppend],
+        current_system_prompt: &str,
+    ) -> Vec<PendingSystemContextAppend> {
+        let mut new_appends: Vec<PendingSystemContextAppend> = Vec::new();
+        for append in appends {
+            if append.text.trim().is_empty() {
+                continue;
+            }
+            let rendered = render_system_context_block(append);
+            if let Some(key) = append.idempotency_key.as_ref() {
+                if let Some(existing) = state.seen.get(key)
+                    && !seen_system_context_matches(existing, append)
+                {
+                    tracing::warn!(
+                        idempotency_key = %key,
+                        "skipping conflicting runtime system-context append"
+                    );
+                    continue;
+                }
+                if let Some(existing) = state
+                    .applied
+                    .iter()
+                    .find(|applied| applied.idempotency_key.as_ref() == Some(key))
+                    && !pending_system_context_matches(existing, append)
+                {
+                    tracing::warn!(
+                        idempotency_key = %key,
+                        "skipping conflicting runtime system-context append"
+                    );
+                    continue;
+                }
+                if let Some(existing) = new_appends
+                    .iter()
+                    .find(|pending| pending.idempotency_key.as_ref() == Some(key))
+                {
+                    if !pending_system_context_matches(existing, append) {
+                        tracing::warn!(
+                            idempotency_key = %key,
+                            "skipping conflicting runtime system-context append"
+                        );
+                    }
+                    continue;
+                }
+                if current_system_prompt.contains(&rendered) {
+                    record_applied_append(state, append);
+                    continue;
+                }
+            } else if new_appends.contains(append) || current_system_prompt.contains(&rendered) {
+                continue;
+            }
+            record_applied_append(state, append);
+            new_appends.push(append.clone());
+        }
+        new_appends
+    }
+
+    fn record_applied_append(
+        state: &mut SessionSystemContextState,
+        append: &PendingSystemContextAppend,
+    ) {
+        if let Some(key) = append.idempotency_key.as_ref() {
+            state.seen.insert(
+                key.clone(),
+                SeenSystemContextKey {
+                    text: append.text.clone(),
+                    source: append.source.clone(),
+                    source_kind: append.source_kind,
+                    state: SeenSystemContextState::Applied,
+                },
+            );
+            if state
+                .applied
+                .iter()
+                .any(|applied| applied.idempotency_key.as_ref() == Some(key))
+            {
+                return;
+            }
+        } else if state.applied.contains(append) {
+            return;
+        }
+        state.applied.push(append.clone());
+    }
+
+    fn seen_system_context_matches(
+        seen: &SeenSystemContextKey,
+        append: &PendingSystemContextAppend,
+    ) -> bool {
+        seen.text == append.text && seen.source.as_deref() == append.source.as_deref()
+    }
+
+    fn pending_system_context_matches(
+        existing: &PendingSystemContextAppend,
+        append: &PendingSystemContextAppend,
+    ) -> bool {
+        existing.text == append.text && existing.source.as_deref() == append.source.as_deref()
+    }
 }
 
 impl Session {
@@ -2140,10 +2735,33 @@ impl Session {
     pub fn discard_transient_runtime_steer_context(&mut self) -> usize {
         let mut removed = 0usize;
 
+        let mut state = match self.try_system_context_state() {
+            Ok(state) => state.unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated system-context authority rejected runtime steer cleanup state"
+                );
+                return removed;
+            }
+        };
+
+        // The typed `source_kind` marker on persisted appends is the authority
+        // for which rendered prompt blocks are transient runtime steers. Gather
+        // the runtime-steer appends, then remove their exact rendered blocks
+        // from the system prompt — no `runtime:steer:` string classification.
+        let runtime_steer_appends = state
+            .pending
+            .iter()
+            .chain(state.applied.iter())
+            .filter(|append| append.source_kind.is_runtime_steer())
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(Message::System(system)) = self.messages.first() {
             let (retained_prompt, removed_blocks) =
-                session_system_context_authority::remove_runtime_steer_prompt_blocks(
+                system_context_authority::remove_runtime_steer_blocks_for_rendered(
                     &system.content,
+                    &runtime_steer_appends,
                 );
             if removed_blocks > 0 {
                 removed += removed_blocks;
@@ -2159,18 +2777,7 @@ impl Session {
             }
         }
 
-        let mut state = match self.try_system_context_state() {
-            Ok(state) => state.unwrap_or_default(),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "generated system-context authority rejected runtime steer cleanup state"
-                );
-                return removed;
-            }
-        };
-        removed +=
-            session_system_context_authority::discard_transient_runtime_steer_state(&mut state);
+        removed += system_context_authority::discard_transient_runtime_steer_state(&mut state);
 
         if removed > 0
             && let Err(err) = self.set_system_context_state(state)
@@ -2208,7 +2815,7 @@ impl Session {
                 return;
             }
         };
-        let new_appends = session_system_context_authority::record_applied_system_context_blocks(
+        let new_appends = system_context_authority::record_applied_system_context_blocks(
             &mut state,
             appends,
             current_system_prompt,
@@ -2419,7 +3026,7 @@ impl Session {
         &mut self,
         state: SessionSystemContextState,
     ) -> Result<(), serde_json::Error> {
-        let state = session_system_context_authority::restore_system_context_state(state)
+        let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
         let value = serde_json::to_value(state)?;
         self.set_metadata_unchecked(SESSION_SYSTEM_CONTEXT_STATE_KEY, value);
@@ -2434,7 +3041,7 @@ impl Session {
             .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
             .map(|value| {
                 let state = serde_json::from_value(value.clone())?;
-                session_system_context_authority::restore_system_context_state(state)
+                system_context_authority::restore_system_context_state(state)
                     .map_err(<serde_json::Error as serde::de::Error>::custom)
             })
             .transpose()
@@ -5690,6 +6297,7 @@ mod tests {
                             .to_string(),
                     ),
                     idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    source_kind: SystemContextSource::Normal,
                 },
                 accepted_at,
             )
@@ -5723,6 +6331,7 @@ mod tests {
                     text: "only for the active run".to_string(),
                     source: Some("runtime:steer:input-1".to_string()),
                     idempotency_key: Some("runtime:steer:input-1".to_string()),
+                    source_kind: SystemContextSource::RuntimeSteer,
                 },
                 SystemTime::UNIX_EPOCH,
             )
@@ -5750,6 +6359,7 @@ mod tests {
                         text: format!("context for {key}"),
                         source: Some(key.to_string()),
                         idempotency_key: Some(key.to_string()),
+                        source_kind: SystemContextSource::RuntimeSteer,
                     },
                     SystemTime::UNIX_EPOCH,
                 )
@@ -5792,6 +6402,7 @@ mod tests {
                     text: "visible to this run".to_string(),
                     source: Some("runtime:steer:input-2".to_string()),
                     idempotency_key: Some("runtime:steer:input-2".to_string()),
+                    source_kind: SystemContextSource::RuntimeSteer,
                 },
                 SystemTime::UNIX_EPOCH,
             )
@@ -5812,15 +6423,19 @@ mod tests {
     }
 
     #[test]
-    fn discard_transient_runtime_steer_context_removes_legacy_prompt_and_state() {
+    fn discard_transient_runtime_steer_context_removes_steer_via_typed_marker() {
         let mut session = Session::new();
+        // The runtime-steer fact is carried by the typed `source_kind`, not by
+        // the `source` string. The durable peer fact uses the same `source`
+        // string scheme but is marked `Normal`, so only the steers are removed.
         session.set_system_prompt(format!(
             "base{}{}{}{}",
             SYSTEM_CONTEXT_SEPARATOR,
             render_system_context_block(&PendingSystemContextAppend {
                 text: "old steer".to_string(),
-                source: Some("runtime:steer:old".to_string()),
-                idempotency_key: Some("runtime:steer:old".to_string()),
+                source: Some("steer-source-old".to_string()),
+                idempotency_key: Some("steer-key-old".to_string()),
+                source_kind: SystemContextSource::RuntimeSteer,
                 accepted_at: SystemTime::UNIX_EPOCH,
             }),
             SYSTEM_CONTEXT_SEPARATOR,
@@ -5828,6 +6443,7 @@ mod tests {
                 text: "durable peer fact".to_string(),
                 source: Some("peer_response_terminal:analyst:req".to_string()),
                 idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
+                source_kind: SystemContextSource::Normal,
                 accepted_at: SystemTime::UNIX_EPOCH,
             })
         ));
@@ -5835,33 +6451,37 @@ mod tests {
             .set_system_context_state(SessionSystemContextState {
                 pending: vec![PendingSystemContextAppend {
                     text: "pending steer".to_string(),
-                    source: Some("runtime:steer:pending".to_string()),
-                    idempotency_key: Some("runtime:steer:pending".to_string()),
+                    source: Some("steer-source-pending".to_string()),
+                    idempotency_key: Some("steer-key-pending".to_string()),
+                    source_kind: SystemContextSource::RuntimeSteer,
                     accepted_at: SystemTime::UNIX_EPOCH,
                 }],
                 applied: vec![
                     PendingSystemContextAppend {
                         text: "old steer".to_string(),
-                        source: Some("runtime:steer:old".to_string()),
-                        idempotency_key: Some("runtime:steer:old".to_string()),
+                        source: Some("steer-source-old".to_string()),
+                        idempotency_key: Some("steer-key-old".to_string()),
+                        source_kind: SystemContextSource::RuntimeSteer,
                         accepted_at: SystemTime::UNIX_EPOCH,
                     },
                     PendingSystemContextAppend {
                         text: "durable peer fact".to_string(),
                         source: Some("peer_response_terminal:analyst:req".to_string()),
                         idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
+                        source_kind: SystemContextSource::Normal,
                         accepted_at: SystemTime::UNIX_EPOCH,
                     },
                 ],
                 seen: BTreeMap::from([(
-                    "runtime:steer:old".to_string(),
+                    "steer-key-old".to_string(),
                     SeenSystemContextKey {
                         text: "old steer".to_string(),
-                        source: Some("runtime:steer:old".to_string()),
+                        source: Some("steer-source-old".to_string()),
+                        source_kind: SystemContextSource::RuntimeSteer,
                         state: SeenSystemContextState::Applied,
                     },
                 )]),
-                active_turn_pending_keys: BTreeSet::from(["runtime:steer:pending".to_string()]),
+                active_turn_pending_keys: BTreeSet::from(["steer-key-pending".to_string()]),
             })
             .expect("system context state should serialize");
 
@@ -5872,7 +6492,7 @@ mod tests {
             Some(Message::System(system)) => system.content.as_str(),
             other => panic!("expected system prompt, got {other:?}"),
         };
-        assert!(!system_prompt.contains("runtime:steer:"));
+        assert!(!system_prompt.contains("old steer"));
         assert!(system_prompt.contains("durable peer fact"));
         let state = session.system_context_state().unwrap_or_default();
         assert!(state.pending.is_empty());
@@ -5890,6 +6510,7 @@ mod tests {
                 "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
             ),
             idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+            source_kind: SystemContextSource::Normal,
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let mut session = Session::new();
@@ -5912,6 +6533,7 @@ mod tests {
                     text: "Apply this staged context at the request boundary.".to_string(),
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: Some("ctx-boundary".to_string()),
+                    source_kind: SystemContextSource::Normal,
                 },
                 accepted_at,
             )
@@ -5954,6 +6576,7 @@ mod tests {
                     text: "Apply this unkeyed staged context at the request boundary.".to_string(),
                     source: Some("rpc/session_inject_context".to_string()),
                     idempotency_key: None,
+                    source_kind: SystemContextSource::Normal,
                 },
                 accepted_at,
             )
@@ -5986,6 +6609,7 @@ mod tests {
             text: "Authoritative peer token is birch seventeen.".to_string(),
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
+            source_kind: SystemContextSource::Normal,
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let duplicate = PendingSystemContextAppend {
@@ -6023,6 +6647,7 @@ mod tests {
             text: "Authoritative peer token is birch seventeen.".to_string(),
             source: Some("peer_response_terminal:analyst:req-1".to_string()),
             idempotency_key: Some("req-1".to_string()),
+            source_kind: SystemContextSource::Normal,
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let conflicting = PendingSystemContextAppend {

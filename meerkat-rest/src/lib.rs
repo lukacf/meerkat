@@ -1014,6 +1014,7 @@ fn pending_system_context_appends(
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         })
         .collect()
 }
@@ -5083,6 +5084,7 @@ async fn append_system_context(
         text: req.text,
         source: req.source,
         idempotency_key: req.idempotency_key,
+        source_kind: meerkat_core::session::SystemContextSource::Normal,
     };
     let result = state
         .session_service

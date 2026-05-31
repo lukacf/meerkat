@@ -69,6 +69,32 @@ pub enum SessionInitialPromptStageDecision {
     Store,
 }
 
+/// Disposition for a runtime system-context append-staging decision.
+///
+/// Ported verbatim from the retired `SessionSystemContextAuthorityMachine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SystemContextAppendDecision {
+    #[default]
+    Staged,
+    Duplicate,
+    RejectEmpty,
+    RejectConflict,
+}
+
+/// Typed provenance class for a runtime system-context append.
+///
+/// This is the canonical replacement for the retired `runtime:steer:` string
+/// prefix folklore: the producer of a runtime-steer append constructs it with
+/// [`SystemContextSource::RuntimeSteer`]; everything else is
+/// [`SystemContextSource::Normal`]. The machine guards the typed field — no
+/// generated or shell code reclassifies a source string into this fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SystemContextSource {
+    #[default]
+    Normal,
+    RuntimeSteer,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -112,6 +138,43 @@ machine! {
                 pending_tool_result_message_count: u64,
             },
             ResolveSessionFirstTurnOverridesAllowed { session_id: SessionId },
+
+            // -----------------------------------------------------------
+            // System-context region (folded from the retired
+            // SessionSystemContextAuthorityMachine).
+            //
+            // The bulky append payloads (text/source strings, pending/applied
+            // vectors, the seen map) stay in the shell's
+            // `SessionSystemContextState`. The machine owns the per-append
+            // SEMANTIC decisions: append disposition (RejectEmpty / Conflict /
+            // Duplicate / Staged) and the runtime-steer apply/discard
+            // disposition, which guards the TYPED `SystemContextSource` field
+            // instead of a `runtime:steer:` string prefix.
+            // -----------------------------------------------------------
+            ResolveSystemContextAppend {
+                trimmed_text_byte_count: u64,
+                idempotency_key_present: bool,
+                existing_key_matches: bool,
+                existing_key_conflicts: bool,
+                active_turn_scoped: bool,
+            },
+            // Per-pending-append decision for `mark_pending_applied`: a
+            // runtime-steer append is dropped (and its seen entry removed); a
+            // normal append is promoted to applied and its seen entry marked
+            // applied. The machine guards the typed `source_kind`.
+            ResolveSystemContextPendingApplyItem {
+                source_kind: Enum<SystemContextSource>,
+            },
+            // Per-item decision for transient runtime-steer cleanup: discard
+            // iff the typed `source_kind` is `RuntimeSteer`.
+            ResolveSystemContextSteerCleanupItem {
+                source_kind: Enum<SystemContextSource>,
+            },
+            // Snapshot-restore consistency authorization, ported verbatim.
+            RestoreSystemContextSnapshot {
+                active_keys_have_known_pending_or_seen: bool,
+                seen_keys_match_known_appends: bool,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -128,6 +191,25 @@ machine! {
                 restore_tool_results: bool,
             },
             SessionFirstTurnPhaseRecovered,
+
+            // System-context region effects.
+            SystemContextAppendResolved {
+                decision: Enum<SystemContextAppendDecision>,
+                active_turn_scoped: bool,
+            },
+            // `promote_to_applied`/`mark_seen_applied` are emitted for normal
+            // appends; `remove_seen` for runtime-steer appends. The shell
+            // mirrors these onto its bulky pending/applied/seen collections.
+            SystemContextPendingApplyItemResolved {
+                promote_to_applied: bool,
+                mark_seen_applied: bool,
+                remove_seen: bool,
+            },
+            // `discard` is emitted true for runtime-steer items.
+            SystemContextSteerCleanupItemResolved {
+                discard: bool,
+            },
+            SystemContextSnapshotRestoreAuthorized,
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -141,12 +223,46 @@ machine! {
             phase == SessionFirstTurnPhase::Pending && prompt_has_content
         }
 
+        // System-context append classification helpers (ported verbatim from
+        // the retired SessionSystemContextAuthorityMachine).
+        helper append_is_empty(trimmed_text_byte_count: u64) -> bool {
+            trimmed_text_byte_count == 0
+        }
+
+        helper append_is_conflict(
+            idempotency_key_present: bool,
+            existing_key_conflicts: bool
+        ) -> bool {
+            idempotency_key_present && existing_key_conflicts
+        }
+
+        helper append_is_duplicate(
+            idempotency_key_present: bool,
+            existing_key_matches: bool,
+            existing_key_conflicts: bool
+        ) -> bool {
+            idempotency_key_present && existing_key_matches && existing_key_conflicts == false
+        }
+
+        helper append_is_new(
+            idempotency_key_present: bool,
+            existing_key_matches: bool,
+            existing_key_conflicts: bool
+        ) -> bool {
+            idempotency_key_present == false
+                || (existing_key_matches == false && existing_key_conflicts == false)
+        }
+
         disposition SessionFirstTurnPhaseResolved => local,
         disposition SessionFirstTurnOverridesResolved => local,
         disposition SessionInitialPromptStageResolved => local,
         disposition SessionToolResultsStageResolved => local,
         disposition SessionConsumedInputsRestoreResolved => local,
         disposition SessionFirstTurnPhaseRecovered => local,
+        disposition SystemContextAppendResolved => local,
+        disposition SystemContextPendingApplyItemResolved => local,
+        disposition SystemContextSteerCleanupItemResolved => local,
+        disposition SystemContextSnapshotRestoreAuthorized => local,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -489,6 +605,193 @@ machine! {
             }
             to Ready
             emit SessionFirstTurnPhaseRecovered
+        }
+
+        // ===============================================================
+        // System-context region (folded from the retired
+        // SessionSystemContextAuthorityMachine).
+        // ===============================================================
+
+        // ---------------------------------------------------------------
+        // ResolveSystemContextAppend — four-way append disposition.
+        //
+        // Ported verbatim from the retired ResolveAppend transitions. The
+        // observations (key present / matches / conflicts) are mechanical
+        // string-equality facts the shell computes against its bulky `seen`
+        // map; the SEMANTIC disposition is decided here from those typed
+        // observations via the append classification helpers.
+        // ---------------------------------------------------------------
+        transition ResolveSystemContextAppendEmpty {
+            on input ResolveSystemContextAppend {
+                trimmed_text_byte_count,
+                idempotency_key_present,
+                existing_key_matches,
+                existing_key_conflicts,
+                active_turn_scoped
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && append_is_empty(trimmed_text_byte_count)
+            }
+            update {}
+            to Ready
+            emit SystemContextAppendResolved {
+                decision: SystemContextAppendDecision::RejectEmpty,
+                active_turn_scoped: active_turn_scoped
+            }
+        }
+
+        transition ResolveSystemContextAppendConflict {
+            on input ResolveSystemContextAppend {
+                trimmed_text_byte_count,
+                idempotency_key_present,
+                existing_key_matches,
+                existing_key_conflicts,
+                active_turn_scoped
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && append_is_empty(trimmed_text_byte_count) == false
+                && append_is_conflict(idempotency_key_present, existing_key_conflicts)
+            }
+            update {}
+            to Ready
+            emit SystemContextAppendResolved {
+                decision: SystemContextAppendDecision::RejectConflict,
+                active_turn_scoped: active_turn_scoped
+            }
+        }
+
+        transition ResolveSystemContextAppendDuplicate {
+            on input ResolveSystemContextAppend {
+                trimmed_text_byte_count,
+                idempotency_key_present,
+                existing_key_matches,
+                existing_key_conflicts,
+                active_turn_scoped
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && append_is_empty(trimmed_text_byte_count) == false
+                && append_is_duplicate(
+                    idempotency_key_present,
+                    existing_key_matches,
+                    existing_key_conflicts)
+            }
+            update {}
+            to Ready
+            emit SystemContextAppendResolved {
+                decision: SystemContextAppendDecision::Duplicate,
+                active_turn_scoped: active_turn_scoped
+            }
+        }
+
+        transition ResolveSystemContextAppendNew {
+            on input ResolveSystemContextAppend {
+                trimmed_text_byte_count,
+                idempotency_key_present,
+                existing_key_matches,
+                existing_key_conflicts,
+                active_turn_scoped
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && append_is_empty(trimmed_text_byte_count) == false
+                && append_is_new(
+                    idempotency_key_present,
+                    existing_key_matches,
+                    existing_key_conflicts)
+            }
+            update {}
+            to Ready
+            emit SystemContextAppendResolved {
+                decision: SystemContextAppendDecision::Staged,
+                active_turn_scoped: active_turn_scoped
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // ResolveSystemContextPendingApplyItem — per-pending-append apply
+        // decision. Guards the TYPED source_kind: a runtime-steer append is
+        // dropped from the applied set and its seen entry removed; a normal
+        // append is promoted to applied and its seen entry marked applied.
+        //
+        // This replaces the retired `is_runtime_steer_append` string-prefix
+        // classification (`source.starts_with("runtime:steer:")`).
+        // ---------------------------------------------------------------
+        transition ResolveSystemContextPendingApplyItemRuntimeSteer {
+            on input ResolveSystemContextPendingApplyItem { source_kind }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && source_kind == SystemContextSource::RuntimeSteer
+            }
+            update {}
+            to Ready
+            emit SystemContextPendingApplyItemResolved {
+                promote_to_applied: false,
+                mark_seen_applied: false,
+                remove_seen: true
+            }
+        }
+
+        transition ResolveSystemContextPendingApplyItemNormal {
+            on input ResolveSystemContextPendingApplyItem { source_kind }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && source_kind == SystemContextSource::Normal
+            }
+            update {}
+            to Ready
+            emit SystemContextPendingApplyItemResolved {
+                promote_to_applied: true,
+                mark_seen_applied: true,
+                remove_seen: false
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // ResolveSystemContextSteerCleanupItem — per-item transient-steer
+        // discard decision, guarding the typed source_kind.
+        // ---------------------------------------------------------------
+        transition ResolveSystemContextSteerCleanupItemRuntimeSteer {
+            on input ResolveSystemContextSteerCleanupItem { source_kind }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && source_kind == SystemContextSource::RuntimeSteer
+            }
+            update {}
+            to Ready
+            emit SystemContextSteerCleanupItemResolved { discard: true }
+        }
+
+        transition ResolveSystemContextSteerCleanupItemNormal {
+            on input ResolveSystemContextSteerCleanupItem { source_kind }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && source_kind == SystemContextSource::Normal
+            }
+            update {}
+            to Ready
+            emit SystemContextSteerCleanupItemResolved { discard: false }
+        }
+
+        // ---------------------------------------------------------------
+        // RestoreSystemContextSnapshot — snapshot-restore consistency
+        // authorization, ported verbatim from AuthorizeRestoreSystemContextState.
+        // ---------------------------------------------------------------
+        transition RestoreSystemContextSnapshot {
+            on input RestoreSystemContextSnapshot {
+                active_keys_have_known_pending_or_seen,
+                seen_keys_match_known_appends
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && active_keys_have_known_pending_or_seen
+                && seen_keys_match_known_appends
+            }
+            update {}
+            to Ready
+            emit SystemContextSnapshotRestoreAuthorized
         }
     }
 }

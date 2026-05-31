@@ -6164,6 +6164,7 @@ impl SessionRuntime {
                         text: pending.text.clone(),
                         source: pending.source.clone(),
                         idempotency_key: pending.idempotency_key.clone(),
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                     },
                 )
                 .await
@@ -8564,6 +8565,7 @@ mod tests {
                             .to_string(),
                     ),
                     idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
                 meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
             )
@@ -10154,6 +10156,7 @@ mod tests {
                         "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
                             .to_string(),
                     ),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -11091,6 +11094,7 @@ mod tests {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![],
@@ -11363,6 +11367,7 @@ mod tests {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("req-123".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
                 meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
             )
@@ -11455,6 +11460,7 @@ mod tests {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Result: {\"token\":\"birch seventeen\"}.".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("req-123".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
                 meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
             )
@@ -11564,6 +11570,7 @@ mod tests {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("req-123".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
                 }],
                 vec![InputId::new()],
@@ -11681,6 +11688,7 @@ mod tests {
                     text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![],
@@ -13018,6 +13026,7 @@ mod tests {
             text: "Coordinate with the orchestrator.".to_string(),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-promotion".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         };
         let append_result = runtime
             .append_system_context(&session_id, append_req.clone())
@@ -13069,6 +13078,7 @@ mod tests {
                     text: "Always include the marker [TS-SDK-CTX] in your replies.".to_string(),
                     source: Some("typescript-smoke".to_string()),
                     idempotency_key: None,
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -13159,6 +13169,7 @@ mod tests {
             text: "Preserve this append across rollback.".to_string(),
             source: Some("test".to_string()),
             idempotency_key: Some("rollback-preserve".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         };
         staged_sessions
             .append_system_context(
@@ -19777,6 +19788,7 @@ mod tests {
             text: "new context".to_string(),
             source: None,
             idempotency_key: Some("key-1".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         };
         runtime
             .append_system_context(&session_id, req)

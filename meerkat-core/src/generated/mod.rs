@@ -16,5 +16,4 @@ pub mod session_document;
 pub mod session_durable_config_authority;
 pub mod session_persistence_version_authority;
 pub mod session_realtime_transcript_authority;
-pub mod session_system_context_authority;
 pub mod terminal_surface_mapping;

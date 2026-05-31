@@ -2495,6 +2495,7 @@ impl MethodRouter {
             text: params.text,
             source: params.source,
             idempotency_key: params.idempotency_key,
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
         };
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {

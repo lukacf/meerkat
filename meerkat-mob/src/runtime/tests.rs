@@ -27089,6 +27089,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                         text: append.text,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                     },
                 )
                 .await
@@ -27180,6 +27181,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                         text: append.text,
                         source: append.source,
                         idempotency_key: append.idempotency_key,
+                        source_kind: meerkat_core::session::SystemContextSource::Normal,
                     }),
             );
 
@@ -27210,6 +27212,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                     text: append.text,
                     source: append.source,
                     idempotency_key: append.idempotency_key,
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await

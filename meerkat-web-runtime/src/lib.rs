@@ -1340,6 +1340,7 @@ fn system_context_request_from_append(
         text: append.text.clone(),
         source: append.source.clone(),
         idempotency_key: append.idempotency_key.clone(),
+        source_kind: append.source_kind,
     }
 }
 
@@ -1349,30 +1350,21 @@ fn merge_runtime_system_context_state(
     starting_state: &meerkat_core::SessionSystemContextState,
     current_state: &meerkat_core::SessionSystemContextState,
 ) -> meerkat_core::SessionSystemContextState {
-    let starting_state =
-        meerkat_core::generated::session_system_context_authority::restore_system_context_state(
-            starting_state.clone(),
-        )
+    let starting_state = starting_state
+        .clone()
+        .restore_from_snapshot()
         .expect("starting system-context state should restore");
-    let current_state =
-        meerkat_core::generated::session_system_context_authority::restore_system_context_state(
-            current_state.clone(),
-        )
+    let current_state = current_state
+        .clone()
+        .restore_from_snapshot()
         .expect("current system-context state should restore");
-    agent_state =
-        meerkat_core::generated::session_system_context_authority::restore_system_context_state(
-            agent_state,
-        )
+    agent_state = agent_state
+        .restore_from_snapshot()
         .expect("agent system-context state should restore");
 
     for applied in current_state.applied() {
         if !starting_state.applied().contains(applied) && !agent_state.applied().contains(applied) {
-            let _ =
-                meerkat_core::generated::session_system_context_authority::record_applied_system_context_blocks(
-                    &mut agent_state,
-                    std::slice::from_ref(applied),
-                    "",
-                );
+            let _ = agent_state.record_applied_blocks(std::slice::from_ref(applied), "");
         }
     }
 
@@ -1415,6 +1407,8 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
                 text: req.text,
                 source: req.source,
                 idempotency_key: req.idempotency_key,
+                // JS-originated context appends are durable, never steers.
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
             },
         )
         .await
@@ -1960,6 +1954,8 @@ pub async fn mob_append_system_context(
                 text: req.text,
                 source: req.source,
                 idempotency_key: req.idempotency_key,
+                // JS-originated context appends are durable, never steers.
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
             },
         )
         .await
@@ -2539,6 +2535,7 @@ mod tests {
             text: append.text.clone(),
             source: append.source.clone(),
             idempotency_key: append.idempotency_key.clone(),
+            source_kind: append.source_kind,
         }
     }
 
@@ -2677,12 +2674,14 @@ capabilities = [{capability_values}]
             text: "initial".to_string(),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-initial".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: base_time,
         };
         let concurrent_pending = PendingSystemContextAppend {
             text: "concurrent".to_string(),
             source: Some("mob".to_string()),
             idempotency_key: Some("ctx-concurrent".to_string()),
+            source_kind: meerkat_core::session::SystemContextSource::Normal,
             accepted_at: base_time + Duration::from_secs(1),
         };
 
@@ -2811,6 +2810,7 @@ capabilities = [{capability_values}]
                     text: "Prioritize coordinating with the lead.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-worker-1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await

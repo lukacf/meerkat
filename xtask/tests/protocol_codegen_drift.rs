@@ -283,27 +283,6 @@ fn approval_lifecycle_matches_codegen_output() {
 }
 
 #[test]
-fn session_system_context_authority_matches_codegen_output() {
-    use meerkat_machine_schema::catalog::dsl;
-
-    let machine = dsl::dsl_session_system_context_authority_machine_production_schema();
-    let rendered = xtask::protocol_codegen::render_session_system_context_authority(&machine)
-        .expect("render session_system_context_authority");
-    let rendered = rustfmt(&rendered);
-
-    let committed_path =
-        repo_root().join("meerkat-core/src/generated/session_system_context_authority.rs");
-    let committed = std::fs::read_to_string(&committed_path)
-        .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
-
-    assert_eq!(
-        normalize(&committed),
-        normalize(&rendered),
-        "session_system_context_authority.rs diverged from codegen output. If this is intentional, run `cargo xtask protocol-codegen` and commit the result."
-    );
-}
-
-#[test]
 fn session_document_authority_matches_codegen_output() {
     use meerkat_machine_schema::catalog::dsl;
 

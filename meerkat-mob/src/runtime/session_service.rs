@@ -313,6 +313,7 @@ pub trait MobSessionService:
                     text: append.text,
                     source: append.source,
                     idempotency_key: append.idempotency_key,
+                    source_kind: append.source_kind,
                 },
             )
             .await

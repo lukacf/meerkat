@@ -4851,6 +4851,7 @@ mod tests {
                     text: "Remember the customer preference.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -4890,6 +4891,7 @@ mod tests {
                     text: "Remember the customer preference.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -4963,6 +4965,7 @@ mod tests {
                     text: "Remember the picture.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await
@@ -5047,6 +5050,7 @@ mod tests {
                     text: "Remember the customer preference.".to_string(),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
                 },
             )
             .await

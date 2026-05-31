@@ -988,6 +988,8 @@ pub(crate) fn context_append_to_pending_system_context_append(
         text,
         source: Some(append.key.clone()),
         idempotency_key: Some(append.key.clone()),
+        // Durable keyed context append (peer responses, etc.) — not a steer.
+        source_kind: meerkat_core::session::SystemContextSource::Normal,
         accepted_at: meerkat_core::time_compat::SystemTime::now(),
     }
 }
@@ -1006,11 +1008,17 @@ pub(crate) fn projection_to_pending_system_context_appends(
         .append
         .as_ref()
         .map(|append| {
+            // The PRODUCER of a runtime-steer append sets the typed marker
+            // here, at construction. This is the single source of truth for
+            // the runtime-steer fact — no downstream code reclassifies the
+            // `source` string. The `runtime:steer:` source/idempotency key is
+            // retained only as a stable per-input idempotency identifier.
             let key = format!("runtime:steer:{input_id}");
             meerkat_core::PendingSystemContextAppend {
                 text: render_core_context_for_pending_system_context(&append.content),
                 source: Some(key.clone()),
                 idempotency_key: Some(key),
+                source_kind: meerkat_core::session::SystemContextSource::RuntimeSteer,
                 accepted_at: meerkat_core::time_compat::SystemTime::now(),
             }
         })

@@ -246,9 +246,6 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/session_realtime_transcript_authority.rs",
     ));
-    set.insert(PathBuf::from(
-        "meerkat-core/src/generated/session_system_context_authority.rs",
-    ));
 
     set.insert(PathBuf::from(
         "meerkat-machine-kernels/src/generated/mod.rs",

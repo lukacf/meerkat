@@ -95,6 +95,55 @@ pub enum SystemContextSource {
     RuntimeSteer,
 }
 
+// ---------------------------------------------------------------------------
+// Realtime-transcript region typed vocabulary (folded from the retired
+// SessionRealtimeTranscriptAuthorityMachine).
+//
+// These are the SAME typed observation/decision enums the retired machine
+// carried. The bulky per-item registry (`SessionRealtimeTranscriptState`,
+// the content-segment maps, the causal ordering, message assembly) stays a
+// NON-generated shell helper in meerkat-core: the DSL has no string-content
+// op, no topological-order op, and no materialize-loop construct, so the
+// shell computes those mechanical facts and feeds them as typed RAW
+// observations. The machine decides the action vector / materialize verdict
+// from those observations — never the other way around.
+// ---------------------------------------------------------------------------
+
+/// Provider-neutral role for a realtime transcript item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    User,
+    Assistant,
+}
+
+/// Output lane carried by an assistant realtime transcript item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    Display,
+    Spoken,
+}
+
+/// Terminal-boundary stop-reason class observed for a realtime assistant turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptStopReasonKind {
+    Cancelled,
+    ToolUse,
+    #[default]
+    Other,
+}
+
+/// Per-item materialization verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeTranscriptMaterializeDecision {
+    #[default]
+    Wait,
+    MarkSkipped,
+    MaterializeUser,
+    MaterializeAssistant,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -175,6 +224,85 @@ machine! {
                 active_keys_have_known_pending_or_seen: bool,
                 seen_keys_match_known_appends: bool,
             },
+
+            // -----------------------------------------------------------
+            // Realtime-transcript region (folded from the retired
+            // SessionRealtimeTranscriptAuthorityMachine).
+            //
+            // Each input carries only typed RAW observations the shell
+            // computes mechanically against its bulky
+            // `SessionRealtimeTranscriptState` (set membership, segment
+            // concat emptiness, per-item flags). NONE carries a pre-decided
+            // action. The machine resolves the action vector / materialize
+            // verdict below.
+            // -----------------------------------------------------------
+            ResolveRealtimeItemObserved {
+                role: Enum<RealtimeTranscriptRoleKind>,
+                response_discarded: bool,
+            },
+            ResolveRealtimeItemSkipped,
+            ResolveRealtimeUserTranscriptFinal {
+                text_present: bool,
+                segment_empty: bool,
+                segment_matches: bool,
+            },
+            ResolveRealtimeAssistantDelta {
+                response_id_valid: bool,
+                response_discarded: bool,
+                delta_id_present: bool,
+                delta_id_seen: bool,
+                item_has_text: bool,
+                current_lane: Enum<RealtimeTranscriptLaneKind>,
+                requested_lane: Enum<RealtimeTranscriptLaneKind>,
+                response_completed: bool,
+                text_after_write_present: bool,
+            },
+            ResolveRealtimeAssistantTextReplacement {
+                response_id_valid: bool,
+                response_discarded: bool,
+                item_materialized: bool,
+                item_has_text: bool,
+                current_lane: Enum<RealtimeTranscriptLaneKind>,
+                requested_lane: Enum<RealtimeTranscriptLaneKind>,
+                response_completed: bool,
+                text_after_replace_present: bool,
+            },
+            ResolveRealtimeAssistantTurnCompleted {
+                response_id_valid: bool,
+                response_discarded: bool,
+                stop_reason: Enum<RealtimeTranscriptStopReasonKind>,
+            },
+            ResolveRealtimeAssistantTurnInterrupted {
+                response_id_valid: bool,
+            },
+            ResolveRealtimeMaterializeCandidate {
+                item_materialized: bool,
+                predecessor_materialized: bool,
+                item_skipped: bool,
+                item_ready: bool,
+                item_text_present: bool,
+                role: Enum<RealtimeTranscriptRoleKind>,
+                response_id_present: bool,
+                completion_present: bool,
+                completion_usage_consumed: bool,
+            },
+            RestoreRealtimeTranscriptState {
+                item_count: u64,
+                first_seen_count: u64,
+                first_seen_unique_count: u64,
+                every_item_has_order_entry: bool,
+                every_order_entry_has_item: bool,
+                all_identity_fields_valid: bool,
+                all_delta_ids_valid: bool,
+                all_completion_response_ids_valid: bool,
+                all_discarded_response_ids_valid: bool,
+                all_materialized_items_were_ready_or_skipped: bool,
+                all_assistant_items_have_response_unless_skipped: bool,
+                all_ready_assistant_items_have_completion_or_are_skipped: bool,
+                all_materialized_assistant_completions_consumed: bool,
+                all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: bool,
+                all_discarded_assistant_items_are_skipped_or_materialized: bool,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -210,6 +338,31 @@ machine! {
                 discard: bool,
             },
             SystemContextSnapshotRestoreAuthorized,
+
+            // Realtime-transcript region effects. The action vector is the
+            // machine's decision; the shell mirrors each flag onto its bulky
+            // `SessionRealtimeTranscriptState` and decides nothing.
+            RealtimeTranscriptEventResolved {
+                observe_item: bool,
+                observe_skipped: bool,
+                write_user_segment: bool,
+                append_assistant_segment: bool,
+                replace_assistant_segment: bool,
+                promote_lane: bool,
+                mark_item_ready: bool,
+                record_delta_id: bool,
+                remove_completion: bool,
+                record_completion: bool,
+                discard_response: bool,
+                discard_response_by_lane: bool,
+                mark_response_ready: bool,
+                materialize_ready_items: bool,
+            },
+            RealtimeMaterializeCandidateResolved {
+                decision: Enum<RealtimeTranscriptMaterializeDecision>,
+                consume_usage: bool,
+            },
+            RealtimeTranscriptSnapshotRestoreAuthorized,
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -253,6 +406,45 @@ machine! {
                 || (existing_key_matches == false && existing_key_conflicts == false)
         }
 
+        // Realtime-transcript region classification helpers (ported verbatim
+        // from the retired SessionRealtimeTranscriptAuthorityMachine).
+        helper realtime_delta_is_duplicate(delta_id_present: bool, delta_id_seen: bool) -> bool {
+            delta_id_present && delta_id_seen
+        }
+
+        helper realtime_lane_accepts(
+            item_has_text: bool,
+            current_lane: Enum<RealtimeTranscriptLaneKind>,
+            requested_lane: Enum<RealtimeTranscriptLaneKind>
+        ) -> bool {
+            current_lane == requested_lane || item_has_text == false
+        }
+
+        helper realtime_should_mark_ready_after_write(
+            response_completed: bool,
+            text_after_write_present: bool
+        ) -> bool {
+            response_completed && text_after_write_present
+        }
+
+        helper realtime_stop_reason_discards(
+            stop_reason: Enum<RealtimeTranscriptStopReasonKind>
+        ) -> bool {
+            stop_reason == RealtimeTranscriptStopReasonKind::Cancelled
+        }
+
+        helper realtime_stop_reason_removes_completion(
+            stop_reason: Enum<RealtimeTranscriptStopReasonKind>
+        ) -> bool {
+            stop_reason == RealtimeTranscriptStopReasonKind::ToolUse
+        }
+
+        helper realtime_stop_reason_records_completion(
+            stop_reason: Enum<RealtimeTranscriptStopReasonKind>
+        ) -> bool {
+            stop_reason == RealtimeTranscriptStopReasonKind::Other
+        }
+
         disposition SessionFirstTurnPhaseResolved => local,
         disposition SessionFirstTurnOverridesResolved => local,
         disposition SessionInitialPromptStageResolved => local,
@@ -263,6 +455,9 @@ machine! {
         disposition SystemContextPendingApplyItemResolved => local,
         disposition SystemContextSteerCleanupItemResolved => local,
         disposition SystemContextSnapshotRestoreAuthorized => local,
+        disposition RealtimeTranscriptEventResolved => local,
+        disposition RealtimeMaterializeCandidateResolved => local,
+        disposition RealtimeTranscriptSnapshotRestoreAuthorized => local,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -792,6 +987,899 @@ machine! {
             update {}
             to Ready
             emit SystemContextSnapshotRestoreAuthorized
+        }
+
+        // ===============================================================
+        // Realtime-transcript region (folded from the retired
+        // SessionRealtimeTranscriptAuthorityMachine). Each transition is a
+        // verbatim port: it reads only the typed RAW observations carried on
+        // the input and resolves the action vector / materialize verdict.
+        // The shell mirrors the emitted decision onto its bulky
+        // `SessionRealtimeTranscriptState` and decides nothing.
+        // ===============================================================
+
+        transition ResolveRealtimeItemObservedDiscardedAssistant {
+            on input ResolveRealtimeItemObserved { role, response_discarded }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && role == RealtimeTranscriptRoleKind::Assistant
+                && response_discarded
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: true,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeItemObservedPresent {
+            on input ResolveRealtimeItemObserved { role, response_discarded }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (role != RealtimeTranscriptRoleKind::Assistant || response_discarded == false)
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeItemSkipped {
+            on input ResolveRealtimeItemSkipped
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: true,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeUserTranscriptFinalEmpty {
+            on input ResolveRealtimeUserTranscriptFinal { text_present, segment_empty, segment_matches }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && text_present == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: true,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeUserTranscriptFinalStore {
+            on input ResolveRealtimeUserTranscriptFinal { text_present, segment_empty, segment_matches }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && text_present
+                && segment_empty
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: true,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: true,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeUserTranscriptFinalReplayOrConflict {
+            on input ResolveRealtimeUserTranscriptFinal { text_present, segment_empty, segment_matches }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && text_present
+                && segment_empty == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: true,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantDeltaInvalidOrDuplicate {
+            on input ResolveRealtimeAssistantDelta {
+                response_id_valid,
+                response_discarded,
+                delta_id_present,
+                delta_id_seen,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_write_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (response_id_valid == false
+                    || realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: false
+            }
+        }
+
+        transition ResolveRealtimeAssistantDeltaDiscarded {
+            on input ResolveRealtimeAssistantDelta {
+                response_id_valid,
+                response_discarded,
+                delta_id_present,
+                delta_id_seen,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_write_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: true,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantDeltaLaneConflict {
+            on input ResolveRealtimeAssistantDelta {
+                response_id_valid,
+                response_discarded,
+                delta_id_present,
+                delta_id_seen,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_write_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && realtime_delta_is_duplicate(delta_id_present, delta_id_seen) == false
+                && realtime_lane_accepts(item_has_text, current_lane, requested_lane) == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: delta_id_present,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantDeltaAccepted {
+            on input ResolveRealtimeAssistantDelta {
+                response_id_valid,
+                response_discarded,
+                delta_id_present,
+                delta_id_seen,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_write_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && realtime_delta_is_duplicate(delta_id_present, delta_id_seen) == false
+                && realtime_lane_accepts(item_has_text, current_lane, requested_lane)
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: true,
+                replace_assistant_segment: false,
+                promote_lane: true,
+                mark_item_ready: realtime_should_mark_ready_after_write(response_completed, text_after_write_present),
+                record_delta_id: delta_id_present,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantReplacementInvalid {
+            on input ResolveRealtimeAssistantTextReplacement {
+                response_id_valid,
+                response_discarded,
+                item_materialized,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_replace_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: false
+            }
+        }
+
+        transition ResolveRealtimeAssistantReplacementDiscarded {
+            on input ResolveRealtimeAssistantTextReplacement {
+                response_id_valid,
+                response_discarded,
+                item_materialized,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_replace_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: true,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantReplacementLocked {
+            on input ResolveRealtimeAssistantTextReplacement {
+                response_id_valid,
+                response_discarded,
+                item_materialized,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_replace_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && item_materialized
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantReplacementLaneConflict {
+            on input ResolveRealtimeAssistantTextReplacement {
+                response_id_valid,
+                response_discarded,
+                item_materialized,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_replace_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && item_materialized == false
+                && realtime_lane_accepts(item_has_text, current_lane, requested_lane) == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantReplacementAccepted {
+            on input ResolveRealtimeAssistantTextReplacement {
+                response_id_valid,
+                response_discarded,
+                item_materialized,
+                item_has_text,
+                current_lane,
+                requested_lane,
+                response_completed,
+                text_after_replace_present
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && item_materialized == false
+                && realtime_lane_accepts(item_has_text, current_lane, requested_lane)
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: true,
+                promote_lane: true,
+                mark_item_ready: realtime_should_mark_ready_after_write(response_completed, text_after_replace_present),
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantTurnCompletedInvalid {
+            on input ResolveRealtimeAssistantTurnCompleted { response_id_valid, response_discarded, stop_reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: false
+            }
+        }
+
+        transition ResolveRealtimeAssistantTurnCompletedDiscard {
+            on input ResolveRealtimeAssistantTurnCompleted { response_id_valid, response_discarded, stop_reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && (response_discarded || realtime_stop_reason_discards(stop_reason))
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: true,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantTurnCompletedToolUse {
+            on input ResolveRealtimeAssistantTurnCompleted { response_id_valid, response_discarded, stop_reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && realtime_stop_reason_removes_completion(stop_reason)
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: true,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantTurnCompletedRecord {
+            on input ResolveRealtimeAssistantTurnCompleted { response_id_valid, response_discarded, stop_reason }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+                && response_discarded == false
+                && realtime_stop_reason_records_completion(stop_reason)
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: true,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: true,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeAssistantTurnInterruptedInvalid {
+            on input ResolveRealtimeAssistantTurnInterrupted { response_id_valid }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: false
+            }
+        }
+
+        transition ResolveRealtimeAssistantTurnInterruptedValid {
+            on input ResolveRealtimeAssistantTurnInterrupted { response_id_valid }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id_valid
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: false,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: false,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: true,
+                discard_response: false,
+                discard_response_by_lane: true,
+                mark_response_ready: true,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeMaterializeAlreadyDone {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::Wait,
+                consume_usage: false
+            }
+        }
+
+        transition ResolveRealtimeMaterializeWaitForPredecessor {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized == false
+                && predecessor_materialized == false
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::Wait,
+                consume_usage: false
+            }
+        }
+
+        transition ResolveRealtimeMaterializeSkipped {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized == false
+                && predecessor_materialized
+                && item_skipped
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::MarkSkipped,
+                consume_usage: false
+            }
+        }
+
+        transition ResolveRealtimeMaterializeWaitForReadyText {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized == false
+                && predecessor_materialized
+                && item_skipped == false
+                && (item_ready == false || item_text_present == false)
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::Wait,
+                consume_usage: false
+            }
+        }
+
+        transition ResolveRealtimeMaterializeUser {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized == false
+                && predecessor_materialized
+                && item_skipped == false
+                && item_ready
+                && item_text_present
+                && role == RealtimeTranscriptRoleKind::User
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::MaterializeUser,
+                consume_usage: false
+            }
+        }
+
+        transition ResolveRealtimeMaterializeAssistant {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized == false
+                && predecessor_materialized
+                && item_skipped == false
+                && item_ready
+                && item_text_present
+                && role == RealtimeTranscriptRoleKind::Assistant
+                && response_id_present
+                && completion_present
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::MaterializeAssistant,
+                consume_usage: completion_usage_consumed == false
+            }
+        }
+
+        transition ResolveRealtimeMaterializeAssistantMissingCompletion {
+            on input ResolveRealtimeMaterializeCandidate {
+                item_materialized,
+                predecessor_materialized,
+                item_skipped,
+                item_ready,
+                item_text_present,
+                role,
+                response_id_present,
+                completion_present,
+                completion_usage_consumed
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_materialized == false
+                && predecessor_materialized
+                && item_skipped == false
+                && item_ready
+                && item_text_present
+                && role == RealtimeTranscriptRoleKind::Assistant
+                && (response_id_present == false || completion_present == false)
+            }
+            update {}
+            to Ready
+            emit RealtimeMaterializeCandidateResolved {
+                decision: RealtimeTranscriptMaterializeDecision::Wait,
+                consume_usage: false
+            }
+        }
+
+        transition AuthorizeRestoreRealtimeTranscriptState {
+            on input RestoreRealtimeTranscriptState {
+                item_count,
+                first_seen_count,
+                first_seen_unique_count,
+                every_item_has_order_entry,
+                every_order_entry_has_item,
+                all_identity_fields_valid,
+                all_delta_ids_valid,
+                all_completion_response_ids_valid,
+                all_discarded_response_ids_valid,
+                all_materialized_items_were_ready_or_skipped,
+                all_assistant_items_have_response_unless_skipped,
+                all_ready_assistant_items_have_completion_or_are_skipped,
+                all_materialized_assistant_completions_consumed,
+                all_completed_assistant_text_items_are_ready_or_materialized_or_skipped,
+                all_discarded_assistant_items_are_skipped_or_materialized
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && item_count == first_seen_count
+                && first_seen_count == first_seen_unique_count
+                && every_item_has_order_entry
+                && every_order_entry_has_item
+                && all_identity_fields_valid
+                && all_delta_ids_valid
+                && all_completion_response_ids_valid
+                && all_discarded_response_ids_valid
+                && all_materialized_items_were_ready_or_skipped
+                && all_assistant_items_have_response_unless_skipped
+                && all_ready_assistant_items_have_completion_or_are_skipped
+                && all_materialized_assistant_completions_consumed
+                && all_completed_assistant_text_items_are_ready_or_materialized_or_skipped
+                && all_discarded_assistant_items_are_skipped_or_materialized
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptSnapshotRestoreAuthorized
         }
     }
 }

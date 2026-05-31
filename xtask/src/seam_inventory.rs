@@ -1643,6 +1643,24 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local system-context snapshot restore authorization consumed in-process by the session restore path",
         ),
+        (
+            "SessionDocumentMachine",
+            "RealtimeTranscriptEventResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local realtime-transcript action vector mirrored onto the session SessionRealtimeTranscriptState item/segment/completion registry inside meerkat-core realtime_transcript_revision",
+        ),
+        (
+            "SessionDocumentMachine",
+            "RealtimeMaterializeCandidateResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local per-item materialize verdict mirrored onto the session SessionRealtimeTranscriptState by the meerkat-core realtime_transcript_revision materializer (shell performs only topological ordering and message assembly)",
+        ),
+        (
+            "SessionDocumentMachine",
+            "RealtimeTranscriptSnapshotRestoreAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local realtime-transcript snapshot restore authorization consumed in-process by the session restore path",
+        ),
         //
         // =========================================================================
         // WorkAttentionLifecycleMachine

@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, NatValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SystemContextAppendDecisionValues, SystemContextSourceValues
+CONSTANTS BooleanValues, NatValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SystemContextAppendDecisionValues, SystemContextSourceValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -29,6 +29,12 @@ VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_ini
 
 vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
+realtime_stop_reason_records_completion(stop_reason) == (stop_reason = "Other")
+realtime_stop_reason_removes_completion(stop_reason) == (stop_reason = "ToolUse")
+realtime_stop_reason_discards(stop_reason) == (stop_reason = "Cancelled")
+realtime_should_mark_ready_after_write(response_completed, text_after_write_present) == (response_completed /\ text_after_write_present)
+realtime_lane_accepts(item_has_text, current_lane, requested_lane) == ((current_lane = requested_lane) \/ (item_has_text = FALSE))
+realtime_delta_is_duplicate(delta_id_present, delta_id_seen) == (delta_id_present /\ delta_id_seen)
 append_is_new(idempotency_key_present, existing_key_matches, existing_key_conflicts) == ((idempotency_key_present = FALSE) \/ ((existing_key_matches = FALSE) /\ (existing_key_conflicts = FALSE)))
 append_is_duplicate(idempotency_key_present, existing_key_matches, existing_key_conflicts) == (idempotency_key_present /\ existing_key_matches /\ (existing_key_conflicts = FALSE))
 append_is_conflict(idempotency_key_present, existing_key_conflicts) == (idempotency_key_present /\ existing_key_conflicts)
@@ -260,6 +266,237 @@ RestoreSystemContextSnapshot(active_keys_have_known_pending_or_seen, seen_keys_m
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
+ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
+    /\ phase = "Ready"
+    /\ ((role = "Assistant") /\ response_discarded)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeItemObservedPresent(role, response_discarded) ==
+    /\ phase = "Ready"
+    /\ ((role # "Assistant") \/ (response_discarded = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeItemSkipped ==
+    /\ phase = "Ready"
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_matches) ==
+    /\ phase = "Ready"
+    /\ (text_present = FALSE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_matches) ==
+    /\ phase = "Ready"
+    /\ (text_present /\ segment_empty)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, segment_matches) ==
+    /\ phase = "Ready"
+    /\ (text_present /\ (segment_empty = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
+    /\ phase = "Ready"
+    /\ ((response_id_valid = FALSE) \/ realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ response_discarded)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid = FALSE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ response_discarded)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ item_materialized)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discarded, stop_reason) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid = FALSE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discarded, stop_reason) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded \/ realtime_stop_reason_discards(stop_reason)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discarded, stop_reason) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_removes_completion(stop_reason))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarded, stop_reason) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_records_completion(stop_reason))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
+    /\ phase = "Ready"
+    /\ (response_id_valid = FALSE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
+    /\ phase = "Ready"
+    /\ response_id_valid
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ item_materialized
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ ((item_materialized = FALSE) /\ (predecessor_materialized = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ item_skipped)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ ((item_ready = FALSE) \/ (item_text_present = FALSE)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "User"))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ response_id_present /\ completion_present)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
+    /\ phase = "Ready"
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ ((response_id_present = FALSE) \/ (completion_present = FALSE)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized) ==
+    /\ phase = "Ready"
+    /\ ((item_count = first_seen_count) /\ (first_seen_count = first_seen_unique_count) /\ every_item_has_order_entry /\ every_order_entry_has_item /\ all_identity_fields_valid /\ all_delta_ids_valid /\ all_completion_response_ids_valid /\ all_discarded_response_ids_valid /\ all_materialized_items_were_ready_or_skipped /\ all_assistant_items_have_response_unless_skipped /\ all_ready_assistant_items_have_completion_or_are_skipped /\ all_materialized_assistant_completions_consumed /\ all_completed_assistant_text_items_are_ready_or_materialized_or_skipped /\ all_discarded_assistant_items_are_skipped_or_materialized)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
 Next ==
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingInactiveOrPending(session_id)
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingConsumed(session_id)
@@ -286,6 +523,35 @@ Next ==
     \/ \E source_kind \in SystemContextSourceValues : ResolveSystemContextSteerCleanupItemRuntimeSteer(source_kind)
     \/ \E source_kind \in SystemContextSourceValues : ResolveSystemContextSteerCleanupItemNormal(source_kind)
     \/ \E active_keys_have_known_pending_or_seen \in BOOLEAN : \E seen_keys_match_known_appends \in BOOLEAN : RestoreSystemContextSnapshot(active_keys_have_known_pending_or_seen, seen_keys_match_known_appends)
+    \/ \E role \in RealtimeTranscriptRoleKindValues : \E response_discarded \in BOOLEAN : ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded)
+    \/ \E role \in RealtimeTranscriptRoleKindValues : \E response_discarded \in BOOLEAN : ResolveRealtimeItemObservedPresent(role, response_discarded)
+    \/ ResolveRealtimeItemSkipped
+    \/ \E text_present \in BOOLEAN : \E segment_empty \in BOOLEAN : \E segment_matches \in BOOLEAN : ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_matches)
+    \/ \E text_present \in BOOLEAN : \E segment_empty \in BOOLEAN : \E segment_matches \in BOOLEAN : ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_matches)
+    \/ \E text_present \in BOOLEAN : \E segment_empty \in BOOLEAN : \E segment_matches \in BOOLEAN : ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, segment_matches)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E delta_id_present \in BOOLEAN : \E delta_id_seen \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_write_present \in BOOLEAN : ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E delta_id_present \in BOOLEAN : \E delta_id_seen \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_write_present \in BOOLEAN : ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E delta_id_present \in BOOLEAN : \E delta_id_seen \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_write_present \in BOOLEAN : ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E delta_id_present \in BOOLEAN : \E delta_id_seen \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_write_present \in BOOLEAN : ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E item_materialized \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_replace_present \in BOOLEAN : ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E item_materialized \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_replace_present \in BOOLEAN : ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E item_materialized \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_replace_present \in BOOLEAN : ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E item_materialized \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_replace_present \in BOOLEAN : ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E item_materialized \in BOOLEAN : \E item_has_text \in BOOLEAN : \E current_lane \in RealtimeTranscriptLaneKindValues : \E requested_lane \in RealtimeTranscriptLaneKindValues : \E response_completed \in BOOLEAN : \E text_after_replace_present \in BOOLEAN : ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discarded, stop_reason)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discarded, stop_reason)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discarded, stop_reason)
+    \/ \E response_id_valid \in BOOLEAN : \E response_discarded \in BOOLEAN : \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarded, stop_reason)
+    \/ \E response_id_valid \in BOOLEAN : ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid)
+    \/ \E response_id_valid \in BOOLEAN : ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+    \/ \E item_count \in 0..2 : \E first_seen_count \in 0..2 : \E first_seen_unique_count \in 0..2 : \E every_item_has_order_entry \in BOOLEAN : \E every_order_entry_has_item \in BOOLEAN : \E all_identity_fields_valid \in BOOLEAN : \E all_delta_ids_valid \in BOOLEAN : \E all_completion_response_ids_valid \in BOOLEAN : \E all_discarded_response_ids_valid \in BOOLEAN : \E all_materialized_items_were_ready_or_skipped \in BOOLEAN : \E all_assistant_items_have_response_unless_skipped \in BOOLEAN : \E all_ready_assistant_items_have_completion_or_are_skipped \in BOOLEAN : \E all_materialized_assistant_completions_consumed \in BOOLEAN : \E all_completed_assistant_text_items_are_ready_or_materialized_or_skipped \in BOOLEAN : \E all_discarded_assistant_items_are_skipped_or_materialized \in BOOLEAN : AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized)
 
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1

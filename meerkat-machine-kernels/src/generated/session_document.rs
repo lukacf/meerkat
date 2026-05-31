@@ -27,6 +27,226 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RealtimeTranscriptLaneKind {
+    #[default]
+    #[serde(rename = "Display")]
+    Display,
+    #[serde(rename = "Spoken")]
+    Spoken,
+}
+impl RealtimeTranscriptLaneKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Display => "Display",
+            Self::Spoken => "Spoken",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptLaneKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Display" => Ok(Self::Display),
+            "Spoken" => Ok(Self::Spoken),
+            other => Err(format!(
+                "invalid RealtimeTranscriptLaneKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptLaneKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptLaneKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeTranscriptMaterializeDecision {
+    #[default]
+    #[serde(rename = "Wait")]
+    Wait,
+    #[serde(rename = "MarkSkipped")]
+    MarkSkipped,
+    #[serde(rename = "MaterializeUser")]
+    MaterializeUser,
+    #[serde(rename = "MaterializeAssistant")]
+    MaterializeAssistant,
+}
+impl RealtimeTranscriptMaterializeDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wait => "Wait",
+            Self::MarkSkipped => "MarkSkipped",
+            Self::MaterializeUser => "MaterializeUser",
+            Self::MaterializeAssistant => "MaterializeAssistant",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptMaterializeDecision {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Wait" => Ok(Self::Wait),
+            "MarkSkipped" => Ok(Self::MarkSkipped),
+            "MaterializeUser" => Ok(Self::MaterializeUser),
+            "MaterializeAssistant" => Ok(Self::MaterializeAssistant),
+            other => Err(format!(
+                "invalid RealtimeTranscriptMaterializeDecision value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptMaterializeDecision {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptMaterializeDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeTranscriptRoleKind {
+    #[default]
+    #[serde(rename = "User")]
+    User,
+    #[serde(rename = "Assistant")]
+    Assistant,
+}
+impl RealtimeTranscriptRoleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptRoleKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "User" => Ok(Self::User),
+            "Assistant" => Ok(Self::Assistant),
+            other => Err(format!(
+                "invalid RealtimeTranscriptRoleKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptRoleKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptRoleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeTranscriptStopReasonKind {
+    #[default]
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "ToolUse")]
+    ToolUse,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl RealtimeTranscriptStopReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cancelled => "Cancelled",
+            Self::ToolUse => "ToolUse",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeTranscriptStopReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Cancelled" => Ok(Self::Cancelled),
+            "ToolUse" => Ok(Self::ToolUse),
+            "Other" => Ok(Self::Other),
+            other => Err(format!(
+                "invalid RealtimeTranscriptStopReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeTranscriptStopReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeTranscriptStopReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SessionFirstTurnPhase {
     #[default]
     #[serde(rename = "Inactive")]
@@ -345,6 +565,82 @@ pub mod inputs {
         pub active_keys_have_known_pending_or_seen: bool,
         pub seen_keys_match_known_appends: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeItemObserved {
+        pub role: RealtimeTranscriptRoleKind,
+        pub response_discarded: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeItemSkipped {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeUserTranscriptFinal {
+        pub text_present: bool,
+        pub segment_empty: bool,
+        pub segment_matches: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeAssistantDelta {
+        pub response_id_valid: bool,
+        pub response_discarded: bool,
+        pub delta_id_present: bool,
+        pub delta_id_seen: bool,
+        pub item_has_text: bool,
+        pub current_lane: RealtimeTranscriptLaneKind,
+        pub requested_lane: RealtimeTranscriptLaneKind,
+        pub response_completed: bool,
+        pub text_after_write_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeAssistantTextReplacement {
+        pub response_id_valid: bool,
+        pub response_discarded: bool,
+        pub item_materialized: bool,
+        pub item_has_text: bool,
+        pub current_lane: RealtimeTranscriptLaneKind,
+        pub requested_lane: RealtimeTranscriptLaneKind,
+        pub response_completed: bool,
+        pub text_after_replace_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeAssistantTurnCompleted {
+        pub response_id_valid: bool,
+        pub response_discarded: bool,
+        pub stop_reason: RealtimeTranscriptStopReasonKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeAssistantTurnInterrupted {
+        pub response_id_valid: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeMaterializeCandidate {
+        pub item_materialized: bool,
+        pub predecessor_materialized: bool,
+        pub item_skipped: bool,
+        pub item_ready: bool,
+        pub item_text_present: bool,
+        pub role: RealtimeTranscriptRoleKind,
+        pub response_id_present: bool,
+        pub completion_present: bool,
+        pub completion_usage_consumed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreRealtimeTranscriptState {
+        pub item_count: u64,
+        pub first_seen_count: u64,
+        pub first_seen_unique_count: u64,
+        pub every_item_has_order_entry: bool,
+        pub every_order_entry_has_item: bool,
+        pub all_identity_fields_valid: bool,
+        pub all_delta_ids_valid: bool,
+        pub all_completion_response_ids_valid: bool,
+        pub all_discarded_response_ids_valid: bool,
+        pub all_materialized_items_were_ready_or_skipped: bool,
+        pub all_assistant_items_have_response_unless_skipped: bool,
+        pub all_ready_assistant_items_have_completion_or_are_skipped: bool,
+        pub all_materialized_assistant_completions_consumed: bool,
+        pub all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: bool,
+        pub all_discarded_assistant_items_are_skipped_or_materialized: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -361,6 +657,15 @@ pub enum Input {
     ResolveSystemContextPendingApplyItem(inputs::ResolveSystemContextPendingApplyItem),
     ResolveSystemContextSteerCleanupItem(inputs::ResolveSystemContextSteerCleanupItem),
     RestoreSystemContextSnapshot(inputs::RestoreSystemContextSnapshot),
+    ResolveRealtimeItemObserved(inputs::ResolveRealtimeItemObserved),
+    ResolveRealtimeItemSkipped(inputs::ResolveRealtimeItemSkipped),
+    ResolveRealtimeUserTranscriptFinal(inputs::ResolveRealtimeUserTranscriptFinal),
+    ResolveRealtimeAssistantDelta(inputs::ResolveRealtimeAssistantDelta),
+    ResolveRealtimeAssistantTextReplacement(inputs::ResolveRealtimeAssistantTextReplacement),
+    ResolveRealtimeAssistantTurnCompleted(inputs::ResolveRealtimeAssistantTurnCompleted),
+    ResolveRealtimeAssistantTurnInterrupted(inputs::ResolveRealtimeAssistantTurnInterrupted),
+    ResolveRealtimeMaterializeCandidate(inputs::ResolveRealtimeMaterializeCandidate),
+    RestoreRealtimeTranscriptState(inputs::RestoreRealtimeTranscriptState),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -383,6 +688,25 @@ impl Input {
                 InputKind::ResolveSystemContextSteerCleanupItem
             }
             Self::RestoreSystemContextSnapshot(_) => InputKind::RestoreSystemContextSnapshot,
+            Self::ResolveRealtimeItemObserved(_) => InputKind::ResolveRealtimeItemObserved,
+            Self::ResolveRealtimeItemSkipped(_) => InputKind::ResolveRealtimeItemSkipped,
+            Self::ResolveRealtimeUserTranscriptFinal(_) => {
+                InputKind::ResolveRealtimeUserTranscriptFinal
+            }
+            Self::ResolveRealtimeAssistantDelta(_) => InputKind::ResolveRealtimeAssistantDelta,
+            Self::ResolveRealtimeAssistantTextReplacement(_) => {
+                InputKind::ResolveRealtimeAssistantTextReplacement
+            }
+            Self::ResolveRealtimeAssistantTurnCompleted(_) => {
+                InputKind::ResolveRealtimeAssistantTurnCompleted
+            }
+            Self::ResolveRealtimeAssistantTurnInterrupted(_) => {
+                InputKind::ResolveRealtimeAssistantTurnInterrupted
+            }
+            Self::ResolveRealtimeMaterializeCandidate(_) => {
+                InputKind::ResolveRealtimeMaterializeCandidate
+            }
+            Self::RestoreRealtimeTranscriptState(_) => InputKind::RestoreRealtimeTranscriptState,
         }
     }
 }
@@ -400,6 +724,15 @@ pub enum InputKind {
     ResolveSystemContextPendingApplyItem,
     ResolveSystemContextSteerCleanupItem,
     RestoreSystemContextSnapshot,
+    ResolveRealtimeItemObserved,
+    ResolveRealtimeItemSkipped,
+    ResolveRealtimeUserTranscriptFinal,
+    ResolveRealtimeAssistantDelta,
+    ResolveRealtimeAssistantTextReplacement,
+    ResolveRealtimeAssistantTurnCompleted,
+    ResolveRealtimeAssistantTurnInterrupted,
+    ResolveRealtimeMaterializeCandidate,
+    RestoreRealtimeTranscriptState,
 }
 
 pub mod effects {
@@ -447,6 +780,30 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SystemContextSnapshotRestoreAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeTranscriptEventResolved {
+        pub observe_item: bool,
+        pub observe_skipped: bool,
+        pub write_user_segment: bool,
+        pub append_assistant_segment: bool,
+        pub replace_assistant_segment: bool,
+        pub promote_lane: bool,
+        pub mark_item_ready: bool,
+        pub record_delta_id: bool,
+        pub remove_completion: bool,
+        pub record_completion: bool,
+        pub discard_response: bool,
+        pub discard_response_by_lane: bool,
+        pub mark_response_ready: bool,
+        pub materialize_ready_items: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeMaterializeCandidateResolved {
+        pub decision: RealtimeTranscriptMaterializeDecision,
+        pub consume_usage: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeTranscriptSnapshotRestoreAuthorized {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -461,6 +818,11 @@ pub enum Effect {
     SystemContextPendingApplyItemResolved(effects::SystemContextPendingApplyItemResolved),
     SystemContextSteerCleanupItemResolved(effects::SystemContextSteerCleanupItemResolved),
     SystemContextSnapshotRestoreAuthorized(effects::SystemContextSnapshotRestoreAuthorized),
+    RealtimeTranscriptEventResolved(effects::RealtimeTranscriptEventResolved),
+    RealtimeMaterializeCandidateResolved(effects::RealtimeMaterializeCandidateResolved),
+    RealtimeTranscriptSnapshotRestoreAuthorized(
+        effects::RealtimeTranscriptSnapshotRestoreAuthorized,
+    ),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -474,6 +836,9 @@ pub enum EffectKind {
     SystemContextPendingApplyItemResolved,
     SystemContextSteerCleanupItemResolved,
     SystemContextSnapshotRestoreAuthorized,
+    RealtimeTranscriptEventResolved,
+    RealtimeMaterializeCandidateResolved,
+    RealtimeTranscriptSnapshotRestoreAuthorized,
 }
 
 #[allow(non_camel_case_types)]
@@ -504,6 +869,35 @@ pub enum TransitionId {
     ResolveSystemContextSteerCleanupItemRuntimeSteer,
     ResolveSystemContextSteerCleanupItemNormal,
     RestoreSystemContextSnapshot,
+    ResolveRealtimeItemObservedDiscardedAssistant,
+    ResolveRealtimeItemObservedPresent,
+    ResolveRealtimeItemSkipped,
+    ResolveRealtimeUserTranscriptFinalEmpty,
+    ResolveRealtimeUserTranscriptFinalStore,
+    ResolveRealtimeUserTranscriptFinalReplayOrConflict,
+    ResolveRealtimeAssistantDeltaInvalidOrDuplicate,
+    ResolveRealtimeAssistantDeltaDiscarded,
+    ResolveRealtimeAssistantDeltaLaneConflict,
+    ResolveRealtimeAssistantDeltaAccepted,
+    ResolveRealtimeAssistantReplacementInvalid,
+    ResolveRealtimeAssistantReplacementDiscarded,
+    ResolveRealtimeAssistantReplacementLocked,
+    ResolveRealtimeAssistantReplacementLaneConflict,
+    ResolveRealtimeAssistantReplacementAccepted,
+    ResolveRealtimeAssistantTurnCompletedInvalid,
+    ResolveRealtimeAssistantTurnCompletedDiscard,
+    ResolveRealtimeAssistantTurnCompletedToolUse,
+    ResolveRealtimeAssistantTurnCompletedRecord,
+    ResolveRealtimeAssistantTurnInterruptedInvalid,
+    ResolveRealtimeAssistantTurnInterruptedValid,
+    ResolveRealtimeMaterializeAlreadyDone,
+    ResolveRealtimeMaterializeWaitForPredecessor,
+    ResolveRealtimeMaterializeSkipped,
+    ResolveRealtimeMaterializeWaitForReadyText,
+    ResolveRealtimeMaterializeUser,
+    ResolveRealtimeMaterializeAssistant,
+    ResolveRealtimeMaterializeAssistantMissingCompletion,
+    AuthorizeRestoreRealtimeTranscriptState,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

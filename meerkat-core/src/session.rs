@@ -12,13 +12,12 @@
 use crate::Provider;
 use crate::generated::{
     session_document, session_durable_config_authority, session_persistence_version_authority,
-    session_realtime_transcript_authority,
-    session_realtime_transcript_authority::SessionRealtimeTranscriptState,
 };
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
+use crate::realtime_transcript_revision::{self, SessionRealtimeTranscriptState};
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
 use crate::tool_scope::ToolFilter;
@@ -2612,15 +2611,14 @@ impl Session {
         event: RealtimeTranscriptEvent,
     ) -> RealtimeTranscriptApplyOutcome {
         let mut state = self.realtime_transcript_state();
-        let commit = session_realtime_transcript_authority::apply_realtime_transcript_event(
-            &mut state, event,
-        )
-        .unwrap_or_else(|err| {
-            fail_closed_generated_restore(
-                "realtime-transcript",
-                <serde_json::Error as serde::de::Error>::custom(err),
-            )
-        });
+        let commit =
+            realtime_transcript_revision::apply_realtime_transcript_event(&mut state, event)
+                .unwrap_or_else(|err| {
+                    fail_closed_generated_restore(
+                        "realtime-transcript",
+                        <serde_json::Error as serde::de::Error>::custom(err),
+                    )
+                });
         self.store_realtime_transcript_state(&state);
         self.push_batch(commit.messages);
         if commit.usage != Usage::default() {
@@ -2650,7 +2648,7 @@ impl Session {
     #[must_use]
     pub fn in_flight_realtime_assistant_response_ids(&self) -> Vec<String> {
         let state = self.realtime_transcript_state();
-        session_realtime_transcript_authority::in_flight_realtime_assistant_response_ids(&state)
+        realtime_transcript_revision::in_flight_realtime_assistant_response_ids(&state)
     }
 
     fn realtime_transcript_state(&self) -> SessionRealtimeTranscriptState {
@@ -2668,7 +2666,7 @@ impl Session {
             .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
             .map(|value| {
                 let state = serde_json::from_value(value.clone())?;
-                session_realtime_transcript_authority::restore_realtime_transcript_state(state)
+                realtime_transcript_revision::restore_realtime_transcript_state(state)
                     .map_err(<serde_json::Error as serde::de::Error>::custom)
             })
             .transpose()

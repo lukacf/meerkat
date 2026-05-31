@@ -41,7 +41,6 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -80,7 +79,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -136,7 +134,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -177,7 +174,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/buildbuddy_static_lanes.rs",
@@ -270,7 +266,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/ci_gate_requires_rmat.rs",
@@ -335,7 +330,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/machines_contracts.rs",
@@ -406,7 +400,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/protocol_codegen_drift.rs",
@@ -520,7 +513,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/rmat_audit.rs",
@@ -594,7 +586,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/rmat_strict.rs",
@@ -658,7 +649,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/protocol_codegen/session_realtime_transcript_authority_domain.rs.inc",
     ],
     srcs = [
         "tests/seam_inventory_strict.rs",

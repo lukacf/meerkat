@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SessionDocumentMachine`
 
 ### Code Anchors
-- `session_document_authority`: `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, and SystemContextSnapshotRestoreAuthorized
+- `session_document_authority`: `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, SystemContextSnapshotRestoreAuthorized, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, and RealtimeTranscriptSnapshotRestoreAuthorized
 
 ### Scenarios
 - `session_first_turn_pending_consume` — MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, and ConsumeSessionDeferredInputsConsumed own the per-session first-turn phase registry and emit SessionFirstTurnPhaseResolved without handwritten phase mutation
@@ -17,6 +17,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `session_system_context_append_resolve` — ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, and ResolveSystemContextAppendNew decide the runtime system-context append disposition from typed key-present/matches/conflicts observations under SystemContextAppendResolved without the shell deciding
 - `session_system_context_apply_discard` — ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, and ResolveSystemContextSteerCleanupItemNormal decide per-append apply/discard from the typed SystemContextSource marker (not a runtime:steer string prefix) under SystemContextPendingApplyItemResolved and SystemContextSteerCleanupItemResolved
 - `session_system_context_snapshot_restore` — RestoreSystemContextSnapshot authorizes a durable system-context snapshot only when active keys have known pending-or-seen entries and seen keys match known appends under SystemContextSnapshotRestoreAuthorized
+- `session_realtime_transcript_event_resolve` — ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState
+- `session_realtime_transcript_materialize_and_restore` — ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, and AuthorizeRestoreRealtimeTranscriptState resolve the per-item materialize verdict and durable snapshot-restore legality under RealtimeMaterializeCandidateResolved and RealtimeTranscriptSnapshotRestoreAuthorized; the shell performs only the topological ordering and message assembly
 
 ### Transitions
 - `MarkSessionInitialTurnPendingInactiveOrPending`
@@ -94,6 +96,93 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RestoreSystemContextSnapshot`
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_snapshot_restore`
+- `ResolveRealtimeItemObservedDiscardedAssistant`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeItemObservedPresent`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeItemSkipped`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`, `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeUserTranscriptFinalEmpty`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeUserTranscriptFinalStore`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeUserTranscriptFinalReplayOrConflict`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantDeltaInvalidOrDuplicate`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantDeltaDiscarded`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantDeltaLaneConflict`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantDeltaAccepted`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantReplacementInvalid`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantReplacementDiscarded`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantReplacementLocked`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantReplacementLaneConflict`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantReplacementAccepted`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantTurnCompletedInvalid`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantTurnCompletedDiscard`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantTurnCompletedToolUse`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantTurnCompletedRecord`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeAssistantTurnInterruptedInvalid`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeAssistantTurnInterruptedValid`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeMaterializeAlreadyDone`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeMaterializeWaitForPredecessor`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeMaterializeSkipped`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeMaterializeWaitForReadyText`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeMaterializeUser`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeMaterializeAssistant`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeMaterializeAssistantMissingCompletion`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `AuthorizeRestoreRealtimeTranscriptState`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -126,6 +215,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SystemContextSnapshotRestoreAuthorized`
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_snapshot_restore`
+- `RealtimeTranscriptEventResolved`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_event_resolve`
+- `RealtimeMaterializeCandidateResolved`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `RealtimeTranscriptSnapshotRestoreAuthorized`
+  - anchors: `session_document_authority`
+  - scenarios: `session_realtime_transcript_materialize_and_restore`
 
 ### Invariants
 - `(none)`

@@ -177,19 +177,6 @@ pub fn run_protocol_codegen() -> Result<()> {
     println!("  generated: {}", output_path.display());
     generated_count += 1;
 
-    let session_realtime_machine =
-        dsl::dsl_session_realtime_transcript_authority_machine_production_schema();
-    let code = generate_session_realtime_transcript_authority(&session_realtime_machine)?;
-    let code = rustfmt_source(&code)?;
-    let output_path =
-        root.join("meerkat-core/src/generated/session_realtime_transcript_authority.rs");
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
-    }
-    fs::write(&output_path, &code).with_context(|| format!("write {}", output_path.display()))?;
-    println!("  generated: {}", output_path.display());
-    generated_count += 1;
-
     if generated_count == 0 {
         println!("protocol-codegen: no handoff protocols declared — nothing to generate");
     } else {
@@ -4721,7 +4708,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
     )?;
     writeln!(
         &mut out,
-        "#![allow(dead_code, clippy::bool_comparison, clippy::field_reassign_with_default, clippy::nonminimal_bool, clippy::partialeq_to_none, clippy::redundant_clone, clippy::redundant_field_names)]"
+        "#![allow(dead_code, unused_parens, unused_variables, clippy::bool_comparison, clippy::field_reassign_with_default, clippy::nonminimal_bool, clippy::partialeq_to_none, clippy::redundant_clone, clippy::redundant_field_names, clippy::too_many_arguments)]"
     )?;
     writeln!(&mut out)?;
     writeln!(&mut out, "use std::{{collections::BTreeMap, fmt}};")?;
@@ -4733,6 +4720,10 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "SessionInitialPromptStageDecision",
         "SystemContextAppendDecision",
         "SystemContextSource",
+        "RealtimeTranscriptRoleKind",
+        "RealtimeTranscriptLaneKind",
+        "RealtimeTranscriptStopReasonKind",
+        "RealtimeTranscriptMaterializeDecision",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -4808,6 +4799,10 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "SessionInitialPromptStageDecision" => Ok("Clear"),
         "SystemContextAppendDecision" => Ok("Staged"),
         "SystemContextSource" => Ok("Normal"),
+        "RealtimeTranscriptRoleKind" => Ok("User"),
+        "RealtimeTranscriptLaneKind" => Ok("Display"),
+        "RealtimeTranscriptStopReasonKind" => Ok("Other"),
+        "RealtimeTranscriptMaterializeDecision" => Ok("Wait"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -5603,6 +5598,10 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "SessionInitialPromptStageDecision"
             | "SystemContextAppendDecision"
             | "SystemContextSource"
+            | "RealtimeTranscriptRoleKind"
+            | "RealtimeTranscriptLaneKind"
+            | "RealtimeTranscriptStopReasonKind"
+            | "RealtimeTranscriptMaterializeDecision"
     )
 }
 
@@ -5639,6 +5638,15 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResolveSystemContextPendingApplyItem",
         "ResolveSystemContextSteerCleanupItem",
         "RestoreSystemContextSnapshot",
+        "ResolveRealtimeItemObserved",
+        "ResolveRealtimeItemSkipped",
+        "ResolveRealtimeUserTranscriptFinal",
+        "ResolveRealtimeAssistantDelta",
+        "ResolveRealtimeAssistantTextReplacement",
+        "ResolveRealtimeAssistantTurnCompleted",
+        "ResolveRealtimeAssistantTurnInterrupted",
+        "ResolveRealtimeMaterializeCandidate",
+        "RestoreRealtimeTranscriptState",
     ] {
         machine
             .inputs
@@ -5656,6 +5664,9 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SystemContextPendingApplyItemResolved",
         "SystemContextSteerCleanupItemResolved",
         "SystemContextSnapshotRestoreAuthorized",
+        "RealtimeTranscriptEventResolved",
+        "RealtimeMaterializeCandidateResolved",
+        "RealtimeTranscriptSnapshotRestoreAuthorized",
     ] {
         machine
             .effects
@@ -5667,6 +5678,10 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionInitialPromptStageDecision",
         "SystemContextAppendDecision",
         "SystemContextSource",
+        "RealtimeTranscriptRoleKind",
+        "RealtimeTranscriptLaneKind",
+        "RealtimeTranscriptStopReasonKind",
+        "RealtimeTranscriptMaterializeDecision",
     ] {
         let binding = machine
             .named_types
@@ -5686,10 +5701,6 @@ pub fn render_pending_continuation_admission(machine: &MachineSchema) -> Result<
 
 pub fn render_session_durable_config_authority(machine: &MachineSchema) -> Result<String> {
     generate_session_durable_config_authority(machine)
-}
-
-pub fn render_session_realtime_transcript_authority(machine: &MachineSchema) -> Result<String> {
-    generate_session_realtime_transcript_authority(machine)
 }
 
 fn generate_session_durable_config_authority(machine: &MachineSchema) -> Result<String> {
@@ -5755,96 +5766,6 @@ fn generate_session_durable_config_authority(machine: &MachineSchema) -> Result<
     )?;
     emit_session_authority_core(&mut out, machine, cfg)?;
     emit_session_durable_config_domain_helpers(&mut out);
-    Ok(out)
-}
-
-fn generate_session_realtime_transcript_authority(machine: &MachineSchema) -> Result<String> {
-    validate_session_realtime_transcript_authority_schema(machine)?;
-    let mut out = String::new();
-    writeln!(
-        &mut out,
-        "// @generated - session realtime transcript authority for `{}`",
-        machine.machine
-    )?;
-    writeln!(
-        &mut out,
-        "// Generated by `xtask protocol-codegen` from `SessionRealtimeTranscriptAuthorityMachine` transitions."
-    )?;
-    writeln!(&mut out, "#![allow(clippy::bool_comparison)]")?;
-    writeln!(&mut out, "#![allow(clippy::too_many_arguments)]")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "use std::collections::{{BTreeMap, BTreeSet}};")?;
-    writeln!(&mut out, "use std::fmt;")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "use crate::{{")?;
-    writeln!(&mut out, "    realtime_transcript::{{")?;
-    writeln!(
-        &mut out,
-        "        RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,"
-    )?;
-    writeln!(
-        &mut out,
-        "        RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole, TranscriptLane,"
-    )?;
-    writeln!(&mut out, "    }},")?;
-    writeln!(&mut out, "    types::{{")?;
-    writeln!(
-        &mut out,
-        "        AssistantBlock, BlockAssistantMessage, ContentInput, Message, StopReason,"
-    )?;
-    writeln!(&mut out, "        TranscriptSource, Usage, UserMessage,")?;
-    writeln!(&mut out, "    }},")?;
-    writeln!(&mut out, "}};")?;
-    writeln!(&mut out)?;
-
-    let cfg = SessionAuthorityRenderConfig {
-        schema_name: "SessionRealtimeTranscriptAuthorityMachine",
-        input_enum: "SessionRealtimeTranscriptAuthorityInput",
-        effect_enum: "SessionRealtimeTranscriptAuthorityEffect",
-        phase_enum: "SessionRealtimeTranscriptAuthorityPhase",
-        state_struct: "SessionRealtimeTranscriptAuthorityMachineState",
-        authority_struct: "SessionRealtimeTranscriptAuthorityMachineAuthority",
-        error_struct: "SessionRealtimeTranscriptAuthorityError",
-        error_message: "generated session realtime transcript authority rejected",
-    };
-    emit_session_named_string_enum(
-        &mut out,
-        machine,
-        "RealtimeTranscriptEventKind",
-        "ItemObserved",
-        cfg.schema_name,
-    )?;
-    emit_session_named_string_enum(
-        &mut out,
-        machine,
-        "RealtimeTranscriptRoleKind",
-        "User",
-        cfg.schema_name,
-    )?;
-    emit_session_named_string_enum(
-        &mut out,
-        machine,
-        "RealtimeTranscriptLaneKind",
-        "Display",
-        cfg.schema_name,
-    )?;
-    emit_session_named_string_enum(
-        &mut out,
-        machine,
-        "RealtimeTranscriptStopReasonKind",
-        "Other",
-        cfg.schema_name,
-    )?;
-    emit_session_named_string_enum(
-        &mut out,
-        machine,
-        "RealtimeTranscriptMaterializeDecision",
-        "Wait",
-        cfg.schema_name,
-    )?;
-    emit_session_realtime_transcript_event_kind_impl(&mut out)?;
-    emit_session_authority_core(&mut out, machine, cfg)?;
-    emit_session_realtime_transcript_domain_helpers(&mut out);
     Ok(out)
 }
 
@@ -6378,46 +6299,6 @@ fn render_session_expr_joined(
         .map(|expr| Ok(format!("({})", render_session_expr(expr, cfg)?)))
         .collect::<Result<Vec<_>>>()?;
     Ok(rendered.join(separator))
-}
-
-fn emit_session_realtime_transcript_event_kind_impl(out: &mut String) -> Result<()> {
-    writeln!(
-        out,
-        r"impl From<&RealtimeTranscriptEvent> for RealtimeTranscriptEventKind {{
-    fn from(event: &RealtimeTranscriptEvent) -> Self {{
-        match event {{
-            RealtimeTranscriptEvent::ItemObserved {{ .. }} => Self::ItemObserved,
-            RealtimeTranscriptEvent::ItemSkipped {{ .. }} => Self::ItemSkipped,
-            RealtimeTranscriptEvent::UserTranscriptFinal {{ .. }} => Self::UserTranscriptFinal,
-            RealtimeTranscriptEvent::AssistantTextDelta {{ .. }} => Self::AssistantTextDelta,
-            RealtimeTranscriptEvent::AssistantTranscriptDelta {{ .. }} => {{
-                Self::AssistantTranscriptDelta
-            }}
-            RealtimeTranscriptEvent::AssistantTranscriptTruncated {{ .. }} => {{
-                Self::AssistantTranscriptTruncated
-            }}
-            RealtimeTranscriptEvent::AssistantTranscriptFinalText {{ .. }} => {{
-                Self::AssistantTranscriptFinalText
-            }}
-            RealtimeTranscriptEvent::AssistantTurnCompleted {{ .. }} => {{
-                Self::AssistantTurnCompleted
-            }}
-            RealtimeTranscriptEvent::AssistantTurnInterrupted {{ .. }} => {{
-                Self::AssistantTurnInterrupted
-            }}
-        }}
-    }}
-}}"
-    )?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_session_realtime_transcript_domain_helpers(out: &mut String) {
-    out.push_str(include_str!(
-        "protocol_codegen/session_realtime_transcript_authority_domain.rs.inc"
-    ));
-    out.push('\n');
 }
 
 fn emit_session_durable_config_domain_helpers(out: &mut String) {
@@ -7550,80 +7431,6 @@ fn validate_session_durable_config_authority_schema(machine: &MachineSchema) -> 
         if !matches!(binding.rust, RustTypeAtom::StringEnum { .. }) {
             bail!(
                 "SessionDurableConfigAuthorityMachine named type `{required}` must be a string enum"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_session_realtime_transcript_authority_schema(machine: &MachineSchema) -> Result<()> {
-    machine
-        .validate()
-        .context("validate SessionRealtimeTranscriptAuthorityMachine schema")?;
-    if machine.machine.as_str() != "SessionRealtimeTranscriptAuthorityMachine" {
-        bail!(
-            "session realtime transcript generator received unexpected machine `{}`",
-            machine.machine
-        );
-    }
-    for required in [
-        "ResolveItemObserved",
-        "ResolveItemSkipped",
-        "ResolveUserTranscriptFinal",
-        "ResolveAssistantDelta",
-        "ResolveAssistantTextReplacement",
-        "ResolveAssistantTurnCompleted",
-        "ResolveAssistantTurnInterrupted",
-        "ResolveMaterializeCandidate",
-        "RestoreRealtimeTranscriptState",
-    ] {
-        machine.inputs.variant_named(required).with_context(|| {
-            format!("SessionRealtimeTranscriptAuthorityMachine missing input `{required}`")
-        })?;
-    }
-    for required in [
-        "RealtimeTranscriptEventResolved",
-        "MaterializeCandidateResolved",
-        "SnapshotRestoreAuthorized",
-    ] {
-        machine.effects.variant_named(required).with_context(|| {
-            format!("SessionRealtimeTranscriptAuthorityMachine missing effect `{required}`")
-        })?;
-    }
-    for required in [
-        "ResolveItemObservedPresent",
-        "ResolveAssistantDeltaAccepted",
-        "ResolveAssistantReplacementAccepted",
-        "ResolveAssistantTurnCompletedRecord",
-        "ResolveAssistantTurnInterruptedValid",
-        "ResolveMaterializeAssistant",
-        "AuthorizeRestoreRealtimeTranscriptState",
-    ] {
-        if !machine
-            .transitions
-            .iter()
-            .any(|transition| transition.name.as_str() == required)
-        {
-            bail!("SessionRealtimeTranscriptAuthorityMachine missing transition `{required}`");
-        }
-    }
-    for required in [
-        "RealtimeTranscriptEventKind",
-        "RealtimeTranscriptRoleKind",
-        "RealtimeTranscriptLaneKind",
-        "RealtimeTranscriptStopReasonKind",
-        "RealtimeTranscriptMaterializeDecision",
-    ] {
-        let binding = machine
-            .named_types
-            .iter()
-            .find(|binding| binding.name.as_str() == required)
-            .with_context(|| {
-                format!("SessionRealtimeTranscriptAuthorityMachine missing named type `{required}`")
-            })?;
-        if !matches!(binding.rust, RustTypeAtom::StringEnum { .. }) {
-            bail!(
-                "SessionRealtimeTranscriptAuthorityMachine named type `{required}` must be a string enum"
             );
         }
     }

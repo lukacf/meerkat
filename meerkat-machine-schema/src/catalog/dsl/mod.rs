@@ -42,7 +42,6 @@ pub mod schedule_lifecycle;
 pub mod session_document;
 pub mod session_durable_config_authority;
 pub mod session_persistence_version_authority;
-pub mod session_realtime_transcript_authority;
 pub mod work_attention_lifecycle;
 pub mod workgraph_lifecycle;
 
@@ -95,9 +94,6 @@ pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
 pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
     "generated::session_persistence_version_authority";
-pub const SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
-pub const SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
-    "generated::session_realtime_transcript_authority";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
@@ -326,6 +322,23 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &["Staged", "Duplicate", "RejectEmpty", "RejectConflict"],
             ),
             NamedTypeBinding::string_enum("SystemContextSource", &["Normal", "RuntimeSteer"]),
+            // Realtime-transcript region typed vocabulary (folded from the
+            // retired SessionRealtimeTranscriptAuthorityMachine).
+            NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
+            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptStopReasonKind",
+                &["Cancelled", "ToolUse", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptMaterializeDecision",
+                &[
+                    "Wait",
+                    "MarkSkipped",
+                    "MaterializeUser",
+                    "MaterializeAssistant",
+                ],
+            ),
         ],
         Vec::new(),
     )
@@ -405,60 +418,6 @@ pub fn session_persistence_version_authority_schema_metadata() -> MachineSchemaM
                 "SessionMetadataSchema",
             ],
         )],
-        Vec::new(),
-    )
-}
-
-/// Session-local support authority for realtime transcript staging and
-/// materialization decisions emitted into `meerkat-core`.
-pub fn dsl_session_realtime_transcript_authority_machine() -> MachineSchema {
-    session_realtime_transcript_authority_schema_metadata().attach_to(
-        session_realtime_transcript_authority::SessionRealtimeTranscriptAuthorityMachineState::schema(
-        ),
-    )
-}
-
-pub fn dsl_session_realtime_transcript_authority_machine_production_schema() -> MachineSchema {
-    with_production_rust_binding(
-        dsl_session_realtime_transcript_authority_machine(),
-        SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_CRATE,
-        SESSION_REALTIME_TRANSCRIPT_AUTHORITY_PRODUCTION_RUST_MODULE,
-    )
-}
-
-pub fn session_realtime_transcript_authority_schema_metadata() -> MachineSchemaMetadata {
-    machine_schema_metadata(
-        vec![
-            NamedTypeBinding::string_enum(
-                "RealtimeTranscriptEventKind",
-                &[
-                    "ItemObserved",
-                    "ItemSkipped",
-                    "UserTranscriptFinal",
-                    "AssistantTextDelta",
-                    "AssistantTranscriptDelta",
-                    "AssistantTranscriptTruncated",
-                    "AssistantTranscriptFinalText",
-                    "AssistantTurnCompleted",
-                    "AssistantTurnInterrupted",
-                ],
-            ),
-            NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
-            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
-            NamedTypeBinding::string_enum(
-                "RealtimeTranscriptStopReasonKind",
-                &["Cancelled", "ToolUse", "Other"],
-            ),
-            NamedTypeBinding::string_enum(
-                "RealtimeTranscriptMaterializeDecision",
-                &[
-                    "Wait",
-                    "MarkSkipped",
-                    "MaterializeUser",
-                    "MaterializeAssistant",
-                ],
-            ),
-        ],
         Vec::new(),
     )
 }

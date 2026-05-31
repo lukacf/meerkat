@@ -61,6 +61,7 @@ pub mod prompt;
 pub mod provider;
 pub mod provider_matrix;
 pub mod realtime_transcript;
+pub mod realtime_transcript_revision;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;

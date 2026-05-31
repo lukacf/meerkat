@@ -24,6 +24,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveSystemContextPendingApplyItem`(source_kind: SystemContextSource)
 - `ResolveSystemContextSteerCleanupItem`(source_kind: SystemContextSource)
 - `RestoreSystemContextSnapshot`(active_keys_have_known_pending_or_seen: Bool, seen_keys_match_known_appends: Bool)
+- `ResolveRealtimeItemObserved`(role: RealtimeTranscriptRoleKind, response_discarded: Bool)
+- `ResolveRealtimeItemSkipped`
+- `ResolveRealtimeUserTranscriptFinal`(text_present: Bool, segment_empty: Bool, segment_matches: Bool)
+- `ResolveRealtimeAssistantDelta`(response_id_valid: Bool, response_discarded: Bool, delta_id_present: Bool, delta_id_seen: Bool, item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind, response_completed: Bool, text_after_write_present: Bool)
+- `ResolveRealtimeAssistantTextReplacement`(response_id_valid: Bool, response_discarded: Bool, item_materialized: Bool, item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind, response_completed: Bool, text_after_replace_present: Bool)
+- `ResolveRealtimeAssistantTurnCompleted`(response_id_valid: Bool, response_discarded: Bool, stop_reason: RealtimeTranscriptStopReasonKind)
+- `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid: Bool)
+- `ResolveRealtimeMaterializeCandidate`(item_materialized: Bool, predecessor_materialized: Bool, item_skipped: Bool, item_ready: Bool, item_text_present: Bool, role: RealtimeTranscriptRoleKind, response_id_present: Bool, completion_present: Bool, completion_usage_consumed: Bool)
+- `RestoreRealtimeTranscriptState`(item_count: u64, first_seen_count: u64, first_seen_unique_count: u64, every_item_has_order_entry: Bool, every_order_entry_has_item: Bool, all_identity_fields_valid: Bool, all_delta_ids_valid: Bool, all_completion_response_ids_valid: Bool, all_discarded_response_ids_valid: Bool, all_materialized_items_were_ready_or_skipped: Bool, all_assistant_items_have_response_unless_skipped: Bool, all_ready_assistant_items_have_completion_or_are_skipped: Bool, all_materialized_assistant_completions_consumed: Bool, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: Bool, all_discarded_assistant_items_are_skipped_or_materialized: Bool)
 
 ## Signals
 
@@ -38,6 +47,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SystemContextPendingApplyItemResolved`(promote_to_applied: Bool, mark_seen_applied: Bool, remove_seen: Bool)
 - `SystemContextSteerCleanupItemResolved`(discard: Bool)
 - `SystemContextSnapshotRestoreAuthorized`
+- `RealtimeTranscriptEventResolved`(observe_item: Bool, observe_skipped: Bool, write_user_segment: Bool, append_assistant_segment: Bool, replace_assistant_segment: Bool, promote_lane: Bool, mark_item_ready: Bool, record_delta_id: Bool, remove_completion: Bool, record_completion: Bool, discard_response: Bool, discard_response_by_lane: Bool, mark_response_ready: Bool, materialize_ready_items: Bool)
+- `RealtimeMaterializeCandidateResolved`(decision: RealtimeTranscriptMaterializeDecision, consume_usage: Bool)
+- `RealtimeTranscriptSnapshotRestoreAuthorized`
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -46,6 +58,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `append_is_conflict`(idempotency_key_present: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `append_is_duplicate`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `append_is_new`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
+- `realtime_delta_is_duplicate`(delta_id_present: Bool, delta_id_seen: Bool) -> `Bool`
+- `realtime_lane_accepts`(item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind) -> `Bool`
+- `realtime_should_mark_ready_after_write`(response_completed: Bool, text_after_write_present: Bool) -> `Bool`
+- `realtime_stop_reason_discards`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
+- `realtime_stop_reason_removes_completion`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
+- `realtime_stop_reason_records_completion`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
 
 ## Invariants
 
@@ -250,9 +268,239 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SystemContextSnapshotRestoreAuthorized`
 - To: `Ready`
 
+### `ResolveRealtimeItemObservedDiscardedAssistant`
+- From: `Ready`
+- On: `ResolveRealtimeItemObserved`(role, response_discarded)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeItemObservedPresent`
+- From: `Ready`
+- On: `ResolveRealtimeItemObserved`(role, response_discarded)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeItemSkipped`
+- From: `Ready`
+- On: `ResolveRealtimeItemSkipped`()
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserTranscriptFinalEmpty`
+- From: `Ready`
+- On: `ResolveRealtimeUserTranscriptFinal`(text_present, segment_empty, segment_matches)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserTranscriptFinalStore`
+- From: `Ready`
+- On: `ResolveRealtimeUserTranscriptFinal`(text_present, segment_empty, segment_matches)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserTranscriptFinalReplayOrConflict`
+- From: `Ready`
+- On: `ResolveRealtimeUserTranscriptFinal`(text_present, segment_empty, segment_matches)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantDeltaInvalidOrDuplicate`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantDelta`(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantDeltaDiscarded`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantDelta`(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantDeltaLaneConflict`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantDelta`(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantDeltaAccepted`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantDelta`(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantReplacementInvalid`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTextReplacement`(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantReplacementDiscarded`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTextReplacement`(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantReplacementLocked`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTextReplacement`(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantReplacementLaneConflict`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTextReplacement`(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantReplacementAccepted`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTextReplacement`(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantTurnCompletedInvalid`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTurnCompleted`(response_id_valid, response_discarded, stop_reason)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantTurnCompletedDiscard`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTurnCompleted`(response_id_valid, response_discarded, stop_reason)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantTurnCompletedToolUse`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTurnCompleted`(response_id_valid, response_discarded, stop_reason)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantTurnCompletedRecord`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTurnCompleted`(response_id_valid, response_discarded, stop_reason)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantTurnInterruptedInvalid`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeAssistantTurnInterruptedValid`
+- From: `Ready`
+- On: `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeAlreadyDone`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeWaitForPredecessor`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeSkipped`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeWaitForReadyText`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeUser`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeAssistant`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `ResolveRealtimeMaterializeAssistantMissingCompletion`
+- From: `Ready`
+- On: `ResolveRealtimeMaterializeCandidate`(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
+- Guards:
+  - ``
+- Emits: `RealtimeMaterializeCandidateResolved`
+- To: `Ready`
+
+### `AuthorizeRestoreRealtimeTranscriptState`
+- From: `Ready`
+- On: `RestoreRealtimeTranscriptState`(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptSnapshotRestoreAuthorized`
+- To: `Ready`
+
 ## Coverage
 ### Code Anchors
-- `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, and SystemContextSnapshotRestoreAuthorized
+- `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, SystemContextSnapshotRestoreAuthorized, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, and RealtimeTranscriptSnapshotRestoreAuthorized
 
 ### Scenarios
 - `session_first_turn_pending_consume` — MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, and ConsumeSessionDeferredInputsConsumed own the per-session first-turn phase registry and emit SessionFirstTurnPhaseResolved without handwritten phase mutation
@@ -261,3 +509,5 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_system_context_append_resolve` — ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, and ResolveSystemContextAppendNew decide the runtime system-context append disposition from typed key-present/matches/conflicts observations under SystemContextAppendResolved without the shell deciding
 - `session_system_context_apply_discard` — ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, and ResolveSystemContextSteerCleanupItemNormal decide per-append apply/discard from the typed SystemContextSource marker (not a runtime:steer string prefix) under SystemContextPendingApplyItemResolved and SystemContextSteerCleanupItemResolved
 - `session_system_context_snapshot_restore` — RestoreSystemContextSnapshot authorizes a durable system-context snapshot only when active keys have known pending-or-seen entries and seen keys match known appends under SystemContextSnapshotRestoreAuthorized
+- `session_realtime_transcript_event_resolve` — ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState
+- `session_realtime_transcript_materialize_and_restore` — ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, and AuthorizeRestoreRealtimeTranscriptState resolve the per-item materialize verdict and durable snapshot-restore legality under RealtimeMaterializeCandidateResolved and RealtimeTranscriptSnapshotRestoreAuthorized; the shell performs only the topological ordering and message assembly

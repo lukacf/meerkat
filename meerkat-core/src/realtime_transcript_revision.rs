@@ -1,30 +1,82 @@
-fn realtime_transcript_authority_effect(
-    input: SessionRealtimeTranscriptAuthorityInput,
-    expected: &'static str,
-) -> Result<Vec<SessionRealtimeTranscriptAuthorityEffect>, SessionRealtimeTranscriptAuthorityError>
-{
-    let mut authority = SessionRealtimeTranscriptAuthorityMachineAuthority::new();
-    let effects = authority.apply_input(input)?;
-    if effects.iter().any(|effect| {
-        matches!(
-            (expected, effect),
-            (
-                "RealtimeTranscriptEventResolved",
-                SessionRealtimeTranscriptAuthorityEffect::RealtimeTranscriptEventResolved { .. }
-            ) | (
-                "MaterializeCandidateResolved",
-                SessionRealtimeTranscriptAuthorityEffect::MaterializeCandidateResolved { .. }
-            ) | (
-                "SnapshotRestoreAuthorized",
-                SessionRealtimeTranscriptAuthorityEffect::SnapshotRestoreAuthorized
-            )
+//! Realtime-transcript revision shell — NON-generated MECHANISM.
+//!
+//! This module is the mechanical companion to the realtime-transcript region
+//! of the canonical [`crate::generated::session_document::SessionDocumentMachine`].
+//!
+//! ## DECISION vs MECHANISM split
+//!
+//! Every SEMANTIC decision in the realtime-transcript flow is owned by the
+//! `SessionDocumentMachine` DSL (its realtime-transcript region):
+//!   * the per-event **action vector** (observe/append/replace/promote/
+//!     mark-ready/record/discard/materialize),
+//!   * the per-item **materialize verdict** (`Wait` / `MarkSkipped` /
+//!     `MaterializeUser` / `MaterializeAssistant` + `consume_usage`),
+//!   * the snapshot-restore **consistency authorization**.
+//!
+//! This file performs only the MECHANICAL work the DSL expr language cannot
+//! express and which the task scopes as shell helpers:
+//!   * the per-session item registry storage ([`SessionRealtimeTranscriptState`]
+//!     and its content-segment maps),
+//!   * `item.text()` string assembly over `content_segments`,
+//!   * the causal topological ordering ([`realtime_transcript_order`]),
+//!   * the materialize loop / batching / `AssistantBlock`/`Message` assembly,
+//!   * `in_flight` filtering + dedup,
+//!   * the restore-consistency observation computations.
+//!
+//! It DECIDES nothing: it computes typed RAW observations from the bulky
+//! registry, hands them to the machine, and mirrors the machine's resolved
+//! action vector / verdict back onto the registry.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::generated::session_document::{
+    RealtimeTranscriptLaneKind, RealtimeTranscriptMaterializeDecision, RealtimeTranscriptRoleKind,
+    RealtimeTranscriptStopReasonKind, SessionDocumentEffect, SessionDocumentError,
+    SessionDocumentMachineAuthority,
+};
+use crate::realtime_transcript::{
+    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
+    RealtimeTranscriptRole, TranscriptLane,
+};
+use crate::types::{
+    AssistantBlock, BlockAssistantMessage, ContentInput, Message, StopReason, TranscriptSource,
+    Usage, UserMessage,
+};
+
+/// Error surfaced when the canonical SessionDocument authority rejects a
+/// realtime-transcript operation. Carries the rejected op label for fail-closed
+/// diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeTranscriptShellError {
+    op: &'static str,
+}
+
+impl std::fmt::Display for RealtimeTranscriptShellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session document authority rejected realtime-transcript {}",
+            self.op
         )
-    }) {
-        Ok(effects)
-    } else {
-        Err(SessionRealtimeTranscriptAuthorityError { op: expected })
     }
 }
+
+impl std::error::Error for RealtimeTranscriptShellError {}
+
+impl From<SessionDocumentError> for RealtimeTranscriptShellError {
+    fn from(err: SessionDocumentError) -> Self {
+        // The machine error label is stable; re-tag it under a realtime op so
+        // the caller's fail-closed path keeps a transcript-scoped message.
+        let _ = err;
+        Self {
+            op: "decision_rejected",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DECISION mirrors: typed projections of the machine's emitted action vectors.
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
 struct RealtimeTranscriptEventDecision {
@@ -50,14 +102,23 @@ struct MaterializeCandidateDecision {
     consume_usage: bool,
 }
 
+fn document_authority() -> SessionDocumentMachineAuthority {
+    SessionDocumentMachineAuthority::new()
+}
+
+/// Drive the machine's realtime-transcript event region and mirror the emitted
+/// action vector. The machine decides; this never does.
 fn resolve_realtime_event(
-    input: SessionRealtimeTranscriptAuthorityInput,
-) -> Result<RealtimeTranscriptEventDecision, SessionRealtimeTranscriptAuthorityError> {
-    let effects = realtime_transcript_authority_effect(input, "RealtimeTranscriptEventResolved")?;
+    apply: impl FnOnce(
+        &mut SessionDocumentMachineAuthority,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError>,
+) -> Result<RealtimeTranscriptEventDecision, RealtimeTranscriptShellError> {
+    let mut authority = document_authority();
+    let effects = apply(&mut authority)?;
     effects
         .into_iter()
         .find_map(|effect| match effect {
-            SessionRealtimeTranscriptAuthorityEffect::RealtimeTranscriptEventResolved {
+            SessionDocumentEffect::RealtimeTranscriptEventResolved {
                 observe_item,
                 observe_skipped,
                 write_user_segment,
@@ -90,20 +151,33 @@ fn resolve_realtime_event(
             }),
             _ => None,
         })
-        .ok_or(SessionRealtimeTranscriptAuthorityError {
-            op: "RealtimeTranscriptEventResolved",
+        .ok_or(RealtimeTranscriptShellError {
+            op: "event_resolved",
         })
 }
 
 fn resolve_materialize_candidate(
-    input: SessionRealtimeTranscriptAuthorityInput,
-) -> Result<MaterializeCandidateDecision, SessionRealtimeTranscriptAuthorityError> {
-    let effects =
-        realtime_transcript_authority_effect(input, "MaterializeCandidateResolved")?;
+    state: &SessionRealtimeTranscriptState,
+    item: &RealtimeTranscriptItemState,
+    text_present: bool,
+    completion: Option<&RealtimeAssistantCompletion>,
+) -> Result<MaterializeCandidateDecision, RealtimeTranscriptShellError> {
+    let mut authority = document_authority();
+    let effects = authority.resolve_realtime_materialize_candidate(
+        item.materialized,
+        realtime_predecessor_materialized(state, item.previous_item_id.as_deref()),
+        item.skipped,
+        item.ready,
+        text_present,
+        role_kind(item.role),
+        item.response_id.is_some(),
+        completion.is_some(),
+        completion.is_some_and(|completion| completion.usage_consumed),
+    )?;
     effects
         .into_iter()
         .find_map(|effect| match effect {
-            SessionRealtimeTranscriptAuthorityEffect::MaterializeCandidateResolved {
+            SessionDocumentEffect::RealtimeMaterializeCandidateResolved {
                 decision,
                 consume_usage,
             } => Some(MaterializeCandidateDecision {
@@ -112,10 +186,14 @@ fn resolve_materialize_candidate(
             }),
             _ => None,
         })
-        .ok_or(SessionRealtimeTranscriptAuthorityError {
-            op: "MaterializeCandidateResolved",
+        .ok_or(RealtimeTranscriptShellError {
+            op: "materialize_candidate_resolved",
         })
 }
+
+// ---------------------------------------------------------------------------
+// Per-session registry storage (MECHANISM).
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -203,48 +281,43 @@ pub struct RealtimeTranscriptApplyCommit {
     pub usage: Usage,
 }
 
+/// Authorize a durable snapshot through the canonical SessionDocument
+/// realtime-transcript restore transition. The shell computes the consistency
+/// observations mechanically; the machine decides legality.
 pub fn restore_realtime_transcript_state(
     state: SessionRealtimeTranscriptState,
-) -> Result<SessionRealtimeTranscriptState, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<SessionRealtimeTranscriptState, RealtimeTranscriptShellError> {
     let first_seen_unique_count = state
         .first_seen_order
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>()
         .len();
-    realtime_transcript_authority_effect(
-        SessionRealtimeTranscriptAuthorityInput::RestoreRealtimeTranscriptState {
-            item_count: usize_to_u64(state.items.len()),
-            first_seen_count: usize_to_u64(state.first_seen_order.len()),
-            first_seen_unique_count: usize_to_u64(first_seen_unique_count),
-            every_item_has_order_entry: state
-                .items
-                .keys()
-                .all(|item_id| state.first_seen_order.iter().any(|seen| seen == item_id)),
-            every_order_entry_has_item: state
-                .first_seen_order
-                .iter()
-                .all(|item_id| state.items.contains_key(item_id)),
-            all_identity_fields_valid: realtime_transcript_state_identity_fields_valid(&state),
-            all_delta_ids_valid: realtime_transcript_delta_ids_valid(&state),
-            all_completion_response_ids_valid: realtime_transcript_completion_ids_valid(&state),
-            all_discarded_response_ids_valid: realtime_transcript_discarded_ids_valid(&state),
-            all_materialized_items_were_ready_or_skipped:
-                realtime_transcript_materialized_items_were_ready_or_skipped(&state),
-            all_assistant_items_have_response_unless_skipped:
-                realtime_transcript_assistant_items_have_response_unless_skipped(&state),
-            all_ready_assistant_items_have_completion_or_are_skipped:
-                realtime_transcript_ready_assistant_items_have_completion_or_are_skipped(&state),
-            all_materialized_assistant_completions_consumed:
-                realtime_transcript_materialized_assistant_completions_consumed(&state),
-            all_completed_assistant_text_items_are_ready_or_materialized_or_skipped:
-                realtime_transcript_completed_assistant_text_items_are_ready_or_materialized_or_skipped(
-                    &state,
-                ),
-            all_discarded_assistant_items_are_skipped_or_materialized:
-                realtime_transcript_discarded_assistant_items_are_skipped_or_materialized(&state),
-        },
-        "SnapshotRestoreAuthorized",
+    let mut authority = document_authority();
+    authority.restore_realtime_transcript_state(
+        usize_to_u64(state.items.len()),
+        usize_to_u64(state.first_seen_order.len()),
+        usize_to_u64(first_seen_unique_count),
+        state
+            .items
+            .keys()
+            .all(|item_id| state.first_seen_order.iter().any(|seen| seen == item_id)),
+        state
+            .first_seen_order
+            .iter()
+            .all(|item_id| state.items.contains_key(item_id)),
+        realtime_transcript_state_identity_fields_valid(&state),
+        realtime_transcript_delta_ids_valid(&state),
+        realtime_transcript_completion_ids_valid(&state),
+        realtime_transcript_discarded_ids_valid(&state),
+        realtime_transcript_materialized_items_were_ready_or_skipped(&state),
+        realtime_transcript_assistant_items_have_response_unless_skipped(&state),
+        realtime_transcript_ready_assistant_items_have_completion_or_are_skipped(&state),
+        realtime_transcript_materialized_assistant_completions_consumed(&state),
+        realtime_transcript_completed_assistant_text_items_are_ready_or_materialized_or_skipped(
+            &state,
+        ),
+        realtime_transcript_discarded_assistant_items_are_skipped_or_materialized(&state),
     )?;
     Ok(state)
 }
@@ -252,7 +325,7 @@ pub fn restore_realtime_transcript_state(
 pub fn apply_realtime_transcript_event(
     state: &mut SessionRealtimeTranscriptState,
     event: RealtimeTranscriptEvent,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let commit = match event {
         RealtimeTranscriptEvent::ItemObserved {
             item_id,
@@ -261,14 +334,13 @@ pub fn apply_realtime_transcript_event(
             response_id,
         } => {
             let response_id = normalize_realtime_optional_response_id(response_id);
-            let decision =
-                resolve_realtime_event(SessionRealtimeTranscriptAuthorityInput::ResolveItemObserved {
-                    role: role_kind(role),
-                    response_discarded: role == RealtimeTranscriptRole::Assistant
-                        && response_id.as_ref().is_some_and(|id| {
-                            state.discarded_assistant_response_ids.contains(id)
-                        }),
-                })?;
+            let response_discarded = role == RealtimeTranscriptRole::Assistant
+                && response_id
+                    .as_ref()
+                    .is_some_and(|id| state.discarded_assistant_response_ids.contains(id));
+            let decision = resolve_realtime_event(|authority| {
+                authority.resolve_realtime_item_observed(role_kind(role), response_discarded)
+            })?;
             apply_item_observation_decision(
                 state,
                 decision,
@@ -283,7 +355,7 @@ pub fn apply_realtime_transcript_event(
             previous_item_id,
         } => {
             let decision =
-                resolve_realtime_event(SessionRealtimeTranscriptAuthorityInput::ResolveItemSkipped)?;
+                resolve_realtime_event(|authority| authority.resolve_realtime_item_skipped())?;
             apply_item_observation_decision(
                 state,
                 decision,
@@ -298,13 +370,7 @@ pub fn apply_realtime_transcript_event(
             previous_item_id,
             content_index,
             text,
-        } => apply_user_transcript_final(
-            state,
-            item_id,
-            previous_item_id,
-            content_index,
-            text,
-        )?,
+        } => apply_user_transcript_final(state, item_id, previous_item_id, content_index, text)?,
         RealtimeTranscriptEvent::AssistantTextDelta {
             response_id,
             delta_id,
@@ -384,7 +450,7 @@ fn apply_item_observation_decision(
     previous_item_id: Option<String>,
     role: RealtimeTranscriptRole,
     response_id: Option<String>,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     if decision.observe_skipped {
         observe_realtime_skipped_item(state, item_id, previous_item_id);
     } else if decision.observe_item {
@@ -399,19 +465,20 @@ fn apply_user_transcript_final(
     previous_item_id: Option<String>,
     content_index: u32,
     text: String,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let existing_segment = state
         .items
         .get(&item_id)
         .and_then(|item| item.content_segments.get(&content_index));
     let segment_empty = existing_segment.is_none_or(String::is_empty);
     let segment_matches = existing_segment.is_some_and(|segment| segment == &text);
-    let decision =
-        resolve_realtime_event(SessionRealtimeTranscriptAuthorityInput::ResolveUserTranscriptFinal {
-            text_present: !text.is_empty(),
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_user_transcript_final(
+            !text.is_empty(),
             segment_empty,
             segment_matches,
-        })?;
+        )
+    })?;
 
     if let Some(item) = if decision.observe_item {
         observe_realtime_item(
@@ -439,6 +506,7 @@ fn apply_user_transcript_final(
     finish_realtime_event(state, decision)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_assistant_delta(
     state: &mut SessionRealtimeTranscriptState,
     response_id: String,
@@ -448,7 +516,7 @@ fn apply_assistant_delta(
     content_index: u32,
     delta: String,
     requested_lane: TranscriptLane,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let response_id = normalize_realtime_response_id(response_id);
     let delta_id_present = !delta_id.trim().is_empty();
     let delta_id_seen = delta_id_present && state.seen_delta_ids.contains(&delta_id);
@@ -468,18 +536,19 @@ fn apply_assistant_delta(
     let response_completed = response_id
         .as_ref()
         .is_some_and(|id| state.assistant_completions.contains_key(id));
-    let decision =
-        resolve_realtime_event(SessionRealtimeTranscriptAuthorityInput::ResolveAssistantDelta {
-            response_id_valid: response_id.is_some(),
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_assistant_delta(
+            response_id.is_some(),
             response_discarded,
             delta_id_present,
             delta_id_seen,
             item_has_text,
-            current_lane: lane_kind(current_lane),
-            requested_lane: lane_kind(requested_lane),
+            lane_kind(current_lane),
+            lane_kind(requested_lane),
             response_completed,
             text_after_write_present,
-        })?;
+        )
+    })?;
 
     if decision.observe_skipped {
         observe_realtime_skipped_item(state, item_id, previous_item_id);
@@ -527,7 +596,7 @@ fn apply_assistant_text_replacement(
     content_index: u32,
     text: String,
     op: &'static str,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let response_id = normalize_realtime_response_id(response_id);
     let response_discarded = response_id
         .as_ref()
@@ -550,18 +619,18 @@ fn apply_assistant_text_replacement(
     let response_completed = response_id
         .as_ref()
         .is_some_and(|id| state.assistant_completions.contains_key(id));
-    let decision = resolve_realtime_event(
-        SessionRealtimeTranscriptAuthorityInput::ResolveAssistantTextReplacement {
-            response_id_valid: response_id.is_some(),
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_assistant_text_replacement(
+            response_id.is_some(),
             response_discarded,
             item_materialized,
             item_has_text,
-            current_lane: lane_kind(current_lane),
-            requested_lane: lane_kind(TranscriptLane::Spoken),
+            lane_kind(current_lane),
+            lane_kind(TranscriptLane::Spoken),
             response_completed,
             text_after_replace_present,
-        },
-    )?;
+        )
+    })?;
 
     if decision.observe_skipped {
         observe_realtime_skipped_item(state, item_id, None);
@@ -588,7 +657,9 @@ fn apply_assistant_text_replacement(
                 );
             } else if decision.promote_lane {
                 item.lane = TranscriptLane::Spoken;
-            } else if decision.observe_item && current_lane != TranscriptLane::Spoken && item_has_text
+            } else if decision.observe_item
+                && current_lane != TranscriptLane::Spoken
+                && item_has_text
             {
                 tracing::warn!(
                     "{op} routed to a Display-lane item; dropping replacement to preserve generated lane decision"
@@ -610,18 +681,18 @@ fn apply_assistant_turn_completed(
     response_id: String,
     stop_reason: StopReason,
     usage: Usage,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let response_id = normalize_realtime_response_id(response_id);
     let response_discarded = response_id
         .as_ref()
         .is_some_and(|id| state.discarded_assistant_response_ids.contains(id));
-    let decision = resolve_realtime_event(
-        SessionRealtimeTranscriptAuthorityInput::ResolveAssistantTurnCompleted {
-            response_id_valid: response_id.is_some(),
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_assistant_turn_completed(
+            response_id.is_some(),
             response_discarded,
-            stop_reason: stop_reason_kind(stop_reason),
-        },
-    )?;
+            stop_reason_kind(stop_reason),
+        )
+    })?;
 
     if let Some(response_id) = response_id {
         if decision.discard_response {
@@ -650,13 +721,11 @@ fn apply_assistant_turn_completed(
 fn apply_assistant_turn_interrupted(
     state: &mut SessionRealtimeTranscriptState,
     response_id: String,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let response_id = normalize_realtime_response_id(response_id);
-    let decision = resolve_realtime_event(
-        SessionRealtimeTranscriptAuthorityInput::ResolveAssistantTurnInterrupted {
-            response_id_valid: response_id.is_some(),
-        },
-    )?;
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_assistant_turn_interrupted(response_id.is_some())
+    })?;
 
     if let Some(response_id) = response_id {
         if decision.discard_response_by_lane {
@@ -682,7 +751,7 @@ fn apply_assistant_turn_interrupted(
 fn finish_realtime_event(
     state: &mut SessionRealtimeTranscriptState,
     decision: RealtimeTranscriptEventDecision,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     if decision.materialize_ready_items {
         materialize_realtime_transcript_ready_items(state)
     } else {
@@ -721,7 +790,7 @@ pub fn in_flight_realtime_assistant_response_ids(
 
 fn materialize_realtime_transcript_ready_items(
     state: &mut SessionRealtimeTranscriptState,
-) -> Result<RealtimeTranscriptApplyCommit, SessionRealtimeTranscriptAuthorityError> {
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let mut materialized = Vec::new();
     let mut messages = Vec::new();
     let mut committed_usage = Usage::default();
@@ -744,21 +813,7 @@ fn materialize_realtime_transcript_ready_items(
                 .as_ref()
                 .and_then(|response_id| state.assistant_completions.get(response_id));
             let decision =
-                resolve_materialize_candidate(SessionRealtimeTranscriptAuthorityInput::ResolveMaterializeCandidate {
-                    item_materialized: item.materialized,
-                    predecessor_materialized: realtime_predecessor_materialized(
-                        state,
-                        item.previous_item_id.as_deref(),
-                    ),
-                    item_skipped: item.skipped,
-                    item_ready: item.ready,
-                    item_text_present: !text.is_empty(),
-                    role: role_kind(item.role),
-                    response_id_present: item.response_id.is_some(),
-                    completion_present: completion.is_some(),
-                    completion_usage_consumed: completion
-                        .is_some_and(|completion| completion.usage_consumed),
-                })?;
+                resolve_materialize_candidate(state, item, !text.is_empty(), completion)?;
             match decision.decision {
                 RealtimeTranscriptMaterializeDecision::Wait => {}
                 RealtimeTranscriptMaterializeDecision::MarkSkipped => {
@@ -820,10 +875,8 @@ fn materialize_realtime_transcript_ready_items(
                     messages.push(Message::User(UserMessage::with_blocks(
                         ContentInput::Text(text.clone()).into_blocks(),
                     )));
-                    materialized.push(RealtimeTranscriptMaterializedMessage::User {
-                        item_id,
-                        text,
-                    });
+                    materialized
+                        .push(RealtimeTranscriptMaterializedMessage::User { item_id, text });
                 }
                 ResolvedMaterialization::Assistant {
                     item_id,
@@ -1008,7 +1061,10 @@ fn mark_realtime_assistant_response_ready(
     }
 }
 
-fn discard_realtime_assistant_response(state: &mut SessionRealtimeTranscriptState, response_id: &str) {
+fn discard_realtime_assistant_response(
+    state: &mut SessionRealtimeTranscriptState,
+    response_id: &str,
+) {
     state
         .discarded_assistant_response_ids
         .insert(response_id.to_string());
@@ -1037,7 +1093,10 @@ fn discard_realtime_assistant_response_by_lane(
         {
             continue;
         }
-        let has_content = item.content_segments.values().any(|segment| !segment.is_empty());
+        let has_content = item
+            .content_segments
+            .values()
+            .any(|segment| !segment.is_empty());
         if item.lane == TranscriptLane::Display && has_content {
             continue;
         }
@@ -1148,9 +1207,7 @@ fn stop_reason_kind(stop_reason: StopReason) -> RealtimeTranscriptStopReasonKind
     }
 }
 
-fn realtime_transcript_state_identity_fields_valid(
-    state: &SessionRealtimeTranscriptState,
-) -> bool {
+fn realtime_transcript_state_identity_fields_valid(state: &SessionRealtimeTranscriptState) -> bool {
     state.items.iter().all(|(item_id, item)| {
         !item_id.trim().is_empty()
             && item

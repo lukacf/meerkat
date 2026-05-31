@@ -237,6 +237,129 @@ fn session_persistence_version_witness_stays_a_pure_version_encoder() {
     );
 }
 
+/// Witness-purity ratchet (LUC-524, P0 Dogma Invariant 1): the
+/// `auth_lease_durable_lifecycle_marker` relation
+/// (`marker_relation_for_tokens_and_snapshot`) is a NON-canonical generated
+/// WITNESS — a pure ordering/equality comparison between the durably-persisted
+/// credential marker and the live AuthMachine `AuthLeaseSnapshot` projection. It
+/// answers exactly one mechanical question: "is the persisted marker equal-to /
+/// newer-than / staler-than / unrelated-to the live credential projection?"
+/// (a tuple `Ord`/`Eq` over `(token_key, expires_at, generation,
+/// credential_published_at_millis)`). The admission POLICY lives in the
+/// resolver (`meerkat-auth-core::resolver`), which maps `Matches` → proceed and
+/// `{TokenNewer, TokenStale, Invalid}` → stale-credential rejection. The witness
+/// never mints a lease fact, never advances any lifecycle, and never decides
+/// allow/reject itself.
+///
+/// This relation CANNOT be folded into the canonical `AuthMachine`: AuthMachine's
+/// generated authority is emitted into `meerkat-runtime`
+/// (`AUTH_MACHINE_PRODUCTION_RUST_CRATE`), but the sole consumer
+/// `meerkat-auth-core` sits BELOW runtime (runtime depends on auth-core; auth-core
+/// has runtime only as a dev-dependency). Folding would create the dependency
+/// cycle `meerkat-auth-core -> meerkat-runtime -> meerkat-auth-core`. Because the
+/// relation is genuinely pure, keeping it as a generated witness is the correct
+/// resolution — this ratchet pins it to that pure shape.
+///
+/// Any future edit that adds a NON-pure relation variant (an admission/mint/
+/// lifecycle verdict instead of a pure comparison), attaches owner feedback
+/// inputs (turning publication into a closure-bearing lifecycle handoff), or
+/// changes the closure policy off `PublicationOnly` fails loudly and forces an
+/// explicit re-classification (fold into a canonical machine if layering ever
+/// permits, or justify a ratchet update for a still-pure relation).
+#[test]
+fn auth_lease_durable_marker_witness_stays_a_pure_ordering_relation() {
+    use meerkat_machine_schema::catalog::auth_lease_bundle_composition;
+    use meerkat_machine_schema::{ClosurePolicy, DurableMarkerRelationProtocol};
+
+    let composition = auth_lease_bundle_composition();
+
+    // Exactly one durable-marker handoff protocol in this composition, matching
+    // the single-protocol contract the codegen (`auth_lease_durable_marker_contract`)
+    // enforces. If a second durable marker appears, the witness shape and the
+    // generated emitter assumptions both need re-review.
+    let markers: Vec<_> = composition
+        .handoff_protocols
+        .iter()
+        .filter_map(|protocol| protocol.durable_marker.as_ref().map(|m| (protocol, m)))
+        .collect();
+    assert_eq!(
+        markers.len(),
+        1,
+        "auth_lease_bundle must own exactly one durable-marker witness protocol"
+    );
+    let (protocol, marker) = markers[0];
+
+    // (1) The relation is the single PURE-COMPARISON variant. The
+    // `DurableMarkerRelationProtocol` enum must not grow an admission/mint/
+    // lifecycle relation that would turn the witness into a facts->conclusion
+    // reducer; and this protocol must select that pure-comparison variant.
+    match marker.relation {
+        DurableMarkerRelationProtocol::AuthLeaseCredentialPublication => {}
+    }
+    // Pin the enum to a single variant. A new variant is the smell of a
+    // semantic relation being smuggled in; adding one must be a deliberate,
+    // reviewed act that updates this ratchet.
+    let relation_variants = [DurableMarkerRelationProtocol::AuthLeaseCredentialPublication];
+    assert_eq!(
+        relation_variants.len(),
+        1,
+        "DurableMarkerRelationProtocol must stay a single pure ordering/equality \
+         relation; a new variant is a candidate semantic reducer that must be \
+         re-classified, not silently emitted as a witness"
+    );
+
+    // (2) The witness compares EXACTLY the four pure scalar fields plus the
+    // three opaque identity-key fields — nothing richer. Each scalar binds to a
+    // real producer obligation field (the codegen re-validates this too). A pure
+    // comparison witness owns no other inputs, so it cannot grow into a reducer
+    // that folds additional facts into a conclusion.
+    for (label, binding) in [
+        ("phase", &marker.phase),
+        ("expires_at", &marker.expires_at),
+        ("generation", &marker.generation),
+        (
+            "credential_published_at_millis",
+            &marker.credential_published_at_millis,
+        ),
+    ] {
+        assert!(
+            protocol
+                .obligation_fields
+                .contains(&binding.obligation_field),
+            "durable marker field `{label}` must bind to a real producer obligation \
+             field carried by protocol `{}`",
+            protocol.name.as_str()
+        );
+    }
+    // Identity fields are opaque key components, never comparison inputs.
+    assert!(
+        !marker.realm_field.is_empty()
+            && !marker.binding_field.is_empty()
+            && !marker.profile_field.is_empty(),
+        "durable marker must carry the three opaque identity-key fields (realm, \
+         binding, profile) used only for token-key equality"
+    );
+
+    // (3) Publication-only closure with NO owner feedback inputs. A durable
+    // marker that gained feedback inputs or a closure policy requiring
+    // acknowledgement would be participating in a lifecycle handoff, not merely
+    // stamping a comparable fact — i.e. it would have become a lifecycle
+    // authority. Keep it a one-way pure publication.
+    assert_eq!(
+        protocol.closure_policy,
+        ClosurePolicy::PublicationOnly,
+        "durable-marker witness protocol must stay PublicationOnly; a closure \
+         policy requiring acknowledgement means it drives lifecycle, not a pure \
+         comparable fact"
+    );
+    assert!(
+        protocol.allowed_feedback_inputs.is_empty(),
+        "durable-marker witness protocol must carry no owner feedback inputs; \
+         feedback inputs make it a lifecycle handoff rather than a pure \
+         publication a consumer compares"
+    );
+}
+
 #[test]
 fn workgraph_machine_state_wire_retains_topology_projection_fields() {
     let value = serde_json::json!({

@@ -370,6 +370,10 @@ pub enum OccurrenceLifecycleInput {
         schedule_phase: SchedulePhase,
         current_schedule_revision: ScheduleRevision,
     },
+    ClassifyCompletionSupersession {
+        schedule_phase: SchedulePhase,
+        current_schedule_revision: ScheduleRevision,
+    },
     Claim {
         owner_id: String,
         at_utc: DateTime<Utc>,
@@ -443,6 +447,10 @@ pub enum OccurrenceLifecycleEffect {
         disposition: ClaimedDispatchDisposition,
         superseded_by_revision: Option<ScheduleRevision>,
     },
+    CompletionSupersessionClassified {
+        disposition: CompletionSupersessionDisposition,
+        superseded_by_revision: Option<ScheduleRevision>,
+    },
     DeliveryFailed,
     LeaseExpired,
 }
@@ -469,6 +477,22 @@ pub enum ClaimedDispatchDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimedDispatchVerdict {
     pub disposition: ClaimedDispatchDisposition,
+    pub superseded_by_revision: Option<ScheduleRevision>,
+}
+
+/// Domain mirror of the occurrence authority's post-completion supersession
+/// disposition verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionSupersessionDisposition {
+    Supersede,
+    Proceed,
+}
+
+/// Machine-decided post-completion supersession verdict the driver mirrors.
+/// `superseded_by_revision` is `Some` only for the `Supersede` disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionSupersessionVerdict {
+    pub disposition: CompletionSupersessionDisposition,
     pub superseded_by_revision: Option<ScheduleRevision>,
 }
 
@@ -634,6 +658,10 @@ pub enum OccurrenceLifecycleError {
     DueClassificationRejected,
     #[error("generated occurrence authority rejected claimed-dispatch disposition classification")]
     ClaimedDispatchClassificationRejected,
+    #[error(
+        "generated occurrence authority rejected completion-supersession disposition classification"
+    )]
+    CompletionSupersessionClassificationRejected,
     #[error("generated occurrence authority rejected recovered machine state: {source}")]
     AuthorityRecoveryRejected {
         source: occ_dsl::OccurrenceLifecycleMachineTransitionError,
@@ -740,6 +768,18 @@ pub enum OccurrenceLifecycleError {
         "OccurrenceLifecycleMachine classified the claimed-dispatch disposition as Supersede without a superseding revision"
     )]
     ClaimedDispatchSupersedeMissingRevision,
+    #[error(
+        "OccurrenceLifecycleMachine did not emit a completion-supersession disposition for the observed schedule facts"
+    )]
+    MissingCompletionSupersessionDisposition,
+    #[error(
+        "OccurrenceLifecycleMachine emitted multiple completion-supersession disposition classifications"
+    )]
+    AmbiguousCompletionSupersessionDisposition,
+    #[error(
+        "OccurrenceLifecycleMachine classified the completion-supersession disposition as Supersede without a superseding revision"
+    )]
+    CompletionSupersessionSupersedeMissingRevision,
     #[error("occurrence projection does not match generated machine_state: {reason}")]
     ProjectionMismatch { reason: String },
 }
@@ -866,6 +906,27 @@ impl Occurrence {
             },
         )?;
         claimed_dispatch_verdict_from_effects(&mutator.effects)
+    }
+
+    /// Classify the post-completion supersession disposition of this dispatched
+    /// occurrence against the observed owning-schedule facts.
+    ///
+    /// The driver shell extracts the schedule's current phase and revision (pure
+    /// observations) and feeds them here; the occurrence authority — not the
+    /// driver — decides Supersede / Proceed. The driver mirrors the returned
+    /// verdict. Fails closed if the authority emits no disposition.
+    pub fn classify_completion_supersession(
+        &self,
+        schedule_phase: SchedulePhase,
+        current_schedule_revision: ScheduleRevision,
+    ) -> Result<CompletionSupersessionVerdict, OccurrenceLifecycleError> {
+        let mutator =
+            self.clone()
+                .apply(OccurrenceLifecycleInput::ClassifyCompletionSupersession {
+                    schedule_phase,
+                    current_schedule_revision,
+                })?;
+        completion_supersession_verdict_from_effects(&mutator.effects)
     }
 
     /// Build a public receipt from the generated receipt facts accepted by the
@@ -1052,6 +1113,13 @@ fn convert_occurrence_input(
             schedule_phase,
             current_schedule_revision,
         } => occ_dsl::OccurrenceLifecycleInput::ClassifyClaimedDispatchDisposition {
+            schedule_phase: to_dsl_claimed_dispatch_schedule_phase(*schedule_phase),
+            current_schedule_revision: current_schedule_revision.0,
+        },
+        OccurrenceLifecycleInput::ClassifyCompletionSupersession {
+            schedule_phase,
+            current_schedule_revision,
+        } => occ_dsl::OccurrenceLifecycleInput::ClassifyCompletionSupersession {
             schedule_phase: to_dsl_claimed_dispatch_schedule_phase(*schedule_phase),
             current_schedule_revision: current_schedule_revision.0,
         },
@@ -1405,6 +1473,9 @@ fn occurrence_error_from_transition_failure_class(
         occ_dsl::OccurrenceTransitionFailureClassKind::ClaimedDispatchClassificationRejected => {
             OccurrenceLifecycleError::ClaimedDispatchClassificationRejected
         }
+        occ_dsl::OccurrenceTransitionFailureClassKind::CompletionSupersessionClassificationRejected => {
+            OccurrenceLifecycleError::CompletionSupersessionClassificationRejected
+        }
         occ_dsl::OccurrenceTransitionFailureClassKind::ClaimRejected => {
             OccurrenceLifecycleError::ClaimRejected
         }
@@ -1492,6 +1563,19 @@ fn claimed_dispatch_disposition_from_dsl(
     }
 }
 
+fn completion_supersession_disposition_from_dsl(
+    disposition: occ_dsl::CompletionSupersessionDisposition,
+) -> CompletionSupersessionDisposition {
+    match disposition {
+        occ_dsl::CompletionSupersessionDisposition::Supersede => {
+            CompletionSupersessionDisposition::Supersede
+        }
+        occ_dsl::CompletionSupersessionDisposition::Proceed => {
+            CompletionSupersessionDisposition::Proceed
+        }
+    }
+}
+
 /// Map DSL effect → domain effect (1:1 by name).
 fn map_occurrence_effect(
     effect: &occ_dsl::OccurrenceLifecycleEffect,
@@ -1530,6 +1614,13 @@ fn map_occurrence_effect(
             superseded_by_revision,
         } => OccurrenceLifecycleEffect::ClaimedDispatchDispositionClassified {
             disposition: claimed_dispatch_disposition_from_dsl(*disposition),
+            superseded_by_revision: superseded_by_revision.map(ScheduleRevision),
+        },
+        occ_dsl::OccurrenceLifecycleEffect::CompletionSupersessionClassified {
+            disposition,
+            superseded_by_revision,
+        } => OccurrenceLifecycleEffect::CompletionSupersessionClassified {
+            disposition: completion_supersession_disposition_from_dsl(*disposition),
             superseded_by_revision: superseded_by_revision.map(ScheduleRevision),
         },
         occ_dsl::OccurrenceLifecycleEffect::DeliveryFailed => {
@@ -1597,6 +1688,36 @@ fn claimed_dispatch_verdict_from_effects(
         && verdict.superseded_by_revision.is_none()
     {
         return Err(OccurrenceLifecycleError::ClaimedDispatchSupersedeMissingRevision);
+    }
+    Ok(verdict)
+}
+
+fn completion_supersession_verdict_from_effects(
+    effects: &[OccurrenceLifecycleEffect],
+) -> Result<CompletionSupersessionVerdict, OccurrenceLifecycleError> {
+    let mut verdicts = effects.iter().filter_map(|effect| match effect {
+        OccurrenceLifecycleEffect::CompletionSupersessionClassified {
+            disposition,
+            superseded_by_revision,
+        } => Some(CompletionSupersessionVerdict {
+            disposition: *disposition,
+            superseded_by_revision: *superseded_by_revision,
+        }),
+        _ => None,
+    });
+
+    let Some(verdict) = verdicts.next() else {
+        return Err(OccurrenceLifecycleError::MissingCompletionSupersessionDisposition);
+    };
+    if verdicts.next().is_some() {
+        return Err(OccurrenceLifecycleError::AmbiguousCompletionSupersessionDisposition);
+    }
+    if matches!(
+        verdict.disposition,
+        CompletionSupersessionDisposition::Supersede
+    ) && verdict.superseded_by_revision.is_none()
+    {
+        return Err(OccurrenceLifecycleError::CompletionSupersessionSupersedeMissingRevision);
     }
     Ok(verdict)
 }
@@ -2965,6 +3086,66 @@ mod tests {
             ClaimedDispatchDisposition::FutureRevision
         );
         assert_eq!(future.superseded_by_revision, None);
+    }
+
+    #[test]
+    fn completion_supersession_comes_from_occurrence_authority() {
+        // Occurrence is dispatched and awaiting completion at schedule revision 1.
+        // The machine — not the driver — classifies whether the completed
+        // delivery is superseded. Unlike the pre-dispatch disposition, a paused
+        // schedule does NOT supersede an already-completed delivery.
+        let awaiting = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-supersede".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch should pass generated authority")
+            .into_occurrence()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() })
+            .expect("await-completion should pass generated authority")
+            .into_occurrence();
+        assert_eq!(awaiting.schedule_revision, ScheduleRevision(1));
+
+        // Active + current revision -> Proceed.
+        let proceed = awaiting
+            .classify_completion_supersession(SchedulePhase::Active, ScheduleRevision(1))
+            .expect("proceed disposition should classify");
+        assert_eq!(
+            proceed.disposition,
+            CompletionSupersessionDisposition::Proceed
+        );
+        assert_eq!(proceed.superseded_by_revision, None);
+
+        // Paused (revision not behind) -> Proceed (paused does NOT supersede a
+        // completed delivery).
+        let paused = awaiting
+            .classify_completion_supersession(SchedulePhase::Paused, ScheduleRevision(1))
+            .expect("paused completion disposition should classify");
+        assert_eq!(
+            paused.disposition,
+            CompletionSupersessionDisposition::Proceed
+        );
+        assert_eq!(paused.superseded_by_revision, None);
+
+        // Deleted -> Supersede by current revision.
+        let deleted = awaiting
+            .classify_completion_supersession(SchedulePhase::Deleted, ScheduleRevision(3))
+            .expect("deleted completion disposition should classify");
+        assert_eq!(
+            deleted.disposition,
+            CompletionSupersessionDisposition::Supersede
+        );
+        assert_eq!(deleted.superseded_by_revision, Some(ScheduleRevision(3)));
+
+        // Active but stale claimed revision -> Supersede by current revision.
+        let stale = awaiting
+            .classify_completion_supersession(SchedulePhase::Active, ScheduleRevision(2))
+            .expect("stale completion disposition should classify");
+        assert_eq!(
+            stale.disposition,
+            CompletionSupersessionDisposition::Supersede
+        );
+        assert_eq!(stale.superseded_by_revision, Some(ScheduleRevision(2)));
     }
 
     #[test]

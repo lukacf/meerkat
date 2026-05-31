@@ -1,5 +1,7 @@
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
-use crate::lifecycle::{ClaimedDispatchDisposition, OccurrenceLifecycleInput};
+use crate::lifecycle::{
+    ClaimedDispatchDisposition, CompletionSupersessionDisposition, OccurrenceLifecycleInput,
+};
 use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
@@ -456,22 +458,37 @@ async fn complete_dispatched_occurrence(
 ) -> Result<(), ScheduleDomainError> {
     let store_now_utc = store.get_store_time_utc().await?;
     let current_schedule = store.get_schedule(&occurrence.schedule_id).await?;
-    if let Some(schedule) = current_schedule
-        && (schedule.phase == SchedulePhase::Deleted
-            || occurrence.schedule_revision < schedule.revision)
-    {
-        let _ = terminalize_occurrence_inner(
-            store,
-            occurrence,
-            OccurrenceLifecycleInput::Supersede {
-                superseded_by_revision: schedule.revision,
-                at_utc: store_now_utc,
-            },
-            None,
-            None,
-        )
-        .await?;
-        return Ok(());
+    if let Some(schedule) = current_schedule {
+        // The schedule's current phase and revision are pure observations. The
+        // OccurrenceLifecycleMachine — not this driver — classifies whether the
+        // completed delivery is superseded; we mirror the emitted verdict and
+        // fail closed if no disposition is emitted.
+        let verdict = occurrence
+            .classify_completion_supersession(schedule.phase, schedule.revision)
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        match verdict.disposition {
+            CompletionSupersessionDisposition::Supersede => {
+                let superseded_by_revision = verdict.superseded_by_revision.ok_or_else(|| {
+                    ScheduleDomainError::Internal(
+                        "occurrence authority classified completion Supersede without a superseding revision"
+                            .to_string(),
+                    )
+                })?;
+                let _ = terminalize_occurrence_inner(
+                    store,
+                    occurrence,
+                    OccurrenceLifecycleInput::Supersede {
+                        superseded_by_revision,
+                        at_utc: store_now_utc,
+                    },
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+            CompletionSupersessionDisposition::Proceed => {}
+        }
     }
 
     let terminal = match completion {

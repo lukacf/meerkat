@@ -2353,6 +2353,10 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 &["Frozen", "Supersede", "Ready", "FutureRevision"],
             ),
             NamedTypeBinding::string_enum(
+                "CompletionSupersessionDisposition",
+                &["Supersede", "Proceed"],
+            ),
+            NamedTypeBinding::string_enum(
                 "OccurrenceLifecycleInputVariant",
                 &[
                     "PlanOccurrence",
@@ -2360,6 +2364,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "RecordReceipt",
                     "ClassifyDue",
                     "ClassifyClaimedDispatchDisposition",
+                    "ClassifyCompletionSupersession",
                     "Claim",
                     "DispatchStarted",
                     "AwaitCompletion",
@@ -2383,6 +2388,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "ReceiptRecordRejected",
                     "DueClassificationRejected",
                     "ClaimedDispatchClassificationRejected",
+                    "CompletionSupersessionClassificationRejected",
                     "ClaimRejected",
                     "NotPendingForClaim",
                     "NotClaimed",

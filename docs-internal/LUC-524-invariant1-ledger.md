@@ -176,3 +176,34 @@ legacy authority paths remaining"). FOLD-only; zero shortcuts.
 - ADJACENT (agent-flagged, same class): schedule driver.rs complete_dispatched_occurrence
   post-completion Deleted/stale->Supersede shell decision; fold via the same
   ClassifyClaimedDispatchDisposition (or a sibling post-completion input).
+
+### Completion-supersession fold (this commit) — 1 folded
+- schedule driver.rs complete_dispatched_occurrence post-completion supersession ->
+  OccurrenceLifecycle ClassifyCompletionSupersession (binary Supersede|Proceed; paused
+  schedule does NOT supersede a completed delivery, no FutureRevision case). occurrence
+  version 6->7. Driver feeds raw phase+revision, mirrors, fails closed on Supersede
+  without revision. Per-machine TLC: 2.6M distinct states clean. Handwritten
+  phase==Deleted||revision< reducer DELETED.
+
+### Site 3 (bridge-rejection recovery class) — BLOCKED, under design review (NOT defended yet)
+Investigated for fold; found a genuine layering obstacle. BridgeRejectionCause::class()
+is consumed via should_fall_back_to_bind at the SHARED provisioner method
+MultiBackendProvisioner::ensure_supervisor_authorized (provisioner.rs), which has 7
+callers across two architectural layers:
+  - builder/actor layer (builder.rs x3 via reconcile_peer_only_trust, actor.rs x2):
+    HOLDS &mut MobMachineAuthority; the verdict genuinely gates rebind-vs-error recovery.
+    FOLDABLE into MobMachine ClassifyBridgeRejectionRecovery.
+  - provisioner trait layer (retire_member / interrupt_member / start_turn): MultiBackend-
+    Provisioner holds NO machine/handle/command-channel; constructed before the actor;
+    start_turn runs in a DETACHED tokio::spawn with only Arc<dyn MobProvisioner>; the other
+    two run inside actor command handlers where routing back through the command channel
+    would deadlock the single-owner actor. On these 3 paths rebind_authority=None and BOTH
+    recoverable+fatal branches bubble up Err -> the class only selects the error message,
+    it does NOT gate recovery/state.
+The agent correctly STOPPED rather than thread a machine into a transport layer (worse
+violation) or fake it. RESOLUTION DIRECTION (next): hoist the recovery classification OUT
+of the shared provisioner method to the machine-owning caller (return the typed rejection
+cause up; classify via MobMachine where &mut authority lives), and on the no-rebind-authority
+trait paths drop the cosmetic class branch (return the rejection error uniformly, since
+recovery is structurally impossible there). That removes class()/should_fall_back_to_bind
+without a transport-layer machine handle. To be designed + folded before final review.

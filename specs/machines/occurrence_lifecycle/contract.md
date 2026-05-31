@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `6`
+- Version: `7`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -52,6 +52,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordReceipt`(correlation_id: Option<String>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<String>)
 - `ClassifyDue`(now_utc_ms: u64)
 - `ClassifyClaimedDispatchDisposition`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
+- `ClassifyCompletionSupersession`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
@@ -82,6 +83,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DueMisfireRequired`
 - `DueLeaseExpired`
 - `ClaimedDispatchDispositionClassified`(disposition: ClaimedDispatchDisposition, superseded_by_revision: Option<u64>)
+- `CompletionSupersessionClassified`(disposition: CompletionSupersessionDisposition, superseded_by_revision: Option<u64>)
 - `DeliveryFailed`
 - `LeaseExpired`
 - `TransitionFailureClassified`(phase: OccurrenceLifecycleState, refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant, public_class: OccurrenceTransitionFailureClassKind)
@@ -453,6 +455,78 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyTransitionFailure`(refusal_kind, trigger)
 - Guards:
   - `claimed_dispatch_disposition_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedPending`
+- From: `Pending`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Pending`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedClaimed`
+- From: `Claimed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Claimed`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedDispatching`
+- From: `Dispatching`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Dispatching`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedCompleted`
+- From: `Completed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Completed`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedSkipped`
+- From: `Skipped`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Skipped`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedMisfired`
+- From: `Misfired`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Misfired`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedSuperseded`
+- From: `Superseded`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
+- Emits: `TransitionFailureClassified`
+- To: `Superseded`
+
+### `ClassifyTransitionFailureCompletionSupersessionRejectedDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyTransitionFailure`(refusal_kind, trigger)
+- Guards:
+  - `completion_supersession_rejected`
 - Emits: `TransitionFailureClassified`
 - To: `DeliveryFailed`
 
@@ -964,6 +1038,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - ``
 - Emits: `ClaimedDispatchDispositionClassified`
 - To: `Claimed`
+
+### `ClassifyCompletionSupersessionDeleted`
+- From: `AwaitingCompletion`
+- On: `ClassifyCompletionSupersession`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `CompletionSupersessionClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyCompletionSupersessionStale`
+- From: `AwaitingCompletion`
+- On: `ClassifyCompletionSupersession`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `CompletionSupersessionClassified`
+- To: `AwaitingCompletion`
+
+### `ClassifyCompletionSupersessionProceed`
+- From: `AwaitingCompletion`
+- On: `ClassifyCompletionSupersession`(schedule_phase, current_schedule_revision)
+- Guards:
+  - ``
+- Emits: `CompletionSupersessionClassified`
+- To: `AwaitingCompletion`
 
 ### `SyncTargetSnapshotPending`
 - From: `Pending`

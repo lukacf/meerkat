@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 6,
+        version: 7,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -142,6 +142,21 @@ machine! {
                 schedule_phase: Enum<ClaimedDispatchSchedulePhase>,
                 current_schedule_revision: u64
             },
+            // Post-completion supersession reconciliation. After a dispatched
+            // occurrence's delivery completes, the driver shell observes the
+            // owning schedule's current phase and revision (pure observations)
+            // and feeds them here against the occurrence's own claimed
+            // schedule_revision (already machine-owned state). The occurrence
+            // authority — not the driver — classifies whether the completed
+            // delivery is superseded (the schedule was deleted, or the claim is
+            // for a stale revision behind the schedule's current revision) or
+            // should proceed to terminalize on its delivery result. Unlike the
+            // pre-dispatch disposition, a paused schedule does NOT supersede a
+            // delivery that has already completed.
+            ClassifyCompletionSupersession {
+                schedule_phase: Enum<ClaimedDispatchSchedulePhase>,
+                current_schedule_revision: u64
+            },
             Claim { owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<String>, at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
@@ -205,6 +220,15 @@ machine! {
                 disposition: Enum<ClaimedDispatchDisposition>,
                 superseded_by_revision: Option<u64>,
             },
+            // Post-completion supersession disposition decided by the
+            // occurrence authority. The driver shell mirrors `disposition`:
+            // Supersede terminalizes the completed occurrence against
+            // `superseded_by_revision`, and Proceed continues to terminalize on
+            // the occurrence's delivery result.
+            CompletionSupersessionClassified {
+                disposition: Enum<CompletionSupersessionDisposition>,
+                superseded_by_revision: Option<u64>,
+            },
             DeliveryFailed,
             LeaseExpired,
             TransitionFailureClassified {
@@ -248,6 +272,7 @@ machine! {
         disposition DueMisfireRequired => local,
         disposition DueLeaseExpired => local,
         disposition ClaimedDispatchDispositionClassified => local,
+        disposition CompletionSupersessionClassified => local,
         disposition DeliveryFailed => external,
         disposition LeaseExpired => external,
         disposition TransitionFailureClassified => local,
@@ -356,6 +381,26 @@ machine! {
                 refusal_kind: refusal_kind,
                 trigger: trigger,
                 public_class: OccurrenceTransitionFailureClassKind::ClaimedDispatchClassificationRejected
+            }
+        }
+
+        transition ClassifyTransitionFailureCompletionSupersessionRejected {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyTransitionFailure { refusal_kind, trigger }
+            guard "completion_supersession_rejected" {
+                trigger == OccurrenceLifecycleInputVariant::ClassifyCompletionSupersession
+                && (
+                    refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
+                    || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
+                )
+            }
+            update {}
+            to Pending
+            emit TransitionFailureClassified {
+                phase: self.lifecycle_phase,
+                refusal_kind: refusal_kind,
+                trigger: trigger,
+                public_class: OccurrenceTransitionFailureClassKind::CompletionSupersessionClassificationRejected
             }
         }
 
@@ -784,6 +829,60 @@ machine! {
             to Claimed
             emit ClaimedDispatchDispositionClassified {
                 disposition: ClaimedDispatchDisposition::Ready,
+                superseded_by_revision: None
+            }
+        }
+
+        // --- Post-completion supersession disposition ---
+        //
+        // After a dispatched occurrence's delivery completes, the driver
+        // reconciles it against the latest owning-schedule facts before
+        // terminalizing on the delivery result. The schedule's current phase and
+        // revision are pure observations the driver extracts; the occurrence
+        // authority owns whether the completed delivery is superseded (the
+        // schedule was deleted, or the claim is for a revision behind the
+        // schedule's current revision) or should proceed. Unlike the pre-dispatch
+        // disposition, a paused schedule does NOT supersede an already-completed
+        // delivery. These are pure classifications in the live post-dispatch
+        // phases (the occurrence is in AwaitingCompletion when delivery resolves).
+
+        transition ClassifyCompletionSupersessionDeleted {
+            on input ClassifyCompletionSupersession { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && schedule_phase == ClaimedDispatchSchedulePhase::Deleted
+            }
+            to AwaitingCompletion
+            emit CompletionSupersessionClassified {
+                disposition: CompletionSupersessionDisposition::Supersede,
+                superseded_by_revision: Some(current_schedule_revision)
+            }
+        }
+
+        transition ClassifyCompletionSupersessionStale {
+            on input ClassifyCompletionSupersession { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && schedule_phase != ClaimedDispatchSchedulePhase::Deleted
+                && self.schedule_revision < current_schedule_revision
+            }
+            to AwaitingCompletion
+            emit CompletionSupersessionClassified {
+                disposition: CompletionSupersessionDisposition::Supersede,
+                superseded_by_revision: Some(current_schedule_revision)
+            }
+        }
+
+        transition ClassifyCompletionSupersessionProceed {
+            on input ClassifyCompletionSupersession { schedule_phase, current_schedule_revision }
+            guard {
+                self.lifecycle_phase == Phase::AwaitingCompletion
+                && schedule_phase != ClaimedDispatchSchedulePhase::Deleted
+                && self.schedule_revision >= current_schedule_revision
+            }
+            to AwaitingCompletion
+            emit CompletionSupersessionClassified {
+                disposition: CompletionSupersessionDisposition::Proceed,
                 superseded_by_revision: None
             }
         }
@@ -1711,6 +1810,20 @@ pub enum ClaimedDispatchDisposition {
     FutureRevision,
 }
 
+/// Machine-owned disposition verdict for a dispatched occurrence whose delivery
+/// has completed. The driver shell mirrors this rather than deciding it. Unlike
+/// the pre-dispatch disposition, a paused schedule does not supersede an
+/// already-completed delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionSupersessionDisposition {
+    /// Schedule was deleted or the claim is for a revision behind the
+    /// schedule's current revision: terminalize the completed occurrence as
+    /// superseded by `superseded_by_revision`.
+    Supersede,
+    /// Terminalize the completed occurrence on its delivery result.
+    Proceed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryReceiptStage {
     Planned,
@@ -1739,6 +1852,7 @@ pub enum OccurrenceTransitionFailureClassKind {
     ReceiptRecordRejected,
     DueClassificationRejected,
     ClaimedDispatchClassificationRejected,
+    CompletionSupersessionClassificationRejected,
     ClaimRejected,
     NotPendingForClaim,
     NotClaimed,

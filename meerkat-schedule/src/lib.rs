@@ -25,11 +25,11 @@ pub use driver::{
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
     AuthorizedOccurrenceWrite, AuthorizedScheduleWrite, ClaimedDispatchDisposition,
-    ClaimedDispatchVerdict, OccurrenceDueAction, OccurrenceLifecycleEffect,
-    OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator,
-    OccurrenceSupersessionAck, OccurrenceWritePrecondition, ScheduleLifecycleEffect,
-    ScheduleLifecycleError, ScheduleLifecycleInput, ScheduleLifecycleMutator,
-    ScheduleWritePrecondition,
+    ClaimedDispatchVerdict, CompletionSupersessionDisposition, CompletionSupersessionVerdict,
+    OccurrenceDueAction, OccurrenceLifecycleEffect, OccurrenceLifecycleError,
+    OccurrenceLifecycleInput, OccurrenceLifecycleMutator, OccurrenceSupersessionAck,
+    OccurrenceWritePrecondition, ScheduleLifecycleEffect, ScheduleLifecycleError,
+    ScheduleLifecycleInput, ScheduleLifecycleMutator, ScheduleWritePrecondition,
 };
 pub use service::ScheduleService;
 pub use store::{

@@ -1496,6 +1496,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "OccurrenceLifecycleMachine",
+            "CompletionSupersessionClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local post-completion supersession disposition (Supersede/Proceed) decided by the occurrence machine; the driver mirrors it instead of classifying schedule facts itself on the post-completion path",
+        ),
+        (
+            "OccurrenceLifecycleMachine",
             "TransitionFailureClassified",
             SeamClassification::SurfaceResultAlignment,
             "Occurrence transition failure public result class must align with generated occurrence refusal-evidence classification",

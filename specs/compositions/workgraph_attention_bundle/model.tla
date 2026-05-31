@@ -2041,13 +2041,23 @@ workgraph_non_reviewer_quorum_policy_has_no_threshold == ((workgraph_completion_
 
 attention__attention_can_close_own_review_item(mode, delegated_authority) == (((mode = "Review") \/ (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
 
+attention__attention_can_link(mode) == (mode = "Coordinate")
+
+attention__attention_can_create(mode) == (mode = "Coordinate")
+
+attention__attention_can_block(mode) == (mode = "Pursue")
+
+attention__attention_can_update(mode) == ((mode = "Pursue") \/ (mode = "Coordinate"))
+
+attention__attention_can_release(mode) == (mode = "Pursue")
+
 attention__attention_can_add_evidence(mode) == (mode # "Observe")
+
+attention__attention_can_get(mode) == ((mode = "Pursue") \/ (mode = "Coordinate") \/ (mode = "Review") \/ (mode = "Falsify") \/ (mode = "Judge") \/ (mode = "Observe"))
 
 attention__attention_is_adversarial(mode) == ((mode = "Review") \/ (mode = "Falsify") \/ (mode = "Observe"))
 
 attention__attention_can_close_if_policy_allows(mode, delegated_authority) == ((delegated_authority = "CloseIfPolicyAllows") /\ (attention__attention_is_adversarial(mode) = FALSE))
-
-attention__attention_can_request_closure(mode, delegated_authority) == (((delegated_authority = "RequestClosure") \/ (delegated_authority = "CloseIfPolicyAllows")) /\ (attention__attention_is_adversarial(mode) = FALSE))
 
 attention_PauseActive(arg_expected_revision, arg_until_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
@@ -2316,7 +2326,7 @@ attention_ClassifyAuthorityActive(arg_mode, arg_delegated_authority) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_close_parent |-> FALSE, can_request_closure |-> attention__attention_can_request_closure(packet.payload.mode, packet.payload.delegated_authority)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthorityActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_block |-> attention__attention_can_block(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_create |-> attention__attention_can_create(packet.payload.mode), can_get |-> attention__attention_can_get(packet.payload.mode), can_link |-> attention__attention_can_link(packet.payload.mode), can_release |-> attention__attention_can_release(packet.payload.mode), can_update |-> attention__attention_can_update(packet.payload.mode)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthorityActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "ClassifyAuthorityActive", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Active"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -2335,7 +2345,7 @@ attention_ClassifyAuthorityPaused(arg_mode, arg_delegated_authority) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_close_parent |-> FALSE, can_request_closure |-> attention__attention_can_request_closure(packet.payload.mode, packet.payload.delegated_authority)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthorityPaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_block |-> attention__attention_can_block(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_create |-> attention__attention_can_create(packet.payload.mode), can_get |-> attention__attention_can_get(packet.payload.mode), can_link |-> attention__attention_can_link(packet.payload.mode), can_release |-> attention__attention_can_release(packet.payload.mode), can_update |-> attention__attention_can_update(packet.payload.mode)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthorityPaused"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "ClassifyAuthorityPaused", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Paused"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -2354,7 +2364,7 @@ attention_ClassifyAuthoritySuperseded(arg_mode, arg_delegated_authority) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_close_parent |-> FALSE, can_request_closure |-> attention__attention_can_request_closure(packet.payload.mode, packet.payload.delegated_authority)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthoritySuperseded"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_block |-> attention__attention_can_block(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_create |-> attention__attention_can_create(packet.payload.mode), can_get |-> attention__attention_can_get(packet.payload.mode), can_link |-> attention__attention_can_link(packet.payload.mode), can_release |-> attention__attention_can_release(packet.payload.mode), can_update |-> attention__attention_can_update(packet.payload.mode)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthoritySuperseded"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "ClassifyAuthoritySuperseded", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Superseded"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -2373,7 +2383,7 @@ attention_ClassifyAuthorityStopped(arg_mode, arg_delegated_authority) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_close_parent |-> FALSE, can_request_closure |-> attention__attention_can_request_closure(packet.payload.mode, packet.payload.delegated_authority)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthorityStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "attention", variant |-> "AttentionAuthorityClassified", payload |-> [can_add_evidence |-> attention__attention_can_add_evidence(packet.payload.mode), can_block |-> attention__attention_can_block(packet.payload.mode), can_close_if_policy_allows |-> attention__attention_can_close_if_policy_allows(packet.payload.mode, packet.payload.delegated_authority), can_close_own_review_item |-> attention__attention_can_close_own_review_item(packet.payload.mode, packet.payload.delegated_authority), can_create |-> attention__attention_can_create(packet.payload.mode), can_get |-> attention__attention_can_get(packet.payload.mode), can_link |-> attention__attention_can_link(packet.payload.mode), can_release |-> attention__attention_can_release(packet.payload.mode), can_update |-> attention__attention_can_update(packet.payload.mode)], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyAuthorityStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "attention", transition |-> "ClassifyAuthorityStopped", actor |-> "attention_authority", step |-> (model_step_count + 1), from_phase |-> attention_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -2478,13 +2488,23 @@ EntryPacketAdmissible_workgraph(packet) ==
 
 attention__entry_packet__attention_can_close_own_review_item(mode, delegated_authority) == (((mode = "Review") \/ (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
 
+attention__entry_packet__attention_can_link(mode) == (mode = "Coordinate")
+
+attention__entry_packet__attention_can_create(mode) == (mode = "Coordinate")
+
+attention__entry_packet__attention_can_block(mode) == (mode = "Pursue")
+
+attention__entry_packet__attention_can_update(mode) == ((mode = "Pursue") \/ (mode = "Coordinate"))
+
+attention__entry_packet__attention_can_release(mode) == (mode = "Pursue")
+
 attention__entry_packet__attention_can_add_evidence(mode) == (mode # "Observe")
+
+attention__entry_packet__attention_can_get(mode) == ((mode = "Pursue") \/ (mode = "Coordinate") \/ (mode = "Review") \/ (mode = "Falsify") \/ (mode = "Judge") \/ (mode = "Observe"))
 
 attention__entry_packet__attention_is_adversarial(mode) == ((mode = "Review") \/ (mode = "Falsify") \/ (mode = "Observe"))
 
 attention__entry_packet__attention_can_close_if_policy_allows(mode, delegated_authority) == ((delegated_authority = "CloseIfPolicyAllows") /\ (attention__entry_packet__attention_is_adversarial(mode) = FALSE))
-
-attention__entry_packet__attention_can_request_closure(mode, delegated_authority) == (((delegated_authority = "RequestClosure") \/ (delegated_authority = "CloseIfPolicyAllows")) /\ (attention__entry_packet__attention_is_adversarial(mode) = FALSE))
 
 EntryPacketAdmissible_attention(packet) ==
     \/ /\ (packet.variant = "Pause") /\ (attention_phase = "Active") /\ ((attention_revision = packet.payload.expected_revision))

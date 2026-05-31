@@ -110,10 +110,12 @@ machine! {
             ClassifyAttentionEligibility { now_utc_ms: u64 },
             // Projected-authority permission classification. The shell extracts
             // the raw binding facts (`mode`, `delegated_authority`); this machine
-            // owns the permission POLICY that maps them to the projected authority
-            // verdict and emits `AttentionAuthorityClassified`. The shell mirrors
-            // the emitted permissions (used to scope tool admission) and fails
-            // closed without a verdict.
+            // owns the COMPLETE per-stance tool-admission POLICY that maps them to
+            // the projected authority capability bits and emits
+            // `AttentionAuthorityClassified`. The attention-scoped tool surface is
+            // a pure tool-name -> capability-bit decoder over the emitted bits
+            // (no per-mode allow-set of its own) and fails closed without a
+            // verdict.
             ClassifyAttentionAuthority {
                 mode: Enum<WorkAttentionMode>,
                 delegated_authority: Enum<AttentionDelegatedAuthority>,
@@ -127,11 +129,15 @@ machine! {
             AttentionStopped { revision: u64 },
             AttentionEligibilityClassified { eligible: bool },
             AttentionAuthorityClassified {
+                can_get: bool,
                 can_add_evidence: bool,
-                can_request_closure: bool,
+                can_release: bool,
+                can_update: bool,
+                can_block: bool,
+                can_create: bool,
+                can_link: bool,
                 can_close_own_review_item: bool,
                 can_close_if_policy_allows: bool,
-                can_close_parent: bool,
             },
         }
 
@@ -143,17 +149,48 @@ machine! {
                 || mode == WorkAttentionMode::Observe
         }
 
+        // Reading the attention item is permitted in every stance, including the
+        // read-only Observe stance.
+        helper attention_can_get(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Pursue
+                || mode == WorkAttentionMode::Coordinate
+                || mode == WorkAttentionMode::Review
+                || mode == WorkAttentionMode::Falsify
+                || mode == WorkAttentionMode::Judge
+                || mode == WorkAttentionMode::Observe
+        }
+
         helper attention_can_add_evidence(mode: WorkAttentionMode) -> bool {
             mode != WorkAttentionMode::Observe
         }
 
-        helper attention_can_request_closure(
-            mode: WorkAttentionMode,
-            delegated_authority: AttentionDelegatedAuthority
-        ) -> bool {
-            (delegated_authority == AttentionDelegatedAuthority::RequestClosure
-                || delegated_authority == AttentionDelegatedAuthority::CloseIfPolicyAllows)
-                && attention_is_adversarial(mode) == false
+        // Releasing the active claim on the attention item is a Pursue-stance
+        // mutation only.
+        helper attention_can_release(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Pursue
+        }
+
+        // Mutating the attention item's own fields is permitted while pursuing or
+        // coordinating it.
+        helper attention_can_update(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Pursue || mode == WorkAttentionMode::Coordinate
+        }
+
+        // Blocking the attention item is a Pursue-stance mutation only.
+        helper attention_can_block(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Pursue
+        }
+
+        // Decomposing the attention item by creating child work is a
+        // Coordinate-stance authority.
+        helper attention_can_create(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Coordinate
+        }
+
+        // Wiring the attention item into the graph (parent/related/derived_from
+        // edges) is a Coordinate-stance authority.
+        helper attention_can_link(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Coordinate
         }
 
         helper attention_can_close_own_review_item(
@@ -335,22 +372,28 @@ machine! {
 
         // --- Projected-authority permission classification ---
         //
-        // The four projected-authority permissions are a machine fact derived
-        // purely from the raw binding facts `(mode, delegated_authority)`. The
+        // The per-stance tool-admission capability bits are a machine fact
+        // derived purely from the raw binding facts `(mode, delegated_authority)`.
+        // This is the complete mode->capability truth table the attention-scoped
+        // tool surface mirrors: the shell is a pure tool-name -> capability-bit
+        // decoder over these bits, holding no per-mode allow-set of its own. The
         // policy is lifecycle-phase independent, so this self-loops in every
-        // phase; it never mutates lifecycle state. `can_close_parent` is always
-        // false (no binding currently grants parent-closure authority).
+        // phase; it never mutates lifecycle state.
         transition ClassifyAuthority {
             per_phase [Active, Paused, Superseded, Stopped]
             on input ClassifyAttentionAuthority { mode, delegated_authority }
             update {}
             to Active
             emit AttentionAuthorityClassified {
+                can_get: attention_can_get(mode),
                 can_add_evidence: attention_can_add_evidence(mode),
-                can_request_closure: attention_can_request_closure(mode, delegated_authority),
+                can_release: attention_can_release(mode),
+                can_update: attention_can_update(mode),
+                can_block: attention_can_block(mode),
+                can_create: attention_can_create(mode),
+                can_link: attention_can_link(mode),
                 can_close_own_review_item: attention_can_close_own_review_item(mode, delegated_authority),
-                can_close_if_policy_allows: attention_can_close_if_policy_allows(mode, delegated_authority),
-                can_close_parent: false
+                can_close_if_policy_allows: attention_can_close_if_policy_allows(mode, delegated_authority)
             }
         }
     }

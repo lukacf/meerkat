@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AttentionContextProjection, AttentionProjectionRequest, CloseWorkItemRequest,
-    GoalRequestCloseRequest, WorkAttentionMode, WorkEdgeKind, WorkGraphService,
-    handle_workgraph_tools_call, workgraph_tools_list,
+    GoalRequestCloseRequest, WorkEdgeKind, WorkGraphService, handle_workgraph_tools_call,
+    workgraph_tools_list,
 };
 
 pub const WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY: &str = "workgraph.attention_projection";
@@ -347,41 +347,42 @@ fn tool_defs_from_values(tools: Vec<Value>) -> Arc<[Arc<ToolDef>]> {
         .into()
 }
 
+/// Pure mechanical decoder from machine-emitted attention authority capability
+/// bits to the admitted workgraph tool-name set.
+///
+/// This holds NO per-mode policy: the complete `(mode, delegated_authority) ->
+/// capability` truth table is owned by the canonical
+/// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` verdict, which
+/// `WorkAttentionMachine::classify_authority` mirrors into
+/// `projection.authority`. Each entry below is a fixed, mechanical tool-name ->
+/// capability-bit mapping (an acceptable witness encoder). Enforcement of the
+/// resulting allow-set lives in `dispatch_with_context` (the mirror).
 fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTreeSet<&'static str> {
-    let mut allowed = BTreeSet::from(["workgraph_get"]);
-    match projection.mode {
-        WorkAttentionMode::Observe => {}
-        WorkAttentionMode::Review | WorkAttentionMode::Falsify => {
-            allowed.insert("workgraph_add_evidence");
-            if projection.authority.can_close_own_review_item {
-                allowed.insert("workgraph_close");
-            }
-        }
-        WorkAttentionMode::Pursue => {
-            allowed.extend([
-                "workgraph_release",
-                "workgraph_update",
-                "workgraph_block",
-                "workgraph_add_evidence",
-            ]);
-            if projection.authority.can_close_if_policy_allows {
-                allowed.insert("workgraph_close");
-            }
-        }
-        WorkAttentionMode::Coordinate => {
-            allowed.extend([
-                "workgraph_create",
-                "workgraph_update",
-                "workgraph_link",
-                "workgraph_add_evidence",
-            ]);
-        }
-        WorkAttentionMode::Judge => {
-            allowed.insert("workgraph_add_evidence");
-            if projection.authority.can_close_if_policy_allows {
-                allowed.insert("workgraph_close");
-            }
-        }
+    let authority = &projection.authority;
+    let mut allowed = BTreeSet::new();
+    if authority.can_get {
+        allowed.insert("workgraph_get");
+    }
+    if authority.can_add_evidence {
+        allowed.insert("workgraph_add_evidence");
+    }
+    if authority.can_release {
+        allowed.insert("workgraph_release");
+    }
+    if authority.can_update {
+        allowed.insert("workgraph_update");
+    }
+    if authority.can_block {
+        allowed.insert("workgraph_block");
+    }
+    if authority.can_create {
+        allowed.insert("workgraph_create");
+    }
+    if authority.can_link {
+        allowed.insert("workgraph_link");
+    }
+    if authority.can_close_own_review_item || authority.can_close_if_policy_allows {
+        allowed.insert("workgraph_close");
     }
     allowed
 }
@@ -529,6 +530,129 @@ mod tests {
         WorkGraphService, WorkNamespace,
     };
 
+    /// The per-mode allow-set is now decided by the canonical
+    /// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` verdict and
+    /// only mechanically decoded by `allowed_tools_for_projection`. This pins the
+    /// post-fold allow-set to the exact pre-fold behavior for every attention mode
+    /// across the relevant delegated-authority combinations, proving the ownership
+    /// move changed no policy.
+    #[tokio::test]
+    async fn per_mode_allow_set_matches_pre_fold_behavior() {
+        async fn allow_set_for(
+            mode: WorkAttentionMode,
+            delegated_authority: AttentionDelegatedAuthority,
+        ) -> BTreeSet<String> {
+            let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+            let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-0000000000aa")
+                .expect("valid session id");
+            let goal = service
+                .create_goal(GoalCreateRequest {
+                    realm_id: None,
+                    namespace: None,
+                    title: "Parity item".to_string(),
+                    description: None,
+                    target: GoalAttentionTarget::Session { session_id },
+                    mode,
+                    completion_policy: WorkCompletionPolicy::SelfAttest,
+                    delegated_authority,
+                    projection_policy: AttentionProjectionPolicy::default(),
+                })
+                .await
+                .expect("create goal");
+            let projection = service
+                .attention_projection(crate::AttentionProjectionRequest {
+                    binding_id: goal.attention.binding_id,
+                    realm_id: None,
+                    namespace: None,
+                })
+                .await
+                .expect("projection")
+                .projection;
+            allowed_tools_for_projection(&projection)
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect()
+        }
+
+        fn expect(names: &[&str]) -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_string()).collect()
+        }
+
+        use AttentionDelegatedAuthority::*;
+        use WorkAttentionMode::*;
+
+        // Observe: read-only.
+        assert_eq!(
+            allow_set_for(Observe, AddEvidence).await,
+            expect(&["workgraph_get"])
+        );
+
+        // Review / Falsify: get + add_evidence, plus close iff own-review close
+        // authority was delegated.
+        for mode in [Review, Falsify] {
+            assert_eq!(
+                allow_set_for(mode, AddEvidence).await,
+                expect(&["workgraph_get", "workgraph_add_evidence"]),
+                "{mode:?} without own-review close"
+            );
+            assert_eq!(
+                allow_set_for(mode, CloseOwnReviewItem).await,
+                expect(&["workgraph_get", "workgraph_add_evidence", "workgraph_close",]),
+                "{mode:?} with own-review close"
+            );
+        }
+
+        // Pursue: get + release + update + block + add_evidence, plus close iff
+        // close-if-policy-allows was delegated.
+        assert_eq!(
+            allow_set_for(Pursue, AddEvidence).await,
+            expect(&[
+                "workgraph_get",
+                "workgraph_release",
+                "workgraph_update",
+                "workgraph_block",
+                "workgraph_add_evidence",
+            ]),
+            "Pursue without close authority"
+        );
+        assert_eq!(
+            allow_set_for(Pursue, CloseIfPolicyAllows).await,
+            expect(&[
+                "workgraph_get",
+                "workgraph_release",
+                "workgraph_update",
+                "workgraph_block",
+                "workgraph_add_evidence",
+                "workgraph_close",
+            ]),
+            "Pursue with close-if-policy-allows"
+        );
+
+        // Coordinate: get + create + update + link + add_evidence (no close).
+        assert_eq!(
+            allow_set_for(Coordinate, AddEvidence).await,
+            expect(&[
+                "workgraph_get",
+                "workgraph_create",
+                "workgraph_update",
+                "workgraph_link",
+                "workgraph_add_evidence",
+            ])
+        );
+
+        // Judge: get + add_evidence, plus close iff close-if-policy-allows.
+        assert_eq!(
+            allow_set_for(Judge, AddEvidence).await,
+            expect(&["workgraph_get", "workgraph_add_evidence"]),
+            "Judge without close authority"
+        );
+        assert_eq!(
+            allow_set_for(Judge, CloseIfPolicyAllows).await,
+            expect(&["workgraph_get", "workgraph_add_evidence", "workgraph_close",]),
+            "Judge with close-if-policy-allows"
+        );
+    }
+
     #[tokio::test]
     async fn workgraph_tool_surface_dispatches_tools() {
         let surface =
@@ -643,7 +767,11 @@ mod tests {
             .expect("projection")
             .projection;
         assert!(projection.authority.can_close_own_review_item);
-        assert!(!projection.authority.can_close_parent);
+        // A Review stance carries no graph-mutation authority beyond evidence and
+        // its own-review close: it cannot create, link, update, release, or block.
+        assert!(!projection.authority.can_create);
+        assert!(!projection.authority.can_link);
+        assert!(!projection.authority.can_update);
         let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
         let names = surface
             .tools()

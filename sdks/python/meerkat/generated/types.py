@@ -1193,9 +1193,13 @@ class GoalStatusResult:
 class ProjectedAttentionAuthority:
     """Wire payload for ProjectedAttentionAuthority."""
     can_add_evidence: bool
+    can_block: bool
     can_close_if_policy_allows: bool
-    can_close_parent: bool
-    can_request_closure: bool
+    can_create: bool
+    can_get: bool
+    can_link: bool
+    can_release: bool
+    can_update: bool
     can_close_own_review_item: Optional[bool] = None
 
 

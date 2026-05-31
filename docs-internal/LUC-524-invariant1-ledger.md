@@ -264,3 +264,40 @@ final gates for machine-authority work (they catch the command-vs-runtime-intern
 gap that drift + ratchets do not).
 
 Next: final class re-sweep + two independent blind dogma reviews (read-only) for convergence.
+
+## CONVERGENCE ROUND 1 (re-sweep + 2 blind reviews)
+Final-convergence workflow ran 1 exhaustive class re-sweep + 2 independent blind dogma reviewers
+(alpha, beta). Result: alpha CLEAN; beta found 2 (workgraph tool-surface); sweep found 1 HIGH the
+reviews missed (supervisor bind admission) + 4 LOW/possible. Triage + actions:
+
+### FOLDED — workgraph tool-surface authority (beta HIGH+MEDIUM)
+tool_surface.rs allowed_tools_for_projection decided the per-attention-mode tool ALLOW-SET via
+`match projection.mode` over hardcoded tool-name string literals (string folklore over the
+machine-owned mode), AND ignored the machine's can_add_evidence bit while emitting two
+never-enforced bits (can_request_closure, can_close_parent = fold-theater).
+FOLD: WorkAttentionLifecycle ClassifyAttentionAuthority now emits the COMPLETE per-mode capability
+bit set (can_get/add_evidence/release/update/block/create/link + existing close bits); the mode->
+capability truth table lives in the DSL. allowed_tools_for_projection is now a PURE mechanical
+tool-name->capability-bit decoder (no match mode). Removed can_request_closure (no such tool) +
+can_close_parent (always false, enforced nowhere) as fold-theater. AttentionContextProjection.authority
+is sourced from WorkAttentionMachine::classify_authority (machine-routed, fails closed). Wire type
+ProjectedAttentionAuthority changed -> schemas + Python/TS/web SDK regenerated; version parity clean.
+New test per_mode_allow_set_matches_pre_fold_behavior pins exact behavior (6 modes x authority combos).
+Gates: drift 10/6 up to date; check clean; workgraph 74 + machine-codegen 94 = 168 passed;
+classifier ratchet pass; seam-inventory 0 debt.
+
+### Pending (this round): supervisor bind material admission (sweep HIGH) -> MeerkatMachine; folding next.
+
+### DEFENDED — 4 LOW/possible sweep items (NOT flagged by either blind reviewer; pure projections):
+- oauth_flow.rs OAuthFlowRegistry::OAuthFlowAuthority: standalone in-memory fixture/inner projection;
+  the PRODUCTION authority is RuntimeOAuthFlowHandle (AuthMachine-routed, AuthMachineInput::Admit/Verify/
+  Consume/Expire OAuth*Flow), wired by CLI new_with_auth_lease. Non-production; not a live violation.
+- resolver.rs begin_managed_store_oauth_refresh_lifecycle: the mutation begin_refresh applies the
+  canonical AuthMachineInput::BeginRefresh (rejects illegal phases). The shell match READS the
+  machine-DECIDED phase (Valid/Expiring/Expired/ReauthRequired/Refreshing/Released) and PROJECTS it
+  to an error/no-op response — it does not decide the phase. Rule-11 projection of a machine verdict.
+- dsl_authority.rs should_publish_control_over_dsl / visible_runtime_phase: read-side snapshot
+  reconciliation of two machine-emitted phases for archive/spine DISPLAY; mutates no lifecycle fact.
+- run_primitive.rs peer_response_terminal_apply_intent_violation: pure typed-SHAPE well-formedness
+  check over the RunPrimitive's OWN fields (StagedInput + RunStart + non-empty context + ContentTurn);
+  not a verdict over a separate machine-owned lifecycle fact.

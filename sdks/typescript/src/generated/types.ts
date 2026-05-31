@@ -875,10 +875,14 @@ export interface GoalStatusResult {
 
 export interface ProjectedAttentionAuthority {
   can_add_evidence: boolean;
+  can_block: boolean;
   can_close_if_policy_allows: boolean;
   can_close_own_review_item?: boolean;
-  can_close_parent: boolean;
-  can_request_closure: boolean;
+  can_create: boolean;
+  can_get: boolean;
+  can_link: boolean;
+  can_release: boolean;
+  can_update: boolean;
 }
 
 export interface WorkAttentionBinding {

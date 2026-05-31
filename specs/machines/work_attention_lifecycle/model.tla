@@ -29,10 +29,15 @@ VARIABLES phase, model_step_count, revision, paused_until_utc_ms, superseded_by_
 vars == << phase, model_step_count, revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
 
 attention_can_close_own_review_item(mode, delegated_authority) == (((mode = "Review") \/ (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
+attention_can_link(mode) == (mode = "Coordinate")
+attention_can_create(mode) == (mode = "Coordinate")
+attention_can_block(mode) == (mode = "Pursue")
+attention_can_update(mode) == ((mode = "Pursue") \/ (mode = "Coordinate"))
+attention_can_release(mode) == (mode = "Pursue")
 attention_can_add_evidence(mode) == (mode # "Observe")
+attention_can_get(mode) == ((mode = "Pursue") \/ (mode = "Coordinate") \/ (mode = "Review") \/ (mode = "Falsify") \/ (mode = "Judge") \/ (mode = "Observe"))
 attention_is_adversarial(mode) == ((mode = "Review") \/ (mode = "Falsify") \/ (mode = "Observe"))
 attention_can_close_if_policy_allows(mode, delegated_authority) == ((delegated_authority = "CloseIfPolicyAllows") /\ (attention_is_adversarial(mode) = FALSE))
-attention_can_request_closure(mode, delegated_authority) == (((delegated_authority = "RequestClosure") \/ (delegated_authority = "CloseIfPolicyAllows")) /\ (attention_is_adversarial(mode) = FALSE))
 
 Init ==
     /\ phase = "Active"

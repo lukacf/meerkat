@@ -1446,12 +1446,16 @@ pub struct AttentionProjectionParentContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectedAttentionAuthority {
+    pub can_get: bool,
     pub can_add_evidence: bool,
-    pub can_request_closure: bool,
+    pub can_release: bool,
+    pub can_update: bool,
+    pub can_block: bool,
+    pub can_create: bool,
+    pub can_link: bool,
     #[serde(default)]
     pub can_close_own_review_item: bool,
     pub can_close_if_policy_allows: bool,
-    pub can_close_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

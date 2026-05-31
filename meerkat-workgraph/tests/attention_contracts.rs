@@ -928,7 +928,13 @@ async fn attention_projection_is_eligible_bounded_and_role_aware() {
     );
     assert!(projection.text.rendered.len() <= 96);
     assert!(projection.authority.can_add_evidence);
-    assert!(!projection.authority.can_close_parent);
+    assert!(projection.authority.can_get);
+    // A Falsify stance carries no graph-mutation or closure authority.
+    assert!(!projection.authority.can_create);
+    assert!(!projection.authority.can_link);
+    assert!(!projection.authority.can_update);
+    assert!(!projection.authority.can_release);
+    assert!(!projection.authority.can_block);
     assert!(!projection.authority.can_close_if_policy_allows);
 
     service
@@ -1389,7 +1395,7 @@ async fn attention_continuation_supersession_is_binding_scoped_not_projection_sc
 }
 
 #[tokio::test]
-async fn request_closure_projects_request_only_authority() {
+async fn request_closure_delegation_does_not_grant_close_authority() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
@@ -1420,13 +1426,19 @@ async fn request_closure_projects_request_only_authority() {
         .expect("project attention")
         .projection;
 
-    assert!(projection.authority.can_request_closure);
+    // A Pursue stance carries its full mutation profile, but the RequestClosure
+    // delegation grants no closure authority (only CloseIfPolicyAllows does).
+    assert!(projection.authority.can_get);
+    assert!(projection.authority.can_add_evidence);
+    assert!(projection.authority.can_release);
+    assert!(projection.authority.can_update);
+    assert!(projection.authority.can_block);
     assert!(!projection.authority.can_close_if_policy_allows);
-    assert!(!projection.authority.can_close_parent);
+    assert!(!projection.authority.can_close_own_review_item);
 }
 
 #[tokio::test]
-async fn close_if_policy_projection_does_not_advertise_parent_close_without_parent_handler() {
+async fn close_if_policy_projection_grants_self_close_without_parent_mutation() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),
     ));
@@ -1457,9 +1469,11 @@ async fn close_if_policy_projection_does_not_advertise_parent_close_without_pare
         .expect("project attention")
         .projection;
 
-    assert!(projection.authority.can_request_closure);
+    // CloseIfPolicyAllows grants policy-gated self-close; the Pursue stance still
+    // carries no create/link authority (the only parent-mutation paths).
     assert!(projection.authority.can_close_if_policy_allows);
-    assert!(!projection.authority.can_close_parent);
+    assert!(!projection.authority.can_create);
+    assert!(!projection.authority.can_link);
 }
 
 #[tokio::test]

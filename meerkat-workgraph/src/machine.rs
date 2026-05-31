@@ -131,10 +131,12 @@ impl WorkAttentionMachine {
     /// The shell extracts only the raw binding facts (`mode`,
     /// `delegated_authority`) and drives the canonical
     /// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` input over
-    /// the recovered binding state. The machine owns the permission POLICY (which
-    /// stances may add evidence, request closure, close their own review item, or
-    /// close-if-policy-allows) and emits the verdict; this function mirrors the
-    /// emitted `AttentionAuthorityClassified` permissions. Fails closed.
+    /// the recovered binding state. The machine owns the COMPLETE per-stance
+    /// tool-admission POLICY (which stances may read, add evidence, release,
+    /// update, block, create, link, close their own review item, or
+    /// close-if-policy-allows) and emits the capability verdict; this function
+    /// mirrors the emitted `AttentionAuthorityClassified` capability bits. Fails
+    /// closed.
     pub fn classify_authority(
         binding: &WorkAttentionBinding,
     ) -> Result<ProjectedAttentionAuthority, WorkGraphError> {
@@ -167,19 +169,27 @@ impl WorkAttentionMachine {
         let mut classified = None;
         for effect in transition.effects() {
             if let attention_dsl::WorkAttentionLifecycleEffect::AttentionAuthorityClassified {
+                can_get,
                 can_add_evidence,
-                can_request_closure,
+                can_release,
+                can_update,
+                can_block,
+                can_create,
+                can_link,
                 can_close_own_review_item,
                 can_close_if_policy_allows,
-                can_close_parent,
             } = effect
             {
                 let verdict = ProjectedAttentionAuthority {
+                    can_get: *can_get,
                     can_add_evidence: *can_add_evidence,
-                    can_request_closure: *can_request_closure,
+                    can_release: *can_release,
+                    can_update: *can_update,
+                    can_block: *can_block,
+                    can_create: *can_create,
+                    can_link: *can_link,
                     can_close_own_review_item: *can_close_own_review_item,
                     can_close_if_policy_allows: *can_close_if_policy_allows,
-                    can_close_parent: *can_close_parent,
                 };
                 if classified.replace(verdict).is_some() {
                     return Err(WorkGraphError::Store(format!(

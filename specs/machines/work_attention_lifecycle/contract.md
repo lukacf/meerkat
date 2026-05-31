@@ -28,12 +28,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AttentionSuperseded`(revision: u64)
 - `AttentionStopped`(revision: u64)
 - `AttentionEligibilityClassified`(eligible: Bool)
-- `AttentionAuthorityClassified`(can_add_evidence: Bool, can_request_closure: Bool, can_close_own_review_item: Bool, can_close_if_policy_allows: Bool, can_close_parent: Bool)
+- `AttentionAuthorityClassified`(can_get: Bool, can_add_evidence: Bool, can_release: Bool, can_update: Bool, can_block: Bool, can_create: Bool, can_link: Bool, can_close_own_review_item: Bool, can_close_if_policy_allows: Bool)
 
 ## Helpers
 - `attention_is_adversarial`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_get`(mode: WorkAttentionMode) -> `Bool`
 - `attention_can_add_evidence`(mode: WorkAttentionMode) -> `Bool`
-- `attention_can_request_closure`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
+- `attention_can_release`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_update`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_block`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_create`(mode: WorkAttentionMode) -> `Bool`
+- `attention_can_link`(mode: WorkAttentionMode) -> `Bool`
 - `attention_can_close_own_review_item`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
 - `attention_can_close_if_policy_allows`(mode: WorkAttentionMode, delegated_authority: AttentionDelegatedAuthority) -> `Bool`
 

@@ -285,11 +285,15 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AttentionAuthorityClassified {
+        pub can_get: bool,
         pub can_add_evidence: bool,
-        pub can_request_closure: bool,
+        pub can_release: bool,
+        pub can_update: bool,
+        pub can_block: bool,
+        pub can_create: bool,
+        pub can_link: bool,
         pub can_close_own_review_item: bool,
         pub can_close_if_policy_allows: bool,
-        pub can_close_parent: bool,
     }
 }
 

@@ -110,3 +110,27 @@ LOW:
 - mob_runtime_bridge_authority.rs: pure fan-out, rename away from *Authority.
 - mob actor/validate FLOW_SYSTEM_MEMBER_ID_PREFIX string classify -> typed MemberKind.
 - session.rs:2012 restore_system_context_state: already-acceptable (pure observation).
+
+## FINAL STATE (after blind-review-driven closure)
+
+### Resolved invariant-1 violations (all committed + independently re-verified)
+- PendingContinuationAdmissionMachine: demoted from canonical, then FOLDED into SessionDocumentMachine (boundary disposition is a canonical transition).
+- SessionTurnAdmissionMachine: PROMOTED to canonical (10th machine) with its own TLA spec; was the live ephemeral turn gate, previously non-canonical.
+- mob_coordination_lifecycle_authority -> MobMachine (work-intent/resource-claim/cursor/overlap; overlap revalidated).
+- session_deferred_turn / system_context / realtime_transcript / durable_config -> the NEW canonical SessionDocumentMachine (meerkat-core, wasm-clean, Approval-pattern schema-walking emitter). runtime-steer + compaction-summary + system-context string folklore replaced by typed markers. The 94k .rs.inc generation-theater deleted.
+- session_persistence_version + auth_lease_durable_marker: kept as pure witnesses + purity ratchets.
+- workgraph completion-policy + evidence.kind -> WorkGraphLifecycle (typed WorkEvidenceKind); workgraph public-error class -> WorkGraphLifecycle (ClassifyWorkGraphPublicError).
+- terminal_surface_mapping: emitter now schema-walks the DSL (was hand-string theater); session_persistence_version emitter now schema-walks (was raw-string paste).
+- policy_table workgraph-attention: typed ContinuationKind into ResolveAdmissionPlan; shell runtime_semantics OVERRIDE deleted (machine emits the lane directly).
+- LLM retry recoverable-vs-fatal + exhaustion fork: MeerkatMachine now revalidates via guards on RecoverableFailure (llm_failure_kind_recoverable helper + retry_attempt<=max_retries); shell keeps only mechanical schedule + typed extraction.
+- Anti-regression ratchets: no-stateless-classifier-canonical; persistence_version + auth_lease witness-purity; recoverability-revalidation; plus the existing seam-inventory/drift/audit-generated-headers gates.
+
+### Defended as dogma-ACCEPTABLE (NOT violations; flagged by some blind reviewers, cleared by others)
+Per dogma rule 11 (derived projections are rebuildable, never authoritative) and the layered/declarative-configuration principle. In each case a canonical machine OWNS the underlying state/config; the helper only reads/derives or evaluates declarative config, mutating/deciding no machine fact:
+- WorkAttentionMachine::is_eligible_at (workgraph machine.rs): pure projection over machine-owned lifecycle_phase + paused_until + clock. Reviewer alpha explicitly cleared the IDENTICAL WorkGraph is_eligible_at; beta flagged the twin. Projection, not a decision.
+- dsl_authority::visible_runtime_phase / should_publish_control_over_dsl (meerkat-runtime): reconciliation of TWO machine-emitted phases for projection DISPLAY. alpha cleared it (run 1); beta flagged it LOW (run 2). Display projection, mutates nothing.
+- mob runtime topology::evaluate_topology (flow.rs:391 step guard): pure evaluation of declarative topology_spec config rules (last-match-wins, default-allow) -> Allow/Deny, then errors/warns. Structural twin of evaluate_condition, which alpha cleared as a pure config-expression evaluator. Layered/declarative config.
+- LOW (reviewers marked acceptable): mob_runtime_bridge_authority::plan_lifecycle_notice (pure deterministic fan-out over machine-supplied facts; cosmetic *Authority naming only); FLOW_SYSTEM_MEMBER_ID_PREFIX reserved-namespace defensive check; presentational render/error-string helpers.
+
+### Operational caveat (pre-existing, CI-budget-managed)
+The largest merged machines (MeerkatMachine, SessionDocumentMachine) and the meerkat_mob_seam composition have heap-bound per-machine/composition TLC that does not complete in a constrained local env. This is the pre-existing constraint the branch's "Tame generated authority CI TLC sweep" / "Raise BuildBuddy CI SLO" commits manage; structural correctness is covered locally by machine-check-drift + classifier/witness ratchets + schema-contract + protocol-codegen-drift gates, with full TLC on the CI/BuildBuddy budget. Per-machine TLC DID complete clean locally for the smaller machines (session_turn_admission 89 states, work_graph_lifecycle 138,103 states).

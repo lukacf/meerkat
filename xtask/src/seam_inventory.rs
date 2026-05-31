@@ -1576,6 +1576,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph public error classification must align with canonical WorkGraph error truth",
         ),
+        (
+            "WorkGraphLifecycleMachine",
+            "WorkItemTerminalityClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph terminality verdict must align with canonical WorkGraph lifecycle-phase truth; the service mirrors it to gate attention binding/projection admission and fails closed",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "BlockerSatisfactionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph per-blocking-edge satisfaction verdict must align with canonical blocker lifecycle truth; the service mirrors it and mechanically fans-in the unresolved_blocker_count revalidated by the dependencies_satisfied guard",
+        ),
         //
         // =========================================================================
         // ApprovalLifecycleMachine
@@ -1804,6 +1816,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "AttentionStopped",
             SeamClassification::NoOwnerRealization,
             "Local WorkGraph attention stop effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkAttentionLifecycleMachine",
+            "AttentionEligibilityClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph attention-projection eligibility verdict must align with canonical attention phase + paused-deadline truth; the service mirrors it and fails closed",
+        ),
+        (
+            "WorkAttentionLifecycleMachine",
+            "AttentionAuthorityClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph projected-authority permissions must align with canonical attention mode + delegated-authority truth; the service mirrors them to scope tool admission and fails closed",
         ),
         //
         // =========================================================================

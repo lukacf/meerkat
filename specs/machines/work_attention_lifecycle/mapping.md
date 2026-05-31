@@ -35,6 +35,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StopPaused`
   - anchors: `work_attention_lifecycle`
   - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyEligibilityActive`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyEligibilityPausedElapsed`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyEligibilityPausedPending`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyEligibilitySuperseded`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyEligibilityStopped`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyAuthorityActive`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyAuthorityPaused`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyAuthoritySuperseded`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `ClassifyAuthorityStopped`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
 
 ### Effects
 - `AttentionPaused`
@@ -47,6 +74,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `work_attention_lifecycle`
   - scenarios: `work_attention_pause_resume_stop`
 - `AttentionStopped`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `AttentionEligibilityClassified`
+  - anchors: `work_attention_lifecycle`
+  - scenarios: `work_attention_pause_resume_stop`
+- `AttentionAuthorityClassified`
   - anchors: `work_attention_lifecycle`
   - scenarios: `work_attention_pause_resume_stop`
 

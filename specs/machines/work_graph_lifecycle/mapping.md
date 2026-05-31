@@ -233,6 +233,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyPublicErrorStoreErrorFailed`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`, `workgraph_topology_legality`
+- `ClassifyTerminalityTerminalCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyTerminalityTerminalCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyTerminalityTerminalFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyTerminalityLiveAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyTerminalityLiveOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyTerminalityLiveInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyTerminalityLiveBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyBlockerSatisfactionFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
 
 ### Effects
 - `Created`
@@ -262,6 +304,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WorkGraphPublicErrorClassified`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`, `workgraph_block_close_evidence`
+- `WorkItemTerminalityClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `BlockerSatisfactionClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`
 
 ### Invariants
 - `absent_has_zero_revision`

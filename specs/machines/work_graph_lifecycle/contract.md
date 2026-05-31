@@ -43,6 +43,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
 - `AddEvidence`(expected_revision: u64, evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>)
 - `ClassifyWorkGraphPublicError`(kind: WorkGraphErrorKind)
+- `ClassifyTerminality`
+- `ClassifyBlockerSatisfied`(blocker_present: Bool, blocker_lifecycle_phase: WorkLifecycleState)
 
 ## Signals
 
@@ -56,6 +58,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Closed`(terminal_state: WorkLifecycleState, at_utc_ms: u64)
 - `EvidenceAdded`
 - `WorkGraphPublicErrorClassified`(kind: WorkGraphErrorKind, public_class: WorkGraphPublicErrorClass)
+- `WorkItemTerminalityClassified`(terminal: Bool)
+- `BlockerSatisfactionClassified`(satisfied: Bool)
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
@@ -669,6 +673,90 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `store_error_class`
 - Emits: `WorkGraphPublicErrorClassified`
+- To: `Failed`
+
+### `ClassifyTerminalityTerminalCompleted`
+- From: `Completed`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `Completed`
+
+### `ClassifyTerminalityTerminalCancelled`
+- From: `Cancelled`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `Cancelled`
+
+### `ClassifyTerminalityTerminalFailed`
+- From: `Failed`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `Failed`
+
+### `ClassifyTerminalityLiveAbsent`
+- From: `Absent`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `Absent`
+
+### `ClassifyTerminalityLiveOpen`
+- From: `Open`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `Open`
+
+### `ClassifyTerminalityLiveInProgress`
+- From: `InProgress`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `InProgress`
+
+### `ClassifyTerminalityLiveBlocked`
+- From: `Blocked`
+- On: `ClassifyTerminality`()
+- Emits: `WorkItemTerminalityClassified`
+- To: `Blocked`
+
+### `ClassifyBlockerSatisfactionAbsent`
+- From: `Absent`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
+- To: `Absent`
+
+### `ClassifyBlockerSatisfactionOpen`
+- From: `Open`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
+- To: `Open`
+
+### `ClassifyBlockerSatisfactionInProgress`
+- From: `InProgress`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
+- To: `InProgress`
+
+### `ClassifyBlockerSatisfactionBlocked`
+- From: `Blocked`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
+- To: `Blocked`
+
+### `ClassifyBlockerSatisfactionCompleted`
+- From: `Completed`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
+- To: `Completed`
+
+### `ClassifyBlockerSatisfactionCancelled`
+- From: `Cancelled`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
+- To: `Cancelled`
+
+### `ClassifyBlockerSatisfactionFailed`
+- From: `Failed`
+- On: `ClassifyBlockerSatisfied`(blocker_present, blocker_lifecycle_phase)
+- Emits: `BlockerSatisfactionClassified`
 - To: `Failed`
 
 ## Coverage

@@ -2440,6 +2440,26 @@ pub fn work_attention_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 "WorkAttentionLifecycleState",
                 &["Active", "Paused", "Superseded", "Stopped"],
             ),
+            NamedTypeBinding::string_enum(
+                "WorkAttentionMode",
+                &[
+                    "Pursue",
+                    "Coordinate",
+                    "Review",
+                    "Falsify",
+                    "Judge",
+                    "Observe",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AttentionDelegatedAuthority",
+                &[
+                    "AddEvidence",
+                    "CloseOwnReviewItem",
+                    "RequestClosure",
+                    "CloseIfPolicyAllows",
+                ],
+            ),
         ],
         vec![],
     )

@@ -142,8 +142,14 @@ async fn attention_pause_is_machine_owned_and_does_not_snooze_item() {
             until: Some(paused_until)
         }
     );
-    assert!(!WorkAttentionMachine::is_eligible_at(&paused, now));
-    assert!(WorkAttentionMachine::is_eligible_at(&paused, paused_until));
+    assert!(
+        !WorkAttentionMachine::classify_eligibility_at(&paused, now)
+            .expect("machine classifies eligibility")
+    );
+    assert!(
+        WorkAttentionMachine::classify_eligibility_at(&paused, paused_until)
+            .expect("machine classifies eligibility")
+    );
     assert!(item.snoozed_until.is_none());
 }
 

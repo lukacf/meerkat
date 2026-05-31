@@ -6,9 +6,10 @@ use serde_json::json;
 use crate::WorkGraphError;
 use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifecycle as wg_dsl};
 use crate::types::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionStatus,
-    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind,
+    AddEvidenceRequest, AttentionDelegatedAuthority, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, ProjectedAttentionAuthority, ReleaseWorkItemRequest,
+    UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim,
+    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind,
     WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
 
@@ -66,15 +67,164 @@ impl WorkAttentionMachine {
         Ok(binding)
     }
 
-    pub fn is_eligible_at(binding: &WorkAttentionBinding, now: DateTime<Utc>) -> bool {
-        match binding.machine_state.lifecycle_phase {
-            attention_dsl::WorkAttentionLifecycleState::Active => true,
-            attention_dsl::WorkAttentionLifecycleState::Paused => binding
-                .machine_state
-                .paused_until_utc_ms
-                .is_some_and(|until| until <= datetime_to_millis(now)),
-            attention_dsl::WorkAttentionLifecycleState::Superseded
-            | attention_dsl::WorkAttentionLifecycleState::Stopped => false,
+    /// Resolve attention-projection eligibility for the binding at `now`.
+    ///
+    /// The shell extracts only the raw wall-clock `now` (a pure observation) and
+    /// drives the canonical `WorkAttentionLifecycleMachine`'s
+    /// `ClassifyAttentionEligibility` input over the recovered binding state. The
+    /// machine owns the eligibility POLICY — including the Paused deadline-elapsed
+    /// rule (`paused_until <= now`) — and emits the verdict; this function only
+    /// mirrors the emitted `AttentionEligibilityClassified.eligible`. It fails
+    /// closed (returns `Err`) if the machine refuses to classify or emits no
+    /// verdict; it decides nothing.
+    pub fn classify_eligibility_at(
+        binding: &WorkAttentionBinding,
+        now: DateTime<Utc>,
+    ) -> Result<bool, WorkGraphError> {
+        let mut dsl_auth =
+            attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
+                binding.machine_state.clone(),
+            )
+            .map_err(|error| {
+                WorkGraphError::InvalidTransition(format!(
+                    "attention binding {} refused eligibility recovery: {error:?}",
+                    binding.binding_id
+                ))
+            })?;
+        let transition = attention_dsl::WorkAttentionLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            attention_dsl::WorkAttentionLifecycleInput::ClassifyAttentionEligibility {
+                now_utc_ms: datetime_to_millis(now),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "attention binding {} refused eligibility classification: {error:?}",
+                binding.binding_id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let attention_dsl::WorkAttentionLifecycleEffect::AttentionEligibilityClassified {
+                eligible,
+            } = effect
+                && classified.replace(*eligible).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "attention binding {} emitted multiple eligibility verdicts",
+                    binding.binding_id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "attention binding {} emitted no eligibility verdict",
+                binding.binding_id
+            ))
+        })
+    }
+
+    /// Resolve the projected attention authority for the binding.
+    ///
+    /// The shell extracts only the raw binding facts (`mode`,
+    /// `delegated_authority`) and drives the canonical
+    /// `WorkAttentionLifecycleMachine`'s `ClassifyAttentionAuthority` input over
+    /// the recovered binding state. The machine owns the permission POLICY (which
+    /// stances may add evidence, request closure, close their own review item, or
+    /// close-if-policy-allows) and emits the verdict; this function mirrors the
+    /// emitted `AttentionAuthorityClassified` permissions. Fails closed.
+    pub fn classify_authority(
+        binding: &WorkAttentionBinding,
+    ) -> Result<ProjectedAttentionAuthority, WorkGraphError> {
+        let mode = attention_mode_to_dsl(binding.mode);
+        let delegated_authority = attention_delegated_authority_to_dsl(binding.delegated_authority);
+        let mut dsl_auth =
+            attention_dsl::WorkAttentionLifecycleMachineAuthority::recover_from_state(
+                binding.machine_state.clone(),
+            )
+            .map_err(|error| {
+                WorkGraphError::InvalidTransition(format!(
+                    "attention binding {} refused authority recovery: {error:?}",
+                    binding.binding_id
+                ))
+            })?;
+        let transition = attention_dsl::WorkAttentionLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            attention_dsl::WorkAttentionLifecycleInput::ClassifyAttentionAuthority {
+                mode,
+                delegated_authority,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "attention binding {} refused authority classification: {error:?}",
+                binding.binding_id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let attention_dsl::WorkAttentionLifecycleEffect::AttentionAuthorityClassified {
+                can_add_evidence,
+                can_request_closure,
+                can_close_own_review_item,
+                can_close_if_policy_allows,
+                can_close_parent,
+            } = effect
+            {
+                let verdict = ProjectedAttentionAuthority {
+                    can_add_evidence: *can_add_evidence,
+                    can_request_closure: *can_request_closure,
+                    can_close_own_review_item: *can_close_own_review_item,
+                    can_close_if_policy_allows: *can_close_if_policy_allows,
+                    can_close_parent: *can_close_parent,
+                };
+                if classified.replace(verdict).is_some() {
+                    return Err(WorkGraphError::Store(format!(
+                        "attention binding {} emitted multiple authority verdicts",
+                        binding.binding_id
+                    )));
+                }
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "attention binding {} emitted no authority verdict",
+                binding.binding_id
+            ))
+        })
+    }
+}
+
+fn attention_mode_to_dsl(mode: WorkAttentionMode) -> attention_dsl::WorkAttentionMode {
+    match mode {
+        WorkAttentionMode::Pursue => attention_dsl::WorkAttentionMode::Pursue,
+        WorkAttentionMode::Coordinate => attention_dsl::WorkAttentionMode::Coordinate,
+        WorkAttentionMode::Review => attention_dsl::WorkAttentionMode::Review,
+        WorkAttentionMode::Falsify => attention_dsl::WorkAttentionMode::Falsify,
+        WorkAttentionMode::Judge => attention_dsl::WorkAttentionMode::Judge,
+        WorkAttentionMode::Observe => attention_dsl::WorkAttentionMode::Observe,
+    }
+}
+
+fn attention_delegated_authority_to_dsl(
+    authority: AttentionDelegatedAuthority,
+) -> attention_dsl::AttentionDelegatedAuthority {
+    match authority {
+        AttentionDelegatedAuthority::AddEvidence => {
+            attention_dsl::AttentionDelegatedAuthority::AddEvidence
+        }
+        AttentionDelegatedAuthority::CloseOwnReviewItem => {
+            attention_dsl::AttentionDelegatedAuthority::CloseOwnReviewItem
+        }
+        AttentionDelegatedAuthority::RequestClosure => {
+            attention_dsl::AttentionDelegatedAuthority::RequestClosure
+        }
+        AttentionDelegatedAuthority::CloseIfPolicyAllows => {
+            attention_dsl::AttentionDelegatedAuthority::CloseIfPolicyAllows
         }
     }
 }
@@ -133,6 +283,110 @@ impl WorkGraphMachine {
         classified.ok_or_else(|| {
             WorkGraphError::Store(format!(
                 "generated WorkGraph public error classification did not emit a class for kind {kind:?}"
+            ))
+        })
+    }
+
+    /// Resolve whether a work item is terminal.
+    ///
+    /// The shell extracts no fact: it drives the canonical
+    /// `WorkGraphLifecycleMachine`'s `ClassifyTerminality` input over the item's
+    /// recovered machine state. The machine owns the lifecycle_phase and the
+    /// terminality verdict (which phases are terminal); this function mirrors the
+    /// emitted `WorkItemTerminalityClassified.terminal`, failing closed if the
+    /// machine refuses or emits no verdict. It decides nothing.
+    pub fn classify_terminality(item: &WorkItem) -> Result<bool, WorkGraphError> {
+        validate_item_machine_projection(item)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            item.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyTerminality {},
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused terminality classification: {error:?}",
+                item.id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::WorkItemTerminalityClassified { terminal } =
+                effect
+                && classified.replace(*terminal).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple terminality verdicts",
+                    item.id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no terminality verdict",
+                item.id
+            ))
+        })
+    }
+
+    /// Resolve whether a single blocking edge is satisfied.
+    ///
+    /// The shell extracts only the raw blocker lifecycle phase (a pure
+    /// observation projected from the blocker's own machine state) and whether
+    /// the blocker was resolvable at all, then drives the canonical
+    /// `WorkGraphLifecycleMachine`'s `ClassifyBlockerSatisfied` input over the
+    /// gated item's recovered state. The machine owns the satisfaction POLICY (a
+    /// blocking edge is satisfied iff its blocker reached terminal SUCCESS,
+    /// `Completed`) and emits the verdict; this function mirrors it. The caller
+    /// mechanically fans-in (counts) the unsatisfied edges. Fails closed.
+    pub fn classify_blocker_satisfied(
+        gated_item: &WorkItem,
+        blocker: Option<&WorkItem>,
+    ) -> Result<bool, WorkGraphError> {
+        validate_item_machine_projection(gated_item)?;
+        let blocker_lifecycle_phase = match blocker {
+            Some(blocker) => blocker.machine_state.lifecycle_phase,
+            None => wg_dsl::WorkLifecycleState::Absent,
+        };
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            gated_item.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyBlockerSatisfied {
+                blocker_present: blocker.is_some(),
+                blocker_lifecycle_phase,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused blocker satisfaction classification: {error:?}",
+                gated_item.id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::BlockerSatisfactionClassified { satisfied } =
+                effect
+                && classified.replace(*satisfied).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple blocker satisfaction verdicts",
+                    gated_item.id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no blocker satisfaction verdict",
+                gated_item.id
             ))
         })
     }

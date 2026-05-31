@@ -579,6 +579,13 @@ pub mod inputs {
     pub struct ClassifyWorkGraphPublicError {
         pub kind: WorkGraphErrorKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTerminality {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyBlockerSatisfied {
+        pub blocker_present: bool,
+        pub blocker_lifecycle_phase: WorkLifecycleState,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -596,6 +603,8 @@ pub enum Input {
     CloseFailed(inputs::CloseFailed),
     AddEvidence(inputs::AddEvidence),
     ClassifyWorkGraphPublicError(inputs::ClassifyWorkGraphPublicError),
+    ClassifyTerminality(inputs::ClassifyTerminality),
+    ClassifyBlockerSatisfied(inputs::ClassifyBlockerSatisfied),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -613,6 +622,8 @@ impl Input {
             Self::CloseFailed(_) => InputKind::CloseFailed,
             Self::AddEvidence(_) => InputKind::AddEvidence,
             Self::ClassifyWorkGraphPublicError(_) => InputKind::ClassifyWorkGraphPublicError,
+            Self::ClassifyTerminality(_) => InputKind::ClassifyTerminality,
+            Self::ClassifyBlockerSatisfied(_) => InputKind::ClassifyBlockerSatisfied,
         }
     }
 }
@@ -631,6 +642,8 @@ pub enum InputKind {
     CloseFailed,
     AddEvidence,
     ClassifyWorkGraphPublicError,
+    ClassifyTerminality,
+    ClassifyBlockerSatisfied,
 }
 
 pub mod effects {
@@ -662,6 +675,14 @@ pub mod effects {
         pub kind: WorkGraphErrorKind,
         pub public_class: WorkGraphPublicErrorClass,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WorkItemTerminalityClassified {
+        pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BlockerSatisfactionClassified {
+        pub satisfied: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -675,6 +696,8 @@ pub enum Effect {
     Closed(effects::Closed),
     EvidenceAdded(effects::EvidenceAdded),
     WorkGraphPublicErrorClassified(effects::WorkGraphPublicErrorClassified),
+    WorkItemTerminalityClassified(effects::WorkItemTerminalityClassified),
+    BlockerSatisfactionClassified(effects::BlockerSatisfactionClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -687,6 +710,8 @@ pub enum EffectKind {
     Closed,
     EvidenceAdded,
     WorkGraphPublicErrorClassified,
+    WorkItemTerminalityClassified,
+    BlockerSatisfactionClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -764,6 +789,20 @@ pub enum TransitionId {
     ClassifyPublicErrorStoreErrorCompleted,
     ClassifyPublicErrorStoreErrorCancelled,
     ClassifyPublicErrorStoreErrorFailed,
+    ClassifyTerminalityTerminalCompleted,
+    ClassifyTerminalityTerminalCancelled,
+    ClassifyTerminalityTerminalFailed,
+    ClassifyTerminalityLiveAbsent,
+    ClassifyTerminalityLiveOpen,
+    ClassifyTerminalityLiveInProgress,
+    ClassifyTerminalityLiveBlocked,
+    ClassifyBlockerSatisfactionAbsent,
+    ClassifyBlockerSatisfactionOpen,
+    ClassifyBlockerSatisfactionInProgress,
+    ClassifyBlockerSatisfactionBlocked,
+    ClassifyBlockerSatisfactionCompleted,
+    ClassifyBlockerSatisfactionCancelled,
+    ClassifyBlockerSatisfactionFailed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

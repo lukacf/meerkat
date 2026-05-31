@@ -1567,7 +1567,9 @@ fn normalize_attention_for_terminal_items_tx(tx: &Transaction<'_>) -> Result<(),
         let Some(item) = item else {
             continue;
         };
-        if item.status.is_terminal() {
+        // Terminality is a WorkGraph machine fact: the shell mirrors the
+        // canonical classify verdict rather than re-deciding `is_terminal()`.
+        if WorkGraphMachine::classify_terminality(&item)? {
             let expected_revision = binding.machine_state.revision;
             let stopped = WorkAttentionMachine::stop(binding, expected_revision, item.updated_at)?;
             upsert_attention_tx(tx, &stopped)?;

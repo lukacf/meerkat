@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkAttentionLifecycleMachine.
 
-CONSTANTS NatValues, WorkAttentionBindingKeyValues
+CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, NatValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -27,6 +27,12 @@ SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRe
 VARIABLES phase, model_step_count, revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms
 
 vars == << phase, model_step_count, revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+attention_can_close_own_review_item(mode, delegated_authority) == (((mode = "Review") \/ (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
+attention_can_add_evidence(mode) == (mode # "Observe")
+attention_is_adversarial(mode) == ((mode = "Review") \/ (mode = "Falsify") \/ (mode = "Observe"))
+attention_can_close_if_policy_allows(mode, delegated_authority) == ((delegated_authority = "CloseIfPolicyAllows") /\ (attention_is_adversarial(mode) = FALSE))
+attention_can_request_closure(mode, delegated_authority) == (((delegated_authority = "RequestClosure") \/ (delegated_authority = "CloseIfPolicyAllows")) /\ (attention_is_adversarial(mode) = FALSE))
 
 Init ==
     /\ phase = "Active"
@@ -114,6 +120,71 @@ StopPaused(expected_revision, at_utc_ms) ==
     /\ UNCHANGED << superseded_by_binding_key >>
 
 
+ClassifyEligibilityActive(now_utc_ms) ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyEligibilityPausedElapsed(now_utc_ms) ==
+    /\ phase = "Paused"
+    /\ ((paused_until_utc_ms # None) /\ ((IF "value" \in DOMAIN paused_until_utc_ms THEN paused_until_utc_ms["value"] ELSE None) <= now_utc_ms))
+    /\ phase' = "Paused"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyEligibilityPausedPending(now_utc_ms) ==
+    /\ phase = "Paused"
+    /\ ((paused_until_utc_ms = None) \/ ((IF "value" \in DOMAIN paused_until_utc_ms THEN paused_until_utc_ms["value"] ELSE None) > now_utc_ms))
+    /\ phase' = "Paused"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyEligibilitySuperseded(now_utc_ms) ==
+    /\ phase = "Superseded"
+    /\ phase' = "Superseded"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyEligibilityStopped(now_utc_ms) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyAuthorityActive(mode, delegated_authority) ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyAuthorityPaused(mode, delegated_authority) ==
+    /\ phase = "Paused"
+    /\ phase' = "Paused"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyAuthoritySuperseded(mode, delegated_authority) ==
+    /\ phase = "Superseded"
+    /\ phase' = "Superseded"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
+ClassifyAuthorityStopped(mode, delegated_authority) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
+
+
 Next ==
     \/ \E expected_revision \in {revision} : \E until_utc_ms \in OptionU64Values : PauseActive(expected_revision, until_utc_ms)
     \/ \E expected_revision \in {revision} : \E until_utc_ms \in OptionU64Values : PausePaused(expected_revision, until_utc_ms)
@@ -122,6 +193,15 @@ Next ==
     \/ \E expected_revision \in {revision} : \E arg_superseded_by_binding_key \in WorkAttentionBindingKeyValues : \E at_utc_ms \in 0..2 : SupersedePaused(expected_revision, arg_superseded_by_binding_key, at_utc_ms)
     \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : StopActive(expected_revision, at_utc_ms)
     \/ \E expected_revision \in {revision} : \E at_utc_ms \in 0..2 : StopPaused(expected_revision, at_utc_ms)
+    \/ \E now_utc_ms \in 0..2 : ClassifyEligibilityActive(now_utc_ms)
+    \/ \E now_utc_ms \in 0..2 : ClassifyEligibilityPausedElapsed(now_utc_ms)
+    \/ \E now_utc_ms \in 0..2 : ClassifyEligibilityPausedPending(now_utc_ms)
+    \/ \E now_utc_ms \in 0..2 : ClassifyEligibilitySuperseded(now_utc_ms)
+    \/ \E now_utc_ms \in 0..2 : ClassifyEligibilityStopped(now_utc_ms)
+    \/ \E mode \in WorkAttentionModeValues : \E delegated_authority \in AttentionDelegatedAuthorityValues : ClassifyAuthorityActive(mode, delegated_authority)
+    \/ \E mode \in WorkAttentionModeValues : \E delegated_authority \in AttentionDelegatedAuthorityValues : ClassifyAuthorityPaused(mode, delegated_authority)
+    \/ \E mode \in WorkAttentionModeValues : \E delegated_authority \in AttentionDelegatedAuthorityValues : ClassifyAuthoritySuperseded(mode, delegated_authority)
+    \/ \E mode \in WorkAttentionModeValues : \E delegated_authority \in AttentionDelegatedAuthorityValues : ClassifyAuthorityStopped(mode, delegated_authority)
     \/ TerminalStutter
 
 live_has_no_terminal_time == (((phase # "Active") /\ (phase # "Paused")) \/ (terminal_at_utc_ms = None))

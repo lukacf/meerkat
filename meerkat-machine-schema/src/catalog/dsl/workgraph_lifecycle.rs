@@ -359,6 +359,25 @@ machine! {
             // and feeds it back here; this machine owns the variant->class
             // POLICY and emits WorkGraphPublicErrorClassified.
             ClassifyWorkGraphPublicError { kind: Enum<WorkGraphErrorKind> },
+            // Terminality classification. This machine owns the lifecycle_phase;
+            // the terminality verdict (which phases are terminal) is a machine
+            // fact. The shell extracts no fact — it drives this input over the
+            // recovered machine state and mirrors the emitted
+            // WorkItemTerminalityClassified.terminal, failing closed.
+            ClassifyTerminality {},
+            // Per-blocking-edge satisfaction classification. The shell extracts
+            // only the raw blocker lifecycle phase (a pure observation projected
+            // from the blocker item's own machine state) plus whether the blocker
+            // was resolvable at all; this machine owns the satisfaction POLICY
+            // (a blocking edge is satisfied iff its blocker reached terminal
+            // SUCCESS, i.e. Completed) and emits BlockerSatisfactionClassified.
+            // The shell mirrors the verdict and mechanically fans-in (counts)
+            // the unsatisfied blockers — the count it feeds to RefreshEligibility
+            // / Claim, which this machine revalidates via dependencies_satisfied.
+            ClassifyBlockerSatisfied {
+                blocker_present: bool,
+                blocker_lifecycle_phase: Enum<WorkLifecycleState>,
+            },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -374,6 +393,8 @@ machine! {
                 kind: Enum<WorkGraphErrorKind>,
                 public_class: Enum<WorkGraphPublicErrorClass>,
             },
+            WorkItemTerminalityClassified { terminal: bool },
+            BlockerSatisfactionClassified { satisfied: bool },
         }
 
         invariant absent_has_zero_revision {
@@ -501,6 +522,8 @@ machine! {
         disposition Closed => routed [WorkAttentionLifecycleMachine],
         disposition EvidenceAdded => local,
         disposition WorkGraphPublicErrorClassified => local,
+        disposition WorkItemTerminalityClassified => local,
+        disposition BlockerSatisfactionClassified => local,
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
@@ -1146,6 +1169,49 @@ machine! {
             emit WorkGraphPublicErrorClassified {
                 kind: kind,
                 public_class: WorkGraphPublicErrorClass::StoreError
+            }
+        }
+
+        // --- Terminality classification ---
+        //
+        // The terminality verdict over the machine-owned lifecycle_phase is a
+        // machine fact. The shell drives this input over recovered state and
+        // mirrors the emitted `terminal`. Each transition self-loops in its phase
+        // (classification never mutates lifecycle state). The terminal phase set
+        // here is exactly `terminal [Completed, Cancelled, Failed]` above.
+
+        transition ClassifyTerminalityTerminal {
+            per_phase [Completed, Cancelled, Failed]
+            on input ClassifyTerminality {}
+            update {}
+            to Absent
+            emit WorkItemTerminalityClassified { terminal: true }
+        }
+
+        transition ClassifyTerminalityLive {
+            per_phase [Absent, Open, InProgress, Blocked]
+            on input ClassifyTerminality {}
+            update {}
+            to Absent
+            emit WorkItemTerminalityClassified { terminal: false }
+        }
+
+        // --- Per-blocking-edge satisfaction classification ---
+        //
+        // A blocking edge is satisfied iff its blocker item reached terminal
+        // SUCCESS (Completed). The shell extracts only the raw blocker lifecycle
+        // phase (projected from the blocker's own machine state) and whether the
+        // blocker was present at all; this machine owns the satisfaction POLICY
+        // and emits the verdict. The shell mirrors it and mechanically fans-in
+        // (counts) the unsatisfied edges. Phase-independent: self-loops in every
+        // phase of the item whose blockers are being classified.
+        transition ClassifyBlockerSatisfaction {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyBlockerSatisfied { blocker_present, blocker_lifecycle_phase }
+            update {}
+            to Absent
+            emit BlockerSatisfactionClassified {
+                satisfied: blocker_present && blocker_lifecycle_phase == WorkLifecycleState::Completed
             }
         }
     }

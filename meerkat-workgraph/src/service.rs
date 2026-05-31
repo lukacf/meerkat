@@ -241,7 +241,7 @@ impl WorkGraphService {
                 current.work_ref.item_id.clone(),
             )
             .await?;
-        if item.status.is_terminal() {
+        if WorkGraphMachine::classify_terminality(&item)? {
             return Err(WorkGraphError::InvalidTransition(format!(
                 "work attention binding {} targets terminal item {}",
                 current.binding_id, item.id
@@ -277,7 +277,7 @@ impl WorkGraphService {
             })
             .await?
             .attention;
-        if !WorkAttentionMachine::is_eligible_at(&attention, now) {
+        if !WorkAttentionMachine::classify_eligibility_at(&attention, now)? {
             return Err(WorkGraphError::InvalidTransition(format!(
                 "work attention binding {} is not eligible for projection",
                 attention.binding_id
@@ -290,7 +290,7 @@ impl WorkGraphService {
                 attention.work_ref.item_id.clone(),
             )
             .await?;
-        if item.status.is_terminal() {
+        if WorkGraphMachine::classify_terminality(&item)? {
             return Err(WorkGraphError::InvalidTransition(format!(
                 "work item {} is terminal and cannot produce attention projection",
                 item.id
@@ -316,7 +316,7 @@ impl WorkGraphService {
             BTreeMap::new()
         };
         Ok(AttentionProjectionResult {
-            projection: build_attention_projection(&attention, &item, &edges, &parent_items),
+            projection: build_attention_projection(&attention, &item, &edges, &parent_items)?,
         })
     }
 
@@ -1005,7 +1005,7 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges);
+        let unresolved_blockers = unresolved_blocker_count(&item, &all_items, &edges)?;
         let expected_previous_revision = item.revision;
         if let Some((item, event)) =
             WorkGraphMachine::refresh_eligibility(item, unresolved_blockers, now)?
@@ -1036,7 +1036,7 @@ impl WorkGraphService {
             .map(|item| (item.id.clone(), item))
             .collect::<BTreeMap<_, _>>();
         let edges = self.store.list_edges(realm_id, namespace).await?;
-        Ok(unresolved_blocker_count(item, &all_items, &edges))
+        unresolved_blocker_count(item, &all_items, &edges)
     }
 }
 
@@ -1058,7 +1058,7 @@ fn build_attention_projection(
     item: &WorkItem,
     edges: &[WorkEdge],
     items_by_id: &BTreeMap<WorkItemId, WorkItem>,
-) -> AttentionContextProjection {
+) -> Result<AttentionContextProjection, WorkGraphError> {
     let include_parent_context = attention.projection_policy.include_parent_context;
     let parent_edges = edges
         .iter()
@@ -1094,10 +1094,10 @@ fn build_attention_projection(
             revision: parent.revision,
         })
         .collect();
-    let authority = projected_attention_authority(attention);
+    let authority = WorkAttentionMachine::classify_authority(attention)?;
     let (rendered, truncated) =
         bounded_attention_projection_text(attention, item, &authority, &parent_items);
-    AttentionContextProjection {
+    Ok(AttentionContextProjection {
         binding_id: attention.binding_id.clone(),
         work_ref: attention.work_ref.clone(),
         mode: attention.mode,
@@ -1112,36 +1112,7 @@ fn build_attention_projection(
             rendered,
             truncated,
         },
-    }
-}
-
-fn projected_attention_authority(attention: &WorkAttentionBinding) -> ProjectedAttentionAuthority {
-    let adversarial = matches!(
-        attention.mode,
-        WorkAttentionMode::Review | WorkAttentionMode::Falsify | WorkAttentionMode::Observe
-    );
-    let close_own_review_item = matches!(
-        attention.mode,
-        WorkAttentionMode::Review | WorkAttentionMode::Falsify
-    ) && matches!(
-        attention.delegated_authority,
-        crate::types::AttentionDelegatedAuthority::CloseOwnReviewItem
-    );
-    let request_closure = matches!(
-        attention.delegated_authority,
-        crate::types::AttentionDelegatedAuthority::RequestClosure
-            | crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
-    ) && !adversarial;
-    ProjectedAttentionAuthority {
-        can_add_evidence: !matches!(attention.mode, WorkAttentionMode::Observe),
-        can_request_closure: request_closure,
-        can_close_own_review_item: close_own_review_item,
-        can_close_if_policy_allows: matches!(
-            attention.delegated_authority,
-            crate::types::AttentionDelegatedAuthority::CloseIfPolicyAllows
-        ) && !adversarial,
-        can_close_parent: false,
-    }
+    })
 }
 
 fn bounded_attention_projection_text(
@@ -1352,22 +1323,32 @@ fn attention_status_matches_at(
     }
 }
 
+/// Count the unresolved blocking edges for `item`.
+///
+/// The per-blocking-edge SATISFACTION verdict ("is this blocker resolved?") is a
+/// machine fact: the shell extracts only the raw blocker lifecycle phase and
+/// drives the canonical `WorkGraphLifecycleMachine`'s `ClassifyBlockerSatisfied`
+/// input, mirroring the emitted verdict. This function performs only the
+/// mechanical fan-in (counting the unsatisfied edges); it decides no satisfaction
+/// class itself. The resulting count is fed to `RefreshEligibility` / `Claim`,
+/// which the machine revalidates via its `dependencies_satisfied` guard. Fails
+/// closed on any classification refusal.
 fn unresolved_blocker_count(
     item: &WorkItem,
     all_items: &BTreeMap<WorkItemId, WorkItem>,
     edges: &[WorkEdge],
-) -> u64 {
-    edges
+) -> Result<u64, WorkGraphError> {
+    let mut unresolved: u64 = 0;
+    for edge in edges
         .iter()
         .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-        .filter(|edge| {
-            all_items
-                .get(&edge.from_id)
-                .is_none_or(|blocker| !blocker.status.is_terminal_success())
-        })
-        .count()
-        .try_into()
-        .unwrap_or(u64::MAX)
+    {
+        let blocker = all_items.get(&edge.from_id);
+        if !WorkGraphMachine::classify_blocker_satisfied(item, blocker)? {
+            unresolved = unresolved.saturating_add(1);
+        }
+    }
+    Ok(unresolved)
 }
 
 #[cfg(test)]

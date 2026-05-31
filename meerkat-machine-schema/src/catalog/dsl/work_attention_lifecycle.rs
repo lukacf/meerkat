@@ -1,3 +1,4 @@
+use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
 #[derive(
@@ -13,6 +14,57 @@ use meerkat_machine_dsl::machine;
     serde::Deserialize,
 )]
 pub struct WorkAttentionBindingKey(pub String);
+
+/// Attention stance the binding was provisioned with. A raw binding fact the
+/// shell extracts (no shell decision); the machine owns the permission POLICY
+/// that maps `(mode, delegated_authority)` to the projected authority verdict.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAttentionMode {
+    #[default]
+    Pursue,
+    Coordinate,
+    Review,
+    Falsify,
+    Judge,
+    Observe,
+}
+
+/// Delegated closure authority the binding was provisioned with. A raw binding
+/// fact the shell extracts; the machine owns the permission POLICY.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionDelegatedAuthority {
+    #[default]
+    AddEvidence,
+    CloseOwnReviewItem,
+    RequestClosure,
+    CloseIfPolicyAllows,
+}
 
 machine! {
     machine WorkAttentionLifecycleMachine {
@@ -48,6 +100,24 @@ machine! {
             Resume { expected_revision: u64 },
             Supersede { expected_revision: u64, superseded_by_binding_key: WorkAttentionBindingKey, at_utc_ms: u64 },
             Stop { expected_revision: u64, at_utc_ms: u64 },
+            // Attention-projection eligibility classification. The shell extracts
+            // only the raw wall-clock `now_utc_ms` (a pure observation) and feeds
+            // it here; this machine owns the eligibility POLICY — including the
+            // Paused deadline-elapsed rule (`paused_until <= now`) — over its own
+            // lifecycle_phase + paused_until_utc_ms and emits the verdict. The
+            // shell mirrors the emitted `AttentionEligibilityClassified.eligible`
+            // and fails closed without a verdict; it decides nothing.
+            ClassifyAttentionEligibility { now_utc_ms: u64 },
+            // Projected-authority permission classification. The shell extracts
+            // the raw binding facts (`mode`, `delegated_authority`); this machine
+            // owns the permission POLICY that maps them to the projected authority
+            // verdict and emits `AttentionAuthorityClassified`. The shell mirrors
+            // the emitted permissions (used to scope tool admission) and fails
+            // closed without a verdict.
+            ClassifyAttentionAuthority {
+                mode: Enum<WorkAttentionMode>,
+                delegated_authority: Enum<AttentionDelegatedAuthority>,
+            },
         }
 
         effect WorkAttentionLifecycleEffect {
@@ -55,6 +125,51 @@ machine! {
             AttentionResumed { revision: u64 },
             AttentionSuperseded { revision: u64 },
             AttentionStopped { revision: u64 },
+            AttentionEligibilityClassified { eligible: bool },
+            AttentionAuthorityClassified {
+                can_add_evidence: bool,
+                can_request_closure: bool,
+                can_close_own_review_item: bool,
+                can_close_if_policy_allows: bool,
+                can_close_parent: bool,
+            },
+        }
+
+        // Adversarial stances must never gain closure authority over the item
+        // they inspect; this is the core of the projected-authority POLICY.
+        helper attention_is_adversarial(mode: WorkAttentionMode) -> bool {
+            mode == WorkAttentionMode::Review
+                || mode == WorkAttentionMode::Falsify
+                || mode == WorkAttentionMode::Observe
+        }
+
+        helper attention_can_add_evidence(mode: WorkAttentionMode) -> bool {
+            mode != WorkAttentionMode::Observe
+        }
+
+        helper attention_can_request_closure(
+            mode: WorkAttentionMode,
+            delegated_authority: AttentionDelegatedAuthority
+        ) -> bool {
+            (delegated_authority == AttentionDelegatedAuthority::RequestClosure
+                || delegated_authority == AttentionDelegatedAuthority::CloseIfPolicyAllows)
+                && attention_is_adversarial(mode) == false
+        }
+
+        helper attention_can_close_own_review_item(
+            mode: WorkAttentionMode,
+            delegated_authority: AttentionDelegatedAuthority
+        ) -> bool {
+            (mode == WorkAttentionMode::Review || mode == WorkAttentionMode::Falsify)
+                && delegated_authority == AttentionDelegatedAuthority::CloseOwnReviewItem
+        }
+
+        helper attention_can_close_if_policy_allows(
+            mode: WorkAttentionMode,
+            delegated_authority: AttentionDelegatedAuthority
+        ) -> bool {
+            delegated_authority == AttentionDelegatedAuthority::CloseIfPolicyAllows
+                && attention_is_adversarial(mode) == false
         }
 
         invariant live_has_no_terminal_time {
@@ -74,6 +189,8 @@ machine! {
         disposition AttentionResumed => local,
         disposition AttentionSuperseded => local,
         disposition AttentionStopped => local,
+        disposition AttentionEligibilityClassified => local,
+        disposition AttentionAuthorityClassified => local,
 
         transition PauseActive {
             on input Pause { expected_revision, until_utc_ms }
@@ -156,6 +273,85 @@ machine! {
             }
             to Stopped
             emit AttentionStopped { revision: self.revision }
+        }
+
+        // --- Attention-projection eligibility classification ---
+        //
+        // The eligibility verdict over the machine-owned lifecycle_phase +
+        // paused_until_utc_ms is a machine fact. The shell extracts only the raw
+        // wall-clock `now_utc_ms`; the transitions below own the eligibility
+        // POLICY and each self-loop in their phase (classification never mutates
+        // lifecycle state), emitting exactly one `eligible` verdict. The Paused
+        // arms own the deadline-elapsed rule (`paused_until <= now`) the shell
+        // used to re-derive.
+
+        transition ClassifyEligibilityActive {
+            on input ClassifyAttentionEligibility { now_utc_ms }
+            guard "active_is_eligible" { self.lifecycle_phase == Phase::Active }
+            update {}
+            to Active
+            emit AttentionEligibilityClassified { eligible: true }
+        }
+
+        transition ClassifyEligibilityPausedElapsed {
+            on input ClassifyAttentionEligibility { now_utc_ms }
+            guard "paused" { self.lifecycle_phase == Phase::Paused }
+            guard "deadline_elapsed" {
+                self.paused_until_utc_ms != None
+                    && self.paused_until_utc_ms.get("value") <= now_utc_ms
+            }
+            update {}
+            to Paused
+            emit AttentionEligibilityClassified { eligible: true }
+        }
+
+        transition ClassifyEligibilityPausedPending {
+            on input ClassifyAttentionEligibility { now_utc_ms }
+            guard "paused" { self.lifecycle_phase == Phase::Paused }
+            guard "deadline_not_elapsed" {
+                self.paused_until_utc_ms == None
+                    || self.paused_until_utc_ms.get("value") > now_utc_ms
+            }
+            update {}
+            to Paused
+            emit AttentionEligibilityClassified { eligible: false }
+        }
+
+        transition ClassifyEligibilitySuperseded {
+            on input ClassifyAttentionEligibility { now_utc_ms }
+            guard "superseded_is_ineligible" { self.lifecycle_phase == Phase::Superseded }
+            update {}
+            to Superseded
+            emit AttentionEligibilityClassified { eligible: false }
+        }
+
+        transition ClassifyEligibilityStopped {
+            on input ClassifyAttentionEligibility { now_utc_ms }
+            guard "stopped_is_ineligible" { self.lifecycle_phase == Phase::Stopped }
+            update {}
+            to Stopped
+            emit AttentionEligibilityClassified { eligible: false }
+        }
+
+        // --- Projected-authority permission classification ---
+        //
+        // The four projected-authority permissions are a machine fact derived
+        // purely from the raw binding facts `(mode, delegated_authority)`. The
+        // policy is lifecycle-phase independent, so this self-loops in every
+        // phase; it never mutates lifecycle state. `can_close_parent` is always
+        // false (no binding currently grants parent-closure authority).
+        transition ClassifyAuthority {
+            per_phase [Active, Paused, Superseded, Stopped]
+            on input ClassifyAttentionAuthority { mode, delegated_authority }
+            update {}
+            to Active
+            emit AttentionAuthorityClassified {
+                can_add_evidence: attention_can_add_evidence(mode),
+                can_request_closure: attention_can_request_closure(mode, delegated_authority),
+                can_close_own_review_item: attention_can_close_own_review_item(mode, delegated_authority),
+                can_close_if_policy_allows: attention_can_close_if_policy_allows(mode, delegated_authority),
+                can_close_parent: false
+            }
         }
     }
 }

@@ -2403,27 +2403,55 @@ fn generate_tool_visibility_owner_protocol() -> Result<String> {
     Ok(out)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SessionPersistenceVersionConstants {
-    session_envelope_version: u32,
-    stored_input_state_version: u32,
-    session_metadata_schema_version: u32,
-    legacy_session_envelope_version: u32,
-    legacy_stored_input_state_version: u32,
-    legacy_session_metadata_schema_version: u32,
-}
-
+/// Emitter-side surface descriptor for one persistence-version field.
+///
+/// These are the field-agnostic *naming* facts (the JSON key the field stamps,
+/// the public Rust constant/function identifiers, the input/effect-variant
+/// names the schema-walk keys off). They are scaffolding — the analogue of the
+/// fixed `SurfaceResultClass` enum in `generate_terminal_surface_mapping` — and
+/// carry no version DECISIONS. Every version value and every accepted-version
+/// fact below is derived mechanically from the machine's transitions.
 #[derive(Debug, Clone, Copy)]
 struct SessionPersistenceVersionFieldSpec {
+    /// `SessionPersistenceVersionField` enum variant this field corresponds to.
     enum_variant: &'static str,
+    /// Input variant whose single transition stamps this field's version.
     authorize_input: &'static str,
+    /// Input variant whose restore transitions accept this field's versions.
     restore_input: &'static str,
+    /// JSON object key this field's version is stamped under / read from.
+    json_key: &'static str,
+    /// `pub const` identifier holding the current version.
+    current_const: &'static str,
+    /// `const` identifier holding the legacy default version.
+    legacy_const: &'static str,
+    /// `pub fn` returning the current version.
+    current_accessor: &'static str,
+    /// `pub fn` returning the legacy default version.
+    legacy_accessor: &'static str,
+    /// `pub fn` constructing the authorized stamp for this field.
+    authorize_fn: &'static str,
+    /// `pub fn` authorizing a restore of an observed version for this field.
+    restore_fn: &'static str,
 }
 
+/// Fully schema-derived emit plan for one persistence-version field.
+///
+/// Every value here is read out of the machine's transitions/init block by the
+/// walk below — nothing is a literal in the emitter body.
 #[derive(Debug, Clone)]
 struct SessionPersistenceVersionFieldPlan {
+    spec: SessionPersistenceVersionFieldSpec,
+    /// Current version, read from the init field the authorize transition
+    /// stamps and the restore transitions restore to.
     current_version: u32,
+    /// Legacy default version, read from the init field the legacy-restore
+    /// transition guards `persisted_version` against.
     legacy_version: u32,
+    /// The exact set of observed versions the machine's restore transitions
+    /// accept, derived from their `persisted_version` guard targets. For a pure
+    /// version encoder this is `{current_version, legacy_version}`.
+    accepted_versions: Vec<u32>,
 }
 
 fn session_persistence_init_u32(machine: &MachineSchema, field: &str) -> Result<u32> {
@@ -2579,6 +2607,7 @@ fn session_persistence_restore_guard_field(transition: &TransitionSchema) -> Res
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn session_persistence_derive_field_plan(
     machine: &MachineSchema,
     spec: SessionPersistenceVersionFieldSpec,
@@ -2639,15 +2668,82 @@ fn session_persistence_derive_field_plan(
         );
     }
 
+    // Map every guarded-against state field to its init version. This is the
+    // exact set of observed versions the machine's restore transitions accept,
+    // read straight out of the schema rather than assumed by the emitter.
+    let mut accepted_versions = Vec::with_capacity(accepted_state_fields.len());
+    for state_field in &accepted_state_fields {
+        accepted_versions.push(session_persistence_init_u32(machine, state_field)?);
+    }
+    accepted_versions.sort_unstable();
+    accepted_versions.dedup();
+
     Ok(SessionPersistenceVersionFieldPlan {
+        spec,
         current_version: session_persistence_init_u32(machine, &current_state_field)?,
         legacy_version: session_persistence_init_u32(machine, &legacy_state_field)?,
+        accepted_versions,
     })
 }
 
+/// Schema-derived emit plan for the whole persistence-version authority: the
+/// closed field-enum variant list (read off the `SessionPersistenceVersionField`
+/// string-enum binding) and one fully-derived [`SessionPersistenceVersionFieldPlan`]
+/// per field, in surface emission order.
+struct SessionPersistenceVersionPlan {
+    /// `SessionPersistenceVersionField` variants, in schema declaration order.
+    field_enum_variants: Vec<String>,
+    /// Per-field plans, in surface emission order (matches the field specs).
+    fields: Vec<SessionPersistenceVersionFieldPlan>,
+}
+
+/// The emitter-side surface descriptors. Naming only (JSON keys, public
+/// identifiers); every version/equality DECISION is derived from the schema.
+/// The `enum_variant` of each spec is cross-checked against the schema's
+/// `SessionPersistenceVersionField` binding so a renamed/added/removed variant
+/// fails the walk rather than silently mis-emitting.
+const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] = [
+    SessionPersistenceVersionFieldSpec {
+        enum_variant: "SessionEnvelope",
+        authorize_input: "AuthorizeSessionEnvelopeVersionStamp",
+        restore_input: "RestoreSessionEnvelopeVersion",
+        json_key: "version",
+        current_const: "SESSION_VERSION",
+        legacy_const: "LEGACY_SESSION_VERSION",
+        current_accessor: "session_envelope_version",
+        legacy_accessor: "legacy_session_envelope_version",
+        authorize_fn: "authorize_session_envelope_version_stamp",
+        restore_fn: "restore_session_envelope_version",
+    },
+    SessionPersistenceVersionFieldSpec {
+        enum_variant: "StoredInputState",
+        authorize_input: "AuthorizeStoredInputStateVersionStamp",
+        restore_input: "RestoreStoredInputStateVersion",
+        json_key: "stored_input_state_version",
+        current_const: "STORED_INPUT_STATE_VERSION",
+        legacy_const: "LEGACY_STORED_INPUT_STATE_VERSION",
+        current_accessor: "stored_input_state_version",
+        legacy_accessor: "legacy_stored_input_state_version",
+        authorize_fn: "authorize_stored_input_state_version_stamp",
+        restore_fn: "restore_stored_input_state_version",
+    },
+    SessionPersistenceVersionFieldSpec {
+        enum_variant: "SessionMetadataSchema",
+        authorize_input: "AuthorizeSessionMetadataSchemaVersionStamp",
+        restore_input: "RestoreSessionMetadataSchemaVersion",
+        json_key: "schema_version",
+        current_const: "SESSION_METADATA_SCHEMA_VERSION",
+        legacy_const: "LEGACY_SESSION_METADATA_SCHEMA_VERSION",
+        current_accessor: "session_metadata_schema_version",
+        legacy_accessor: "legacy_session_metadata_schema_version",
+        authorize_fn: "authorize_session_metadata_schema_version_stamp",
+        restore_fn: "restore_session_metadata_schema_version",
+    },
+];
+
 fn validate_session_persistence_version_authority_schema(
     machine: &MachineSchema,
-) -> Result<SessionPersistenceVersionConstants> {
+) -> Result<SessionPersistenceVersionPlan> {
     machine
         .validate()
         .context("validate SessionPersistenceVersionAuthorityMachine schema")?;
@@ -2657,22 +2753,16 @@ fn validate_session_persistence_version_authority_schema(
             machine.machine.as_str()
         );
     }
-    let required_inputs = [
-        "AuthorizeSessionEnvelopeVersionStamp",
-        "AuthorizeStoredInputStateVersionStamp",
-        "AuthorizeSessionMetadataSchemaVersionStamp",
-        "RestoreSessionEnvelopeVersion",
-        "RestoreStoredInputStateVersion",
-        "RestoreSessionMetadataSchemaVersion",
-    ];
-    for input in required_inputs {
-        if !machine
-            .inputs
-            .variants
-            .iter()
-            .any(|variant| variant.name.as_str() == input)
-        {
-            bail!("{} missing input `{input}`", machine.machine.as_str());
+    for spec in &SESSION_PERSISTENCE_FIELD_SPECS {
+        for input in [spec.authorize_input, spec.restore_input] {
+            if !machine
+                .inputs
+                .variants
+                .iter()
+                .any(|variant| variant.name.as_str() == input)
+            {
+                bail!("{} missing input `{input}`", machine.machine.as_str());
+            }
         }
     }
     for effect in ["VersionStampAuthorized", "VersionRestoreAuthorized"] {
@@ -2692,45 +2782,67 @@ fn validate_session_persistence_version_authority_schema(
         .context(
             "SessionPersistenceVersionAuthorityMachine missing SessionPersistenceVersionField binding",
         )?;
-    if !matches!(binding.rust, RustTypeAtom::StringEnum { .. }) {
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
         bail!("SessionPersistenceVersionField must be a string enum");
+    };
+    let field_enum_variants: Vec<String> = variants
+        .iter()
+        .map(|variant| variant.as_str().to_owned())
+        .collect();
+
+    // The emitter's surface specs must cover exactly the schema's field-enum
+    // variants — no more, no fewer — so a schema change to the closed field set
+    // forces an explicit emitter update instead of a silent partial emit.
+    let schema_variants: std::collections::BTreeSet<&str> =
+        field_enum_variants.iter().map(String::as_str).collect();
+    let spec_variants: std::collections::BTreeSet<&str> = SESSION_PERSISTENCE_FIELD_SPECS
+        .iter()
+        .map(|spec| spec.enum_variant)
+        .collect();
+    if schema_variants != spec_variants {
+        bail!(
+            "SessionPersistenceVersionField variants {schema_variants:?} do not match emitter field specs {spec_variants:?}"
+        );
     }
-    let session_envelope = session_persistence_derive_field_plan(
-        machine,
-        SessionPersistenceVersionFieldSpec {
-            enum_variant: "SessionEnvelope",
-            authorize_input: "AuthorizeSessionEnvelopeVersionStamp",
-            restore_input: "RestoreSessionEnvelopeVersion",
-        },
-    )?;
-    let stored_input_state = session_persistence_derive_field_plan(
-        machine,
-        SessionPersistenceVersionFieldSpec {
-            enum_variant: "StoredInputState",
-            authorize_input: "AuthorizeStoredInputStateVersionStamp",
-            restore_input: "RestoreStoredInputStateVersion",
-        },
-    )?;
-    let session_metadata_schema = session_persistence_derive_field_plan(
-        machine,
-        SessionPersistenceVersionFieldSpec {
-            enum_variant: "SessionMetadataSchema",
-            authorize_input: "AuthorizeSessionMetadataSchemaVersionStamp",
-            restore_input: "RestoreSessionMetadataSchemaVersion",
-        },
-    )?;
-    Ok(SessionPersistenceVersionConstants {
-        session_envelope_version: session_envelope.current_version,
-        stored_input_state_version: stored_input_state.current_version,
-        session_metadata_schema_version: session_metadata_schema.current_version,
-        legacy_session_envelope_version: session_envelope.legacy_version,
-        legacy_stored_input_state_version: stored_input_state.legacy_version,
-        legacy_session_metadata_schema_version: session_metadata_schema.legacy_version,
+
+    let mut fields = Vec::with_capacity(SESSION_PERSISTENCE_FIELD_SPECS.len());
+    for spec in SESSION_PERSISTENCE_FIELD_SPECS {
+        fields.push(session_persistence_derive_field_plan(machine, spec)?);
+    }
+
+    Ok(SessionPersistenceVersionPlan {
+        field_enum_variants,
+        fields,
     })
 }
 
+/// Validate that the field's restore transitions accept exactly the version
+/// set the shared `restore_version` helper compares against — i.e. the
+/// `{current, legacy}` pair derived from the authorize/legacy state fields.
+///
+/// The generated `restore_*` function delegates the equality to
+/// `restore_version` (`observed == current || observed == legacy`); this gate
+/// proves that delegation is faithful to the machine's restore transitions, so
+/// a schema that started accepting some other version would fail the walk
+/// rather than silently emit a now-wrong comparison.
+fn session_persistence_accepted_check(plan: &SessionPersistenceVersionFieldPlan) -> Result<()> {
+    let mut sorted = vec![plan.current_version, plan.legacy_version];
+    sorted.sort_unstable();
+    sorted.dedup();
+    if plan.accepted_versions != sorted {
+        let enum_variant = plan.spec.enum_variant;
+        let accepted = &plan.accepted_versions;
+        bail!(
+            "{enum_variant} restore transitions accept {accepted:?}, but the authorize/legacy state fields resolve to {sorted:?}"
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
 fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Result<String> {
-    let constants = validate_session_persistence_version_authority_schema(machine)?;
+    let plan = validate_session_persistence_version_authority_schema(machine)?;
+
     let mut out = String::new();
     writeln!(
         &mut out,
@@ -2746,45 +2858,129 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
     writeln!(&mut out)?;
     writeln!(&mut out, "use serde_json::{{Map, Value, json}};")?;
     writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub const SESSION_VERSION: u32 = {};",
-        constants.session_envelope_version
-    )?;
-    writeln!(
-        &mut out,
-        "pub const STORED_INPUT_STATE_VERSION: u32 = {};",
-        constants.stored_input_state_version
-    )?;
-    writeln!(
-        &mut out,
-        "pub const SESSION_METADATA_SCHEMA_VERSION: u32 = {};",
-        constants.session_metadata_schema_version
-    )?;
-    writeln!(
-        &mut out,
-        "const LEGACY_SESSION_VERSION: u32 = {};",
-        constants.legacy_session_envelope_version
-    )?;
-    writeln!(
-        &mut out,
-        "const LEGACY_STORED_INPUT_STATE_VERSION: u32 = {};",
-        constants.legacy_stored_input_state_version
-    )?;
-    writeln!(
-        &mut out,
-        "const LEGACY_SESSION_METADATA_SCHEMA_VERSION: u32 = {};",
-        constants.legacy_session_metadata_schema_version
-    )?;
-    out.push_str(
-        r#"
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionPersistenceVersionField {
-    SessionEnvelope,
-    StoredInputState,
-    SessionMetadataSchema,
+
+    // (1) Current/legacy version constants, one pair per field, every value
+    // read from the machine's init block via the field plan.
+    for field in &plan.fields {
+        writeln!(
+            &mut out,
+            "pub const {}: u32 = {};",
+            field.spec.current_const, field.current_version
+        )?;
+    }
+    for field in &plan.fields {
+        writeln!(
+            &mut out,
+            "const {}: u32 = {};",
+            field.spec.legacy_const, field.legacy_version
+        )?;
+    }
+    writeln!(&mut out)?;
+
+    // (2) The closed field enum, emitted from the schema's
+    // `SessionPersistenceVersionField` string-enum variants.
+    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(&mut out, "pub enum SessionPersistenceVersionField {{")?;
+    for variant in &plan.field_enum_variants {
+        writeln!(&mut out, "    {variant},")?;
+    }
+    writeln!(&mut out, "}}")?;
+
+    // (3) Field-agnostic mechanism: the authorized-stamp record, the typed
+    // error, and the three pure helpers (`authorize_version_stamp`,
+    // `restore_version`, `observed_version_from_json`). These carry no per-field
+    // decision, so they are emitted verbatim once.
+    out.push_str(SESSION_PERSISTENCE_MECHANISM);
+
+    // (4) Current-version accessors, one per field, returning the field's
+    // schema-derived constant.
+    for field in &plan.fields {
+        writeln!(&mut out)?;
+        writeln!(&mut out, "#[must_use]")?;
+        writeln!(
+            &mut out,
+            "pub fn {}() -> u32 {{",
+            field.spec.current_accessor
+        )?;
+        writeln!(&mut out, "    {}", field.spec.current_const)?;
+        writeln!(&mut out, "}}")?;
+    }
+
+    // (5) Legacy-version accessors, one per field.
+    for field in &plan.fields {
+        writeln!(&mut out)?;
+        writeln!(&mut out, "#[must_use]")?;
+        writeln!(
+            &mut out,
+            "pub fn {}() -> u32 {{",
+            field.spec.legacy_accessor
+        )?;
+        writeln!(&mut out, "    {}", field.spec.legacy_const)?;
+        writeln!(&mut out, "}}")?;
+    }
+
+    // (6) Authorize-stamp constructors. Each binds the schema field variant to
+    // its JSON key and its schema-derived current/legacy constants — the exact
+    // stamp the `VersionStampAuthorized` transition emits.
+    for field in &plan.fields {
+        writeln!(&mut out)?;
+        writeln!(
+            &mut out,
+            "pub fn {}() -> AuthorizedSessionPersistenceVersionStamp {{",
+            field.spec.authorize_fn
+        )?;
+        writeln!(&mut out, "    authorize_version_stamp(")?;
+        writeln!(
+            &mut out,
+            "        SessionPersistenceVersionField::{},",
+            field.spec.enum_variant
+        )?;
+        writeln!(&mut out, "        \"{}\",", field.spec.json_key)?;
+        writeln!(&mut out, "        {},", field.spec.current_const)?;
+        writeln!(&mut out, "        {},", field.spec.legacy_const)?;
+        writeln!(&mut out, "    )")?;
+        writeln!(&mut out, "}}")?;
+    }
+
+    // (7) Restore authorizers. The accepted-version equality
+    // (`observed == current || observed == legacy`) is the body of the shared
+    // `restore_version` helper; here we (a) re-validate that the field's restore
+    // transitions accept exactly that derived set and (b) feed the field's
+    // schema-derived current/legacy constants, restoring to current.
+    for field in &plan.fields {
+        // Validation gate: fails the walk if the schema's restore transitions
+        // accept anything other than `{current, legacy}`.
+        session_persistence_accepted_check(field)?;
+        writeln!(&mut out)?;
+        writeln!(&mut out, "pub fn {}(", field.spec.restore_fn)?;
+        writeln!(&mut out, "    observed: u32,")?;
+        writeln!(
+            &mut out,
+            ") -> Result<u32, SessionPersistenceVersionAuthorityError> {{"
+        )?;
+        writeln!(&mut out, "    restore_version(")?;
+        writeln!(
+            &mut out,
+            "        SessionPersistenceVersionField::{},",
+            field.spec.enum_variant
+        )?;
+        writeln!(&mut out, "        observed,")?;
+        writeln!(&mut out, "        {},", field.spec.current_const)?;
+        writeln!(&mut out, "        {},", field.spec.legacy_const)?;
+        writeln!(&mut out, "    )")?;
+        writeln!(&mut out, "}}")?;
+    }
+
+    // (8) The JSON stamp applier — field-agnostic, emitted verbatim.
+    out.push_str(SESSION_PERSISTENCE_STAMP_APPLIER);
+
+    Ok(out)
 }
 
+/// Field-agnostic mechanism shared by every persistence-version field: the
+/// authorized-stamp record + accessors, the typed authority error, and the
+/// three pure helpers. Carries no per-field decision, so it is emitted once.
+const SESSION_PERSISTENCE_MECHANISM: &str = r#"
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorizedSessionPersistenceVersionStamp {
     field: SessionPersistenceVersionField,
@@ -2896,98 +3092,11 @@ fn observed_version_from_json(
         observed: None,
     })
 }
+"#;
 
-#[must_use]
-pub fn session_envelope_version() -> u32 {
-    SESSION_VERSION
-}
-
-#[must_use]
-pub fn stored_input_state_version() -> u32 {
-    STORED_INPUT_STATE_VERSION
-}
-
-#[must_use]
-pub fn session_metadata_schema_version() -> u32 {
-    SESSION_METADATA_SCHEMA_VERSION
-}
-
-#[must_use]
-pub fn legacy_session_envelope_version() -> u32 {
-    LEGACY_SESSION_VERSION
-}
-
-#[must_use]
-pub fn legacy_stored_input_state_version() -> u32 {
-    LEGACY_STORED_INPUT_STATE_VERSION
-}
-
-#[must_use]
-pub fn legacy_session_metadata_schema_version() -> u32 {
-    LEGACY_SESSION_METADATA_SCHEMA_VERSION
-}
-
-pub fn authorize_session_envelope_version_stamp() -> AuthorizedSessionPersistenceVersionStamp {
-    authorize_version_stamp(
-        SessionPersistenceVersionField::SessionEnvelope,
-        "version",
-        SESSION_VERSION,
-        LEGACY_SESSION_VERSION,
-    )
-}
-
-pub fn authorize_stored_input_state_version_stamp() -> AuthorizedSessionPersistenceVersionStamp {
-    authorize_version_stamp(
-        SessionPersistenceVersionField::StoredInputState,
-        "stored_input_state_version",
-        STORED_INPUT_STATE_VERSION,
-        LEGACY_STORED_INPUT_STATE_VERSION,
-    )
-}
-
-pub fn authorize_session_metadata_schema_version_stamp() -> AuthorizedSessionPersistenceVersionStamp
-{
-    authorize_version_stamp(
-        SessionPersistenceVersionField::SessionMetadataSchema,
-        "schema_version",
-        SESSION_METADATA_SCHEMA_VERSION,
-        LEGACY_SESSION_METADATA_SCHEMA_VERSION,
-    )
-}
-
-pub fn restore_session_envelope_version(
-    observed: u32,
-) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    restore_version(
-        SessionPersistenceVersionField::SessionEnvelope,
-        observed,
-        SESSION_VERSION,
-        LEGACY_SESSION_VERSION,
-    )
-}
-
-pub fn restore_stored_input_state_version(
-    observed: u32,
-) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    restore_version(
-        SessionPersistenceVersionField::StoredInputState,
-        observed,
-        STORED_INPUT_STATE_VERSION,
-        LEGACY_STORED_INPUT_STATE_VERSION,
-    )
-}
-
-pub fn restore_session_metadata_schema_version(
-    observed: u32,
-) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    restore_version(
-        SessionPersistenceVersionField::SessionMetadataSchema,
-        observed,
-        SESSION_METADATA_SCHEMA_VERSION,
-        LEGACY_SESSION_METADATA_SCHEMA_VERSION,
-    )
-}
-
+/// The JSON stamp applier — field-agnostic; takes an already-authorized stamp
+/// and writes its current version into the object under its key.
+const SESSION_PERSISTENCE_STAMP_APPLIER: &str = r"
 pub fn stamp_authorized_version(
     object: &mut Map<String, Value>,
     stamp: AuthorizedSessionPersistenceVersionStamp,
@@ -3002,10 +3111,7 @@ pub fn stamp_authorized_version(
     object.insert(stamp.key().to_string(), json!(stamp.version()));
     Ok(())
 }
-"#,
-    );
-    Ok(out)
-}
+";
 
 pub fn render_session_persistence_version_authority(machine: &MachineSchema) -> Result<String> {
     generate_session_persistence_version_authority(machine)

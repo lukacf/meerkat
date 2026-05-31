@@ -1576,6 +1576,51 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         //
         // =========================================================================
+        // SessionDocumentMachine — per-session session-document registry
+        // =========================================================================
+        //
+        // Local effects: the session shell mirrors the machine-owned decision
+        // (phase + initial-prompt/tool-results staging) back onto the durable
+        // SessionDeferredTurnState projection; the effects never cross a shell
+        // boundary on their own.
+        (
+            "SessionDocumentMachine",
+            "SessionFirstTurnPhaseResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local first-turn phase decision mirrored onto the durable SessionDeferredTurnState projection inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionFirstTurnOverridesResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local build-override legality decision consumed in-process by the session shell first-turn override gate",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionInitialPromptStageResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local initial-prompt staging decision mirrored onto the session pending-prompt payload inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionToolResultsStageResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local tool-results staging decision mirrored onto the session pending-tool-results payload inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionConsumedInputsRestoreResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local consumed-input rollback decision mirrored onto the session pending payloads inside meerkat-core session",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SessionFirstTurnPhaseRecovered",
+            SeamClassification::NoOwnerRealization,
+            "Local durable snapshot recovery acknowledgement consumed in-process by the session restore path",
+        ),
+        //
+        // =========================================================================
         // WorkAttentionLifecycleMachine
         // =========================================================================
         (

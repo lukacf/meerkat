@@ -51,6 +51,13 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             "AuthMachine",
             // Approval lifecycle owns approval status/result truth.
             "ApprovalLifecycleMachine",
+            // SessionDocument owns per-session session-document lifecycle
+            // truth (currently the first-turn region) in its own per-session
+            // `Map` registry. Folds the former non-canonical
+            // SessionDeferredTurnAuthorityMachine, whose stateless-classifier
+            // shape (current_phase passed as input) is replaced by registry
+            // state that the machine reads and mutates itself.
+            "SessionDocumentMachine",
             // WorkGraph: realm-scoped commitment graph lifecycle,
             // readiness, claim state, and topology validation.
             "WorkGraphLifecycleMachine",

@@ -5,5 +5,6 @@ pub mod meerkat;
 pub mod mob;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
+pub mod session_document;
 pub mod work_attention_lifecycle;
 pub mod work_graph_lifecycle;

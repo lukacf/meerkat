@@ -39,7 +39,7 @@ pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod pending_continuation_admission;
 pub mod schedule_lifecycle;
-pub mod session_deferred_turn_authority;
+pub mod session_document;
 pub mod session_durable_config_authority;
 pub mod session_persistence_version_authority;
 pub mod session_realtime_transcript_authority;
@@ -88,9 +88,8 @@ pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurre
 pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE: &str =
     "generated::pending_continuation_admission";
-pub const SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
-pub const SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
-    "generated::session_deferred_turn_authority";
+pub const SESSION_DOCUMENT_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
+pub const SESSION_DOCUMENT_PRODUCTION_RUST_MODULE: &str = "generated::session_document";
 pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const SESSION_DURABLE_CONFIG_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
     "generated::session_durable_config_authority";
@@ -299,30 +298,33 @@ pub fn pending_continuation_admission_schema_metadata() -> MachineSchemaMetadata
     )
 }
 
-/// Non-canonical support schema used only to emit the generated session
-/// deferred-turn authority protocol into `meerkat-core`.
-pub fn dsl_session_deferred_turn_authority_machine() -> MachineSchema {
-    session_deferred_turn_authority_schema_metadata().attach_to(
-        session_deferred_turn_authority::SessionDeferredTurnAuthorityMachineState::schema(),
-    )
+/// Canonical SessionDocumentMachine — owns per-session session-document
+/// lifecycle truth (currently the first-turn region) in its own `Map` state.
+pub fn dsl_session_document_machine() -> MachineSchema {
+    session_document_schema_metadata()
+        .attach_to(session_document::SessionDocumentMachineState::schema())
 }
 
-pub fn dsl_session_deferred_turn_authority_machine_production_schema() -> MachineSchema {
+pub fn dsl_session_document_machine_production_schema() -> MachineSchema {
     with_production_rust_binding(
-        dsl_session_deferred_turn_authority_machine(),
-        SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_CRATE,
-        SESSION_DEFERRED_TURN_AUTHORITY_PRODUCTION_RUST_MODULE,
+        dsl_session_document_machine(),
+        SESSION_DOCUMENT_PRODUCTION_RUST_CRATE,
+        SESSION_DOCUMENT_PRODUCTION_RUST_MODULE,
     )
 }
 
-pub fn session_deferred_turn_authority_schema_metadata() -> MachineSchemaMetadata {
+pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            // String-backed per-session registry key. The DSL declares it as a
+            // newtype (`SessionId(pub String)`) so the `Map` key satisfies
+            // `Ord + Hash + Clone`; the model domain is the string identity.
+            NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string_enum(
-                "DeferredTurnFirstTurnPhase",
+                "SessionFirstTurnPhase",
                 &["Inactive", "Pending", "Consumed"],
             ),
-            NamedTypeBinding::string_enum("InitialPromptStageDecision", &["Clear", "Store"]),
+            NamedTypeBinding::string_enum("SessionInitialPromptStageDecision", &["Clear", "Store"]),
         ],
         Vec::new(),
     )

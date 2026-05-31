@@ -11,8 +11,8 @@
 
 use crate::Provider;
 use crate::generated::{
-    session_deferred_turn_authority, session_durable_config_authority,
-    session_persistence_version_authority, session_realtime_transcript_authority,
+    session_document, session_durable_config_authority, session_persistence_version_authority,
+    session_realtime_transcript_authority,
     session_realtime_transcript_authority::SessionRealtimeTranscriptState,
     session_system_context_authority,
 };
@@ -1036,7 +1036,7 @@ impl DeferredFirstTurnPhase {
     }
 }
 
-impl From<DeferredFirstTurnPhase> for session_deferred_turn_authority::DeferredTurnFirstTurnPhase {
+impl From<DeferredFirstTurnPhase> for session_document::SessionFirstTurnPhase {
     fn from(value: DeferredFirstTurnPhase) -> Self {
         match value {
             DeferredFirstTurnPhase::Inactive => Self::Inactive,
@@ -1046,12 +1046,12 @@ impl From<DeferredFirstTurnPhase> for session_deferred_turn_authority::DeferredT
     }
 }
 
-impl From<session_deferred_turn_authority::DeferredTurnFirstTurnPhase> for DeferredFirstTurnPhase {
-    fn from(value: session_deferred_turn_authority::DeferredTurnFirstTurnPhase) -> Self {
+impl From<session_document::SessionFirstTurnPhase> for DeferredFirstTurnPhase {
+    fn from(value: session_document::SessionFirstTurnPhase) -> Self {
         match value {
-            session_deferred_turn_authority::DeferredTurnFirstTurnPhase::Inactive => Self::Inactive,
-            session_deferred_turn_authority::DeferredTurnFirstTurnPhase::Pending => Self::Pending,
-            session_deferred_turn_authority::DeferredTurnFirstTurnPhase::Consumed => Self::Consumed,
+            session_document::SessionFirstTurnPhase::Inactive => Self::Inactive,
+            session_document::SessionFirstTurnPhase::Pending => Self::Pending,
+            session_document::SessionFirstTurnPhase::Consumed => Self::Consumed,
         }
     }
 }
@@ -1431,6 +1431,40 @@ impl SessionSystemContextState {
     }
 }
 
+/// Per-session registry key for the first-turn region of the
+/// [`session_document::SessionDocumentMachine`]. Each
+/// [`SessionDeferredTurnState`] is a single session's projection, so its
+/// machine instance carries exactly one registry entry under this key.
+const SESSION_DOCUMENT_FIRST_TURN_KEY: &str = "first_turn";
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// Authorize a durable deferred-turn snapshot through the canonical
+/// [`session_document::SessionDocumentMachine`] recovery transition.
+///
+/// The machine validates that the persisted first-turn phase is a legal
+/// recovery target and adopts it into its per-session registry, emitting
+/// `SessionFirstTurnPhaseRecovered`. The snapshot is returned unchanged on
+/// success; the machine — not this shell — owns the recovery legality.
+fn validate_deferred_turn_snapshot(
+    state: SessionDeferredTurnState,
+) -> Result<SessionDeferredTurnState, session_document::SessionDocumentError> {
+    let mut authority = session_document::SessionDocumentMachineAuthority::new();
+    let key = session_document::SessionDocumentKey::new(SESSION_DOCUMENT_FIRST_TURN_KEY);
+    // The recovery transition fails closed for any illegal first-turn phase
+    // (its guard admits only the three known phases); a rejection surfaces as
+    // `Err` here. On success the machine has adopted the snapshot.
+    authority.recover_session_first_turn_phase(
+        key,
+        state.first_turn_phase.into(),
+        state.pending_initial_prompt.is_some(),
+        usize_to_u64(state.pending_tool_results.len()),
+    )?;
+    Ok(state)
+}
+
 impl SessionDeferredTurnState {
     pub fn first_turn_phase(&self) -> DeferredFirstTurnPhase {
         self.first_turn_phase
@@ -1460,13 +1494,66 @@ impl SessionDeferredTurnState {
         &mut self.pending_tool_results
     }
 
+    /// Build a [`SessionDocumentMachineAuthority`] seeded with this session's
+    /// current durable first-turn projection.
+    ///
+    /// The machine owns the canonical first-turn phase + presence/count in its
+    /// own per-session `Map`; the durable [`SessionDeferredTurnState`] is its
+    /// projection. We recover the machine-owned registry from that projection
+    /// before driving an operation so every subsequent decision reads the
+    /// machine's own state — the shell never passes a phase conclusion as an
+    /// operation input.
+    fn document_authority(
+        &self,
+    ) -> (
+        session_document::SessionDocumentMachineAuthority,
+        session_document::SessionDocumentKey,
+    ) {
+        let mut authority = session_document::SessionDocumentMachineAuthority::new();
+        let key = session_document::SessionDocumentKey::new(SESSION_DOCUMENT_FIRST_TURN_KEY);
+        if let Err(err) = authority.recover_session_first_turn_phase(
+            key.clone(),
+            self.first_turn_phase.into(),
+            self.pending_initial_prompt.is_some(),
+            usize_to_u64(self.pending_tool_results.len()),
+        ) {
+            tracing::warn!(
+                error = %err,
+                "generated session document authority rejected first-turn recovery"
+            );
+        }
+        (authority, key)
+    }
+
+    /// Mirror the machine-resolved first-turn phase from one effect batch onto
+    /// the durable projection, returning `was_pending` when present.
+    fn mirror_first_turn_phase(
+        &mut self,
+        effects: &[session_document::SessionDocumentEffect],
+    ) -> Option<bool> {
+        for effect in effects {
+            if let session_document::SessionDocumentEffect::SessionFirstTurnPhaseResolved {
+                phase,
+                was_pending,
+            } = effect
+            {
+                self.first_turn_phase = (*phase).into();
+                return Some(*was_pending);
+            }
+        }
+        None
+    }
+
     /// Mark that this session has a deferred first turn waiting to start.
     pub fn mark_initial_turn_pending(&mut self) {
-        match session_deferred_turn_authority::mark_initial_turn_pending(self) {
-            Ok(()) => {}
+        let (mut authority, key) = self.document_authority();
+        match authority.mark_session_initial_turn_pending(key) {
+            Ok(effects) => {
+                self.mirror_first_turn_phase(&effects);
+            }
             Err(err) => tracing::warn!(
                 error = %err,
-                "generated deferred-turn authority rejected pending mark"
+                "generated session document authority rejected pending mark"
             ),
         }
     }
@@ -1475,12 +1562,13 @@ impl SessionDeferredTurnState {
     ///
     /// Returns true when the phase transitioned from `Pending`.
     pub fn mark_initial_turn_started(&mut self) -> bool {
-        match session_deferred_turn_authority::mark_initial_turn_started(self) {
-            Ok(was_pending) => was_pending,
+        let (mut authority, key) = self.document_authority();
+        match authority.start_session_initial_turn(key) {
+            Ok(effects) => self.mirror_first_turn_phase(&effects).unwrap_or(false),
             Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    "generated deferred-turn authority rejected first-turn start"
+                    "generated session document authority rejected first-turn start"
                 );
                 false
             }
@@ -1489,30 +1577,89 @@ impl SessionDeferredTurnState {
 
     /// Restore the deferred first-turn pending phase after a failed pre-run setup.
     pub fn restore_initial_turn_pending(&mut self) {
-        match session_deferred_turn_authority::restore_initial_turn_pending(self) {
-            Ok(()) => {}
+        // The restore-to-pending decision is the machine's
+        // `RestoreSessionConsumedInputs` transition with phase rollback
+        // requested; presence/count mirrors are left untouched here because the
+        // bulky payloads are restored separately by the caller.
+        let (mut authority, key) = self.document_authority();
+        match authority.restore_session_consumed_inputs(
+            key.clone(),
+            true,
+            self.pending_initial_prompt.is_some(),
+            usize_to_u64(self.pending_tool_results.len()),
+        ) {
+            Ok(_) => {
+                // Mirror the machine-owned phase the restore transition wrote
+                // into its per-session registry rather than re-deriving it.
+                if let Some(phase) = authority.session_first_turn_phase_for(&key) {
+                    self.first_turn_phase = phase.into();
+                }
+            }
             Err(err) => tracing::warn!(
                 error = %err,
-                "generated deferred-turn authority rejected pending restore"
+                "generated session document authority rejected pending restore"
             ),
         }
     }
 
     /// Whether build-only first-turn overrides are still legal for this session.
     pub fn allows_initial_turn_overrides(&self) -> bool {
-        session_deferred_turn_authority::allows_initial_turn_overrides(self.first_turn_phase.into())
-            .unwrap_or(false)
+        let (mut authority, key) = self.document_authority();
+        match authority.resolve_session_first_turn_overrides_allowed(key) {
+            Ok(effects) => effects
+                .iter()
+                .find_map(|effect| {
+                    match effect {
+                session_document::SessionDocumentEffect::SessionFirstTurnOverridesResolved {
+                    allowed,
+                } => Some(*allowed),
+                _ => None,
+            }
+                })
+                .unwrap_or(false),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated session document authority rejected override resolution"
+                );
+                false
+            }
+        }
     }
 
     /// Stage the create-time prompt for a later first turn.
     pub fn stage_initial_prompt(&mut self, prompt: ContentInput, accepted_at: SystemTime) {
-        if let Err(err) =
-            session_deferred_turn_authority::stage_initial_prompt(self, prompt, accepted_at)
-        {
-            tracing::warn!(
+        let prompt_has_content = prompt.has_images() || !prompt.text_content().trim().is_empty();
+        let (mut authority, key) = self.document_authority();
+        match authority.stage_session_initial_prompt(key, prompt_has_content) {
+            Ok(effects) => {
+                let decision = effects.iter().find_map(|effect| {
+                    match effect {
+                    session_document::SessionDocumentEffect::SessionInitialPromptStageResolved {
+                        decision,
+                    } => Some(*decision),
+                    _ => None,
+                }
+                });
+                match decision {
+                    Some(session_document::SessionInitialPromptStageDecision::Store) => {
+                        self.pending_initial_prompt = Some(PendingDeferredPrompt {
+                            prompt,
+                            accepted_at,
+                        });
+                    }
+                    Some(session_document::SessionInitialPromptStageDecision::Clear) => {
+                        self.pending_initial_prompt = None;
+                    }
+                    None => tracing::warn!(
+                        "generated session document authority returned no prompt-stage decision"
+                    ),
+                }
+            }
+            Err(err) => tracing::warn!(
                 error = %err,
-                "generated deferred-turn authority rejected initial prompt stage"
-            );
+                "generated session document authority rejected initial prompt stage"
+            ),
         }
     }
 
@@ -1522,14 +1669,38 @@ impl SessionDeferredTurnState {
         results: Vec<ToolResult>,
         accepted_at: SystemTime,
     ) -> usize {
-        session_deferred_turn_authority::stage_tool_results(self, results, accepted_at)
-            .unwrap_or_else(|err| {
+        let (mut authority, key) = self.document_authority();
+        let accepted = match authority.stage_session_tool_results(key, usize_to_u64(results.len()))
+        {
+            Ok(effects) => effects.iter().find_map(|effect| match effect {
+                session_document::SessionDocumentEffect::SessionToolResultsStageResolved {
+                    accepted_count,
+                } => Some(*accepted_count),
+                _ => None,
+            }),
+            Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    "generated deferred-turn authority rejected tool-results stage"
+                    "generated session document authority rejected tool-results stage"
                 );
-                0
-            })
+                return 0;
+            }
+        };
+        let Some(accepted) = accepted else {
+            tracing::warn!(
+                "generated session document authority returned no tool-results decision"
+            );
+            return 0;
+        };
+        if accepted == 0 {
+            return 0;
+        }
+        let accepted = usize::try_from(accepted).unwrap_or(usize::MAX);
+        self.pending_tool_results.push(PendingToolResultsMessage {
+            results,
+            accepted_at,
+        });
+        accepted
     }
 
     /// Whether any callback tool results are currently staged.
@@ -1539,13 +1710,22 @@ impl SessionDeferredTurnState {
 
     /// Start a turn and consume all inputs generated-authorized for that seam.
     pub fn consume_for_started_turn(&mut self) -> ConsumedDeferredTurnInputs {
-        session_deferred_turn_authority::consume_for_started_turn(self).unwrap_or_else(|err| {
-            tracing::warn!(
-                error = %err,
-                "generated deferred-turn authority rejected started-turn consumption"
-            );
-            ConsumedDeferredTurnInputs::default()
-        })
+        let (mut authority, key) = self.document_authority();
+        let was_pending = match authority.consume_session_deferred_inputs(key) {
+            Ok(effects) => self.mirror_first_turn_phase(&effects).unwrap_or(false),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated session document authority rejected started-turn consumption"
+                );
+                return ConsumedDeferredTurnInputs::default();
+            }
+        };
+        ConsumedDeferredTurnInputs {
+            restore_first_turn_pending: was_pending,
+            pending_initial_prompt: self.pending_initial_prompt.take(),
+            pending_tool_results: std::mem::take(&mut self.pending_tool_results),
+        }
     }
 
     /// Restore inputs previously consumed by `consume_for_started_turn`.
@@ -1553,13 +1733,51 @@ impl SessionDeferredTurnState {
         if consumed.is_empty() {
             return;
         }
-        if let Err(err) =
-            session_deferred_turn_authority::restore_consumed_turn_inputs(self, consumed)
-        {
+        let (mut authority, key) = self.document_authority();
+        let effects = match authority.restore_session_consumed_inputs(
+            key,
+            consumed.restore_first_turn_pending,
+            consumed.pending_initial_prompt.is_some(),
+            usize_to_u64(consumed.pending_tool_results.len()),
+        ) {
+            Ok(effects) => effects,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "generated session document authority rejected consumed input restore"
+                );
+                return;
+            }
+        };
+        let Some((restore_first_turn_pending, restore_initial_prompt, restore_tool_results)) =
+            effects.iter().find_map(|effect| match effect {
+                session_document::SessionDocumentEffect::SessionConsumedInputsRestoreResolved {
+                    restore_first_turn_pending,
+                    restore_initial_prompt,
+                    restore_tool_results,
+                } => Some((
+                    *restore_first_turn_pending,
+                    *restore_initial_prompt,
+                    *restore_tool_results,
+                )),
+                _ => None,
+            })
+        else {
             tracing::warn!(
-                error = %err,
-                "generated deferred-turn authority rejected consumed input restore"
+                "generated session document authority returned no consumed-input restore decision"
             );
+            return;
+        };
+        if restore_first_turn_pending {
+            self.restore_initial_turn_pending();
+        }
+        if restore_initial_prompt && self.pending_initial_prompt.is_none() {
+            self.pending_initial_prompt = consumed.pending_initial_prompt;
+        }
+        if restore_tool_results {
+            let mut restored = consumed.pending_tool_results;
+            restored.extend(std::mem::take(&mut self.pending_tool_results));
+            self.pending_tool_results = restored;
         }
     }
 }
@@ -2239,7 +2457,7 @@ impl Session {
         &mut self,
         state: SessionDeferredTurnState,
     ) -> Result<(), serde_json::Error> {
-        let state = session_deferred_turn_authority::restore_deferred_turn_state(state)
+        let state = validate_deferred_turn_snapshot(state)
             .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
         let value = serde_json::to_value(state)?;
         self.set_metadata_unchecked(SESSION_DEFERRED_TURN_STATE_KEY, value);
@@ -2254,7 +2472,7 @@ impl Session {
             .get(SESSION_DEFERRED_TURN_STATE_KEY)
             .map(|value| {
                 let state = serde_json::from_value(value.clone())?;
-                session_deferred_turn_authority::restore_deferred_turn_state(state)
+                validate_deferred_turn_snapshot(state)
                     .map_err(<serde_json::Error as serde::de::Error>::custom)
             })
             .transpose()

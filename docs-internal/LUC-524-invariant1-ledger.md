@@ -65,3 +65,48 @@ build/clippy/test lanes.
   single instance (never stack concurrent runs — they starve each other), with
   bounded `.cfg` state limits. Folding into MeerkatMachine/MobMachine grows this
   model, so bound new maps the way `run_*`/`frame_*` are bounded.
+
+## Blind dogma review findings (diagnostic pass at commit 1797365b5)
+
+3 independent blind reviewers (given only the invariant + codebase). All
+VIOLATIONS_FOUND. Authoritative remaining-work list:
+
+CRITICAL (turn-admission — both fold together):
+- PendingContinuationAdmissionMachine: unmodeled facts->disposition reducer
+  (RunPending/NoPendingBoundary), not canonical, not a pure encoder. Consumed by
+  SessionTurnAdmissionMachine + runner.rs.
+- SessionTurnAdmissionMachine (meerkat-session/src/turn_admission.rs): full
+  multi-phase admission lifecycle (Idle/Admitted/Running/Completing/ShuttingDown,
+  terminal [ShuttingDown]), the LIVE ephemeral turn gate, but non-canonical + no
+  TLA model. Resolution: promote to canonical via the SessionDocument pattern
+  (DSL in catalog + schema-walking emitter -> schema-free authority into
+  meerkat-session, reachable by ephemeral + WASM) and ABSORB PCAM's boundary
+  classification as an internal transition. Delete PCAM + the inline machine!.
+
+HIGH:
+- terminal_surface_mapping.rs (emitter xtask:7868-8190): turn-outcome->surface
+  class table is hand-authored string literals in the emitter, not derived from
+  MeerkatMachine. Fold into MeerkatMachine.
+- session_store.rs:443-453,646: transcript-write/save-guard admits by string-prefix
+  matching message content. Route through a typed marker.
+- auth_lease_durable_lifecycle_marker.rs:248-297 (consumed meerkat-auth-core
+  resolver.rs:324): hand-authored staleness reducer. Fold into AuthMachine /
+  auth_lease_bundle.
+- workgraph/machine.rs:367,475-503: completion-policy satisfaction decided by a
+  shell reducer gating CloseCompleted; + evidence.kind string folklore (MEDIUM).
+  Fold into WorkGraphLifecycleMachine CloseCompleted guards + typed WorkEvidenceKind.
+- session_persistence_version_authority.rs: codegen is raw-string paste, not
+  schema-walked (the witness behavior is pure, but its generation is theater).
+  Schema-walk it or make it an honest hand helper.
+
+MEDIUM:
+- policy_table.rs:85-98,68-82: workgraph-attention continuation routing reclassified
+  by string folklore AND overrides the canonical machine's emitted projection.
+  Carry a typed continuation discriminant into ResolveAdmissionPlan.
+- session_recovery.rs:277-313,242-266: resume effective-config override-admission
+  verdicts decided in handwritten shell. Model as SessionDocumentMachine transition.
+
+LOW:
+- mob_runtime_bridge_authority.rs: pure fan-out, rename away from *Authority.
+- mob actor/validate FLOW_SYSTEM_MEMBER_ID_PREFIX string classify -> typed MemberKind.
+- session.rs:2012 restore_system_context_state: already-acceptable (pure observation).

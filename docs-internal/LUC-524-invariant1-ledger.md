@@ -354,3 +354,21 @@ version parity + schema regen coherent.
 of AuthMachine confirm_oauth_durable_admission -> delete); pre-admission reservation release (LOW liveness);
 model hot-swap eligibility (known pending project_hot_swap_machine_gap); MCP teardown + create_item
 (sweep-rated defensible). beta to be re-run for two-clean.
+
+### Round-2 LOWs DEFENDED (sweep-only, NOT flagged by reviewer alpha; genuine projections/cleanup/equality)
+- oauth_flow.rs registry capacity guard: non-production. Production capacity authority is AuthMachine
+  confirm_oauth_durable_admission (RuntimeOAuthFlowHandle uses the registry's _without_capacity variants
+  + AuthMachine for capacity). The registry capacity verdict runs only in the standalone fixture/tests.
+- session_runtime.rs spawn_runtime_pre_admission_idle_cleanup: a 10ms watcher that idempotently RELEASES
+  a transient pre-admission reservation once `!runtime_running || !input_still_active` — deterministic
+  cleanup over machine-supplied facts (restore_or_release is idempotent), not a user-visible verdict.
+- live_orchestration.rs should_apply_global_model_hot_swap: a PURE string inequality
+  (current_session_model != new_global_model) — an equality observation that skips a no-op; the
+  downstream reconfigure_session_llm_identity is machine-routed and per-session identity is re-resolved
+  from session-bound state, not config.
+- runtime_ingress.rs clear_session_if_new_locked (MCP): transport-side idempotent teardown over
+  machine-supplied facts (sweep-rated defensible).
+- machine.rs create_item initial-status: input-routing config-eval (disallowed WorkStatus variants have
+  no constructor); sweep-rated defensible.
+These are projections of machine-decided facts / idempotent cleanup / pure equality — not shell-decided
+semantic verdicts over machine-owned lifecycle facts. Re-running convergence (round 3) for two-clean.

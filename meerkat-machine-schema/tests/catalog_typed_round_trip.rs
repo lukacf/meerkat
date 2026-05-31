@@ -79,6 +79,7 @@ fn canonical_machine_slug_snapshot() {
             "OccurrenceLifecycleMachine".to_string(),
             "ScheduleLifecycleMachine".to_string(),
             "SessionDocumentMachine".to_string(),
+            "SessionTurnAdmissionMachine".to_string(),
             "WorkAttentionLifecycleMachine".to_string(),
             "WorkGraphLifecycleMachine".to_string(),
         ],

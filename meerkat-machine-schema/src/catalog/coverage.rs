@@ -9,8 +9,8 @@ use super::{
     dsl::{
         dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine,
         dsl_occurrence_lifecycle_machine, dsl_schedule_lifecycle_machine,
-        dsl_session_document_machine, dsl_work_attention_lifecycle_machine,
-        dsl_workgraph_lifecycle_machine,
+        dsl_session_document_machine, dsl_session_turn_admission_machine,
+        dsl_work_attention_lifecycle_machine, dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -330,6 +330,36 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "session_durable_config_authorize_restore",
                     "AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, and AuthorizeSystemPromptMutation decide durable-config persist/restore/system-prompt admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_session_turn_admission_machine(),
+            &[anchor(
+                "session_turn_admission_authority",
+                "meerkat-session/src/generated/session_turn_admission.rs",
+                "generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariant shutdown_phase_is_not_active",
+            )],
+            &[
+                scenario(
+                    "turn_admission_claim_run_finalize",
+                    "ClaimTurn, BeginTurn, ResolveTurn, FinalizeTurnToIdle, FinalizeTurnToShutdown, AbortClaim, and ProjectTurnAdmission own the Idle/Admitted/Running/Completing/ShuttingDown turn-admission phase and emit TurnAdmissionProjected without handwritten phase mutation",
+                ),
+                scenario(
+                    "turn_admission_interrupt_and_shutdown",
+                    "RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, and RequestShutdownAlreadyShuttingDown resolve interrupt wake feedback and immediate-or-deferred shutdown under TurnInterruptRequested and TurnAdmissionProjected while preserving the shutdown-not-active invariant",
+                ),
+                scenario(
+                    "turn_admission_dispatch_and_boundary_cancel",
+                    "AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, AuthorizeCancelAfterBoundaryAdmitted, and AuthorizeCancelAfterBoundaryRunning resolve start-turn dispatch authorization and boundary-cancel legality from the admission phase under StartTurnDispatchResolved and CancelAfterBoundaryAuthorized",
+                ),
+                scenario(
+                    "turn_admission_start_turn_disposition",
+                    "ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, and ResolveLastStartTurnPublicTerminalNoPending resolve the start-turn disposition from the execution kind, prompt content observation, and the SessionDocumentMachine-emitted PendingContinuationDisposition under StartTurnDispositionResolved and StartTurnPublicTerminalResolved; the shell mirrors the disposition and never decides",
+                ),
+                scenario(
+                    "turn_admission_runtime_keep_alive",
+                    "ResolveRuntimeKeepAliveEnable and ResolveRuntimeKeepAlivePreserve resolve runtime keep-alive persistence from the typed keep-alive-policy-present observation under RuntimeKeepAliveResolved",
                 ),
             ],
         ),

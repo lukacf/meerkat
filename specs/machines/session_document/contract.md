@@ -37,6 +37,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSessionBuildStatePersist`(system_prompt_present: Bool, output_schema_present: Bool, hook_entry_count: u64, disabled_hook_count: u64, budget_limits_present: Bool, recoverable_tool_count: u64, silent_comms_intent_count: u64, max_inline_peer_notifications_present: Bool, app_context_present: Bool, additional_instruction_count: u64, shell_env_count: u64, mob_tool_authority_context_present: Bool, mob_tool_authority_context_generated: Bool, call_timeout_override: SessionCallTimeoutOverrideKind)
 - `RestoreSessionBuildState`(system_prompt_present: Bool, output_schema_present: Bool, hook_entry_count: u64, disabled_hook_count: u64, budget_limits_present: Bool, recoverable_tool_count: u64, silent_comms_intent_count: u64, max_inline_peer_notifications_present: Bool, app_context_present: Bool, additional_instruction_count: u64, shell_env_count: u64, mob_tool_authority_context_present: Bool, call_timeout_override: SessionCallTimeoutOverrideKind)
 - `AuthorizeSystemPromptMutation`(source: SessionSystemPromptSource, prompt_present: Bool, prompt_byte_count: u64, replacing_existing: Bool)
+- `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 
 ## Signals
 
@@ -58,6 +59,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionBuildStatePersistAuthorized`
 - `SessionBuildStateRestoreAuthorized`
 - `SystemPromptMutationAuthorized`
+- `PendingContinuationResolved`(disposition: PendingContinuationDisposition)
+- `PendingContinuationPublicTerminalResolved`(terminal: PendingContinuationPublicTerminal)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -72,6 +75,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_stop_reason_discards`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
 - `realtime_stop_reason_removes_completion`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
 - `realtime_stop_reason_records_completion`(stop_reason: RealtimeTranscriptStopReasonKind) -> `Bool`
+- `tail_has_pending_boundary`(session_tail: ObservedSessionTailKind) -> `Bool`
+- `has_effective_pending_boundary`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64) -> `Bool`
 
 ## Invariants
 
@@ -534,6 +539,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SystemPromptMutationAuthorized`
+- To: `Ready`
+
+### `ResolvePendingContinuationWithBoundary`
+- From: `Ready`
+- On: `ResolvePendingContinuation`(session_tail, staged_tool_result_count)
+- Guards:
+  - ``
+- Emits: `PendingContinuationResolved`
+- To: `Ready`
+
+### `ResolvePendingContinuationWithoutBoundary`
+- From: `Ready`
+- On: `ResolvePendingContinuation`(session_tail, staged_tool_result_count)
+- Guards:
+  - ``
+- Emits: `PendingContinuationResolved`, `PendingContinuationPublicTerminalResolved`
 - To: `Ready`
 
 ## Coverage

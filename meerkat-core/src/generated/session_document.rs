@@ -124,6 +124,31 @@ pub enum SessionSystemPromptSource {
     RuntimeSteerCleanup,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ObservedSessionTailKind {
+    #[default]
+    Empty,
+    System,
+    SystemNotice,
+    User,
+    Assistant,
+    BlockAssistant,
+    ToolResults,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PendingContinuationDisposition {
+    RunPending,
+    #[default]
+    NoPendingBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PendingContinuationPublicTerminal {
+    #[default]
+    NoPendingBoundary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionDocumentInput {
     MarkSessionInitialTurnPending {
@@ -306,6 +331,10 @@ pub enum SessionDocumentInput {
         prompt_byte_count: u64,
         replacing_existing: bool,
     },
+    ResolvePendingContinuation {
+        session_tail: ObservedSessionTailKind,
+        staged_tool_result_count: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,11 +396,24 @@ pub enum SessionDocumentEffect {
     SessionBuildStatePersistAuthorized,
     SessionBuildStateRestoreAuthorized,
     SystemPromptMutationAuthorized,
+    PendingContinuationResolved {
+        disposition: PendingContinuationDisposition,
+    },
+    PendingContinuationPublicTerminalResolved {
+        terminal: PendingContinuationPublicTerminal,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDocumentError {
     op: &'static str,
+}
+
+impl SessionDocumentError {
+    #[must_use]
+    pub fn new(op: &'static str) -> Self {
+        Self { op }
+    }
 }
 
 impl fmt::Display for SessionDocumentError {
@@ -460,6 +502,8 @@ enum SessionDocumentTransition {
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
     AuthorizeSystemPromptMutation,
+    ResolvePendingContinuationWithBoundary,
+    ResolvePendingContinuationWithoutBoundary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2114,6 +2158,48 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolvePendingContinuation {
+                session_tail,
+                staged_tool_result_count,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (has_effective_pending_boundary(session_tail, staged_tool_result_count))
+                {
+                    matches.push(SessionDocumentTransition::ResolvePendingContinuationWithBoundary);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (has_effective_pending_boundary(session_tail, staged_tool_result_count)
+                        == false)
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolvePendingContinuationWithoutBoundary);
+                }
+                let transition = Self::single_transition(matches, "ResolvePendingContinuation")?;
+                match transition {
+                    SessionDocumentTransition::ResolvePendingContinuationWithBoundary => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::PendingContinuationResolved {
+                            disposition: PendingContinuationDisposition::RunPending,
+                        }])
+                    }
+                    SessionDocumentTransition::ResolvePendingContinuationWithoutBoundary => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::PendingContinuationResolved {
+                                disposition: PendingContinuationDisposition::NoPendingBoundary,
+                            },
+                            SessionDocumentEffect::PendingContinuationPublicTerminalResolved {
+                                terminal: PendingContinuationPublicTerminal::NoPendingBoundary,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolvePendingContinuation_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -2546,6 +2632,17 @@ impl SessionDocumentMachineAuthority {
             replacing_existing,
         })
     }
+
+    pub fn resolve_pending_continuation(
+        &mut self,
+        session_tail: ObservedSessionTailKind,
+        staged_tool_result_count: u64,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolvePendingContinuation {
+            session_tail,
+            staged_tool_result_count,
+        })
+    }
 }
 
 fn phase_allows_initial_turn_overrides(phase: SessionFirstTurnPhase) -> bool {
@@ -2610,6 +2707,18 @@ fn realtime_stop_reason_removes_completion(stop_reason: RealtimeTranscriptStopRe
 
 fn realtime_stop_reason_records_completion(stop_reason: RealtimeTranscriptStopReasonKind) -> bool {
     stop_reason == RealtimeTranscriptStopReasonKind::Other
+}
+
+fn tail_has_pending_boundary(session_tail: ObservedSessionTailKind) -> bool {
+    (session_tail == ObservedSessionTailKind::User)
+        || (session_tail == ObservedSessionTailKind::ToolResults)
+}
+
+fn has_effective_pending_boundary(
+    session_tail: ObservedSessionTailKind,
+    staged_tool_result_count: u64,
+) -> bool {
+    (tail_has_pending_boundary(session_tail)) || (staged_tool_result_count > 0)
 }
 
 impl Default for SessionDocumentMachineAuthority {

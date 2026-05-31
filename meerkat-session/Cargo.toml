@@ -16,8 +16,6 @@ categories.workspace = true
 meerkat-capabilities = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-machine-dsl = { workspace = true }
-meerkat-machine-schema = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"
 tracing = { workspace = true }
@@ -50,11 +48,6 @@ meerkat-runtime = { workspace = true }
 default = []
 session-store = ["dep:meerkat-store", "dep:meerkat-runtime"]
 session-compaction = []
-
-[package.metadata.cargo-machete]
-ignored = [
-    "meerkat-machine-schema", # referenced by generated machine DSL macro expansion
-]
 
 [lints]
 workspace = true

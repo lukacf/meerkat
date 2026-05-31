@@ -447,9 +447,7 @@ impl SessionAgent for FactoryAgent {
     }
 
     fn observed_session_tail(&self) -> ObservedSessionTailKind {
-        meerkat_core::pending_continuation_admission::observe_session_tail(
-            self.agent.session().messages(),
-        )
+        meerkat_core::pending_continuation::observe_session_tail(self.agent.session().messages())
     }
 
     fn apply_runtime_system_context(

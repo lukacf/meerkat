@@ -1685,6 +1685,68 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local system-prompt mutation admission consumed in-process by the meerkat-core session_durable_config_authority shell, which applies the original prompt unchanged on admit",
         ),
+        (
+            "SessionDocumentMachine",
+            "PendingContinuationResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local pending-continuation disposition mirrored in-process by the meerkat-core pending_continuation driver (run_pending) and the meerkat-session turn-admission shell",
+        ),
+        (
+            "SessionDocumentMachine",
+            "PendingContinuationPublicTerminalResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local NoPendingBoundary terminal witness mirrored alongside the pending-continuation disposition; consumed in-process, never crosses a shell boundary",
+        ),
+        //
+        // =========================================================================
+        // SessionTurnAdmissionMachine — ephemeral turn-admission gate
+        // =========================================================================
+        //
+        // Local effects: the EphemeralSessionService turn-admission slot observes
+        // each emitted effect synchronously under its mutex and mirrors the
+        // projection/disposition. None crosses an actor or shell boundary.
+        (
+            "SessionTurnAdmissionMachine",
+            "TurnAdmissionProjected",
+            SeamClassification::NoOwnerRealization,
+            "Local turn-admission projection mirrored in-process by the EphemeralSessionService turn-admission slot",
+        ),
+        (
+            "SessionTurnAdmissionMachine",
+            "TurnInterruptRequested",
+            SeamClassification::NoOwnerRealization,
+            "Local interrupt wake feedback consumed in-process by the turn-admission slot to decide whether to wake the running turn",
+        ),
+        (
+            "SessionTurnAdmissionMachine",
+            "StartTurnDispatchResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local start-turn dispatch authorization mirrored in-process by the ephemeral start-turn path",
+        ),
+        (
+            "SessionTurnAdmissionMachine",
+            "CancelAfterBoundaryAuthorized",
+            SeamClassification::NoOwnerRealization,
+            "Local boundary-cancel authorization consumed in-process by the ephemeral cancel-after-boundary path",
+        ),
+        (
+            "SessionTurnAdmissionMachine",
+            "StartTurnDispositionResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local start-turn disposition mirrored in-process by the ephemeral start-turn path",
+        ),
+        (
+            "SessionTurnAdmissionMachine",
+            "StartTurnPublicTerminalResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local NoPendingBoundary terminal witness mirrored in-process alongside the start-turn disposition",
+        ),
+        (
+            "SessionTurnAdmissionMachine",
+            "RuntimeKeepAliveResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local runtime keep-alive persistence verdict consumed in-process by the ephemeral start-turn path",
+        ),
         //
         // =========================================================================
         // WorkAttentionLifecycleMachine

@@ -196,6 +196,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeSystemPromptMutation`
   - anchors: `session_document_authority`
   - scenarios: `session_durable_config_authorize_restore`
+- `ResolvePendingContinuationWithBoundary`
+  - anchors: `session_document_authority`
+  - scenarios: `session_first_turn_pending_consume`
+- `ResolvePendingContinuationWithoutBoundary`
+  - anchors: `session_document_authority`
+  - scenarios: `session_first_turn_pending_consume`
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`
@@ -249,6 +255,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SystemPromptMutationAuthorized`
   - anchors: `session_document_authority`
   - scenarios: `session_durable_config_authorize_restore`
+- `PendingContinuationResolved`
+  - anchors: `session_document_authority`
+  - scenarios: `session_first_turn_pending_consume`, `session_system_context_apply_discard`
+- `PendingContinuationPublicTerminalResolved`
+  - anchors: `session_document_authority`
+  - scenarios: `session_first_turn_pending_consume`, `session_system_context_apply_discard`
 
 ### Invariants
 - `(none)`

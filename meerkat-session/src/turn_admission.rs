@@ -3,559 +3,30 @@
 //! The mutex/notify/channel code around this type is service mechanics. The
 //! semantic facts it carries — phase, transition legality, active projection,
 //! interrupt/shutdown acceptance, and start-turn disposition — are owned by the
-//! generated `SessionTurnAdmissionMachine` below.
+//! canonical `SessionTurnAdmissionMachine`. Its generated, schema-free
+//! authority is emitted into `crate::generated::session_turn_admission` by
+//! `xtask protocol-codegen` (DSL in
+//! `meerkat-machine-schema/src/catalog/dsl/session_turn_admission.rs`, TLA
+//! model in `specs/machines/session_turn_admission/`). This shell drives the
+//! generated authority and MIRRORS the emitted decisions; it owns no semantics.
 
 use std::fmt;
 
 use meerkat_core::lifecycle::RuntimeExecutionKind;
-use meerkat_machine_dsl::machine;
 
 mod authority {
-    use super::machine;
-    use meerkat_core::pending_continuation_admission::PendingContinuationDisposition;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-    pub(crate) enum StartTurnExecutionKind {
-        #[default]
-        ContentTurn,
-        ResumePending,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-    pub(crate) enum StartTurnDisposition {
-        #[default]
-        RunContentTurn,
-        RunPending,
-        NoPendingBoundary,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-    pub(crate) enum StartTurnPublicTerminal {
-        #[default]
-        NoPendingBoundary,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-    pub(crate) enum StartTurnDispatchAuthorization {
-        #[default]
-        Authorized,
-        Cancelled,
-    }
-
-    machine! {
-        machine SessionTurnAdmissionMachine {
-            version: 1,
-            rust: "meerkat-session" / "turn_admission::authority",
-
-            state {
-                lifecycle_phase: TurnAdmissionPhase,
-                interrupt_pending: bool,
-                shutdown_pending: bool,
-                last_public_terminal: Option<Enum<StartTurnPublicTerminal>>,
-            }
-
-            init(Idle) {
-                interrupt_pending = false,
-                shutdown_pending = false,
-                last_public_terminal = None,
-            }
-
-            terminal [ShuttingDown]
-
-            phase TurnAdmissionPhase {
-                Idle,
-                Admitted,
-                Running,
-                Completing,
-                ShuttingDown,
-            }
-
-            input SessionTurnAdmissionInput {
-                ProjectTurnAdmission,
-                ClaimTurn,
-                AbortClaim,
-                BeginTurn,
-                ResolveTurn,
-                FinalizeTurn,
-                RequestInterrupt,
-                RequestShutdown,
-                AuthorizeStartTurnDispatch,
-                AuthorizeCancelAfterBoundary,
-                ResolveLastStartTurnPublicTerminal,
-                ResolveRuntimeKeepAlive { keep_alive_policy_present: bool },
-                ResolveStartTurnDisposition {
-                    execution_kind_present: bool,
-                    execution_kind: Enum<StartTurnExecutionKind>,
-                    prompt_trimmed_text_byte_count: u64,
-                    prompt_non_text_block_count: u64,
-                    pending_continuation: Enum<PendingContinuationDisposition>,
-                },
-            }
-
-            effect SessionTurnAdmissionEffect {
-                TurnAdmissionProjected {
-                    phase: TurnAdmissionPhase,
-                    interrupt_pending: bool,
-                    shutdown_pending: bool,
-                    is_active: bool,
-                },
-                TurnInterruptRequested { wake: bool },
-                StartTurnDispatchResolved { authorization: Enum<StartTurnDispatchAuthorization> },
-                CancelAfterBoundaryAuthorized,
-                StartTurnDispositionResolved { disposition: Enum<StartTurnDisposition> },
-                StartTurnPublicTerminalResolved { terminal: Enum<StartTurnPublicTerminal> },
-                RuntimeKeepAliveResolved { persist_keep_alive: bool },
-            }
-
-            helper is_active_phase(phase: TurnAdmissionPhase) -> bool {
-                phase == Phase::Admitted || phase == Phase::Running || phase == Phase::Completing
-            }
-
-            helper prompt_has_content(prompt_trimmed_text_byte_count: u64, prompt_non_text_block_count: u64) -> bool {
-                prompt_trimmed_text_byte_count > 0 || prompt_non_text_block_count > 0
-            }
-
-            invariant shutdown_phase_is_not_active {
-                self.lifecycle_phase != Phase::ShuttingDown || is_active_phase(self.lifecycle_phase) == false
-            }
-
-            disposition TurnAdmissionProjected => local,
-            disposition TurnInterruptRequested => local,
-            disposition StartTurnDispatchResolved => local,
-            disposition CancelAfterBoundaryAuthorized => local,
-            disposition StartTurnDispositionResolved => local,
-            disposition StartTurnPublicTerminalResolved => local,
-            disposition RuntimeKeepAliveResolved => local,
-
-            transition ProjectTurnAdmission {
-                per_phase [Idle, Admitted, Running, Completing, ShuttingDown]
-                on input ProjectTurnAdmission
-                update {}
-                to Idle
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition ClaimTurn {
-                on input ClaimTurn
-                guard { self.lifecycle_phase == Phase::Idle }
-                update {
-                    self.interrupt_pending = false;
-                    self.shutdown_pending = false;
-                    self.last_public_terminal = None;
-                }
-                to Admitted
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition AbortClaim {
-                on input AbortClaim
-                guard { self.lifecycle_phase == Phase::Admitted }
-                update {
-                    self.interrupt_pending = false;
-                    self.shutdown_pending = false;
-                }
-                to Idle
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition BeginTurn {
-                on input BeginTurn
-                guard { self.lifecycle_phase == Phase::Admitted }
-                update {}
-                to Running
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition ResolveTurn {
-                on input ResolveTurn
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Completing
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition FinalizeTurnToShutdown {
-                on input FinalizeTurn
-                guard { self.lifecycle_phase == Phase::Completing && self.shutdown_pending }
-                update {
-                    self.interrupt_pending = false;
-                }
-                to ShuttingDown
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition FinalizeTurnToIdle {
-                on input FinalizeTurn
-                guard { self.lifecycle_phase == Phase::Completing && self.shutdown_pending == false }
-                update {
-                    self.interrupt_pending = false;
-                    self.shutdown_pending = false;
-                }
-                to Idle
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestInterruptAdmittedFirst {
-                on input RequestInterrupt
-                guard { self.lifecycle_phase == Phase::Admitted && self.interrupt_pending == false }
-                update {
-                    self.interrupt_pending = true;
-                }
-                to Admitted
-                emit TurnInterruptRequested { wake: true }
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestInterruptAdmittedDuplicate {
-                on input RequestInterrupt
-                guard { self.lifecycle_phase == Phase::Admitted && self.interrupt_pending }
-                update {}
-                to Admitted
-                emit TurnInterruptRequested { wake: false }
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestInterruptRunningFirst {
-                on input RequestInterrupt
-                guard { self.lifecycle_phase == Phase::Running && self.interrupt_pending == false }
-                update {
-                    self.interrupt_pending = true;
-                }
-                to Running
-                emit TurnInterruptRequested { wake: true }
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestInterruptRunningDuplicate {
-                on input RequestInterrupt
-                guard { self.lifecycle_phase == Phase::Running && self.interrupt_pending }
-                update {}
-                to Running
-                emit TurnInterruptRequested { wake: false }
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestShutdownImmediateIdle {
-                on input RequestShutdown
-                guard { self.lifecycle_phase == Phase::Idle }
-                update {
-                    self.interrupt_pending = false;
-                    self.shutdown_pending = true;
-                }
-                to ShuttingDown
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestShutdownImmediateAdmitted {
-                on input RequestShutdown
-                guard { self.lifecycle_phase == Phase::Admitted }
-                update {
-                    self.interrupt_pending = false;
-                    self.shutdown_pending = true;
-                }
-                to ShuttingDown
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestShutdownDeferredRunning {
-                on input RequestShutdown
-                guard { self.lifecycle_phase == Phase::Running }
-                update {
-                    self.shutdown_pending = true;
-                }
-                to Running
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestShutdownDeferredCompleting {
-                on input RequestShutdown
-                guard { self.lifecycle_phase == Phase::Completing }
-                update {
-                    self.shutdown_pending = true;
-                }
-                to Completing
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition RequestShutdownAlreadyShuttingDown {
-                on input RequestShutdown
-                guard { self.lifecycle_phase == Phase::ShuttingDown }
-                update {}
-                to ShuttingDown
-                emit TurnAdmissionProjected {
-                    phase: self.lifecycle_phase,
-                    interrupt_pending: self.interrupt_pending,
-                    shutdown_pending: self.shutdown_pending,
-                    is_active: is_active_phase(self.lifecycle_phase),
-                }
-            }
-
-            transition AuthorizeCancelAfterBoundaryAdmitted {
-                on input AuthorizeCancelAfterBoundary
-                guard { self.lifecycle_phase == Phase::Admitted }
-                update {}
-                to Admitted
-                emit CancelAfterBoundaryAuthorized
-            }
-
-            transition AuthorizeStartTurnDispatchAdmitted {
-                on input AuthorizeStartTurnDispatch
-                guard { self.lifecycle_phase == Phase::Admitted }
-                update {}
-                to Admitted
-                emit StartTurnDispatchResolved { authorization: StartTurnDispatchAuthorization::Authorized }
-            }
-
-            transition AuthorizeStartTurnDispatchShuttingDown {
-                on input AuthorizeStartTurnDispatch
-                guard { self.lifecycle_phase == Phase::ShuttingDown }
-                update {}
-                to ShuttingDown
-                emit StartTurnDispatchResolved { authorization: StartTurnDispatchAuthorization::Cancelled }
-            }
-
-            transition AuthorizeCancelAfterBoundaryRunning {
-                on input AuthorizeCancelAfterBoundary
-                guard { self.lifecycle_phase == Phase::Running }
-                update {}
-                to Running
-                emit CancelAfterBoundaryAuthorized
-            }
-
-            transition ResolveDispositionContentTurn {
-                on input ResolveStartTurnDisposition {
-                    execution_kind_present,
-                    execution_kind,
-                    prompt_trimmed_text_byte_count,
-                    prompt_non_text_block_count,
-                    pending_continuation
-                }
-                guard {
-                    self.lifecycle_phase == Phase::Admitted
-                    && execution_kind_present
-                    && execution_kind == StartTurnExecutionKind::ContentTurn
-                }
-                update {
-                    self.last_public_terminal = None;
-                }
-                to Admitted
-                emit StartTurnDispositionResolved { disposition: StartTurnDisposition::RunContentTurn }
-            }
-
-            transition ResolveDispositionResumePendingWithBoundary {
-                on input ResolveStartTurnDisposition {
-                    execution_kind_present,
-                    execution_kind,
-                    prompt_trimmed_text_byte_count,
-                    prompt_non_text_block_count,
-                    pending_continuation
-                }
-                guard {
-                    self.lifecycle_phase == Phase::Admitted
-                    && execution_kind_present
-                    && execution_kind == StartTurnExecutionKind::ResumePending
-                    && pending_continuation == PendingContinuationDisposition::RunPending
-                }
-                update {
-                    self.last_public_terminal = None;
-                }
-                to Admitted
-                emit StartTurnDispositionResolved { disposition: StartTurnDisposition::RunPending }
-            }
-
-            transition ResolveDispositionResumePendingWithoutBoundary {
-                on input ResolveStartTurnDisposition {
-                    execution_kind_present,
-                    execution_kind,
-                    prompt_trimmed_text_byte_count,
-                    prompt_non_text_block_count,
-                    pending_continuation
-                }
-                guard {
-                    self.lifecycle_phase == Phase::Admitted
-                    && execution_kind_present
-                    && execution_kind == StartTurnExecutionKind::ResumePending
-                    && pending_continuation == PendingContinuationDisposition::NoPendingBoundary
-                }
-                update {
-                    self.last_public_terminal = Some(StartTurnPublicTerminal::NoPendingBoundary);
-                }
-                to Admitted
-                emit StartTurnDispositionResolved { disposition: StartTurnDisposition::NoPendingBoundary }
-                emit StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary }
-            }
-
-            transition ResolveDispositionDirectPrompt {
-                on input ResolveStartTurnDisposition {
-                    execution_kind_present,
-                    execution_kind,
-                    prompt_trimmed_text_byte_count,
-                    prompt_non_text_block_count,
-                    pending_continuation
-                }
-                guard {
-                    self.lifecycle_phase == Phase::Admitted
-                    && execution_kind_present == false
-                    && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count)
-                }
-                update {
-                    self.last_public_terminal = None;
-                }
-                to Admitted
-                emit StartTurnDispositionResolved { disposition: StartTurnDisposition::RunContentTurn }
-            }
-
-            transition ResolveDispositionDirectPending {
-                on input ResolveStartTurnDisposition {
-                    execution_kind_present,
-                    execution_kind,
-                    prompt_trimmed_text_byte_count,
-                    prompt_non_text_block_count,
-                    pending_continuation
-                }
-                guard {
-                    self.lifecycle_phase == Phase::Admitted
-                    && execution_kind_present == false
-                    && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == false
-                    && pending_continuation == PendingContinuationDisposition::RunPending
-                }
-                update {
-                    self.last_public_terminal = None;
-                }
-                to Admitted
-                emit StartTurnDispositionResolved { disposition: StartTurnDisposition::RunPending }
-            }
-
-            transition ResolveDispositionDirectNoPending {
-                on input ResolveStartTurnDisposition {
-                    execution_kind_present,
-                    execution_kind,
-                    prompt_trimmed_text_byte_count,
-                    prompt_non_text_block_count,
-                    pending_continuation
-                }
-                guard {
-                    self.lifecycle_phase == Phase::Admitted
-                    && execution_kind_present == false
-                    && prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == false
-                    && pending_continuation == PendingContinuationDisposition::NoPendingBoundary
-                }
-                update {
-                    self.last_public_terminal = Some(StartTurnPublicTerminal::NoPendingBoundary);
-                }
-                to Admitted
-                emit StartTurnDispositionResolved { disposition: StartTurnDisposition::NoPendingBoundary }
-                emit StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary }
-            }
-
-            transition ResolveRuntimeKeepAliveEnable {
-                on input ResolveRuntimeKeepAlive { keep_alive_policy_present }
-                guard { self.lifecycle_phase == Phase::Admitted && keep_alive_policy_present }
-                update {}
-                to Admitted
-                emit RuntimeKeepAliveResolved { persist_keep_alive: true }
-            }
-
-            transition ResolveRuntimeKeepAlivePreserve {
-                on input ResolveRuntimeKeepAlive { keep_alive_policy_present }
-                guard { self.lifecycle_phase == Phase::Admitted && keep_alive_policy_present == false }
-                update {}
-                to Admitted
-                emit RuntimeKeepAliveResolved { persist_keep_alive: false }
-            }
-
-            transition ResolveLastStartTurnPublicTerminalNoPending {
-                per_phase [Idle, Admitted, Running, Completing, ShuttingDown]
-                on input ResolveLastStartTurnPublicTerminal
-                guard { self.last_public_terminal == Some(StartTurnPublicTerminal::NoPendingBoundary) }
-                update {}
-                to Idle
-                emit StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary }
-            }
-        }
-    }
+    pub(crate) use crate::generated::session_turn_admission::{
+        SessionTurnAdmissionEffect, SessionTurnAdmissionMachineAuthority,
+        StartTurnDispatchAuthorization, StartTurnDisposition, StartTurnExecutionKind,
+        StartTurnPublicTerminal, TurnAdmissionPhase,
+    };
 }
 
 pub(crate) use authority::StartTurnDispatchAuthorization;
 pub(crate) use authority::StartTurnDisposition;
 pub(crate) use authority::StartTurnPublicTerminal;
 pub(crate) use authority::TurnAdmissionPhase;
-pub use meerkat_core::pending_continuation_admission::ObservedSessionTailKind;
+pub use meerkat_core::pending_continuation::ObservedSessionTailKind;
 
 /// Generated projection of the session-visible turn-admission state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -669,50 +140,82 @@ impl TurnAdmissionSlot {
 
     /// Claim the turn slot before dispatching `StartTurn`. `Idle -> Admitted`.
     pub(crate) fn claim(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
-        self.apply_projected(authority::SessionTurnAdmissionInput::ClaimTurn, "claim")
+        let from = self.phase();
+        let effects = self
+            .authority
+            .claim_turn()
+            .map_err(|_| TurnAdmissionError { from, op: "claim" })?;
+        self.update_projection_from_effects(&effects, from, "claim")?;
+        Ok(self.phase())
     }
 
     /// Release an admitted slot without running the turn. `Admitted -> Idle`.
     pub(crate) fn abort_claim(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
-        self.apply_projected(
-            authority::SessionTurnAdmissionInput::AbortClaim,
-            "abort_claim",
-        )
+        let from = self.phase();
+        let effects = self
+            .authority
+            .abort_claim()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "abort_claim",
+            })?;
+        self.update_projection_from_effects(&effects, from, "abort_claim")?;
+        Ok(self.phase())
     }
 
     /// Mark the admitted slot as actively running. `Admitted -> Running`.
     pub(crate) fn begin(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
-        self.apply_projected(authority::SessionTurnAdmissionInput::BeginTurn, "begin")
+        let from = self.phase();
+        let effects = self
+            .authority
+            .begin_turn()
+            .map_err(|_| TurnAdmissionError { from, op: "begin" })?;
+        self.update_projection_from_effects(&effects, from, "begin")?;
+        Ok(self.phase())
     }
 
     /// Move a finished run into the finalization window. `Running -> Completing`.
     pub(crate) fn resolve(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
-        self.apply_projected(authority::SessionTurnAdmissionInput::ResolveTurn, "resolve")
+        let from = self.phase();
+        let effects = self
+            .authority
+            .resolve_turn()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "resolve",
+            })?;
+        self.update_projection_from_effects(&effects, from, "resolve")?;
+        Ok(self.phase())
     }
 
     /// Close the finalization window. `Completing -> Idle` unless shutdown was
     /// requested mid-turn, in which case `Completing -> ShuttingDown`.
     pub(crate) fn finalize(&mut self) -> Result<FinalizeOutcome, TurnAdmissionError> {
-        let next_phase = self.apply_projected(
-            authority::SessionTurnAdmissionInput::FinalizeTurn,
-            "finalize",
-        )?;
-        Ok(FinalizeOutcome { next_phase })
+        let from = self.phase();
+        let effects = self
+            .authority
+            .finalize_turn()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "finalize",
+            })?;
+        self.update_projection_from_effects(&effects, from, "finalize")?;
+        Ok(FinalizeOutcome {
+            next_phase: self.phase(),
+        })
     }
 
     /// Request an interrupt through generated legality and wake feedback.
     pub(crate) fn request_interrupt(&mut self) -> Result<bool, TurnAdmissionError> {
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::RequestInterrupt,
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "request_interrupt",
-        })?;
-        let wake = transition
-            .effects()
+        let effects = self
+            .authority
+            .request_interrupt()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "request_interrupt",
+            })?;
+        let wake = effects
             .iter()
             .find_map(|effect| match effect {
                 authority::SessionTurnAdmissionEffect::TurnInterruptRequested { wake } => {
@@ -724,22 +227,21 @@ impl TurnAdmissionSlot {
                 from,
                 op: "request_interrupt",
             })?;
-        self.update_projection_from_transition(&transition, from, "request_interrupt")?;
+        self.update_projection_from_effects(&effects, from, "request_interrupt")?;
         Ok(wake)
     }
 
     /// Authorize boundary cancellation through generated admission state.
     pub(crate) fn authorize_cancel_after_boundary(&mut self) -> Result<(), TurnAdmissionError> {
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::AuthorizeCancelAfterBoundary,
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "authorize_cancel_after_boundary",
-        })?;
-        if transition.effects().iter().any(|effect| {
+        let effects = self
+            .authority
+            .authorize_cancel_after_boundary()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "authorize_cancel_after_boundary",
+            })?;
+        if effects.iter().any(|effect| {
             matches!(
                 effect,
                 authority::SessionTurnAdmissionEffect::CancelAfterBoundaryAuthorized
@@ -758,16 +260,14 @@ impl TurnAdmissionSlot {
         &mut self,
     ) -> Result<StartTurnDispatchAuthorization, TurnAdmissionError> {
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::AuthorizeStartTurnDispatch,
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "authorize_start_turn_dispatch",
-        })?;
-        transition
-            .effects()
+        let effects = self
+            .authority
+            .authorize_start_turn_dispatch()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "authorize_start_turn_dispatch",
+            })?;
+        effects
             .iter()
             .find_map(|effect| match effect {
                 authority::SessionTurnAdmissionEffect::StartTurnDispatchResolved {
@@ -784,10 +284,16 @@ impl TurnAdmissionSlot {
     /// Flag a shutdown request. Immediate and deferred shutdown outcomes are
     /// generated by `SessionTurnAdmissionMachine`.
     pub(crate) fn request_shutdown(&mut self) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
-        self.apply_projected(
-            authority::SessionTurnAdmissionInput::RequestShutdown,
-            "request_shutdown",
-        )
+        let from = self.phase();
+        let effects = self
+            .authority
+            .request_shutdown()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "request_shutdown",
+            })?;
+        self.update_projection_from_effects(&effects, from, "request_shutdown")?;
+        Ok(self.phase())
     }
 
     pub(crate) fn resolve_start_turn_disposition(
@@ -807,20 +313,22 @@ impl TurnAdmissionSlot {
             None => (false, authority::StartTurnExecutionKind::ContentTurn),
         };
         let prompt_observation = observe_start_turn_prompt(prompt);
-        let pending_resolution =
-            meerkat_core::pending_continuation_admission::resolve_pending_continuation(
-                session_tail,
-                staged_tool_result_count,
-            )
-            .map_err(|_| TurnAdmissionError {
-                from: self.phase(),
-                op: "resolve_pending_continuation",
-            })?;
+        // Drive the canonical SessionDocumentMachine pending-continuation
+        // decision first, then MIRROR its disposition into this machine's
+        // start-turn-disposition input.
+        let pending_resolution = meerkat_core::pending_continuation::resolve_pending_continuation(
+            session_tail,
+            staged_tool_result_count,
+        )
+        .map_err(|_| TurnAdmissionError {
+            from: self.phase(),
+            op: "resolve_pending_continuation",
+        })?;
         if pending_resolution.disposition
-            == meerkat_core::pending_continuation_admission::PendingContinuationDisposition::NoPendingBoundary
+            == meerkat_core::session_document::PendingContinuationDisposition::NoPendingBoundary
             && pending_resolution.public_terminal
                 != Some(
-                    meerkat_core::pending_continuation_admission::PendingContinuationPublicTerminal::NoPendingBoundary,
+                    meerkat_core::session_document::PendingContinuationPublicTerminal::NoPendingBoundary,
                 )
         {
             return Err(TurnAdmissionError {
@@ -829,22 +337,20 @@ impl TurnAdmissionSlot {
             });
         }
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::ResolveStartTurnDisposition {
+        let effects = self
+            .authority
+            .resolve_start_turn_disposition(
                 execution_kind_present,
                 execution_kind,
-                prompt_trimmed_text_byte_count: prompt_observation.trimmed_text_byte_count,
-                prompt_non_text_block_count: prompt_observation.non_text_block_count,
-                pending_continuation: pending_resolution.disposition,
-            },
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "resolve_start_turn_disposition",
-        })?;
-        let disposition = transition
-            .effects()
+                prompt_observation.trimmed_text_byte_count,
+                prompt_observation.non_text_block_count,
+                pending_resolution.disposition,
+            )
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "resolve_start_turn_disposition",
+            })?;
+        let disposition = effects
             .iter()
             .find_map(|effect| match effect {
                 authority::SessionTurnAdmissionEffect::StartTurnDispositionResolved {
@@ -856,7 +362,7 @@ impl TurnAdmissionSlot {
                 from,
                 op: "resolve_start_turn_disposition",
             })?;
-        let public_terminal = transition.effects().iter().find_map(|effect| match effect {
+        let public_terminal = effects.iter().find_map(|effect| match effect {
             authority::SessionTurnAdmissionEffect::StartTurnPublicTerminalResolved { terminal } => {
                 Some(*terminal)
             }
@@ -872,16 +378,14 @@ impl TurnAdmissionSlot {
         &mut self,
     ) -> Result<StartTurnPublicTerminal, TurnAdmissionError> {
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::ResolveLastStartTurnPublicTerminal,
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "resolve_last_start_turn_public_terminal",
-        })?;
-        transition
-            .effects()
+        let effects = self
+            .authority
+            .resolve_last_start_turn_public_terminal()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "resolve_last_start_turn_public_terminal",
+            })?;
+        effects
             .iter()
             .find_map(|effect| match effect {
                 authority::SessionTurnAdmissionEffect::StartTurnPublicTerminalResolved {
@@ -900,18 +404,14 @@ impl TurnAdmissionSlot {
         keep_alive_policy_present: bool,
     ) -> Result<bool, TurnAdmissionError> {
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::ResolveRuntimeKeepAlive {
-                keep_alive_policy_present,
-            },
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "resolve_runtime_keep_alive",
-        })?;
-        transition
-            .effects()
+        let effects = self
+            .authority
+            .resolve_runtime_keep_alive(keep_alive_policy_present)
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "resolve_runtime_keep_alive",
+            })?;
+        effects
             .iter()
             .find_map(|effect| match effect {
                 authority::SessionTurnAdmissionEffect::RuntimeKeepAliveResolved {
@@ -925,39 +425,25 @@ impl TurnAdmissionSlot {
             })
     }
 
-    fn apply_projected(
-        &mut self,
-        input: authority::SessionTurnAdmissionInput,
-        op: &'static str,
-    ) -> Result<TurnAdmissionPhase, TurnAdmissionError> {
-        let from = self.phase();
-        let transition =
-            authority::SessionTurnAdmissionMachineMutator::apply(&mut self.authority, input)
-                .map_err(|_| TurnAdmissionError { from, op })?;
-        self.update_projection_from_transition(&transition, from, op)?;
-        Ok(self.phase())
-    }
-
     fn refresh_projection(&mut self) -> Result<(), TurnAdmissionError> {
         let from = self.phase();
-        let transition = authority::SessionTurnAdmissionMachineMutator::apply(
-            &mut self.authority,
-            authority::SessionTurnAdmissionInput::ProjectTurnAdmission,
-        )
-        .map_err(|_| TurnAdmissionError {
-            from,
-            op: "project_turn_admission",
-        })?;
-        self.update_projection_from_transition(&transition, from, "project_turn_admission")
+        let effects = self
+            .authority
+            .project_turn_admission()
+            .map_err(|_| TurnAdmissionError {
+                from,
+                op: "project_turn_admission",
+            })?;
+        self.update_projection_from_effects(&effects, from, "project_turn_admission")
     }
 
-    fn update_projection_from_transition(
+    fn update_projection_from_effects(
         &mut self,
-        transition: &authority::SessionTurnAdmissionMachineTransition,
+        effects: &[authority::SessionTurnAdmissionEffect],
         from: TurnAdmissionPhase,
         op: &'static str,
     ) -> Result<(), TurnAdmissionError> {
-        let Some(projection) = transition.effects().iter().find_map(|effect| match effect {
+        let Some(projection) = effects.iter().find_map(|effect| match effect {
             authority::SessionTurnAdmissionEffect::TurnAdmissionProjected {
                 phase,
                 interrupt_pending: _,

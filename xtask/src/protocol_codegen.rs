@@ -132,17 +132,6 @@ pub fn run_protocol_codegen() -> Result<()> {
     println!("  generated: {}", output_path.display());
     generated_count += 1;
 
-    let pending_machine = dsl::dsl_pending_continuation_admission_machine_production_schema();
-    let code = generate_pending_continuation_admission(&pending_machine)?;
-    let code = rustfmt_source(&code)?;
-    let output_path = root.join("meerkat-core/src/generated/pending_continuation_admission.rs");
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
-    }
-    fs::write(&output_path, &code).with_context(|| format!("write {}", output_path.display()))?;
-    println!("  generated: {}", output_path.display());
-    generated_count += 1;
-
     let approval_machine = dsl::dsl_approval_lifecycle_machine_production_schema();
     let code = generate_approval_lifecycle_authority(&approval_machine)?;
     let code = rustfmt_source(&code)?;
@@ -158,6 +147,18 @@ pub fn run_protocol_codegen() -> Result<()> {
     let code = generate_session_document_authority(&session_document_machine)?;
     let code = rustfmt_source(&code)?;
     let output_path = root.join("meerkat-core/src/generated/session_document.rs");
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
+    }
+    fs::write(&output_path, &code).with_context(|| format!("write {}", output_path.display()))?;
+    println!("  generated: {}", output_path.display());
+    generated_count += 1;
+
+    let session_turn_admission_machine =
+        dsl::dsl_session_turn_admission_machine_production_schema();
+    let code = generate_session_turn_admission_authority(&session_turn_admission_machine)?;
+    let code = rustfmt_source(&code)?;
+    let output_path = root.join("meerkat-session/src/generated/session_turn_admission.rs");
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
     }
@@ -4716,6 +4717,9 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "SessionToolCategoryOverrideKind",
         "SessionCallTimeoutOverrideKind",
         "SessionSystemPromptSource",
+        "ObservedSessionTailKind",
+        "PendingContinuationDisposition",
+        "PendingContinuationPublicTerminal",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -4799,6 +4803,9 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "SessionToolCategoryOverrideKind" => Ok("Inherit"),
         "SessionCallTimeoutOverrideKind" => Ok("Inherit"),
         "SessionSystemPromptSource" => Ok("DirectMutation"),
+        "ObservedSessionTailKind" => Ok("Empty"),
+        "PendingContinuationDisposition" => Ok("NoPendingBoundary"),
+        "PendingContinuationPublicTerminal" => Ok("NoPendingBoundary"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -4835,6 +4842,13 @@ fn emit_session_document_error(out: &mut String) -> Result<()> {
     writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
     writeln!(out, "pub struct SessionDocumentError {{")?;
     writeln!(out, "    op: &'static str,")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl SessionDocumentError {{")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn new(op: &'static str) -> Self {{")?;
+    writeln!(out, "        Self {{ op }}")?;
+    writeln!(out, "    }}")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     writeln!(out, "impl fmt::Display for SessionDocumentError {{")?;
@@ -5598,6 +5612,9 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "RealtimeTranscriptLaneKind"
             | "RealtimeTranscriptStopReasonKind"
             | "RealtimeTranscriptMaterializeDecision"
+            | "ObservedSessionTailKind"
+            | "PendingContinuationDisposition"
+            | "PendingContinuationPublicTerminal"
     )
 }
 
@@ -5647,6 +5664,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "AuthorizeSessionBuildStatePersist",
         "RestoreSessionBuildState",
         "AuthorizeSystemPromptMutation",
+        "ResolvePendingContinuation",
     ] {
         machine
             .inputs
@@ -5671,6 +5689,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionBuildStatePersistAuthorized",
         "SessionBuildStateRestoreAuthorized",
         "SystemPromptMutationAuthorized",
+        "PendingContinuationResolved",
+        "PendingContinuationPublicTerminalResolved",
     ] {
         machine
             .effects
@@ -5690,6 +5710,9 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionToolCategoryOverrideKind",
         "SessionCallTimeoutOverrideKind",
         "SessionSystemPromptSource",
+        "ObservedSessionTailKind",
+        "PendingContinuationDisposition",
+        "PendingContinuationPublicTerminal",
     ] {
         let binding = machine
             .named_types
@@ -5703,253 +5726,756 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
     Ok(())
 }
 
-pub fn render_pending_continuation_admission(machine: &MachineSchema) -> Result<String> {
-    generate_pending_continuation_admission(machine)
+// =========================================================================
+// SessionTurnAdmissionMachine — canonical ephemeral turn-admission authority
+// =========================================================================
+//
+// Pure mechanical schema-walker (modeled on the SessionDocument authority
+// emitter). It iterates `transition.from`, `transition.guards`,
+// `transition.updates`, and `transition.emit` and lowers each DSL `Expr` /
+// `Update` / `EffectEmit` to Rust. It contains NO hand-coded admission
+// semantics: every decision (phase legality, interrupt/shutdown intent,
+// dispatch authorization, start-turn disposition) lives in the
+// SessionTurnAdmissionMachine DSL transitions. The generated file is
+// SCHEMA-FREE (no `meerkat_machine_schema` reference) so the owning
+// `meerkat-session` crate needs no machine-schema dependency (wasm-clean).
+//
+// The only domain knowledge here is the set of local decision-enum names and
+// the single EXTERNAL enum `PendingContinuationDisposition`, which is owned by
+// the canonical SessionDocumentMachine and referenced by path rather than
+// re-emitted locally (one semantic fact, one owner).
+
+const STA_LOCAL_ENUMS: &[&str] = &[
+    "StartTurnExecutionKind",
+    "StartTurnDisposition",
+    "StartTurnPublicTerminal",
+    "StartTurnDispatchAuthorization",
+];
+const STA_EXTERNAL_ENUM: &str = "PendingContinuationDisposition";
+const STA_EXTERNAL_ENUM_PATH: &str =
+    "meerkat_core::session_document::PendingContinuationDisposition";
+
+pub fn render_session_turn_admission_authority(machine: &MachineSchema) -> Result<String> {
+    generate_session_turn_admission_authority(machine)
 }
 
-fn generate_pending_continuation_admission(machine: &MachineSchema) -> Result<String> {
-    validate_pending_continuation_admission_schema(machine)?;
+fn generate_session_turn_admission_authority(machine: &MachineSchema) -> Result<String> {
+    validate_session_turn_admission_authority_schema(machine)?;
 
     let mut out = String::new();
     writeln!(
         &mut out,
-        "// @generated — pending continuation admission authority for `{}`",
+        "// @generated — session turn admission authority for `{}`",
         machine.machine
     )?;
     writeln!(
         &mut out,
-        "// Generated by `xtask protocol-codegen` from `PendingContinuationAdmissionMachine`."
+        "// Generated by `xtask protocol-codegen` from `SessionTurnAdmissionMachine`."
     )?;
     writeln!(
         &mut out,
-        "#![allow(clippy::bool_comparison, clippy::field_reassign_with_default)]"
+        "#![allow(dead_code, unused_parens, unused_variables, clippy::bool_comparison, clippy::field_reassign_with_default, clippy::nonminimal_bool, clippy::partialeq_to_none, clippy::redundant_field_names, clippy::too_many_arguments)]"
     )?;
     writeln!(&mut out)?;
     writeln!(&mut out, "use std::fmt;")?;
     writeln!(&mut out)?;
-    writeln!(&mut out, "use crate::types::Message;")?;
+    writeln!(&mut out, "pub use {STA_EXTERNAL_ENUM_PATH};")?;
     writeln!(&mut out)?;
 
-    for enum_name in [
-        "ObservedSessionTailKind",
-        "PendingContinuationDisposition",
-        "PendingContinuationPublicTerminal",
-    ] {
-        emit_pending_named_string_enum(&mut out, machine, enum_name)?;
+    for enum_name in STA_LOCAL_ENUMS {
+        emit_sta_named_string_enum(&mut out, machine, enum_name)?;
     }
-    emit_pending_input_enum(&mut out, machine)?;
-    emit_pending_effect_enum(&mut out, machine)?;
-
-    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
-    writeln!(&mut out, "pub struct PendingContinuationResolution {{")?;
-    writeln!(
+    emit_sta_variant_enum(
         &mut out,
-        "    pub disposition: PendingContinuationDisposition,"
+        "SessionTurnAdmissionInput",
+        &machine.inputs.variants,
     )?;
-    writeln!(
+    emit_sta_variant_enum(
         &mut out,
-        "    pub public_terminal: Option<PendingContinuationPublicTerminal>,"
+        "SessionTurnAdmissionEffect",
+        &machine.effects.variants,
     )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-
-    writeln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
-    writeln!(&mut out, "pub struct PendingContinuationAdmissionError {{")?;
-    writeln!(&mut out, "    op: &'static str,")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
+    emit_sta_error(&mut out)?;
+    emit_sta_phase_enum(&mut out, machine)?;
+    emit_sta_state_struct(&mut out, machine)?;
+    emit_sta_transition_enum(&mut out, machine)?;
+    emit_sta_authority_impl(&mut out, machine)?;
+    for helper in &machine.helpers {
+        emit_sta_helper(&mut out, helper, machine)?;
+    }
     writeln!(
         &mut out,
-        "impl fmt::Display for PendingContinuationAdmissionError {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        write!(f, \"generated pending-continuation authority rejected {{}}\", self.op)"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "impl std::error::Error for PendingContinuationAdmissionError {{}}"
-    )?;
-    writeln!(&mut out)?;
-
-    emit_pending_phase_enum(&mut out, machine)?;
-    emit_pending_state_struct(&mut out, machine)?;
-
-    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
-    writeln!(
-        &mut out,
-        "pub struct PendingContinuationAdmissionMachineAuthority {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    state: PendingContinuationAdmissionMachineState,"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    emit_pending_authority_impl(&mut out, machine)?;
-    writeln!(
-        &mut out,
-        "impl Default for PendingContinuationAdmissionMachineAuthority {{"
+        "impl Default for SessionTurnAdmissionMachineAuthority {{"
     )?;
     writeln!(&mut out, "    fn default() -> Self {{")?;
     writeln!(&mut out, "        Self::new()")?;
     writeln!(&mut out, "    }}")?;
     writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-
-    writeln!(&mut out, "#[must_use]")?;
-    writeln!(
-        &mut out,
-        "pub fn observe_session_tail(messages: &[Message]) -> ObservedSessionTailKind {{"
-    )?;
-    writeln!(&mut out, "    match messages.last() {{")?;
-    writeln!(&mut out, "        None => ObservedSessionTailKind::Empty,")?;
-    writeln!(
-        &mut out,
-        "        Some(Message::System(_)) => ObservedSessionTailKind::System,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(Message::SystemNotice(_)) => ObservedSessionTailKind::SystemNotice,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(Message::User(_)) => ObservedSessionTailKind::User,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(Message::Assistant(_)) => ObservedSessionTailKind::Assistant,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(Message::BlockAssistant(_)) => ObservedSessionTailKind::BlockAssistant,"
-    )?;
-    writeln!(
-        &mut out,
-        "        Some(Message::ToolResults {{ .. }}) => ObservedSessionTailKind::ToolResults,"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "pub fn resolve_pending_continuation(")?;
-    writeln!(&mut out, "    session_tail: ObservedSessionTailKind,")?;
-    writeln!(&mut out, "    staged_tool_result_count: u64,")?;
-    writeln!(
-        &mut out,
-        ") -> Result<PendingContinuationResolution, PendingContinuationAdmissionError> {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    PendingContinuationAdmissionMachineAuthority::new()"
-    )?;
-    writeln!(
-        &mut out,
-        "        .resolve_pending_continuation(session_tail, staged_tool_result_count)"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    emit_pending_helper(
-        &mut out,
-        pending_helper(machine, "tail_has_pending_boundary")?,
-    )?;
-    emit_pending_helper(
-        &mut out,
-        pending_helper(machine, "has_effective_pending_boundary")?,
-    )?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "#[cfg(test)]")?;
-    writeln!(&mut out, "#[allow(clippy::expect_used)]")?;
-    writeln!(&mut out, "mod tests {{")?;
-    writeln!(&mut out, "    use super::*;")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    #[test]")?;
-    writeln!(
-        &mut out,
-        "    fn user_and_tool_results_tails_admit_pending_continuation() {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        for tail in [ObservedSessionTailKind::User, ObservedSessionTailKind::ToolResults] {{"
-    )?;
-    writeln!(
-        &mut out,
-        "            let resolution = resolve_pending_continuation(tail, 0)"
-    )?;
-    writeln!(
-        &mut out,
-        "                .expect(\"generated authority should resolve pending tail\");"
-    )?;
-    writeln!(
-        &mut out,
-        "            assert_eq!(resolution.disposition, PendingContinuationDisposition::RunPending);"
-    )?;
-    writeln!(
-        &mut out,
-        "            assert_eq!(resolution.public_terminal, None);"
-    )?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    #[test]")?;
-    writeln!(
-        &mut out,
-        "    fn staged_tool_results_admit_pending_continuation() {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        let resolution = resolve_pending_continuation(ObservedSessionTailKind::Empty, 1)"
-    )?;
-    writeln!(
-        &mut out,
-        "            .expect(\"generated authority should resolve staged results\");"
-    )?;
-    writeln!(
-        &mut out,
-        "        assert_eq!(resolution.disposition, PendingContinuationDisposition::RunPending);"
-    )?;
-    writeln!(
-        &mut out,
-        "        assert_eq!(resolution.public_terminal, None);"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    #[test]")?;
-    writeln!(
-        &mut out,
-        "    fn non_boundary_tail_emits_no_pending_terminal() {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        let resolution = resolve_pending_continuation(ObservedSessionTailKind::Assistant, 0)"
-    )?;
-    writeln!(
-        &mut out,
-        "            .expect(\"generated authority should resolve non-boundary tail\");"
-    )?;
-    writeln!(
-        &mut out,
-        "        assert_eq!(resolution.disposition, PendingContinuationDisposition::NoPendingBoundary);"
-    )?;
-    writeln!(&mut out, "        assert_eq!(")?;
-    writeln!(&mut out, "            resolution.public_terminal,")?;
-    writeln!(
-        &mut out,
-        "            Some(PendingContinuationPublicTerminal::NoPendingBoundary)"
-    )?;
-    writeln!(&mut out, "        );")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-
     Ok(out)
 }
 
+fn sta_default_variant(name: &str) -> Result<&'static str> {
+    match name {
+        "StartTurnExecutionKind" => Ok("ContentTurn"),
+        "StartTurnDisposition" => Ok("RunContentTurn"),
+        "StartTurnPublicTerminal" => Ok("NoPendingBoundary"),
+        "StartTurnDispatchAuthorization" => Ok("Authorized"),
+        other => bail!("unknown SessionTurnAdmissionMachine enum `{other}`"),
+    }
+}
+
+fn emit_sta_named_string_enum(out: &mut String, machine: &MachineSchema, name: &str) -> Result<()> {
+    let binding = machine
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == name)
+        .with_context(|| format!("SessionTurnAdmissionMachine missing named type `{name}`"))?;
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
+        bail!("SessionTurnAdmissionMachine named type `{name}` must be a string enum");
+    };
+    let variants = variants
+        .iter()
+        .map(|variant| variant.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let default_variant = sta_default_variant(name)?;
+    if !variants.iter().any(|variant| variant == default_variant) {
+        bail!(
+            "SessionTurnAdmissionMachine enum `{name}` missing default variant `{default_variant}`"
+        );
+    }
+    emit_string_enum(out, name, &variants, default_variant)
+}
+
+fn emit_sta_variant_enum(
+    out: &mut String,
+    enum_name: &str,
+    variants: &[VariantSchema],
+) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(out, "pub enum {enum_name} {{")?;
+    for variant in variants {
+        if variant.fields.is_empty() {
+            writeln!(out, "    {},", variant.name)?;
+            continue;
+        }
+        writeln!(out, "    {} {{", variant.name)?;
+        for field in &variant.fields {
+            writeln!(
+                out,
+                "        {}: {},",
+                field.name,
+                render_sta_type_ref(&field.ty)?
+            )?;
+        }
+        writeln!(out, "    }},")?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_error(out: &mut String) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
+    writeln!(out, "pub struct SessionTurnAdmissionError {{")?;
+    writeln!(out, "    op: &'static str,")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl SessionTurnAdmissionError {{")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn new(op: &'static str) -> Self {{")?;
+    writeln!(out, "        Self {{ op }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn op(&self) -> &'static str {{")?;
+    writeln!(out, "        self.op")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl fmt::Display for SessionTurnAdmissionError {{")?;
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{"
+    )?;
+    writeln!(
+        out,
+        "        write!(f, \"generated session turn admission authority rejected {{}}\", self.op)"
+    )?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "impl std::error::Error for SessionTurnAdmissionError {{}}"
+    )?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_phase_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    let variants = machine
+        .state
+        .phase
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str().to_owned())
+        .collect::<Vec<_>>();
+    emit_string_enum(
+        out,
+        machine.state.phase.name.as_str(),
+        &variants,
+        machine.state.init.phase.as_str(),
+    )
+}
+
+fn emit_sta_state_struct(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]")?;
+    writeln!(out, "pub struct SessionTurnAdmissionMachineState {{")?;
+    writeln!(
+        out,
+        "    lifecycle_phase: {},",
+        machine.state.phase.name.as_str()
+    )?;
+    for field in &machine.state.fields {
+        writeln!(
+            out,
+            "    pub {}: {},",
+            field.name,
+            render_sta_type_ref(&field.ty)?
+        )?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl SessionTurnAdmissionMachineState {{")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(
+        out,
+        "    pub fn phase(&self) -> {} {{",
+        machine.state.phase.name.as_str()
+    )?;
+    writeln!(out, "        self.lifecycle_phase")?;
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_transition_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(out, "enum SessionTurnAdmissionTransition {{")?;
+    for transition in &machine.transitions {
+        writeln!(out, "    {},", transition.name)?;
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_authority_impl(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(out, "pub struct SessionTurnAdmissionMachineAuthority {{")?;
+    writeln!(out, "    state: SessionTurnAdmissionMachineState,")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(out, "impl SessionTurnAdmissionMachineAuthority {{")?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(out, "    pub fn new() -> Self {{")?;
+    writeln!(
+        out,
+        "        let mut state = SessionTurnAdmissionMachineState::default();"
+    )?;
+    writeln!(
+        out,
+        "        state.lifecycle_phase = {}::{};",
+        machine.state.phase.name, machine.state.init.phase
+    )?;
+    for init in &machine.state.init.fields {
+        writeln!(
+            out,
+            "        state.{} = {};",
+            init.field,
+            render_sta_owned_expr(&init.expr, &std::collections::BTreeMap::new(), machine)?
+        )?;
+    }
+    writeln!(out, "        Self {{ state }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    writeln!(out, "    #[must_use]")?;
+    writeln!(
+        out,
+        "    pub fn state(&self) -> &SessionTurnAdmissionMachineState {{"
+    )?;
+    writeln!(out, "        &self.state")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    emit_sta_single_transition(out)?;
+    emit_sta_apply_input(out, machine)?;
+    emit_sta_public_methods(out, machine)?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_single_transition(out: &mut String) -> Result<()> {
+    writeln!(out, "    fn single_transition(")?;
+    writeln!(out, "        matches: Vec<SessionTurnAdmissionTransition>,")?;
+    writeln!(out, "        op: &'static str,")?;
+    writeln!(
+        out,
+        "    ) -> Result<SessionTurnAdmissionTransition, SessionTurnAdmissionError> {{"
+    )?;
+    writeln!(out, "        let mut matches = matches.into_iter();")?;
+    writeln!(out, "        let Some(first) = matches.next() else {{")?;
+    writeln!(
+        out,
+        "            return Err(SessionTurnAdmissionError {{ op }});"
+    )?;
+    writeln!(out, "        }};")?;
+    writeln!(out, "        if matches.next().is_some() {{")?;
+    writeln!(
+        out,
+        "            return Err(SessionTurnAdmissionError {{ op }});"
+    )?;
+    writeln!(out, "        }}")?;
+    writeln!(out, "        Ok(first)")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_apply_input(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    writeln!(out, "    fn apply_input(")?;
+    writeln!(out, "        &mut self,")?;
+    writeln!(out, "        input: SessionTurnAdmissionInput,")?;
+    writeln!(
+        out,
+        "    ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {{"
+    )?;
+    writeln!(out, "        match input {{")?;
+    for input_variant in &machine.inputs.variants {
+        emit_sta_apply_input_arm(out, machine, input_variant)?;
+    }
+    writeln!(out, "        }}")?;
+    writeln!(out, "    }}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn emit_sta_apply_input_arm(
+    out: &mut String,
+    machine: &MachineSchema,
+    input_variant: &VariantSchema,
+) -> Result<()> {
+    write!(
+        out,
+        "            SessionTurnAdmissionInput::{}",
+        input_variant.name
+    )?;
+    if input_variant.fields.is_empty() {
+        writeln!(out, " => {{")?;
+    } else {
+        writeln!(out, " {{")?;
+        for field in &input_variant.fields {
+            writeln!(out, "                {},", field.name)?;
+        }
+        writeln!(out, "            }} => {{")?;
+    }
+
+    let binding_types = sta_binding_types(input_variant);
+    let transitions = machine
+        .transitions
+        .iter()
+        .filter(|transition| {
+            matches!(
+                &transition.on,
+                TriggerMatch::Input { variant, .. } if variant.as_str() == input_variant.name.as_str()
+            )
+        })
+        .collect::<Vec<_>>();
+    writeln!(out, "                let mut matches = Vec::new();")?;
+    for transition in &transitions {
+        writeln!(
+            out,
+            "                if {} {{",
+            render_sta_transition_condition(transition, &binding_types, machine)?
+        )?;
+        writeln!(
+            out,
+            "                    matches.push(SessionTurnAdmissionTransition::{});",
+            transition.name
+        )?;
+        writeln!(out, "                }}")?;
+    }
+    writeln!(
+        out,
+        "                let transition = Self::single_transition(matches, \"{}\")?;",
+        input_variant.name
+    )?;
+    writeln!(out, "                match transition {{")?;
+    for transition in &transitions {
+        emit_sta_transition_apply_block(out, transition, &binding_types, machine)?;
+    }
+    writeln!(
+        out,
+        "                    #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError {{ op: \"{}_transition\" }}),",
+        input_variant.name
+    )?;
+    writeln!(out, "                }}")?;
+    writeln!(out, "            }}")?;
+    Ok(())
+}
+
+fn emit_sta_transition_apply_block(
+    out: &mut String,
+    transition: &TransitionSchema,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<()> {
+    writeln!(
+        out,
+        "                    SessionTurnAdmissionTransition::{} => {{",
+        transition.name
+    )?;
+    for update in &transition.updates {
+        writeln!(
+            out,
+            "                        {}",
+            render_sta_update(update, binding_types, machine)?
+        )?;
+    }
+    writeln!(
+        out,
+        "                        self.state.lifecycle_phase = {}::{};",
+        machine.state.phase.name, transition.to
+    )?;
+    if transition.emit.is_empty() {
+        writeln!(out, "                        Ok(Vec::new())")?;
+    } else {
+        writeln!(out, "                        Ok(vec![")?;
+        for effect in &transition.emit {
+            writeln!(
+                out,
+                "                            {},",
+                render_sta_effect_emit(effect, binding_types, machine)?
+            )?;
+        }
+        writeln!(out, "                        ])")?;
+    }
+    writeln!(out, "                    }}")?;
+    Ok(())
+}
+
+fn emit_sta_public_methods(out: &mut String, machine: &MachineSchema) -> Result<()> {
+    for input in &machine.inputs.variants {
+        let method = to_snake_case(input.name.as_str());
+        writeln!(out, "    pub fn {method}(")?;
+        writeln!(out, "        &mut self,")?;
+        for field in &input.fields {
+            writeln!(
+                out,
+                "        {}: {},",
+                field.name,
+                render_sta_type_ref(&field.ty)?
+            )?;
+        }
+        writeln!(
+            out,
+            "    ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {{"
+        )?;
+        if input.fields.is_empty() {
+            writeln!(
+                out,
+                "        self.apply_input(SessionTurnAdmissionInput::{})",
+                input.name
+            )?;
+        } else {
+            writeln!(
+                out,
+                "        self.apply_input(SessionTurnAdmissionInput::{} {{",
+                input.name
+            )?;
+            for field in &input.fields {
+                writeln!(out, "            {},", field.name)?;
+            }
+            writeln!(out, "        }})")?;
+        }
+        writeln!(out, "    }}")?;
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+fn emit_sta_helper(out: &mut String, helper: &HelperSchema, machine: &MachineSchema) -> Result<()> {
+    write!(out, "fn {}(", helper.name)?;
+    for (idx, param) in helper.params.iter().enumerate() {
+        if idx > 0 {
+            write!(out, ", ")?;
+        }
+        write!(
+            out,
+            "{}: {}",
+            param.name.as_str(),
+            render_sta_type_ref(&param.ty)?
+        )?;
+    }
+    writeln!(out, ") -> {} {{", render_sta_type_ref(&helper.returns)?)?;
+    let binding_types = helper
+        .params
+        .iter()
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect();
+    writeln!(
+        out,
+        "    {}",
+        render_sta_expr(&helper.body, &binding_types, machine)?
+    )?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn render_sta_type_ref(ty: &TypeRef) -> Result<String> {
+    match ty {
+        TypeRef::Bool => Ok("bool".to_string()),
+        TypeRef::U32 => Ok("u32".to_string()),
+        TypeRef::U64 => Ok("u64".to_string()),
+        TypeRef::Enum(name) => Ok(name.as_str().to_string()),
+        TypeRef::Named(name) => Ok(name.as_str().to_string()),
+        TypeRef::Option(inner) => Ok(format!("Option<{}>", render_sta_type_ref(inner)?)),
+        other => bail!("unsupported SessionTurnAdmissionMachine type `{other:?}`"),
+    }
+}
+
+fn render_sta_transition_condition(
+    transition: &TransitionSchema,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    let mut conditions = Vec::new();
+    if transition.from.len() == 1 {
+        conditions.push(format!(
+            "self.state.lifecycle_phase == {}::{}",
+            machine.state.phase.name, transition.from[0]
+        ));
+    } else if !transition.from.is_empty()
+        && transition.from.len() != machine.state.phase.variants.len()
+    {
+        // A transition legal in every phase needs no phase guard; otherwise
+        // gate on the explicit `per_phase` set.
+        conditions.push(format!(
+            "matches!(self.state.lifecycle_phase, {})",
+            transition
+                .from
+                .iter()
+                .map(|phase| format!("{}::{phase}", machine.state.phase.name))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+    for guard in &transition.guards {
+        conditions.push(render_sta_expr(&guard.expr, binding_types, machine)?);
+    }
+    if conditions.is_empty() {
+        Ok("true".to_string())
+    } else {
+        Ok(conditions
+            .into_iter()
+            .map(|condition| format!("({condition})"))
+            .collect::<Vec<_>>()
+            .join(" && "))
+    }
+}
+
+fn render_sta_update(
+    update: &Update,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    match update {
+        Update::Assign { field, expr } => Ok(format!(
+            "self.state.{field} = {};",
+            render_sta_owned_expr(expr, binding_types, machine)?
+        )),
+        other => bail!("unsupported SessionTurnAdmissionMachine update `{other:?}`"),
+    }
+}
+
+fn render_sta_effect_emit(
+    effect: &EffectEmit,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    let variant = machine
+        .effects
+        .variant_named(effect.variant.as_str())
+        .with_context(|| {
+            format!(
+                "SessionTurnAdmissionMachine effect `{}` missing from schema",
+                effect.variant
+            )
+        })?;
+    if effect.fields.is_empty() {
+        return Ok(format!("SessionTurnAdmissionEffect::{}", effect.variant));
+    }
+    let mut rendered = format!("SessionTurnAdmissionEffect::{} {{", effect.variant);
+    for (field, expr) in &effect.fields {
+        variant.field_named(field.as_str()).with_context(|| {
+            format!(
+                "SessionTurnAdmissionMachine effect `{}` missing field `{}`",
+                effect.variant, field
+            )
+        })?;
+        write!(
+            &mut rendered,
+            " {field}: {},",
+            render_sta_expr(expr, binding_types, machine)?
+        )?;
+    }
+    rendered.push_str(" }");
+    Ok(rendered)
+}
+
+fn render_sta_expr(
+    expr: &Expr,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    match expr {
+        Expr::Bool(value) => Ok(value.to_string()),
+        Expr::U64(value) => Ok(value.to_string()),
+        Expr::U64Max => Ok("u64::MAX".to_string()),
+        Expr::NamedVariant { enum_name, variant } => {
+            Ok(format!("{}::{}", enum_name.as_str(), variant.as_str()))
+        }
+        Expr::CurrentPhase => Ok("self.state.lifecycle_phase".to_string()),
+        Expr::Phase(phase) => Ok(format!("{}::{phase}", machine.state.phase.name)),
+        Expr::Field(field) => Ok(format!("self.state.{field}")),
+        Expr::Binding(binding) => Ok(binding.clone()),
+        Expr::None => Ok("None".to_string()),
+        Expr::Some(inner) => Ok(format!(
+            "Some({})",
+            render_sta_expr(inner, binding_types, machine)?
+        )),
+        Expr::Not(inner) => Ok(format!(
+            "!({})",
+            render_sta_expr(inner, binding_types, machine)?
+        )),
+        Expr::And(items) => render_sta_expr_joined(items, " && ", binding_types, machine),
+        Expr::Or(items) => render_sta_expr_joined(items, " || ", binding_types, machine),
+        Expr::Eq(left, right) => Ok(format!(
+            "{} == {}",
+            render_sta_expr(left, binding_types, machine)?,
+            render_sta_expr(right, binding_types, machine)?
+        )),
+        Expr::Neq(left, right) => Ok(format!(
+            "{} != {}",
+            render_sta_expr(left, binding_types, machine)?,
+            render_sta_expr(right, binding_types, machine)?
+        )),
+        Expr::Gt(left, right) => Ok(format!(
+            "{} > {}",
+            render_sta_expr(left, binding_types, machine)?,
+            render_sta_expr(right, binding_types, machine)?
+        )),
+        Expr::Call { helper, args } => {
+            let rendered_args = args
+                .iter()
+                .map(|arg| render_sta_expr(arg, binding_types, machine))
+                .collect::<Result<Vec<_>>>()?
+                .join(", ");
+            Ok(format!("{helper}({rendered_args})"))
+        }
+        other => bail!("unsupported SessionTurnAdmissionMachine expression `{other:?}`"),
+    }
+}
+
+fn render_sta_expr_joined(
+    items: &[Expr],
+    separator: &str,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    if items.is_empty() {
+        bail!("SessionTurnAdmissionMachine expression cannot join an empty list");
+    }
+    let rendered = items
+        .iter()
+        .map(|expr| {
+            Ok(format!(
+                "({})",
+                render_sta_expr(expr, binding_types, machine)?
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rendered.join(separator))
+}
+
+fn render_sta_owned_expr(
+    expr: &Expr,
+    binding_types: &std::collections::BTreeMap<String, TypeRef>,
+    machine: &MachineSchema,
+) -> Result<String> {
+    match expr {
+        Expr::None => Ok("None".to_string()),
+        Expr::Some(inner) => Ok(format!(
+            "Some({})",
+            render_sta_owned_expr(inner, binding_types, machine)?
+        )),
+        Expr::Bool(value) => Ok(value.to_string()),
+        Expr::U64(value) => Ok(value.to_string()),
+        Expr::NamedVariant { enum_name, variant } => {
+            Ok(format!("{}::{}", enum_name.as_str(), variant.as_str()))
+        }
+        Expr::Binding(binding) => Ok(binding.clone()),
+        other => render_sta_expr(other, binding_types, machine),
+    }
+}
+
+fn sta_binding_types(variant: &VariantSchema) -> std::collections::BTreeMap<String, TypeRef> {
+    variant
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str().to_owned(), field.ty.clone()))
+        .collect()
+}
+
+fn validate_session_turn_admission_authority_schema(machine: &MachineSchema) -> Result<()> {
+    machine
+        .validate()
+        .context("validate SessionTurnAdmissionMachine schema")?;
+    if machine.machine.as_str() != "SessionTurnAdmissionMachine" {
+        bail!(
+            "session turn admission generator received unexpected machine `{}`",
+            machine.machine
+        );
+    }
+    // Every local decision enum must be a string enum present in the schema.
+    for required in STA_LOCAL_ENUMS {
+        let binding = machine
+            .named_types
+            .iter()
+            .find(|binding| binding.name.as_str() == *required)
+            .with_context(|| {
+                format!("SessionTurnAdmissionMachine missing named type `{required}`")
+            })?;
+        if !matches!(binding.rust, RustTypeAtom::StringEnum { .. }) {
+            bail!("SessionTurnAdmissionMachine named type `{required}` must be a string enum");
+        }
+    }
+    // The external pending-continuation enum must be declared (it is referenced
+    // by path, owned by SessionDocumentMachine).
+    machine
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == STA_EXTERNAL_ENUM)
+        .with_context(|| {
+            format!("SessionTurnAdmissionMachine missing external named type `{STA_EXTERNAL_ENUM}`")
+        })?;
+    Ok(())
+}
+
+/// Shared schema-walking helper: emit a `#[derive(...)]` C-like string enum
+/// with the given default variant. Used by the approval-lifecycle,
+/// session-document, and session-turn-admission authority emitters.
 fn emit_string_enum(
     out: &mut String,
     name: &str,
@@ -5969,547 +6495,6 @@ fn emit_string_enum(
     }
     writeln!(out, "}}")?;
     writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_named_string_enum(
-    out: &mut String,
-    machine: &MachineSchema,
-    name: &str,
-) -> Result<()> {
-    let variants = pending_named_string_enum_variants(machine, name)?;
-    let default_variant = pending_default_variant(name, &variants)?;
-    emit_string_enum(out, name, &variants, default_variant)
-}
-
-fn pending_named_string_enum_variants(machine: &MachineSchema, name: &str) -> Result<Vec<String>> {
-    let binding = machine
-        .named_types
-        .iter()
-        .find(|binding| binding.name.as_str() == name)
-        .with_context(|| {
-            format!("PendingContinuationAdmissionMachine missing named type `{name}`")
-        })?;
-    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
-        bail!("PendingContinuationAdmissionMachine named type `{name}` must be a string enum");
-    };
-    Ok(variants
-        .iter()
-        .map(|variant| variant.as_str().to_owned())
-        .collect())
-}
-
-fn pending_default_variant<'a>(name: &str, variants: &'a [String]) -> Result<&'a str> {
-    let wanted = match name {
-        "ObservedSessionTailKind" => "Empty",
-        "PendingContinuationDisposition" => "NoPendingBoundary",
-        "PendingContinuationPublicTerminal" => "NoPendingBoundary",
-        other => bail!("unknown PendingContinuationAdmissionMachine enum `{other}`"),
-    };
-    if variants.iter().any(|variant| variant == wanted) {
-        Ok(wanted)
-    } else {
-        bail!(
-            "PendingContinuationAdmissionMachine enum `{name}` missing default variant `{wanted}`"
-        );
-    }
-}
-
-fn emit_pending_phase_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
-    let variants = machine
-        .state
-        .phase
-        .variants
-        .iter()
-        .map(|variant| variant.name.as_str().to_owned())
-        .collect::<Vec<_>>();
-    emit_string_enum(
-        out,
-        "PendingContinuationAdmissionPhase",
-        &variants,
-        machine.state.init.phase.as_str(),
-    )
-}
-
-fn emit_pending_state_struct(out: &mut String, machine: &MachineSchema) -> Result<()> {
-    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]")?;
-    writeln!(
-        out,
-        "pub struct PendingContinuationAdmissionMachineState {{"
-    )?;
-    writeln!(
-        out,
-        "    lifecycle_phase: PendingContinuationAdmissionPhase,"
-    )?;
-    for field in &machine.state.fields {
-        writeln!(
-            out,
-            "    {}: {},",
-            field.name,
-            render_pending_type_ref(&field.ty)?
-        )?;
-    }
-    writeln!(out, "}}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_input_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
-    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
-    writeln!(out, "pub enum PendingContinuationAdmissionInput {{")?;
-    for variant in &machine.inputs.variants {
-        emit_pending_variant(out, variant)?;
-    }
-    writeln!(out, "}}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_effect_enum(out: &mut String, machine: &MachineSchema) -> Result<()> {
-    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
-    writeln!(out, "pub enum PendingContinuationAdmissionEffect {{")?;
-    for variant in &machine.effects.variants {
-        emit_pending_variant(out, variant)?;
-    }
-    writeln!(out, "}}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_variant(out: &mut String, variant: &VariantSchema) -> Result<()> {
-    if variant.fields.is_empty() {
-        writeln!(out, "    {},", variant.name)?;
-        return Ok(());
-    }
-    writeln!(out, "    {} {{", variant.name)?;
-    for field in &variant.fields {
-        writeln!(
-            out,
-            "        {}: {},",
-            field.name,
-            render_pending_type_ref(&field.ty)?
-        )?;
-    }
-    writeln!(out, "    }},")?;
-    Ok(())
-}
-
-fn emit_pending_authority_impl(out: &mut String, machine: &MachineSchema) -> Result<()> {
-    writeln!(out, "impl PendingContinuationAdmissionMachineAuthority {{")?;
-    writeln!(out, "    #[must_use]")?;
-    writeln!(out, "    pub fn new() -> Self {{")?;
-    writeln!(
-        out,
-        "        let mut state = PendingContinuationAdmissionMachineState::default();"
-    )?;
-    writeln!(
-        out,
-        "        state.lifecycle_phase = PendingContinuationAdmissionPhase::{};",
-        machine.state.init.phase
-    )?;
-    for init in &machine.state.init.fields {
-        writeln!(
-            out,
-            "        state.{} = {};",
-            init.field,
-            render_pending_expr(&init.expr)?
-        )?;
-    }
-    writeln!(out, "        Self {{ state }}")?;
-    writeln!(out, "    }}")?;
-    writeln!(out)?;
-    writeln!(out, "    #[must_use]")?;
-    writeln!(
-        out,
-        "    pub fn state(&self) -> &PendingContinuationAdmissionMachineState {{"
-    )?;
-    writeln!(out, "        &self.state")?;
-    writeln!(out, "    }}")?;
-    writeln!(out)?;
-    emit_pending_apply_input(out, machine)?;
-    emit_pending_resolve_pending_method(out)?;
-    emit_pending_resolve_last_terminal_method(out)?;
-    writeln!(out, "}}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_apply_input(out: &mut String, machine: &MachineSchema) -> Result<()> {
-    writeln!(out, "    fn apply_input(")?;
-    writeln!(out, "        &mut self,")?;
-    writeln!(out, "        input: PendingContinuationAdmissionInput,")?;
-    writeln!(
-        out,
-        "    ) -> Result<Vec<PendingContinuationAdmissionEffect>, PendingContinuationAdmissionError> {{"
-    )?;
-    writeln!(out, "        match input {{")?;
-    for input_variant in &machine.inputs.variants {
-        emit_pending_apply_input_arm(out, machine, input_variant)?;
-    }
-    writeln!(out, "        }}")?;
-    writeln!(out, "    }}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_apply_input_arm(
-    out: &mut String,
-    machine: &MachineSchema,
-    input_variant: &VariantSchema,
-) -> Result<()> {
-    write!(
-        out,
-        "            PendingContinuationAdmissionInput::{}",
-        input_variant.name
-    )?;
-    if input_variant.fields.is_empty() {
-        writeln!(out, " => {{")?;
-    } else {
-        writeln!(out, " {{")?;
-        for field in &input_variant.fields {
-            writeln!(out, "                {},", field.name)?;
-        }
-        writeln!(out, "            }} => {{")?;
-    }
-    for transition in machine.transitions.iter().filter(|transition| {
-        matches!(
-            &transition.on,
-            TriggerMatch::Input { variant, .. } if variant.as_str() == input_variant.name.as_str()
-        )
-    }) {
-        emit_pending_transition_block(out, transition)?;
-    }
-    writeln!(
-        out,
-        "                Err(PendingContinuationAdmissionError {{ op: \"{}\" }})",
-        input_variant.name
-    )?;
-    writeln!(out, "            }}")?;
-    Ok(())
-}
-
-fn emit_pending_transition_block(out: &mut String, transition: &TransitionSchema) -> Result<()> {
-    writeln!(
-        out,
-        "                if {} {{",
-        render_pending_transition_condition(transition)?
-    )?;
-    for update in &transition.updates {
-        writeln!(
-            out,
-            "                    {}",
-            render_pending_update(update)?
-        )?;
-    }
-    writeln!(
-        out,
-        "                    self.state.lifecycle_phase = PendingContinuationAdmissionPhase::{};",
-        transition.to
-    )?;
-    if transition.emit.is_empty() {
-        writeln!(out, "                    return Ok(Vec::new());")?;
-    } else {
-        writeln!(out, "                    return Ok(vec![")?;
-        for effect in &transition.emit {
-            writeln!(
-                out,
-                "                        {},",
-                render_pending_effect_emit(effect)?
-            )?;
-        }
-        writeln!(out, "                    ]);")?;
-    }
-    writeln!(out, "                }}")?;
-    Ok(())
-}
-
-fn render_pending_transition_condition(transition: &TransitionSchema) -> Result<String> {
-    let mut conditions = Vec::new();
-    if transition.from.len() == 1 {
-        conditions.push(format!(
-            "self.state.lifecycle_phase == PendingContinuationAdmissionPhase::{}",
-            transition.from[0]
-        ));
-    } else if !transition.from.is_empty() {
-        conditions.push(format!(
-            "matches!(self.state.lifecycle_phase, {})",
-            transition
-                .from
-                .iter()
-                .map(|phase| format!("PendingContinuationAdmissionPhase::{phase}"))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        ));
-    }
-    for guard in &transition.guards {
-        conditions.push(render_pending_expr(&guard.expr)?);
-    }
-    if conditions.is_empty() {
-        Ok("true".to_string())
-    } else {
-        Ok(conditions
-            .into_iter()
-            .map(|condition| format!("({condition})"))
-            .collect::<Vec<_>>()
-            .join(" && "))
-    }
-}
-
-fn render_pending_update(update: &Update) -> Result<String> {
-    match update {
-        Update::Assign { field, expr } => Ok(format!(
-            "self.state.{field} = {};",
-            render_pending_expr(expr)?
-        )),
-        other => bail!("unsupported PendingContinuationAdmissionMachine update `{other:?}`"),
-    }
-}
-
-fn render_pending_effect_emit(effect: &EffectEmit) -> Result<String> {
-    if effect.fields.is_empty() {
-        return Ok(format!(
-            "PendingContinuationAdmissionEffect::{}",
-            effect.variant
-        ));
-    }
-    let mut rendered = format!("PendingContinuationAdmissionEffect::{} {{", effect.variant);
-    for (idx, (field, expr)) in effect.fields.iter().enumerate() {
-        if idx > 0 {
-            rendered.push(' ');
-        }
-        write!(&mut rendered, " {field}: {},", render_pending_expr(expr)?)?;
-    }
-    rendered.push_str(" }");
-    Ok(rendered)
-}
-
-fn emit_pending_resolve_pending_method(out: &mut String) -> Result<()> {
-    writeln!(out, "    pub fn resolve_pending_continuation(")?;
-    writeln!(out, "        &mut self,")?;
-    writeln!(out, "        session_tail: ObservedSessionTailKind,")?;
-    writeln!(out, "        staged_tool_result_count: u64,")?;
-    writeln!(
-        out,
-        "    ) -> Result<PendingContinuationResolution, PendingContinuationAdmissionError> {{"
-    )?;
-    writeln!(
-        out,
-        "        let effects = self.apply_input(PendingContinuationAdmissionInput::ResolvePendingContinuation {{"
-    )?;
-    writeln!(out, "            session_tail,")?;
-    writeln!(out, "            staged_tool_result_count,")?;
-    writeln!(out, "        }})?;")?;
-    writeln!(out, "        let mut disposition = None;")?;
-    writeln!(out, "        let mut public_terminal = None;")?;
-    writeln!(out, "        for effect in effects {{")?;
-    writeln!(out, "            match effect {{")?;
-    writeln!(
-        out,
-        "                PendingContinuationAdmissionEffect::PendingContinuationResolved {{ disposition: value }} => {{"
-    )?;
-    writeln!(out, "                    disposition = Some(value);")?;
-    writeln!(out, "                }}")?;
-    writeln!(
-        out,
-        "                PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved {{ terminal }} => {{"
-    )?;
-    writeln!(out, "                    public_terminal = Some(terminal);")?;
-    writeln!(out, "                }}")?;
-    writeln!(out, "            }}")?;
-    writeln!(out, "        }}")?;
-    writeln!(out, "        let Some(disposition) = disposition else {{")?;
-    writeln!(
-        out,
-        "            return Err(PendingContinuationAdmissionError {{ op: \"pending_continuation_resolution_effect\" }});"
-    )?;
-    writeln!(out, "        }};")?;
-    writeln!(out, "        Ok(PendingContinuationResolution {{")?;
-    writeln!(out, "            disposition,")?;
-    writeln!(out, "            public_terminal,")?;
-    writeln!(out, "        }})")?;
-    writeln!(out, "    }}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_resolve_last_terminal_method(out: &mut String) -> Result<()> {
-    writeln!(out, "    pub fn resolve_last_public_terminal(")?;
-    writeln!(out, "        &mut self,")?;
-    writeln!(
-        out,
-        "    ) -> Result<PendingContinuationPublicTerminal, PendingContinuationAdmissionError> {{"
-    )?;
-    writeln!(
-        out,
-        "        let effects = self.apply_input(PendingContinuationAdmissionInput::ResolveLastPendingContinuationPublicTerminal)?;"
-    )?;
-    writeln!(out, "        for effect in effects {{")?;
-    writeln!(
-        out,
-        "            if let PendingContinuationAdmissionEffect::PendingContinuationPublicTerminalResolved {{ terminal }} = effect {{"
-    )?;
-    writeln!(out, "                return Ok(terminal);")?;
-    writeln!(out, "            }}")?;
-    writeln!(out, "        }}")?;
-    writeln!(
-        out,
-        "        Err(PendingContinuationAdmissionError {{ op: \"pending_continuation_public_terminal_effect\" }})"
-    )?;
-    writeln!(out, "    }}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn emit_pending_helper(out: &mut String, helper: &HelperSchema) -> Result<()> {
-    if helper.returns != TypeRef::Bool {
-        bail!(
-            "PendingContinuationAdmissionMachine helper `{}` must return bool",
-            helper.name
-        );
-    }
-    write!(out, "fn {}(", helper.name)?;
-    for (idx, param) in helper.params.iter().enumerate() {
-        if idx > 0 {
-            write!(out, ", ")?;
-        }
-        write!(
-            out,
-            "{}: {}",
-            param.name.as_str(),
-            render_pending_type_ref(&param.ty)?
-        )?;
-    }
-    writeln!(out, ") -> bool {{")?;
-    writeln!(out, "    {}", render_pending_expr(&helper.body)?)?;
-    writeln!(out, "}}")?;
-    writeln!(out)?;
-    Ok(())
-}
-
-fn render_pending_type_ref(ty: &TypeRef) -> Result<String> {
-    match ty {
-        TypeRef::Bool => Ok("bool".to_string()),
-        TypeRef::U64 => Ok("u64".to_string()),
-        TypeRef::Enum(enum_name) => Ok(enum_name.as_str().to_string()),
-        TypeRef::Option(inner) => Ok(format!("Option<{}>", render_pending_type_ref(inner)?)),
-        other => bail!("unsupported PendingContinuationAdmissionMachine type `{other:?}`"),
-    }
-}
-
-fn render_pending_expr(expr: &Expr) -> Result<String> {
-    match expr {
-        Expr::Bool(value) => Ok(value.to_string()),
-        Expr::U64(value) => Ok(value.to_string()),
-        Expr::U64Max => Ok("u64::MAX".to_string()),
-        Expr::NamedVariant { enum_name, variant } => {
-            Ok(format!("{}::{}", enum_name.as_str(), variant.as_str()))
-        }
-        Expr::Field(field) => Ok(format!("self.state.{field}")),
-        Expr::CurrentPhase => Ok("self.state.lifecycle_phase".to_string()),
-        Expr::Binding(binding) => Ok(binding.clone()),
-        Expr::Phase(phase) => Ok(format!("PendingContinuationAdmissionPhase::{phase}")),
-        Expr::Variant(variant) => Ok(variant.clone()),
-        Expr::None => Ok("None".to_string()),
-        Expr::Some(inner) => Ok(format!("Some({})", render_pending_expr(inner)?)),
-        Expr::Not(inner) => Ok(format!("!({})", render_pending_expr(inner)?)),
-        Expr::Eq(left, right) => Ok(format!(
-            "{} == {}",
-            render_pending_expr(left)?,
-            render_pending_expr(right)?
-        )),
-        Expr::Neq(left, right) => Ok(format!(
-            "{} != {}",
-            render_pending_expr(left)?,
-            render_pending_expr(right)?
-        )),
-        Expr::Gt(left, right) => Ok(format!(
-            "{} > {}",
-            render_pending_expr(left)?,
-            render_pending_expr(right)?
-        )),
-        Expr::Or(items) => render_pending_expr_joined(items, " || "),
-        Expr::And(items) => render_pending_expr_joined(items, " && "),
-        Expr::Call { helper, args } => {
-            let rendered_args = args
-                .iter()
-                .map(render_pending_expr)
-                .collect::<Result<Vec<_>>>()?
-                .join(", ");
-            Ok(format!("{helper}({rendered_args})"))
-        }
-        other => bail!("unsupported PendingContinuationAdmissionMachine expression `{other:?}`"),
-    }
-}
-
-fn render_pending_expr_joined(items: &[Expr], separator: &str) -> Result<String> {
-    if items.is_empty() {
-        bail!("PendingContinuationAdmissionMachine helper expression cannot be empty");
-    }
-    let rendered = items
-        .iter()
-        .map(|expr| Ok(format!("({})", render_pending_expr(expr)?)))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(rendered.join(separator))
-}
-
-fn pending_helper<'a>(machine: &'a MachineSchema, name: &str) -> Result<&'a HelperSchema> {
-    machine
-        .helpers
-        .iter()
-        .find(|helper| helper.name == name)
-        .with_context(|| format!("PendingContinuationAdmissionMachine missing helper `{name}`"))
-}
-
-fn validate_pending_continuation_admission_schema(machine: &MachineSchema) -> Result<()> {
-    machine
-        .validate()
-        .context("validate PendingContinuationAdmissionMachine schema")?;
-    if machine.machine.as_str() != "PendingContinuationAdmissionMachine" {
-        bail!(
-            "pending continuation generator received unexpected machine `{}`",
-            machine.machine
-        );
-    }
-    for required in [
-        "ResolvePendingContinuation",
-        "ResolveLastPendingContinuationPublicTerminal",
-    ] {
-        machine.inputs.variant_named(required).with_context(|| {
-            format!("PendingContinuationAdmissionMachine missing input `{required}`")
-        })?;
-    }
-    for required in [
-        "PendingContinuationResolved",
-        "PendingContinuationPublicTerminalResolved",
-    ] {
-        machine.effects.variant_named(required).with_context(|| {
-            format!("PendingContinuationAdmissionMachine missing effect `{required}`")
-        })?;
-    }
-    for transition in &machine.transitions {
-        render_pending_transition_condition(transition).with_context(|| {
-            format!(
-                "PendingContinuationAdmissionMachine transition `{}` has unsupported guard",
-                transition.name
-            )
-        })?;
-        for update in &transition.updates {
-            render_pending_update(update).with_context(|| {
-                format!(
-                    "PendingContinuationAdmissionMachine transition `{}` has unsupported update",
-                    transition.name
-                )
-            })?;
-        }
-        for effect in &transition.emit {
-            render_pending_effect_emit(effect).with_context(|| {
-                format!(
-                    "PendingContinuationAdmissionMachine transition `{}` has unsupported effect",
-                    transition.name
-                )
-            })?;
-        }
-    }
     Ok(())
 }
 

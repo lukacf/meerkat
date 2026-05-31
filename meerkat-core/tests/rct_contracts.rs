@@ -621,7 +621,7 @@ async fn test_regression_filtered_dispatcher_denies_non_allowed()
 fn test_regression_run_pending_requires_user_message() -> Result<(), Box<dyn std::error::Error>> {
     // A session without an authority-admitted tail should fail run_pending.
     use meerkat_core::Session;
-    use meerkat_core::pending_continuation_admission::{
+    use meerkat_core::pending_continuation::{
         PendingContinuationDisposition, PendingContinuationPublicTerminal, observe_session_tail,
         resolve_pending_continuation,
     };
@@ -646,7 +646,7 @@ fn test_regression_session_with_user_message_is_valid_for_run_pending()
 -> Result<(), Box<dyn std::error::Error>> {
     // A session with an authority-admitted tail should be valid for run_pending.
     use meerkat_core::Session;
-    use meerkat_core::pending_continuation_admission::{
+    use meerkat_core::pending_continuation::{
         PendingContinuationDisposition, observe_session_tail, resolve_pending_continuation,
     };
     use meerkat_core::types::{Message, UserMessage};

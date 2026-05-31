@@ -7057,7 +7057,7 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
+            meerkat_core::pending_continuation::observe_session_tail(session.messages())
         }
 
         fn update_keep_alive(&mut self, keep_alive: bool) {
@@ -8090,7 +8090,7 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
+            meerkat_core::pending_continuation::observe_session_tail(session.messages())
         }
 
         fn apply_runtime_system_context(
@@ -8380,7 +8380,7 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            meerkat_core::pending_continuation_admission::observe_session_tail(session.messages())
+            meerkat_core::pending_continuation::observe_session_tail(session.messages())
         }
 
         fn apply_runtime_system_context(

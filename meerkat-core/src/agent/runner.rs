@@ -6,13 +6,13 @@ use crate::event::AgentEvent;
 use crate::hooks::{HookInvocation, HookPoint};
 use crate::lifecycle::run_primitive::{ConversationAppend, ConversationAppendRole, CoreRenderable};
 use crate::ops::{ToolDispatchOutcome, ToolDispatchTimeoutPolicy};
-use crate::pending_continuation_admission::{
-    ObservedSessionTailKind, PendingContinuationDisposition, PendingContinuationPublicTerminal,
-    observe_session_tail, resolve_pending_continuation,
-};
+use crate::pending_continuation::{observe_session_tail, resolve_pending_continuation};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
 use crate::session::{PendingSystemContextAppend, Session};
+use crate::session_document::{
+    ObservedSessionTailKind, PendingContinuationDisposition, PendingContinuationPublicTerminal,
+};
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;

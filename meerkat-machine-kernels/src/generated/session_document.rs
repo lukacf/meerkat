@@ -27,6 +27,176 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ObservedSessionTailKind {
+    #[default]
+    #[serde(rename = "Empty")]
+    Empty,
+    #[serde(rename = "System")]
+    System,
+    #[serde(rename = "SystemNotice")]
+    SystemNotice,
+    #[serde(rename = "User")]
+    User,
+    #[serde(rename = "Assistant")]
+    Assistant,
+    #[serde(rename = "BlockAssistant")]
+    BlockAssistant,
+    #[serde(rename = "ToolResults")]
+    ToolResults,
+}
+impl ObservedSessionTailKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::System => "System",
+            Self::SystemNotice => "SystemNotice",
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+            Self::BlockAssistant => "BlockAssistant",
+            Self::ToolResults => "ToolResults",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ObservedSessionTailKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Empty" => Ok(Self::Empty),
+            "System" => Ok(Self::System),
+            "SystemNotice" => Ok(Self::SystemNotice),
+            "User" => Ok(Self::User),
+            "Assistant" => Ok(Self::Assistant),
+            "BlockAssistant" => Ok(Self::BlockAssistant),
+            "ToolResults" => Ok(Self::ToolResults),
+            other => Err(format!("invalid ObservedSessionTailKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ObservedSessionTailKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ObservedSessionTailKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PendingContinuationDisposition {
+    #[default]
+    #[serde(rename = "RunPending")]
+    RunPending,
+    #[serde(rename = "NoPendingBoundary")]
+    NoPendingBoundary,
+}
+impl PendingContinuationDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunPending => "RunPending",
+            Self::NoPendingBoundary => "NoPendingBoundary",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PendingContinuationDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunPending" => Ok(Self::RunPending),
+            "NoPendingBoundary" => Ok(Self::NoPendingBoundary),
+            other => Err(format!(
+                "invalid PendingContinuationDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PendingContinuationDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PendingContinuationDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PendingContinuationPublicTerminal {
+    #[default]
+    #[serde(rename = "NoPendingBoundary")]
+    NoPendingBoundary,
+}
+impl PendingContinuationPublicTerminal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoPendingBoundary => "NoPendingBoundary",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PendingContinuationPublicTerminal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoPendingBoundary" => Ok(Self::NoPendingBoundary),
+            other => Err(format!(
+                "invalid PendingContinuationPublicTerminal value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PendingContinuationPublicTerminal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PendingContinuationPublicTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RealtimeTranscriptLaneKind {
     #[default]
     #[serde(rename = "Display")]
@@ -951,6 +1121,11 @@ pub mod inputs {
         pub prompt_byte_count: u64,
         pub replacing_existing: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePendingContinuation {
+        pub session_tail: ObservedSessionTailKind,
+        pub staged_tool_result_count: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -980,6 +1155,7 @@ pub enum Input {
     AuthorizeSessionBuildStatePersist(inputs::AuthorizeSessionBuildStatePersist),
     RestoreSessionBuildState(inputs::RestoreSessionBuildState),
     AuthorizeSystemPromptMutation(inputs::AuthorizeSystemPromptMutation),
+    ResolvePendingContinuation(inputs::ResolvePendingContinuation),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1027,6 +1203,7 @@ impl Input {
             }
             Self::RestoreSessionBuildState(_) => InputKind::RestoreSessionBuildState,
             Self::AuthorizeSystemPromptMutation(_) => InputKind::AuthorizeSystemPromptMutation,
+            Self::ResolvePendingContinuation(_) => InputKind::ResolvePendingContinuation,
         }
     }
 }
@@ -1057,6 +1234,7 @@ pub enum InputKind {
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
     AuthorizeSystemPromptMutation,
+    ResolvePendingContinuation,
 }
 
 pub mod effects {
@@ -1136,6 +1314,14 @@ pub mod effects {
     pub struct SessionBuildStateRestoreAuthorized {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SystemPromptMutationAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PendingContinuationResolved {
+        pub disposition: PendingContinuationDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PendingContinuationPublicTerminalResolved {
+        pub terminal: PendingContinuationPublicTerminal,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1159,6 +1345,8 @@ pub enum Effect {
     SessionBuildStatePersistAuthorized(effects::SessionBuildStatePersistAuthorized),
     SessionBuildStateRestoreAuthorized(effects::SessionBuildStateRestoreAuthorized),
     SystemPromptMutationAuthorized(effects::SystemPromptMutationAuthorized),
+    PendingContinuationResolved(effects::PendingContinuationResolved),
+    PendingContinuationPublicTerminalResolved(effects::PendingContinuationPublicTerminalResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1179,6 +1367,8 @@ pub enum EffectKind {
     SessionBuildStatePersistAuthorized,
     SessionBuildStateRestoreAuthorized,
     SystemPromptMutationAuthorized,
+    PendingContinuationResolved,
+    PendingContinuationPublicTerminalResolved,
 }
 
 #[allow(non_camel_case_types)]
@@ -1242,6 +1432,8 @@ pub enum TransitionId {
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
     AuthorizeSystemPromptMutation,
+    ResolvePendingContinuationWithBoundary,
+    ResolvePendingContinuationWithoutBoundary,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

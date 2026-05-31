@@ -232,7 +232,7 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
         "meerkat-core/src/generated/session_persistence_version_authority.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/pending_continuation_admission.rs",
+        "meerkat-session/src/generated/session_turn_admission.rs",
     ));
     set.insert(PathBuf::from(
         "meerkat-core/src/generated/approval_lifecycle.rs",

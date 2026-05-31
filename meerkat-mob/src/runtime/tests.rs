@@ -5082,10 +5082,8 @@ impl SessionAgent for PersistentMockAgent {
 
     fn cancel(&mut self) {}
 
-    fn observed_session_tail(
-        &self,
-    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
-        meerkat_core::pending_continuation_admission::ObservedSessionTailKind::Empty
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        meerkat_core::pending_continuation::ObservedSessionTailKind::Empty
     }
 
     fn hot_swap_llm_identity(
@@ -5693,10 +5691,8 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     fn cancel(&mut self) {}
 
-    fn observed_session_tail(
-        &self,
-    ) -> meerkat_core::pending_continuation_admission::ObservedSessionTailKind {
-        meerkat_core::pending_continuation_admission::observe_session_tail(self.session.messages())
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
     }
 
     fn hot_swap_llm_identity(

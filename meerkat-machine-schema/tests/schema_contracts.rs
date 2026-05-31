@@ -56,8 +56,16 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // `Map` registry. Folds the former non-canonical
             // SessionDeferredTurnAuthorityMachine, whose stateless-classifier
             // shape (current_phase passed as input) is replaced by registry
-            // state that the machine reads and mutates itself.
+            // state that the machine reads and mutates itself. It also owns the
+            // pending-continuation disposition folded from the retired
+            // non-canonical PendingContinuationAdmissionMachine.
             "SessionDocumentMachine",
+            // SessionTurnAdmission owns the live ephemeral turn-admission
+            // lifecycle (Idle/Admitted/Running/Completing/ShuttingDown with a
+            // ShuttingDown terminal). Promoted to canonical under LUC-524
+            // (P0 Dogma Invariant 1): it is a real multi-phase admission
+            // machine, no longer an inline `machine!` without a TLA model.
+            "SessionTurnAdmissionMachine",
             // WorkGraph: realm-scoped commitment graph lifecycle,
             // readiness, claim state, and topology validation.
             "WorkGraphLifecycleMachine",
@@ -67,13 +75,14 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
     );
 
     for absorbed in [
-        "SessionTurnAdmissionMachine",
         "SessionToolVisibilityMachine",
         "PeerDirectoryReachabilityMachine",
-        // Pending-continuation is a stateless boundary classifier (single
-        // `Ready` phase, `terminal []`, all self-loops). It owns no
-        // independent lifecycle and is consumed as a generated helper that
-        // feeds SessionTurnAdmissionMachine — it must NOT be canonical.
+        // Pending-continuation was a stateless boundary classifier (single
+        // `Ready` phase, `terminal []`, all self-loops). Its
+        // `has_effective_pending_boundary` disposition is now a transition in
+        // the canonical SessionDocumentMachine (pending-continuation region);
+        // the former standalone PendingContinuationAdmissionMachine is deleted
+        // and must NOT be canonical.
         "PendingContinuationAdmissionMachine",
         // System-context append/apply/discard decisions and the runtime-steer
         // marker are folded into SessionDocumentMachine's system-context

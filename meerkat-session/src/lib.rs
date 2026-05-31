@@ -15,6 +15,7 @@ pub mod tokio {
 }
 
 pub mod ephemeral;
+pub(crate) mod generated;
 pub(crate) mod turn_admission;
 
 /// Session persistence migration entry points.

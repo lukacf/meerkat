@@ -203,6 +203,49 @@ pub enum SessionSystemPromptSource {
     RuntimeSteerCleanup,
 }
 
+// ---------------------------------------------------------------------------
+// Pending-continuation region typed vocabulary (folded from the retired
+// non-canonical PendingContinuationAdmissionMachine).
+//
+// The pending-boundary is a session-document-tail-derived fact: given the
+// typed `session_tail` class (the pure mechanical encoding of `messages.last()`
+// produced by the `observe_session_tail` encoder, which stays a pure encoder)
+// and the count of staged tool results, the machine decides whether a
+// continuation has an effective pending boundary to run. This is the SAME
+// `has_effective_pending_boundary` decision the retired machine carried; it now
+// lives as a SessionDocumentMachine transition so both meerkat-core
+// (`run_pending`) and meerkat-session (turn admission) drive the canonical
+// machine and MIRROR the emitted disposition.
+// ---------------------------------------------------------------------------
+
+/// Provider-neutral class of the last message in a session's transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ObservedSessionTailKind {
+    #[default]
+    Empty,
+    System,
+    SystemNotice,
+    User,
+    Assistant,
+    BlockAssistant,
+    ToolResults,
+}
+
+/// Disposition for a pending-continuation admission decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PendingContinuationDisposition {
+    RunPending,
+    #[default]
+    NoPendingBoundary,
+}
+
+/// Public terminal witness emitted alongside a `NoPendingBoundary` disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PendingContinuationPublicTerminal {
+    #[default]
+    NoPendingBoundary,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -439,6 +482,20 @@ machine! {
                 prompt_byte_count: u64,
                 replacing_existing: bool,
             },
+
+            // -----------------------------------------------------------
+            // Pending-continuation region (folded from the retired
+            // PendingContinuationAdmissionMachine). The input carries only the
+            // typed RAW observations the shell computes mechanically (the
+            // session-tail class from the pure `observe_session_tail` encoder
+            // and the staged tool-result count). It carries NO pre-decided
+            // disposition. The machine resolves RunPending / NoPendingBoundary
+            // below from those observations via `has_effective_pending_boundary`.
+            // -----------------------------------------------------------
+            ResolvePendingContinuation {
+                session_tail: Enum<ObservedSessionTailKind>,
+                staged_tool_result_count: u64,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -511,6 +568,14 @@ machine! {
             SessionBuildStatePersistAuthorized,
             SessionBuildStateRestoreAuthorized,
             SystemPromptMutationAuthorized,
+
+            // Pending-continuation region effects. The disposition is the
+            // machine's decision; the shell mirrors it onto its run-pending /
+            // start-turn-disposition path and decides nothing. The public
+            // terminal witness is emitted alongside `NoPendingBoundary` so the
+            // shell can surface the typed terminal without re-deriving it.
+            PendingContinuationResolved { disposition: Enum<PendingContinuationDisposition> },
+            PendingContinuationPublicTerminalResolved { terminal: Enum<PendingContinuationPublicTerminal> },
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -593,6 +658,22 @@ machine! {
             stop_reason == RealtimeTranscriptStopReasonKind::Other
         }
 
+        // Pending-continuation classification helpers (ported verbatim from the
+        // retired PendingContinuationAdmissionMachine). A `User` or `ToolResults`
+        // tail is itself a runnable continuation boundary; staged tool results
+        // are a boundary even when the tail is something else.
+        helper tail_has_pending_boundary(session_tail: Enum<ObservedSessionTailKind>) -> bool {
+            session_tail == ObservedSessionTailKind::User
+                || session_tail == ObservedSessionTailKind::ToolResults
+        }
+
+        helper has_effective_pending_boundary(
+            session_tail: Enum<ObservedSessionTailKind>,
+            staged_tool_result_count: u64
+        ) -> bool {
+            tail_has_pending_boundary(session_tail) || staged_tool_result_count > 0
+        }
+
         disposition SessionFirstTurnPhaseResolved => local,
         disposition SessionFirstTurnOverridesResolved => local,
         disposition SessionInitialPromptStageResolved => local,
@@ -610,6 +691,8 @@ machine! {
         disposition SessionBuildStatePersistAuthorized => local,
         disposition SessionBuildStateRestoreAuthorized => local,
         disposition SystemPromptMutationAuthorized => local,
+        disposition PendingContinuationResolved => local,
+        disposition PendingContinuationPublicTerminalResolved => local,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2172,6 +2255,50 @@ machine! {
             update {}
             to Ready
             emit SystemPromptMutationAuthorized
+        }
+
+        // ===============================================================
+        // Pending-continuation region (folded from the retired
+        // PendingContinuationAdmissionMachine). Both transitions read only the
+        // typed RAW observations carried on the input and resolve the
+        // disposition via `has_effective_pending_boundary`. The shell mirrors
+        // the emitted disposition (and the public terminal witness) onto its
+        // run-pending / start-turn-disposition path and decides nothing.
+        // ===============================================================
+
+        transition ResolvePendingContinuationWithBoundary {
+            on input ResolvePendingContinuation {
+                session_tail,
+                staged_tool_result_count
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && has_effective_pending_boundary(session_tail, staged_tool_result_count)
+            }
+            update {}
+            to Ready
+            emit PendingContinuationResolved {
+                disposition: PendingContinuationDisposition::RunPending
+            }
+        }
+
+        transition ResolvePendingContinuationWithoutBoundary {
+            on input ResolvePendingContinuation {
+                session_tail,
+                staged_tool_result_count
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && has_effective_pending_boundary(session_tail, staged_tool_result_count) == false
+            }
+            update {}
+            to Ready
+            emit PendingContinuationResolved {
+                disposition: PendingContinuationDisposition::NoPendingBoundary
+            }
+            emit PendingContinuationPublicTerminalResolved {
+                terminal: PendingContinuationPublicTerminal::NoPendingBoundary
+            }
         }
     }
 }

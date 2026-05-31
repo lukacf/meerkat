@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, NatValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, SessionCallTimeoutOverrideKindValues, SessionDurableProviderKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SessionToolCategoryOverrideKindValues, SystemContextAppendDecisionValues, SystemContextSourceValues
+CONSTANTS BooleanValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, SessionCallTimeoutOverrideKindValues, SessionDurableProviderKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SessionToolCategoryOverrideKindValues, SystemContextAppendDecisionValues, SystemContextSourceValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -29,6 +29,7 @@ VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_ini
 
 vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
+tail_has_pending_boundary(session_tail) == ((session_tail = "User") \/ (session_tail = "ToolResults"))
 realtime_stop_reason_records_completion(stop_reason) == (stop_reason = "Other")
 realtime_stop_reason_removes_completion(stop_reason) == (stop_reason = "ToolUse")
 realtime_stop_reason_discards(stop_reason) == (stop_reason = "Cancelled")
@@ -41,6 +42,7 @@ append_is_conflict(idempotency_key_present, existing_key_conflicts) == (idempote
 append_is_empty(trimmed_text_byte_count) == (trimmed_text_byte_count = 0)
 should_store_initial_prompt(arg_phase, prompt_has_content) == ((arg_phase = "Pending") /\ prompt_has_content)
 phase_allows_initial_turn_overrides(arg_phase) == (arg_phase = "Pending")
+has_effective_pending_boundary(session_tail, staged_tool_result_count) == (tail_has_pending_boundary(session_tail) \/ (staged_tool_result_count > 0))
 
 Init ==
     /\ phase = "Ready"
@@ -528,6 +530,22 @@ AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replaci
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
+ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) ==
+    /\ phase = "Ready"
+    /\ has_effective_pending_boundary(session_tail, staged_tool_result_count)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
+ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count) ==
+    /\ phase = "Ready"
+    /\ (has_effective_pending_boundary(session_tail, staged_tool_result_count) = FALSE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
 Next ==
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingInactiveOrPending(session_id)
     \/ \E session_id \in SessionIdValues : MarkSessionInitialTurnPendingConsumed(session_id)
@@ -587,6 +605,8 @@ Next ==
     \/ \E system_prompt_present \in BOOLEAN : \E output_schema_present \in BOOLEAN : \E hook_entry_count \in 0..2 : \E disabled_hook_count \in 0..2 : \E budget_limits_present \in BOOLEAN : \E recoverable_tool_count \in 0..2 : \E silent_comms_intent_count \in 0..2 : \E max_inline_peer_notifications_present \in BOOLEAN : \E app_context_present \in BOOLEAN : \E additional_instruction_count \in 0..2 : \E shell_env_count \in 0..2 : \E mob_tool_authority_context_present \in BOOLEAN : \E mob_tool_authority_context_generated \in BOOLEAN : \E call_timeout_override \in SessionCallTimeoutOverrideKindValues : AuthorizeSessionBuildStatePersist(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, mob_tool_authority_context_generated, call_timeout_override)
     \/ \E system_prompt_present \in BOOLEAN : \E output_schema_present \in BOOLEAN : \E hook_entry_count \in 0..2 : \E disabled_hook_count \in 0..2 : \E budget_limits_present \in BOOLEAN : \E recoverable_tool_count \in 0..2 : \E silent_comms_intent_count \in 0..2 : \E max_inline_peer_notifications_present \in BOOLEAN : \E app_context_present \in BOOLEAN : \E additional_instruction_count \in 0..2 : \E shell_env_count \in 0..2 : \E mob_tool_authority_context_present \in BOOLEAN : \E call_timeout_override \in SessionCallTimeoutOverrideKindValues : RestoreSessionBuildState(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, call_timeout_override)
     \/ \E source \in SessionSystemPromptSourceValues : \E prompt_present \in BOOLEAN : \E prompt_byte_count \in 0..2 : \E replacing_existing \in BOOLEAN : AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing)
+    \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count)
+    \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count)
 
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1

@@ -3540,8 +3540,6 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-machine-dsl",
- "meerkat-machine-schema",
  "meerkat-runtime",
  "meerkat-skills",
  "meerkat-store",

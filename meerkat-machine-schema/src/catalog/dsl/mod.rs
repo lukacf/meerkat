@@ -37,10 +37,10 @@ pub mod auth_machine;
 pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
-pub mod pending_continuation_admission;
 pub mod schedule_lifecycle;
 pub mod session_document;
 pub mod session_persistence_version_authority;
+pub mod session_turn_admission;
 pub mod work_attention_lifecycle;
 pub mod workgraph_lifecycle;
 
@@ -82,11 +82,10 @@ pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::schedule_lifecycle";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurrence_lifecycle";
-pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
-pub const PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE: &str =
-    "generated::pending_continuation_admission";
 pub const SESSION_DOCUMENT_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const SESSION_DOCUMENT_PRODUCTION_RUST_MODULE: &str = "generated::session_document";
+pub const SESSION_TURN_ADMISSION_PRODUCTION_RUST_CRATE: &str = "meerkat-session";
+pub const SESSION_TURN_ADMISSION_PRODUCTION_RUST_MODULE: &str = "generated::session_turn_admission";
 pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const SESSION_PERSISTENCE_VERSION_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
     "generated::session_persistence_version_authority";
@@ -244,48 +243,6 @@ pub fn dsl_meerkat_machine() -> MachineSchema {
     meerkat_machine_schema_metadata().attach_to(meerkat_machine::MeerkatMachineState::schema())
 }
 
-pub fn dsl_pending_continuation_admission_machine() -> MachineSchema {
-    pending_continuation_admission_schema_metadata().attach_to(
-        pending_continuation_admission::PendingContinuationAdmissionMachineState::schema(),
-    )
-}
-
-pub fn dsl_pending_continuation_admission_machine_production_schema() -> MachineSchema {
-    with_production_rust_binding(
-        dsl_pending_continuation_admission_machine(),
-        PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_CRATE,
-        PENDING_CONTINUATION_ADMISSION_PRODUCTION_RUST_MODULE,
-    )
-}
-
-pub fn pending_continuation_admission_schema_metadata() -> MachineSchemaMetadata {
-    machine_schema_metadata(
-        vec![
-            NamedTypeBinding::string_enum(
-                "ObservedSessionTailKind",
-                &[
-                    "Empty",
-                    "System",
-                    "SystemNotice",
-                    "User",
-                    "Assistant",
-                    "BlockAssistant",
-                    "ToolResults",
-                ],
-            ),
-            NamedTypeBinding::string_enum(
-                "PendingContinuationDisposition",
-                &["RunPending", "NoPendingBoundary"],
-            ),
-            NamedTypeBinding::string_enum(
-                "PendingContinuationPublicTerminal",
-                &["NoPendingBoundary"],
-            ),
-        ],
-        Vec::new(),
-    )
-}
-
 /// Canonical SessionDocumentMachine — owns per-session session-document
 /// lifecycle truth (currently the first-turn region) in its own `Map` state.
 pub fn dsl_session_document_machine() -> MachineSchema {
@@ -359,6 +316,79 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "RuntimeContextAppend",
                     "RuntimeSteerCleanup",
                 ],
+            ),
+            // Pending-continuation region typed vocabulary (folded from the
+            // retired non-canonical PendingContinuationAdmissionMachine).
+            NamedTypeBinding::string_enum(
+                "ObservedSessionTailKind",
+                &[
+                    "Empty",
+                    "System",
+                    "SystemNotice",
+                    "User",
+                    "Assistant",
+                    "BlockAssistant",
+                    "ToolResults",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PendingContinuationDisposition",
+                &["RunPending", "NoPendingBoundary"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PendingContinuationPublicTerminal",
+                &["NoPendingBoundary"],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+/// Canonical SessionTurnAdmissionMachine — the live ephemeral turn-admission
+/// gate (`EphemeralSessionService` turn-admission slot). Multi-phase admission
+/// lifecycle with a `ShuttingDown` terminal.
+pub fn dsl_session_turn_admission_machine() -> MachineSchema {
+    session_turn_admission_schema_metadata()
+        .attach_to(session_turn_admission::SessionTurnAdmissionMachineState::schema())
+}
+
+pub fn dsl_session_turn_admission_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_session_turn_admission_machine(),
+        SESSION_TURN_ADMISSION_PRODUCTION_RUST_CRATE,
+        SESSION_TURN_ADMISSION_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            // The phase enum is referenced as a typed field on the
+            // `TurnAdmissionProjected` effect, so it needs a named-type binding.
+            NamedTypeBinding::string_enum(
+                "TurnAdmissionPhase",
+                &["Idle", "Admitted", "Running", "Completing", "ShuttingDown"],
+            ),
+            NamedTypeBinding::string_enum(
+                "StartTurnExecutionKind",
+                &["ContentTurn", "ResumePending"],
+            ),
+            NamedTypeBinding::string_enum(
+                "StartTurnDisposition",
+                &["RunContentTurn", "RunPending", "NoPendingBoundary"],
+            ),
+            NamedTypeBinding::string_enum("StartTurnPublicTerminal", &["NoPendingBoundary"]),
+            NamedTypeBinding::string_enum(
+                "StartTurnDispatchAuthorization",
+                &["Authorized", "Cancelled"],
+            ),
+            // Pending-continuation disposition is owned by the canonical
+            // SessionDocumentMachine and consumed here as a typed input. The
+            // meerkat-session shell drives SessionDocumentMachine first and
+            // mirrors the disposition into this machine's input.
+            NamedTypeBinding::string_enum(
+                "PendingContinuationDisposition",
+                &["RunPending", "NoPendingBoundary"],
             ),
         ],
         Vec::new(),

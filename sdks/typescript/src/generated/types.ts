@@ -676,6 +676,7 @@ export interface MobEventRouterConfigInput {
 
 export interface MobExternalBackendConfigInput {
   address_base: string;
+  supervisor_bridge?: unknown;
 }
 
 export interface MobFlowSpecInput {

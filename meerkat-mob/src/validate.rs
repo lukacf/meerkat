@@ -250,7 +250,71 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     severity: DiagnosticSeverity::Error,
                 });
             }
-            Some(_) => {}
+            Some(external) => {
+                if let Some(supervisor_bridge) = &external.supervisor_bridge {
+                    let mut bind_socket = None;
+                    if let Some(bind_address) = supervisor_bridge.bind_address.as_deref() {
+                        match bind_address.parse::<std::net::SocketAddr>() {
+                            Ok(socket) => bind_socket = Some(socket),
+                            Err(error) => diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::InvalidExternalBackendConfig,
+                                message: format!(
+                                    "backend.external.supervisor_bridge.bind_address must be a socket address: {error}"
+                                ),
+                                location: Some(
+                                    "backend.external.supervisor_bridge.bind_address".to_string(),
+                                ),
+                                severity: DiagnosticSeverity::Error,
+                            }),
+                        }
+                    }
+                    if bind_socket.is_some_and(|socket| socket.ip().is_unspecified())
+                        && supervisor_bridge.advertised_address.is_none()
+                    {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::InvalidExternalBackendConfig,
+                            message: "backend.external.supervisor_bridge.advertised_address is required when bind_address uses an unspecified interface".to_string(),
+                            location: Some(
+                                "backend.external.supervisor_bridge.advertised_address"
+                                    .to_string(),
+                            ),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                    if let Some(advertised_address) =
+                        supervisor_bridge.advertised_address.as_deref()
+                    {
+                        match meerkat_core::comms::PeerAddress::parse(advertised_address) {
+                            Ok(address)
+                                if address.transport()
+                                    == meerkat_core::comms::PeerTransport::Tcp => {}
+                            Ok(address) => diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::InvalidExternalBackendConfig,
+                                message: format!(
+                                    "backend.external.supervisor_bridge.advertised_address must use tcp transport, got '{}'",
+                                    address.transport()
+                                ),
+                                location: Some(
+                                    "backend.external.supervisor_bridge.advertised_address"
+                                        .to_string(),
+                                ),
+                                severity: DiagnosticSeverity::Error,
+                            }),
+                            Err(error) => diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::InvalidExternalBackendConfig,
+                                message: format!(
+                                    "backend.external.supervisor_bridge.advertised_address must be a typed peer address: {error}"
+                                ),
+                                location: Some(
+                                    "backend.external.supervisor_bridge.advertised_address"
+                                        .to_string(),
+                                ),
+                                severity: DiagnosticSeverity::Error,
+                            }),
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -538,12 +602,35 @@ mod tests {
             .backend = Some(MobBackendKind::External);
         def.backend.external = Some(crate::definition::ExternalBackendConfig {
             address_base: "   ".to_string(),
+            supervisor_bridge: None,
         });
         let diagnostics = validate_definition(&def);
         assert!(
             diagnostics
                 .iter()
                 .any(|d| d.code == DiagnosticCode::InvalidExternalBackendConfig)
+        );
+    }
+
+    #[test]
+    fn test_external_backend_requires_advertised_supervisor_address_for_unspecified_bind() {
+        let mut def = valid_definition();
+        def.backend.default = MobBackendKind::External;
+        def.backend.external = Some(crate::definition::ExternalBackendConfig {
+            address_base: "https://backend.example.invalid/mesh".to_string(),
+            supervisor_bridge: Some(crate::definition::SupervisorBridgeEndpointConfig {
+                bind_address: Some("0.0.0.0:42000".to_string()),
+                advertised_address: None,
+            }),
+        });
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.code == DiagnosticCode::InvalidExternalBackendConfig
+                    && d.location.as_deref()
+                        == Some("backend.external.supervisor_bridge.advertised_address")
+            }),
+            "unspecified bind address must not become advertised route truth"
         );
     }
 

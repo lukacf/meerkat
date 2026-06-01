@@ -14547,6 +14547,16 @@
         "properties": {
           "address_base": {
             "type": "string"
+          },
+          "supervisor_bridge": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MobSupervisorBridgeEndpointConfigInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -15039,6 +15049,24 @@
           "text"
         ],
         "type": "string"
+      },
+      "MobSupervisorBridgeEndpointConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "advertised_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bind_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "MobSupervisorSpecInput": {
         "additionalProperties": false,

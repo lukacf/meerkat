@@ -276,6 +276,18 @@ pub struct MobProfileInput {
 #[serde(deny_unknown_fields)]
 pub struct MobExternalBackendConfigInput {
     pub address_base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_bridge: Option<MobSupervisorBridgeEndpointConfigInput>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobSupervisorBridgeEndpointConfigInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

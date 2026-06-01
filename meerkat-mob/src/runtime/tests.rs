@@ -3052,6 +3052,7 @@ fn sample_definition_with_external_backend() -> MobDefinition {
     let mut def = sample_definition();
     def.backend.external = Some(crate::definition::ExternalBackendConfig {
         address_base: "https://backend.example.invalid/mesh".to_string(),
+        supervisor_bridge: None,
     });
     def
 }
@@ -3505,6 +3506,7 @@ struct LiveExternalPeerHarness {
     delivered_inputs: Arc<RwLock<Vec<String>>>,
     hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
+    supervisor_addresses: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     bind_peer_id_override: Arc<RwLock<Option<String>>>,
     fail_authorize_countdown: Arc<AtomicUsize>,
@@ -3567,6 +3569,10 @@ impl LiveExternalPeerHarness {
         self.received_intents.read().await.clone()
     }
 
+    async fn supervisor_addresses(&self) -> Vec<String> {
+        self.supervisor_addresses.read().await.clone()
+    }
+
     async fn authorized_supervisor_peer_id(&self) -> Option<String> {
         self.supervisor_state
             .read()
@@ -3623,11 +3629,35 @@ impl Drop for LiveExternalPeerHarness {
 }
 
 async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
+    spawn_live_external_peer_with_transport(peer_name, false).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn spawn_live_external_tcp_peer(peer_name: &str) -> LiveExternalPeerHarness {
+    spawn_live_external_peer_with_transport(peer_name, true).await
+}
+
+async fn spawn_live_external_peer_with_transport(
+    peer_name: &str,
+    listen_tcp: bool,
+) -> LiveExternalPeerHarness {
     let peer_name = peer_name.to_string();
-    let runtime = Arc::new(
-        meerkat_comms::CommsRuntime::inproc_only(&peer_name)
-            .expect("create live external peer runtime"),
-    );
+    let mut runtime = meerkat_comms::CommsRuntime::inproc_only(&peer_name)
+        .expect("create live external peer runtime");
+    #[cfg(not(target_arch = "wasm32"))]
+    if listen_tcp {
+        runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure live external peer TCP listener");
+        runtime
+            .start_listeners()
+            .await
+            .expect("start live external peer TCP listener");
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = listen_tcp;
+    let runtime_address = runtime.advertised_address();
+    let runtime = Arc::new(runtime);
     install_ephemeral_peer_request_response_authority(
         &runtime,
         &format!("live-external-peer-{peer_name}"),
@@ -3636,7 +3666,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let peer_pubkey = *runtime.public_key().as_bytes();
     let binding = crate::RuntimeBinding::External {
         peer_id: runtime.public_key().to_peer_id().to_string(),
-        address: format!("inproc://{peer_name}"),
+        address: runtime_address.clone(),
         bootstrap_token: Some(bootstrap_token.into()),
         pubkey: Some(peer_pubkey),
     };
@@ -3655,6 +3685,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_delivery_responses = delivery_responses.clone();
     let received_intents = Arc::new(RwLock::new(Vec::new()));
     let responder_received_intents = received_intents.clone();
+    let supervisor_addresses = Arc::new(RwLock::new(Vec::new()));
+    let responder_supervisor_addresses = supervisor_addresses.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
     let responder_supervisor_state = supervisor_state.clone();
     let bind_peer_id_override: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
@@ -3663,6 +3695,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_fail_authorize_countdown = fail_authorize_countdown.clone();
     let fail_next_bind = Arc::new(AtomicBool::new(false));
     let responder_fail_next_bind = fail_next_bind.clone();
+    let responder_runtime_address = runtime_address.clone();
     let task = tokio::spawn(async move {
         let mut state = super::bridge_protocol::BridgeMemberRuntimeState::Idle;
         let inbox_notify = responder_runtime.inbox_notify();
@@ -3814,6 +3847,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                             payload.supervisor.clone(),
                                                         )
                                                         .expect("valid supervisor spec");
+                                                    responder_supervisor_addresses
+                                                        .write()
+                                                        .await
+                                                        .push(supervisor_spec.address.to_string());
                                                     responder_runtime
                                                         .add_trusted_peer(supervisor_spec)
                                                         .await
@@ -3839,7 +3876,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                                     .to_peer_id()
                                                                     .to_string()
                                                             }),
-                                                        address: format!("inproc://{peer_name}"),
+                                                        address: responder_runtime_address.clone(),
                                                         capabilities:
                                                             super::bridge_protocol::BridgeCapabilities {
                                                                 deliver_member_input: true,
@@ -3940,6 +3977,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                         payload.supervisor.clone(),
                                                     )
                                                     .expect("valid supervisor spec");
+                                                responder_supervisor_addresses
+                                                    .write()
+                                                    .await
+                                                    .push(supervisor_spec.address.to_string());
                                                 responder_runtime
                                                     .add_trusted_peer(supervisor_spec)
                                                     .await
@@ -3964,6 +4005,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                     payload.supervisor.clone(),
                                                 )
                                                 .expect("valid supervisor spec");
+                                            responder_supervisor_addresses
+                                                .write()
+                                                .await
+                                                .push(supervisor_spec.address.to_string());
                                             responder_runtime
                                                 .add_trusted_peer(supervisor_spec)
                                                 .await
@@ -4231,6 +4276,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         delivered_inputs,
         hard_cancel_reasons,
         received_intents,
+        supervisor_addresses,
         supervisor_state,
         bind_peer_id_override,
         fail_authorize_countdown,
@@ -6894,7 +6940,8 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         ),
     }
     .expect("peer spec");
-    let old_bridge = crate::runtime::MobSupervisorBridge::new(&mob_id, original.clone())
+    let old_bridge = crate::runtime::MobSupervisorBridge::new(&mob_id, original.clone(), None)
+        .await
         .expect("build old supervisor bridge");
     old_bridge
         .trust_recipient(&peer)
@@ -11595,6 +11642,7 @@ async fn test_spawn_member_tool_dispatches_backend_selection() {
     let mut definition = sample_definition_with_mob_tools();
     definition.backend.external = Some(crate::definition::ExternalBackendConfig {
         address_base: "https://backend.example.invalid/mesh".to_string(),
+        supervisor_bridge: None,
     });
     let (handle, service) = create_test_mob(definition).await;
     let sid_1 = handle
@@ -19146,6 +19194,7 @@ async fn test_external_backend_autonomous_flow_dispatch_normalizes_to_peer_only_
     );
     definition.backend.external = Some(crate::definition::ExternalBackendConfig {
         address_base: "https://backend.example.invalid/mesh".to_string(),
+        supervisor_bridge: None,
     });
     let mob_id = definition.id.clone();
     let (handle, service) = create_test_mob(definition).await;
@@ -29267,6 +29316,366 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
         }
         other => panic!("expected BackendPeer member ref, got {other:?}"),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_tcp_bind_and_peer_turn_use_routable_supervisor_bridge() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-tcp-bind-route",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob(definition).await;
+    let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp");
+    let external = spawn_live_external_tcp_peer(&external_name).await;
+    let crate::RuntimeBinding::External { address, .. } = external.binding() else {
+        panic!("live external peer must produce external binding");
+    };
+    assert!(
+        address.starts_with("tcp://127.0.0.1:"),
+        "test harness must exercise TCP routing, got {address}"
+    );
+
+    let mut spec = SpawnMemberSpec::new("lead", "l-tcp");
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.binding = Some(external.binding());
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn TCP external member");
+
+    handle
+        .member(&AgentIdentity::from("l-tcp"))
+        .await
+        .expect("member handle")
+        .send("tcp external turn", HandlingMode::Queue)
+        .await
+        .expect("peer turn should route to TCP external runtime");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "peer-only TCP external dispatch must not fall back to local session start_turn"
+    );
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "remote runtime must receive the post-bind peer turn"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn unused_loopback_port() -> u16 {
+    std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("reserve loopback port")
+        .local_addr()
+        .expect("reserved listener local addr")
+        .port()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_tcp_bind_uses_configured_supervisor_advertised_address() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let mut definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-tcp-advertised-supervisor",
+    );
+    let mob_id = definition.id.clone();
+    let port = unused_loopback_port();
+    let advertised_address = format!("tcp://127.0.0.1:{port}");
+    definition
+        .backend
+        .external
+        .as_mut()
+        .expect("external backend")
+        .supervisor_bridge = Some(crate::definition::SupervisorBridgeEndpointConfig {
+        bind_address: Some(format!("0.0.0.0:{port}")),
+        advertised_address: Some(advertised_address.clone()),
+    });
+    let (handle, service) = create_test_mob(definition).await;
+    let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp-advertised");
+    let external = spawn_live_external_tcp_peer(&external_name).await;
+
+    let mut spec = SpawnMemberSpec::new("lead", "l-tcp-advertised");
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.binding = Some(external.binding());
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn TCP external member");
+
+    assert_eq!(
+        external.supervisor_addresses().await,
+        vec![advertised_address.clone()],
+        "external runtime must be told to trust the configured supervisor bridge address"
+    );
+
+    handle
+        .member(&AgentIdentity::from("l-tcp-advertised"))
+        .await
+        .expect("member handle")
+        .send(
+            "tcp external turn through advertised supervisor",
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("peer turn should route through configured advertised supervisor");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "configured peer-only TCP external dispatch must not fall back to local session start_turn"
+    );
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "remote runtime must receive the post-bind peer turn"
+    );
+
+    handle
+        .rotate_supervisor()
+        .await
+        .expect("rotate configured supervisor bridge");
+    let supervisor_addresses = external.supervisor_addresses().await;
+    assert!(
+        supervisor_addresses.len() >= 2
+            && supervisor_addresses
+                .iter()
+                .all(|address| address == &advertised_address),
+        "rotation must preserve the configured routable supervisor address, got {supervisor_addresses:?}"
+    );
+
+    handle
+        .member(&AgentIdentity::from("l-tcp-advertised"))
+        .await
+        .expect("member handle")
+        .send(
+            "tcp external turn after advertised supervisor rotation",
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("peer turn after rotation should route through configured advertised supervisor");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "configured peer-only TCP external dispatch after rotation must not fall back to local session start_turn"
+    );
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        2,
+        "remote runtime must receive the post-rotation peer turn"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_tcp_fixed_supervisor_bridge_pending_rotation_retry_reuses_active_listener() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let mut definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-tcp-fixed-supervisor-pending-retry",
+    );
+    let mob_id = definition.id.clone();
+    let port = unused_loopback_port();
+    let advertised_address = format!("tcp://127.0.0.1:{port}");
+    definition
+        .backend
+        .external
+        .as_mut()
+        .expect("external backend")
+        .supervisor_bridge = Some(crate::definition::SupervisorBridgeEndpointConfig {
+        bind_address: Some(format!("0.0.0.0:{port}")),
+        advertised_address: Some(advertised_address.clone()),
+    });
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile exists")
+        .external_addressable = true;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let external_a =
+        spawn_live_external_tcp_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b =
+        spawn_live_external_tcp_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn first TCP external worker");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn second TCP external worker");
+
+    let original = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original authority")
+        .expect("original authority record");
+    external_b.fail_next_authorize();
+    let error = handle
+        .rotate_supervisor()
+        .await
+        .expect_err("partial rotation should leave pending supervisor authority");
+    let attempted_public_peer_id = match error {
+        MobError::SupervisorRotationIncomplete {
+            previous_epoch,
+            attempted_epoch,
+            attempted_public_peer_id,
+            rotated_peer_count,
+            pending_authority_recorded,
+            ..
+        } => {
+            assert_eq!(previous_epoch, original.epoch);
+            assert_eq!(attempted_epoch, original.epoch + 1);
+            assert_eq!(rotated_peer_count, 1);
+            assert!(
+                pending_authority_recorded,
+                "partial TCP rotation should persist pending authority for retry"
+            );
+            attempted_public_peer_id
+        }
+        other => panic!("expected typed incomplete supervisor rotation, got: {other:?}"),
+    };
+    assert_eq!(
+        external_a.authorized_supervisor_peer_id().await.as_deref(),
+        Some(attempted_public_peer_id.as_str()),
+        "first remote should accept the attempted authority before retry"
+    );
+
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown original actor before retry");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume mob with pending supervisor rotation");
+
+    let retry_report = resumed
+        .rotate_supervisor()
+        .await
+        .expect("fixed-port retry should reuse the active supervisor listener");
+    assert_eq!(retry_report.previous_epoch, original.epoch);
+    assert_eq!(retry_report.current_epoch, original.epoch + 1);
+    let retried = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load authority after retry")
+        .expect("authority after retry");
+    assert_eq!(retried.public_peer_id, retry_report.public_peer_id);
+    assert!(
+        retried.pending_rotation.is_none(),
+        "successful fixed-port retry must clear pending rotation metadata"
+    );
+    assert_eq!(
+        external_a.authorized_supervisor_peer_id().await.as_deref(),
+        Some(retried.public_peer_id.as_str()),
+        "retry should reconcile the already-accepted TCP remote"
+    );
+    assert_eq!(
+        external_b.authorized_supervisor_peer_id().await.as_deref(),
+        Some(retried.public_peer_id.as_str()),
+        "retry should rotate the TCP remote that rejected the first attempt"
+    );
+    let supervisor_addresses = external_a.supervisor_addresses().await;
+    assert!(
+        supervisor_addresses
+            .iter()
+            .all(|address| address == &advertised_address),
+        "retry must keep publishing the configured routable supervisor address, got {supervisor_addresses:?}"
+    );
+
+    resumed
+        .member(&AgentIdentity::from("w-a"))
+        .await
+        .expect("member handle")
+        .send("tcp fixed-port retry peer turn", HandlingMode::Queue)
+        .await
+        .expect("peer turn should route after fixed-port retry");
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "peer-only TCP external dispatch after retry must not fall back to local session start_turn"
+    );
+    assert_eq!(
+        external_a.delivered_input_ids().await.len(),
+        1,
+        "remote runtime must receive the post-retry peer turn"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_tcp_peer_turn_routes_after_supervisor_rotation() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-tcp-rotate-route",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob(definition).await;
+    let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp-rotate");
+    let external = spawn_live_external_tcp_peer(&external_name).await;
+
+    let mut spec = SpawnMemberSpec::new("lead", "l-tcp-rotate");
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.binding = Some(external.binding());
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn TCP external member");
+
+    handle
+        .rotate_supervisor()
+        .await
+        .expect("rotate supervisor with TCP external member");
+
+    handle
+        .member(&AgentIdentity::from("l-tcp-rotate"))
+        .await
+        .expect("member handle")
+        .send("tcp external turn after rotation", HandlingMode::Queue)
+        .await
+        .expect("peer turn after rotation should route to TCP external runtime");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "rotated peer-only TCP external dispatch must not fall back to local session start_turn"
+    );
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "remote runtime must receive the post-rotation peer turn"
+    );
 }
 
 #[tokio::test]

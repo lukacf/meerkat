@@ -915,6 +915,31 @@ impl MobActor {
         self.supervisor_payload_for_authority(&authority)
     }
 
+    async fn bridge_supervisor_payload_for_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
+        let authority = self.supervisor_bridge.authority().await;
+        self.bridge_supervisor_payload_for_authority_and_recipient(&authority, recipient)
+            .await
+    }
+
+    async fn bridge_supervisor_payload_for_authority_and_recipient(
+        &self,
+        authority: &crate::store::SupervisorAuthorityRecord,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
+        let spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_authority_and_recipient(authority, recipient)
+            .await?;
+        Ok(super::bridge_protocol::BridgeSupervisorPayload {
+            supervisor: spec.into(),
+            epoch: authority.epoch,
+            protocol_version: authority.protocol_version,
+        })
+    }
+
     fn supervisor_payload_for_authority(
         &self,
         authority: &crate::store::SupervisorAuthorityRecord,
@@ -955,7 +980,7 @@ impl MobActor {
         peer: &TrustedPeerDescriptor,
         binding: &crate::RuntimeBinding,
     ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         self.bind_peer_only_member_for_binding_with_payload(peer, binding, &payload)
             .await
     }
@@ -1074,7 +1099,7 @@ impl MobActor {
         peer: &TrustedPeerDescriptor,
         binding: Option<&crate::RuntimeBinding>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         self.supervisor_bridge.trust_recipient(peer).await?;
@@ -1254,7 +1279,7 @@ impl MobActor {
         let peer = self
             .ensure_supervisor_authorized(&peer, Some(binding))
             .await?;
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
         let command = super::bridge_protocol::BridgeCommand::ObserveMember(payload);
         self.send_bridge_command_typed(&peer, &command, timeout)
             .await
@@ -1269,7 +1294,7 @@ impl MobActor {
         let peer = self
             .ensure_supervisor_authorized(&peer, Some(binding))
             .await?;
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
         let command = super::bridge_protocol::BridgeCommand::DestroyMember(payload);
         self.send_bridge_command_typed(&peer, &command, timeout)
             .await
@@ -1285,7 +1310,7 @@ impl MobActor {
         let peer = self
             .ensure_supervisor_authorized(&peer, Some(binding))
             .await?;
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
         let command = super::bridge_protocol::BridgeCommand::RevokeSupervisor(payload);
         let _ack: super::bridge_protocol::BridgeAck = self
             .send_bridge_command_typed(&peer, &command, timeout)
@@ -1304,7 +1329,10 @@ impl MobActor {
             .ensure_supervisor_authorized(recipient, recipient_binding)
             .await?;
         let authority = self.supervisor_bridge.authority().await;
-        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(&recipient)
+            .await?;
         let command = super::bridge_protocol::BridgeCommand::WireMember(
             super::bridge_protocol::BridgePeerWiringPayload {
                 supervisor: sup_spec.into(),
@@ -1330,7 +1358,10 @@ impl MobActor {
             .ensure_supervisor_authorized(recipient, recipient_binding)
             .await?;
         let authority = self.supervisor_bridge.authority().await;
-        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(&recipient)
+            .await?;
         let command = super::bridge_protocol::BridgeCommand::UnwireMember(
             super::bridge_protocol::BridgePeerWiringPayload {
                 supervisor: sup_spec.into(),
@@ -10043,36 +10074,17 @@ impl MobActor {
             };
         }
         if !remote_bindings.is_empty() {
-            let next_public_key = next.keypair().public_key();
-            let next_sup_spec: super::bridge_protocol::BridgePeerSpec =
-                meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
-                    format!("{}/__mob_supervisor__", self.definition.id),
-                    next.public_peer_id.clone(),
-                    *next_public_key.as_bytes(),
-                    format!("inproc://{}/__mob_supervisor__", self.definition.id),
-                )
-                .map_err(|error| {
-                    MobError::WiringError(format!("invalid rotated supervisor spec: {error}"))
-                })?
-                .into();
-            let next_payload = super::bridge_protocol::BridgeSupervisorPayload {
-                supervisor: next_sup_spec,
-                epoch: next.epoch,
-                protocol_version: next.protocol_version,
-            };
-            let current_payload = super::bridge_protocol::BridgeSupervisorPayload {
-                supervisor: Self::supervisor_spec_for_authority(
-                    &self.definition.id,
-                    &stable_current,
-                )?
-                .into(),
-                epoch: stable_current.epoch,
-                protocol_version: stable_current.protocol_version,
-            };
-            let next_command =
-                super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(next_payload.clone());
             for binding in remote_bindings.iter().cloned() {
                 let peer = Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")?;
+                let next_payload = self
+                    .bridge_supervisor_payload_for_authority_and_recipient(&next, &peer)
+                    .await?;
+                let current_payload = self
+                    .bridge_supervisor_payload_for_authority_and_recipient(&stable_current, &peer)
+                    .await?;
+                let next_command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
+                    next_payload.clone(),
+                );
                 let peer_id = peer.peer_id.to_string();
                 let mut already_pending = accepted_peer_ids.contains(&peer_id);
                 if already_pending {
@@ -10208,11 +10220,21 @@ impl MobActor {
                                         self.supervisor_bridge
                                             .trust_recipient(&effective_peer)
                                             .await?;
+                                        let retry_next_payload = self
+                                            .bridge_supervisor_payload_for_authority_and_recipient(
+                                                &next,
+                                                &effective_peer,
+                                            )
+                                            .await?;
+                                        let retry_next_command =
+                                            super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
+                                                retry_next_payload.clone(),
+                                            );
                                         let retry = self
                                             .supervisor_bridge
                                             .send_bridge_command(
                                                 &effective_peer,
-                                                &next_command,
+                                                &retry_next_command,
                                                 std::time::Duration::from_secs(5),
                                             )
                                             .await;
@@ -10220,7 +10242,7 @@ impl MobActor {
                                             Ok(value) => {
                                                 if let Some(retry_rejection) =
                                                     Self::bridge_rejection_reply(
-                                                        next_payload.protocol_version,
+                                                        retry_next_payload.protocol_version,
                                                         &value,
                                                     )
                                                 {
@@ -10632,14 +10654,10 @@ impl MobActor {
         current: &crate::store::SupervisorAuthorityRecord,
         rotated_peers: &[(TrustedPeerDescriptor, crate::RuntimeBinding)],
     ) -> Result<(), MobError> {
-        let current_sup_spec: super::bridge_protocol::BridgePeerSpec =
-            Self::supervisor_spec_for_authority(&self.definition.id, current)?.into();
-        let current_payload = super::bridge_protocol::BridgeSupervisorPayload {
-            supervisor: current_sup_spec,
-            epoch: current.epoch,
-            protocol_version: current.protocol_version,
-        };
         for (peer, binding) in rotated_peers {
+            let current_payload = self
+                .bridge_supervisor_payload_for_authority_and_recipient(current, peer)
+                .await?;
             let bind = self
                 .bind_peer_only_member_for_binding_with_payload(peer, binding, &current_payload)
                 .await
@@ -10702,13 +10720,17 @@ impl MobActor {
             self.rotate_supervisor_bridge_to(target).await?;
             return Ok(());
         }
-        let target_payload = self.supervisor_payload_for_authority(target)?;
-        let target_command =
-            super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(target_payload.clone());
-        let attempted_payload = self.supervisor_payload_for_authority(attempted)?;
-        let revoke_attempted_command =
-            super::bridge_protocol::BridgeCommand::RevokeSupervisor(attempted_payload);
         for (peer, binding) in rotated_peers {
+            let target_payload = self
+                .bridge_supervisor_payload_for_authority_and_recipient(target, peer)
+                .await?;
+            let target_command =
+                super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(target_payload.clone());
+            let attempted_payload = self
+                .bridge_supervisor_payload_for_authority_and_recipient(attempted, peer)
+                .await?;
+            let revoke_attempted_command =
+                super::bridge_protocol::BridgeCommand::RevokeSupervisor(attempted_payload);
             let authorize_result = self
                 .supervisor_bridge
                 .send_bridge_command_as_authority(

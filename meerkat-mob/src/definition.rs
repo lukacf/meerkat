@@ -65,6 +65,23 @@ pub struct WiringRules {
 pub struct ExternalBackendConfig {
     /// Base address prefix used to publish external peer addresses.
     pub address_base: String,
+    /// Supervisor bridge endpoint used by remote external members to send
+    /// bridge replies back to this mob supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_bridge: Option<SupervisorBridgeEndpointConfig>,
+}
+
+/// TCP endpoint configuration for the mob supervisor bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SupervisorBridgeEndpointConfig {
+    /// Local socket address the supervisor bridge should bind, for example
+    /// `0.0.0.0:42000` or `127.0.0.1:0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+    /// Address advertised to external members, for example
+    /// `tcp://supervisor.example.com:42000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_address: Option<String>,
 }
 
 /// Backend selection and backend-specific settings for the mob.

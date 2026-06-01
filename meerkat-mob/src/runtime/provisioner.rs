@@ -2097,6 +2097,22 @@ impl MultiBackendProvisioner {
         })
     }
 
+    async fn bridge_supervisor_payload_for_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
+        let authority = self.supervisor_bridge.authority().await;
+        let spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(recipient)
+            .await?;
+        Ok(super::bridge_protocol::BridgeSupervisorPayload {
+            supervisor: spec.into(),
+            epoch: authority.epoch,
+            protocol_version: authority.protocol_version,
+        })
+    }
+
     fn bridge_rejection_reply(
         protocol_version: super::bridge_protocol::BridgeProtocolVersion,
         value: &serde_json::Value,
@@ -2113,7 +2129,7 @@ impl MultiBackendProvisioner {
         peer: &TrustedPeerDescriptor,
         binding: Option<PeerOnlyBindingParts<'_>>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         self.supervisor_bridge.trust_recipient(peer).await?;
@@ -2239,7 +2255,10 @@ impl MultiBackendProvisioner {
     ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
         let bootstrap_token = Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
         let authority = self.supervisor_bridge.authority().await;
-        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(peer)
+            .await?;
         let command = super::bridge_protocol::BridgeCommand::BindMember(
             super::bridge_protocol::BridgeBindPayload {
                 supervisor: sup_spec.into(),
@@ -2480,7 +2499,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         )),
                     )
                     .await?;
-                let payload = self.bridge_supervisor_payload().await?;
+                let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
                 let command = super::bridge_protocol::BridgeCommand::RetireMember(payload);
                 let _retire: super::bridge_protocol::BridgeRetireResponse = self
                     .send_bridge_command_typed(&peer, &command, Duration::from_secs(10))
@@ -2518,7 +2537,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         )),
                     )
                     .await?;
-                let payload = self.bridge_supervisor_payload().await?;
+                let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
                 let command = super::bridge_protocol::BridgeCommand::InterruptMember(payload);
                 let _ack: super::bridge_protocol::BridgeAck = self
                     .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
@@ -2581,7 +2600,10 @@ impl MobProvisioner for MultiBackendProvisioner {
                     )
                     .await?;
                 let authority = self.supervisor_bridge.authority().await;
-                let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+                let sup_spec = self
+                    .supervisor_bridge
+                    .supervisor_spec_for_recipient(&peer)
+                    .await?;
                 let command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
                     super::bridge_protocol::BridgeDeliveryPayload {
                         supervisor: sup_spec.into(),
@@ -2657,7 +2679,10 @@ impl MobProvisioner for MultiBackendProvisioner {
             )
             .await?;
         let authority = self.supervisor_bridge.authority().await;
-        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(&peer)
+            .await?;
         for spec in desired_specs {
             let command = super::bridge_protocol::BridgeCommand::WireMember(
                 super::bridge_protocol::BridgePeerWiringPayload {

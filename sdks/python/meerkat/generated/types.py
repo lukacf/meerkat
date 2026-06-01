@@ -929,6 +929,7 @@ class MobEventRouterConfigInput:
 class MobExternalBackendConfigInput:
     """Request payload for MobExternalBackendConfigInput."""
     address_base: str
+    supervisor_bridge: Optional[Any] = None
 
 
 @dataclass

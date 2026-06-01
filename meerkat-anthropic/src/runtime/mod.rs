@@ -22,10 +22,10 @@ use meerkat_core::{AuthLease, AuthMetadata, Provider};
 use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
-    load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
-    mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
-    refresh_allowed,
+    ManagedStoreLifecycle, OAuthLoginCredentialAdmission,
+    begin_managed_store_oauth_refresh_lifecycle, load_managed_store_tokens_with_lifecycle,
+    managed_store_oauth_refresh_failure_coordinator, mark_managed_store_oauth_refresh_failed,
+    publish_managed_store_tokens_lifecycle_and_save, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -344,72 +344,80 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             persisted
                         }
                         AnthropicAuthMethod::ClaudeAiOauth => {
-                            if lifecycle == ManagedStoreLifecycle::Authorized
-                                && persisted.primary_secret.is_some()
-                                && !env.force_refresh
-                            {
-                                persisted
-                            } else {
-                                if !refresh_allowed(binding) {
-                                    return Err(ProviderAuthError::Auth(
-                                        AuthError::RefreshRequired,
-                                    ));
-                                }
-                                let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
-                                    env,
-                                    binding,
-                                    &mut managed,
-                                )?;
-                                let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                                    Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                                });
-                                let coord = managed_store_oauth_refresh_failure_coordinator(
-                                    coord,
-                                    env.clone(),
-                                    binding.clone(),
-                                    refresh_started,
-                                );
-                                let endpoints =
-                                    oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
-                                let runtime = oauth::AnthropicOAuthRuntime::new(
-                                    managed.store.clone(),
-                                    coord,
-                                    endpoints,
-                                    managed.key.clone(),
-                                );
-                                let commit_env = env.clone();
-                                let commit_binding = binding.clone();
-                                let commit: oauth::TokenCommitFn = Box::new(move |tokens| {
-                                    Box::pin(async move {
-                                        publish_managed_store_tokens_lifecycle_and_save(
-                                            &commit_env,
-                                            &commit_binding,
-                                            &managed,
-                                            &tokens,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            meerkat_auth_core::RefreshError::Refresh(e.to_string())
-                                        })
-                                    })
-                                });
-                                let refreshed = runtime
-                                    .refresh_tokens_with_commit(commit, env.force_refresh)
-                                    .await;
-                                refreshed.map_err(|e| {
-                                    let observation =
-                                        anthropic_oauth_refresh_failure_observation(&e);
-                                    let failure = mark_managed_store_oauth_refresh_failed(
-                                        env,
-                                        binding,
+                            // The cached-vs-refresh disposition is owned by the
+                            // per-binding AuthMachine: feed only the pure
+                            // observations (persisted secret presence,
+                            // force_refresh, refresh-allowed config) and mirror
+                            // the verdict. UseCached -> persisted; BeginRefresh ->
+                            // run the OAuth refresh; refresh-disallowed/reauth ->
+                            // the matching error surfaced by the resolver.
+                            match resolve_oauth_login_credential_disposition(
+                                env,
+                                binding,
+                                persisted.primary_secret.is_some(),
+                            )? {
+                                OAuthLoginCredentialAdmission::UseCached => persisted,
+                                OAuthLoginCredentialAdmission::BeginRefresh => {
+                                    let refresh_started =
+                                        begin_managed_store_oauth_refresh_lifecycle(
+                                            env,
+                                            binding,
+                                            &mut managed,
+                                        )?;
+                                    let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                        Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
+                                    });
+                                    let coord = managed_store_oauth_refresh_failure_coordinator(
+                                        coord,
+                                        env.clone(),
+                                        binding.clone(),
                                         refresh_started,
-                                        observation,
-                                    )
-                                    .err()
-                                    .map(|err| format!("; {err}"))
-                                    .unwrap_or_default();
-                                    anthropic_oauth_refresh_error(e, failure)
-                                })?
+                                    );
+                                    let endpoints =
+                                        oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
+                                    let runtime = oauth::AnthropicOAuthRuntime::new(
+                                        managed.store.clone(),
+                                        coord,
+                                        endpoints,
+                                        managed.key.clone(),
+                                    );
+                                    let commit_env = env.clone();
+                                    let commit_binding = binding.clone();
+                                    let commit: oauth::TokenCommitFn =
+                                        Box::new(move |tokens| {
+                                            Box::pin(async move {
+                                                publish_managed_store_tokens_lifecycle_and_save(
+                                                    &commit_env,
+                                                    &commit_binding,
+                                                    &managed,
+                                                    &tokens,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    meerkat_auth_core::RefreshError::Refresh(
+                                                        e.to_string(),
+                                                    )
+                                                })
+                                            })
+                                        });
+                                    let refreshed = runtime
+                                        .refresh_tokens_with_commit(commit, env.force_refresh)
+                                        .await;
+                                    refreshed.map_err(|e| {
+                                        let observation =
+                                            anthropic_oauth_refresh_failure_observation(&e);
+                                        let failure = mark_managed_store_oauth_refresh_failed(
+                                            env,
+                                            binding,
+                                            refresh_started,
+                                            observation,
+                                        )
+                                        .err()
+                                        .map(|err| format!("; {err}"))
+                                        .unwrap_or_default();
+                                        anthropic_oauth_refresh_error(e, failure)
+                                    })?
+                                }
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),

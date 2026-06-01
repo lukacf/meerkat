@@ -1531,6 +1531,110 @@ ResolveCredentialUseAdmissionReleasedReleased(intent) ==
     /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
 
 
+ResolveOAuthLoginCredentialDispositionUseCachedValid(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Valid"
+    /\ (credential_present /\ arg_credential_present /\ (force_refresh = FALSE))
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshValidValid(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Valid"
+    /\ (~((credential_present /\ arg_credential_present /\ (force_refresh = FALSE))) /\ refresh_allowed)
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Valid"
+    /\ (~((credential_present /\ arg_credential_present /\ (force_refresh = FALSE))) /\ (refresh_allowed = FALSE))
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Expiring"
+    /\ refresh_allowed
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Expired"
+    /\ refresh_allowed
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Refreshing"
+    /\ refresh_allowed
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "ReauthRequired"
+    /\ refresh_allowed
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Released"
+    /\ refresh_allowed
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Expiring"
+    /\ (refresh_allowed = FALSE)
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Expired"
+    /\ (refresh_allowed = FALSE)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Refreshing"
+    /\ (refresh_allowed = FALSE)
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "ReauthRequired"
+    /\ (refresh_allowed = FALSE)
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased(arg_credential_present, force_refresh, refresh_allowed) ==
+    /\ phase = "Released"
+    /\ (refresh_allowed = FALSE)
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
 Next ==
     \/ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : Acquire(expires_at_ts, arg_credential_published_at_millis)
     \/ MarkExpiring
@@ -1660,6 +1764,19 @@ Next ==
     \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing(intent)
     \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionReauthRequiredReauthRequired(intent)
     \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionReleasedReleased(intent)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionUseCachedValid(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshValidValid(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired(arg_credential_present, force_refresh, refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E force_refresh \in BOOLEAN : \E refresh_allowed \in BOOLEAN : ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased(arg_credential_present, force_refresh, refresh_allowed)
     \/ TerminalStutter
 
 oauth_flow_membership_consistent == ((DOMAIN oauth_browser_flow_providers = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_redirect_uris = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_expires_at_millis = oauth_browser_flow_ids) /\ (DOMAIN oauth_device_flow_providers = oauth_device_flow_ids) /\ (DOMAIN oauth_device_flow_expires_at_millis = oauth_device_flow_ids) /\ (\A flow_id \in oauth_device_poll_ids : (flow_id \in oauth_device_flow_ids)) /\ (oauth_outstanding_flow_count = (Cardinality(oauth_browser_flow_ids) + Cardinality(oauth_device_flow_ids))))

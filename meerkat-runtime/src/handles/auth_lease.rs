@@ -1001,6 +1001,9 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::ResolveCredentialUseAdmission { .. } => {
                 "resolve_credential_use_admission"
             }
+            auth_dsl::AuthMachineInput::ResolveOAuthLoginCredentialDisposition { .. } => {
+                "resolve_oauth_login_credential_disposition"
+            }
         }
     }
 }
@@ -1044,6 +1047,9 @@ fn credential_use_disposition_from_dsl(
         }
         auth_dsl::CredentialUseDisposition::RefreshRequired => {
             meerkat_core::handles::CredentialUseDisposition::RefreshRequired
+        }
+        auth_dsl::CredentialUseDisposition::RefreshDisallowed => {
+            meerkat_core::handles::CredentialUseDisposition::RefreshDisallowed
         }
         auth_dsl::CredentialUseDisposition::ReauthRequired => {
             meerkat_core::handles::CredentialUseDisposition::ReauthRequired
@@ -1446,6 +1452,63 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             })
     }
 
+    fn resolve_oauth_login_credential_disposition(
+        &self,
+        lease_key: &LeaseKey,
+        facts: meerkat_core::handles::OAuthLoginCredentialFacts,
+    ) -> Result<meerkat_core::handles::CredentialUseDisposition, DslTransitionError> {
+        const CONTEXT: &str = "AuthLeaseHandle::resolve_oauth_login_credential_disposition";
+        let guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // No registered lease for this binding mirrors the resolver's prior
+        // credential-filtered `None` phase: the lease is absent.
+        let Some(authority) = guard.authorities.get(lease_key) else {
+            return Ok(meerkat_core::handles::CredentialUseDisposition::LeaseAbsent);
+        };
+        // Read-only classification: recover a transient authority over the live
+        // state so the registry is never mutated and no lifecycle audit fires.
+        let mut transient =
+            auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+        let transition = auth_dsl::AuthMachineMutator::apply(
+            &mut transient,
+            auth_dsl::AuthMachineInput::ResolveOAuthLoginCredentialDisposition {
+                credential_present: facts.credential_present,
+                force_refresh: facts.force_refresh,
+                refresh_allowed: facts.refresh_allowed,
+            },
+        )
+        .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+
+        let mut resolved = None;
+        for effect in transition.effects() {
+            if let auth_dsl::AuthMachineEffect::CredentialUseAdmissionResolved { disposition } =
+                effect
+                && resolved.replace(*disposition).is_some()
+            {
+                return Err(DslTransitionError::new(
+                    CONTEXT,
+                    format!(
+                        "AuthMachine emitted multiple OAuth-login credential dispositions for `{lease_key}`"
+                    ),
+                ));
+            }
+        }
+
+        resolved
+            .map(credential_use_disposition_from_dsl)
+            .ok_or_else(|| {
+                DslTransitionError::new(
+                    CONTEXT,
+                    format!(
+                        "AuthMachine emitted no OAuth-login credential disposition for `{lease_key}`"
+                    ),
+                )
+            })
+    }
+
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
@@ -1669,6 +1732,112 @@ mod tests {
 
         // Classification is read-only: the live phase is unchanged after probing.
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Refreshing));
+    }
+
+    // P0 Dogma Invariant 1, FOLD 2: the OAuth-login cached-vs-refresh
+    // disposition is now owned by the AuthMachine
+    // `ResolveOAuthLoginCredentialDisposition` classifier. This test pins EXACT
+    // behavioral parity with the prior provider-runtime shell composite
+    // (`lifecycle == Authorized && primary_secret.is_some() && !force_refresh`
+    // use-cached; else `refresh_allowed ? begin-refresh : Err(RefreshRequired)`)
+    // for every combination of phase, persisted-secret presence, force_refresh,
+    // and refresh_allowed — including the four required cases (cached-use;
+    // force_refresh -> refresh; lifecycle RefreshRequired -> refresh;
+    // refresh-not-allowed -> Err).
+    #[test]
+    fn oauth_login_credential_disposition_matches_legacy_composite() {
+        use meerkat_core::handles::CredentialUseDisposition as Disp;
+        use meerkat_core::handles::OAuthLoginCredentialFacts;
+
+        // Drive a lease into each lifecycle phase and return its handle/key. The
+        // machine's own `credential_present` is true in all of these (acquired
+        // leases carry a published credential), exactly as in production where
+        // the provider composite is only reached for credential-bearing leases.
+        fn lease_in_phase(
+            phase: AuthLeasePhase,
+            binding: &str,
+        ) -> (RuntimeAuthLeaseHandle, LeaseKey) {
+            let h = RuntimeAuthLeaseHandle::new();
+            let k = lease("dev", binding);
+            h.acquire_lease(&k, 1_800_000_000).unwrap();
+            match phase {
+                AuthLeasePhase::Valid => {}
+                AuthLeasePhase::Expiring => h.mark_expiring(&k).unwrap(),
+                AuthLeasePhase::Expired => {
+                    h.observe_credential_freshness(&k, 1_800_000_001, 60)
+                        .unwrap();
+                }
+                AuthLeasePhase::Refreshing => h.begin_refresh(&k).unwrap(),
+                AuthLeasePhase::ReauthRequired => h.mark_reauth_required(&k).unwrap(),
+                AuthLeasePhase::Released => h.release_lease(&k).unwrap(),
+            }
+            (h, k)
+        }
+
+        let phases = [
+            AuthLeasePhase::Valid,
+            AuthLeasePhase::Expiring,
+            AuthLeasePhase::Expired,
+            AuthLeasePhase::Refreshing,
+            AuthLeasePhase::ReauthRequired,
+            AuthLeasePhase::Released,
+        ];
+        let mut counter = 0u32;
+        for phase in phases {
+            for credential_present in [false, true] {
+                for force_refresh in [false, true] {
+                    for refresh_allowed in [false, true] {
+                        counter += 1;
+                        let (h, k) = lease_in_phase(phase, &format!("oauthdisp_{counter}"));
+                        let got = h
+                            .resolve_oauth_login_credential_disposition(
+                                &k,
+                                OAuthLoginCredentialFacts {
+                                    credential_present,
+                                    force_refresh,
+                                    refresh_allowed,
+                                },
+                            )
+                            .unwrap();
+
+                        // Reference composite: use-cached iff lifecycle==Authorized
+                        // (phase Valid with the machine's published credential) AND
+                        // a persisted secret is present AND not force-refreshing;
+                        // else refresh_allowed ? begin-refresh : refresh-disallowed.
+                        let use_cached =
+                            phase == AuthLeasePhase::Valid && credential_present && !force_refresh;
+                        let expected = if use_cached {
+                            Disp::Authorized
+                        } else if refresh_allowed {
+                            Disp::RefreshRequired
+                        } else {
+                            Disp::RefreshDisallowed
+                        };
+                        assert_eq!(
+                            got, expected,
+                            "phase={phase:?} cred_present={credential_present} \
+                             force_refresh={force_refresh} refresh_allowed={refresh_allowed}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Unregistered lease -> LeaseAbsent regardless of observations.
+        let h = RuntimeAuthLeaseHandle::new();
+        let absent = lease("dev", "oauthdisp_absent");
+        assert_eq!(
+            h.resolve_oauth_login_credential_disposition(
+                &absent,
+                OAuthLoginCredentialFacts {
+                    credential_present: true,
+                    force_refresh: false,
+                    refresh_allowed: true,
+                },
+            )
+            .unwrap(),
+            Disp::LeaseAbsent
+        );
     }
 
     #[test]

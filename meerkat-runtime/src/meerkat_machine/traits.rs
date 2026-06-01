@@ -531,16 +531,24 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dsl_phase = dsl_authority::runtime_phase_from_authority(&authority);
         let dsl_pre_run_phase = dsl_authority::pre_run_phase_from_authority(&authority);
-        if self.has_runtime_persistence()
-            && dsl_authority::should_publish_control_over_dsl(
-                control.phase,
-                dsl_phase,
-                dsl_pre_run_phase,
-            )
-        {
-            Some(control.phase)
-        } else {
-            Some(dsl_phase)
+        // The visible-phase arbitration verdict is machine-owned: mirror the
+        // generated `selected_raw_phase` (the chosen phase without the
+        // visibility rewrite). The classifier is total over the pure
+        // observations, so a failure is structurally unreachable; if it ever
+        // arises we fail closed to the most-terminal phase rather than re-derive
+        // a disposition in the shell.
+        match crate::meerkat_machine::resolve_visible_runtime_phase(
+            dsl_phase,
+            dsl_pre_run_phase,
+            control.phase,
+            control.pre_run_phase,
+            self.has_runtime_persistence(),
+        ) {
+            Ok(plan) => Some(plan.selected_raw_phase),
+            Err(reason) => {
+                tracing::error!(%session_id, %reason, "MeerkatMachine visible runtime phase resolution failed; failing closed to Destroyed");
+                Some(RuntimeState::Destroyed)
+            }
         }
     }
 
@@ -557,22 +565,23 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dsl_phase = dsl_authority::runtime_phase_from_authority(&authority);
         let dsl_pre_run_phase = dsl_authority::pre_run_phase_from_authority(&authority);
-        if self.has_runtime_persistence()
-            && dsl_authority::should_publish_control_over_dsl(
-                control.phase,
-                dsl_phase,
-                dsl_pre_run_phase,
-            )
-        {
-            Some(dsl_authority::visible_runtime_phase(
-                control.phase,
-                control.pre_run_phase,
-            ))
-        } else {
-            Some(dsl_authority::visible_runtime_phase(
-                dsl_phase,
-                dsl_pre_run_phase,
-            ))
+        // Mirror the machine-owned `visible_phase` verdict (the externally-
+        // visible phase after the Running+pre_run(Retired)->Retired rewrite).
+        // The classifier is total; a failure is structurally unreachable and
+        // fails closed to the most-terminal phase rather than re-deriving in the
+        // shell.
+        match crate::meerkat_machine::resolve_visible_runtime_phase(
+            dsl_phase,
+            dsl_pre_run_phase,
+            control.phase,
+            control.pre_run_phase,
+            self.has_runtime_persistence(),
+        ) {
+            Ok(plan) => Some(plan.visible_phase),
+            Err(reason) => {
+                tracing::error!(%session_id, %reason, "MeerkatMachine visible runtime phase resolution failed; failing closed to Destroyed");
+                Some(RuntimeState::Destroyed)
+            }
         }
     }
 

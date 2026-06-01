@@ -51,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ConsumeOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `ExpireOAuthDeviceFlow`(flow_id: String)
 - `ResolveCredentialUseAdmission`(intent: CredentialUseIntent)
+- `ResolveOAuthLoginCredentialDisposition`(credential_present: Bool, force_refresh: Bool, refresh_allowed: Bool)
 
 ## Signals
 
@@ -1153,6 +1154,110 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ResolveCredentialUseAdmissionReleasedReleased`
 - From: `Released`
 - On: `ResolveCredentialUseAdmission`(intent)
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Released`
+
+### `ResolveOAuthLoginCredentialDispositionUseCachedValid`
+- From: `Valid`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `use_cached`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshValidValid`
+- From: `Valid`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `needs_refresh_allowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid`
+- From: `Valid`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `needs_refresh_disallowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring`
+- From: `Expiring`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_allowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expiring`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired`
+- From: `Expired`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_allowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expired`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing`
+- From: `Refreshing`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_allowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Refreshing`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired`
+- From: `ReauthRequired`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_allowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `ReauthRequired`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased`
+- From: `Released`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_allowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Released`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring`
+- From: `Expiring`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_disallowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expiring`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired`
+- From: `Expired`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_disallowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expired`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing`
+- From: `Refreshing`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_disallowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Refreshing`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired`
+- From: `ReauthRequired`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_disallowed`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `ReauthRequired`
+
+### `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased`
+- From: `Released`
+- On: `ResolveOAuthLoginCredentialDisposition`(credential_present, force_refresh, refresh_allowed)
+- Guards:
+  - `refresh_disallowed`
 - Emits: `CredentialUseAdmissionResolved`
 - To: `Released`
 

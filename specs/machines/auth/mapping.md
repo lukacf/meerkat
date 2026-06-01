@@ -402,6 +402,45 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveCredentialUseAdmissionReleasedReleased`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionUseCachedValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshValidValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
 
 ### Effects
 - `EmitLifecycleEvent`

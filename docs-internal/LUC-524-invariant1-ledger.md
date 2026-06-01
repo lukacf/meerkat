@@ -781,3 +781,32 @@ debt; clippy --all-features -D warnings clean. Behavior preserved (exact verdict
 
 ### DEFENDED — is_recoverable (sweep LOW): telemetry-only non-branching event metadata; live recovery fork is
 machine-routed via ClassifyLlmFailureRecovery.
+
+## CONVERGENCE ROUND 14 — TWO CLEAN BLIND REVIEWS (bar met) + folded the 2 sweep-only MEDIUMs
+review-alpha CLEAN; review-beta CLEAN -> the acceptance bar "two blind dogma reviews both clean" is MET on
+the committed tree (3d8f68596). The aggressive sweep additionally found 2 genuine MEDIUMs the reviewers
+missed; folded both (honesty over gaming the bar):
+
+### FOLDED — control-vs-DSL visible-phase arbitration -> MeerkatMachine
+dsl_authority.rs visible_runtime_phase + should_publish_control_over_dsl arbitrated two machine-owned phases
+(DSL lifecycle_phase vs durable control-projection phase) via handwritten terminal-precedence; the result
+gates ingress-admission rejection + status reads (not display-only). -> MeerkatMachine ResolveVisibleRuntimePhase
+{ dsl_phase, dsl_pre_run_phase, control_phase, control_pre_run_phase, has_runtime_persistence } ->
+VisibleRuntimePhaseResolved { publish_control, selected_raw_phase, visible_phase }. The precedence + the
+Running+pre_run(Retired)->Retired rewrite move into the DSL. Both shell helpers DELETED; traits.rs/visibility.rs
+mirror the verdict, fail closed. Declared runtime-internal in BOTH parity lists. Exhaustive parity test over all
+7x7x4x4x2 observation combinations vs the deleted policy passes.
+
+### FOLDED — provider OAuth cached-vs-refresh disposition -> AuthMachine (anthropic/openai/gemini)
+All 3 provider runtimes had `if lifecycle==Authorized && secret_present && !force_refresh { use } else { refresh
+gated on refresh_allowed }` -- re-deriving a use-vs-refresh disposition by layering force_refresh + presence atop
+the machine's lifecycle verdict. -> AuthMachine ResolveOAuthLoginCredentialDisposition { credential_present,
+force_refresh, refresh_allowed } + new CredentialUseDisposition::RefreshDisallowed; the machine composes the full
+disposition. All 3 providers route resolve_oauth_login_credential_disposition and mirror (Authorized->use cached;
+RefreshRequired->begin refresh; RefreshDisallowed->Err(RefreshRequired); ReauthRequired->reauth err; LeaseAbsent/
+AlreadyRefreshing->lease-absent err). The 3 shell composites deleted; refresh_allowed fed as a pure config
+observation. Exhaustive parity test vs the legacy composite passes; per-provider integration tests added.
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; classifier ratchet pass;
+runtime+anthropic+openai+gemini+auth-core+core --all-features 2680/2774 passed; seam 0 debt; clippy --all-features
+-D warnings clean; version parity clean. Behavior preserved (exhaustive parity tests).

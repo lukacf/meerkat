@@ -66,41 +66,6 @@ pub(crate) fn runtime_phase_from_authority(
     write_back_phase(authority.state().lifecycle_phase)
 }
 
-pub(crate) fn visible_runtime_phase(
-    phase: RuntimeState,
-    pre_run_phase: Option<RuntimeState>,
-) -> RuntimeState {
-    if phase == RuntimeState::Running && pre_run_phase == Some(RuntimeState::Retired) {
-        RuntimeState::Retired
-    } else {
-        phase
-    }
-}
-
-pub(crate) fn should_publish_control_over_dsl(
-    control_phase: RuntimeState,
-    dsl_phase: RuntimeState,
-    dsl_pre_run_phase: Option<RuntimeState>,
-) -> bool {
-    if control_phase == RuntimeState::Retired
-        && dsl_phase == RuntimeState::Running
-        && dsl_pre_run_phase == Some(RuntimeState::Retired)
-    {
-        return false;
-    }
-    control_phase != dsl_phase
-        && (matches!(
-            dsl_phase,
-            RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
-        ) || matches!(
-            control_phase,
-            RuntimeState::Running
-                | RuntimeState::Retired
-                | RuntimeState::Stopped
-                | RuntimeState::Destroyed
-        ))
-}
-
 pub(crate) fn current_run_id_from_authority(
     authority: &mm_dsl::MeerkatMachineAuthority,
 ) -> Option<RunId> {
@@ -300,5 +265,116 @@ mod tests {
         let msg = map_error(err, "test_context");
         assert!(msg.contains("test_context"));
         assert!(msg.contains("Idle"));
+    }
+
+    // P0 Dogma Invariant 1, FOLD 1: the visible-runtime-phase arbitration is now
+    // owned by the MeerkatMachine `ResolveVisibleRuntimePhase` classifier. This
+    // test pins EXACT behavioral parity with the prior handwritten shell policy
+    // (`should_publish_control_over_dsl` + `visible_runtime_phase`) for every
+    // combination of the five pure observations, including the
+    // Running+pre_run(Retired) special cases.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn resolve_visible_runtime_phase_matches_legacy_policy_for_all_combos() {
+        // Reference implementation of the deleted shell policy (tests only).
+        fn reference_should_publish_control(
+            control_phase: RuntimeState,
+            dsl_phase: RuntimeState,
+            dsl_pre_run_phase: Option<RuntimeState>,
+        ) -> bool {
+            if control_phase == RuntimeState::Retired
+                && dsl_phase == RuntimeState::Running
+                && dsl_pre_run_phase == Some(RuntimeState::Retired)
+            {
+                return false;
+            }
+            control_phase != dsl_phase
+                && (matches!(
+                    dsl_phase,
+                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
+                ) || matches!(
+                    control_phase,
+                    RuntimeState::Running
+                        | RuntimeState::Retired
+                        | RuntimeState::Stopped
+                        | RuntimeState::Destroyed
+                ))
+        }
+        fn reference_visible(phase: RuntimeState, pre_run: Option<RuntimeState>) -> RuntimeState {
+            if phase == RuntimeState::Running && pre_run == Some(RuntimeState::Retired) {
+                RuntimeState::Retired
+            } else {
+                phase
+            }
+        }
+
+        const STATES: [RuntimeState; 7] = [
+            RuntimeState::Initializing,
+            RuntimeState::Idle,
+            RuntimeState::Attached,
+            RuntimeState::Running,
+            RuntimeState::Retired,
+            RuntimeState::Stopped,
+            RuntimeState::Destroyed,
+        ];
+        const PRE_RUNS: [Option<RuntimeState>; 4] = [
+            None,
+            Some(RuntimeState::Idle),
+            Some(RuntimeState::Attached),
+            Some(RuntimeState::Retired),
+        ];
+
+        for &dsl_phase in &STATES {
+            for &control_phase in &STATES {
+                for &dsl_pre_run in &PRE_RUNS {
+                    for &control_pre_run in &PRE_RUNS {
+                        for &has_persistence in &[false, true] {
+                            let plan = crate::meerkat_machine::resolve_visible_runtime_phase(
+                                dsl_phase,
+                                dsl_pre_run,
+                                control_phase,
+                                control_pre_run,
+                                has_persistence,
+                            )
+                            .expect("total classifier always emits a verdict");
+
+                            let expect_publish = has_persistence
+                                && reference_should_publish_control(
+                                    control_phase,
+                                    dsl_phase,
+                                    dsl_pre_run,
+                                );
+                            assert_eq!(
+                                plan.publish_control, expect_publish,
+                                "publish_control mismatch dsl={dsl_phase:?} control={control_phase:?} \
+                                 dsl_pre={dsl_pre_run:?} ctrl_pre={control_pre_run:?} persist={has_persistence}"
+                            );
+
+                            let expect_raw = if expect_publish {
+                                control_phase
+                            } else {
+                                dsl_phase
+                            };
+                            assert_eq!(
+                                plan.selected_raw_phase, expect_raw,
+                                "selected_raw_phase mismatch dsl={dsl_phase:?} control={control_phase:?} \
+                                 dsl_pre={dsl_pre_run:?} ctrl_pre={control_pre_run:?} persist={has_persistence}"
+                            );
+
+                            let expect_visible = if expect_publish {
+                                reference_visible(control_phase, control_pre_run)
+                            } else {
+                                reference_visible(dsl_phase, dsl_pre_run)
+                            };
+                            assert_eq!(
+                                plan.visible_phase, expect_visible,
+                                "visible_phase mismatch dsl={dsl_phase:?} control={control_phase:?} \
+                                 dsl_pre={dsl_pre_run:?} ctrl_pre={control_pre_run:?} persist={has_persistence}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

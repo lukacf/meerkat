@@ -527,17 +527,25 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority);
             let dsl_pre_run_phase =
                 crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority);
-            let publish_control = self.has_runtime_persistence()
-                && crate::meerkat_machine::dsl_authority::should_publish_control_over_dsl(
-                    control.phase,
-                    dsl_phase,
-                    dsl_pre_run_phase,
-                );
-            if !publish_control {
-                snapshot.phase = crate::meerkat_machine::dsl_authority::visible_runtime_phase(
-                    dsl_phase,
-                    dsl_pre_run_phase,
-                );
+            // Mirror the machine-owned visible-phase arbitration verdict: the
+            // machine decides `publish_control` (terminal precedence) and the
+            // visibility rewrite. When the control projection supersedes the DSL
+            // we keep the raw control snapshot; otherwise we expose the visible
+            // DSL phase plus the live DSL run binding.
+            let plan = crate::meerkat_machine::resolve_visible_runtime_phase(
+                dsl_phase,
+                dsl_pre_run_phase,
+                control.phase,
+                control.pre_run_phase,
+                self.has_runtime_persistence(),
+            )
+            .unwrap_or(crate::meerkat_machine::VisibleRuntimePhasePlan {
+                publish_control: true,
+                selected_raw_phase: control.phase,
+                visible_phase: control.phase,
+            });
+            if !plan.publish_control {
+                snapshot.phase = plan.visible_phase;
                 snapshot.current_run_id = dsl_current_run_id;
                 snapshot.pre_run_phase = dsl_pre_run_phase;
             }
@@ -623,17 +631,22 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority);
             let dsl_pre_run_phase =
                 crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority);
-            let publish_control = self.has_runtime_persistence()
-                && crate::meerkat_machine::dsl_authority::should_publish_control_over_dsl(
-                    control.phase,
-                    dsl_phase,
-                    dsl_pre_run_phase,
-                );
-            if !publish_control {
-                snapshot.phase = crate::meerkat_machine::dsl_authority::visible_runtime_phase(
-                    dsl_phase,
-                    dsl_pre_run_phase,
-                );
+            // Mirror the machine-owned visible-phase arbitration verdict (see
+            // the archive snapshot path above for the full contract).
+            let plan = crate::meerkat_machine::resolve_visible_runtime_phase(
+                dsl_phase,
+                dsl_pre_run_phase,
+                control.phase,
+                control.pre_run_phase,
+                self.has_runtime_persistence(),
+            )
+            .unwrap_or(crate::meerkat_machine::VisibleRuntimePhasePlan {
+                publish_control: true,
+                selected_raw_phase: control.phase,
+                visible_phase: control.phase,
+            });
+            if !plan.publish_control {
+                snapshot.phase = plan.visible_phase;
                 snapshot.current_run_id = dsl_current_run_id;
                 snapshot.pre_run_phase = dsl_pre_run_phase;
             }

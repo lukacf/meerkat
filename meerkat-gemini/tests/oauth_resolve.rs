@@ -22,6 +22,54 @@ fn code_assist_realm() -> RealmConnectionSet {
     code_assist_realm_with_source(CredentialSourceSpec::PlatformDefault)
 }
 
+fn code_assist_realm_no_refresh() -> RealmConnectionSet {
+    let mut backend = BTreeMap::new();
+    backend.insert(
+        "code_assist".into(),
+        BackendProfileConfig {
+            provider: "gemini".into(),
+            backend_kind: "google_code_assist".into(),
+            base_url: None,
+            options: serde_json::json!({"realm_id": "dev", "project_id": "test-project"}),
+        },
+    );
+    let mut auth = BTreeMap::new();
+    auth.insert(
+        "google_oauth".into(),
+        AuthProfileConfig {
+            provider: "gemini".into(),
+            auth_method: "google_oauth".into(),
+            source: CredentialSourceSpec::PlatformDefault,
+            constraints: AuthConstraints {
+                allow_interactive_login: true,
+                allow_refresh: false,
+                ..Default::default()
+            },
+            metadata_defaults: Default::default(),
+        },
+    );
+    let mut binding = BTreeMap::new();
+    binding.insert(
+        "default_code_assist".into(),
+        ProviderBindingConfig {
+            backend_profile: "code_assist".into(),
+            auth_profile: "google_oauth".into(),
+            default_model: None,
+            policy: Default::default(),
+        },
+    );
+    RealmConnectionSet::from_config(
+        "dev",
+        &RealmConfigSection {
+            backend,
+            auth,
+            binding,
+            default_binding: Some("default_code_assist".into()),
+        },
+    )
+    .unwrap()
+}
+
 fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
     backend.insert(
@@ -470,4 +518,37 @@ async fn google_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() {
         stored.refresh_token.as_deref(),
         Some("forced-google-refresh")
     );
+}
+
+#[tokio::test]
+async fn google_oauth_force_refresh_with_refresh_disallowed_errors_refresh_required() {
+    // FOLD 2: fresh credential + force_refresh forces the refresh branch, but
+    // the binding disallows silent refresh -> AuthMachine emits RefreshDisallowed
+    // and the provider mirrors the RefreshRequired error.
+    let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
+    let store = Arc::new(EphemeralTokenStore::new());
+    let fresh = persisted_google_oauth("fresh-google-access");
+    let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&fresh);
+    store.save(&key, &marked).await.unwrap();
+
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease_handle)
+        .with_force_refresh(true);
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let err = registry
+        .resolve(
+            &code_assist_realm_no_refresh(),
+            &default_auth_binding(),
+            &env,
+        )
+        .await
+        .unwrap_err();
+    match err {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::RefreshRequired,
+        ) => {}
+        other => panic!("expected RefreshRequired, got {other:?}"),
+    }
 }

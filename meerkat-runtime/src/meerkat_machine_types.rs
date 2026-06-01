@@ -916,6 +916,7 @@ meerkat_machine_runtime_internal_inputs!(
         FatalFailure,
         RecoverableFailure,
         RecoverRuntimeAuthority,
+        ResolveVisibleRuntimePhase,
     ],
     UserInterruptDispatch => [
         InterruptCurrentRun,

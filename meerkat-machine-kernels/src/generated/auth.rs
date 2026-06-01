@@ -99,6 +99,8 @@ pub enum CredentialUseDisposition {
     Authorized,
     #[serde(rename = "RefreshRequired")]
     RefreshRequired,
+    #[serde(rename = "RefreshDisallowed")]
+    RefreshDisallowed,
     #[serde(rename = "ReauthRequired")]
     ReauthRequired,
     #[serde(rename = "LeaseAbsent")]
@@ -111,6 +113,7 @@ impl CredentialUseDisposition {
         match self {
             Self::Authorized => "Authorized",
             Self::RefreshRequired => "RefreshRequired",
+            Self::RefreshDisallowed => "RefreshDisallowed",
             Self::ReauthRequired => "ReauthRequired",
             Self::LeaseAbsent => "LeaseAbsent",
             Self::AlreadyRefreshing => "AlreadyRefreshing",
@@ -123,6 +126,7 @@ impl std::convert::TryFrom<&str> for CredentialUseDisposition {
         match value {
             "Authorized" => Ok(Self::Authorized),
             "RefreshRequired" => Ok(Self::RefreshRequired),
+            "RefreshDisallowed" => Ok(Self::RefreshDisallowed),
             "ReauthRequired" => Ok(Self::ReauthRequired),
             "LeaseAbsent" => Ok(Self::LeaseAbsent),
             "AlreadyRefreshing" => Ok(Self::AlreadyRefreshing),
@@ -381,6 +385,12 @@ pub mod inputs {
     pub struct ResolveCredentialUseAdmission {
         pub intent: CredentialUseIntent,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveOAuthLoginCredentialDisposition {
+        pub credential_present: bool,
+        pub force_refresh: bool,
+        pub refresh_allowed: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -412,6 +422,7 @@ pub enum Input {
     ConsumeOAuthDeviceFlow(inputs::ConsumeOAuthDeviceFlow),
     ExpireOAuthDeviceFlow(inputs::ExpireOAuthDeviceFlow),
     ResolveCredentialUseAdmission(inputs::ResolveCredentialUseAdmission),
+    ResolveOAuthLoginCredentialDisposition(inputs::ResolveOAuthLoginCredentialDisposition),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -445,6 +456,9 @@ impl Input {
             Self::ConsumeOAuthDeviceFlow(_) => InputKind::ConsumeOAuthDeviceFlow,
             Self::ExpireOAuthDeviceFlow(_) => InputKind::ExpireOAuthDeviceFlow,
             Self::ResolveCredentialUseAdmission(_) => InputKind::ResolveCredentialUseAdmission,
+            Self::ResolveOAuthLoginCredentialDisposition(_) => {
+                InputKind::ResolveOAuthLoginCredentialDisposition
+            }
         }
     }
 }
@@ -477,6 +491,7 @@ pub enum InputKind {
     ConsumeOAuthDeviceFlow,
     ExpireOAuthDeviceFlow,
     ResolveCredentialUseAdmission,
+    ResolveOAuthLoginCredentialDisposition,
 }
 
 pub mod effects {
@@ -641,6 +656,19 @@ pub enum TransitionId {
     ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing,
     ResolveCredentialUseAdmissionReauthRequiredReauthRequired,
     ResolveCredentialUseAdmissionReleasedReleased,
+    ResolveOAuthLoginCredentialDispositionUseCachedValid,
+    ResolveOAuthLoginCredentialDispositionRefreshValidValid,
+    ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid,
+    ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring,
+    ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired,
+    ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing,
+    ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired,
+    ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased,
+    ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring,
+    ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired,
+    ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing,
+    ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired,
+    ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

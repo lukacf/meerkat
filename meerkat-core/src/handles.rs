@@ -162,12 +162,37 @@ pub enum CredentialUseDisposition {
     Authorized,
     /// Caller must refresh first.
     RefreshRequired,
+    /// A refresh is required to proceed but the binding's config does not permit
+    /// silent refresh (`allow_refresh == false`); the caller surfaces a
+    /// refresh-required error instead of beginning a refresh. Only emitted by the
+    /// OAuth-login cached-vs-refresh disposition.
+    RefreshDisallowed,
     /// Interactive user reauthorization is required.
     ReauthRequired,
     /// No usable lease is present.
     LeaseAbsent,
     /// A refresh is already in flight; the begin-refresh caller no-ops.
     AlreadyRefreshing,
+}
+
+/// Pure provider-runtime observations fed to the AuthMachine's OAuth-login
+/// cached-vs-refresh disposition classifier.
+///
+/// The provider runtime shell holds these three facts and never composes them
+/// into a disposition itself: the per-binding AuthMachine owns the
+/// `(lifecycle_phase, self.credential_present, credential_present, force_refresh,
+/// refresh_allowed)` -> [`CredentialUseDisposition`] policy and the shell mirrors
+/// the emitted verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuthLoginCredentialFacts {
+    /// Whether a persisted credential secret is present
+    /// (`persisted.primary_secret.is_some()`).
+    pub credential_present: bool,
+    /// Whether the caller forced a refresh (`env.force_refresh`).
+    pub force_refresh: bool,
+    /// Whether the binding config permits silent refresh
+    /// (`refresh_allowed(binding)` / `allow_refresh`).
+    pub refresh_allowed: bool,
 }
 
 /// Typed classification of why a DSL transition was rejected.
@@ -1715,6 +1740,33 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         Err(DslTransitionError::new(
             "AuthLeaseHandle::resolve_credential_use_admission",
             "classifying credential-use admission requires generated AuthMachine authority",
+        ))
+    }
+
+    /// Classify the OAuth-login cached-vs-refresh disposition for a binding.
+    ///
+    /// Drives the per-binding AuthMachine's
+    /// `ResolveOAuthLoginCredentialDisposition` read-only classifier over the
+    /// live machine and mirrors the emitted `CredentialUseAdmissionResolved`
+    /// disposition. The AuthMachine owns the complete `(lifecycle_phase,
+    /// self.credential_present, credential_present, force_refresh,
+    /// refresh_allowed)` -> disposition POLICY; the provider runtime shell
+    /// extracts only the pure [`OAuthLoginCredentialFacts`] observations and
+    /// mirrors the verdict (`Authorized` -> use cached, `RefreshRequired` ->
+    /// begin refresh, `RefreshDisallowed` -> refresh-required error, etc.).
+    ///
+    /// Production handles must implement this through generated AuthMachine
+    /// authority. The default fails closed so a handwritten handle cannot become
+    /// a cached-vs-refresh reducer.
+    fn resolve_oauth_login_credential_disposition(
+        &self,
+        lease_key: &LeaseKey,
+        facts: OAuthLoginCredentialFacts,
+    ) -> Result<CredentialUseDisposition, DslTransitionError> {
+        let _ = (lease_key, facts);
+        Err(DslTransitionError::new(
+            "AuthLeaseHandle::resolve_oauth_login_credential_disposition",
+            "classifying OAuth-login credential disposition requires generated AuthMachine authority",
         ))
     }
 

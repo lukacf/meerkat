@@ -482,6 +482,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "VisibleRuntimePhaseResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Visible/authoritative runtime-phase arbitration (publish_control terminal precedence + Running+pre_run(Retired)->Retired visibility rewrite) is decided by MeerkatMachine ResolveVisibleRuntimePhase over the shell's pure RuntimeState observations; the runtime status/ingress shell mirrors selected_raw_phase/visible_phase instead of re-deriving the disposition",
+        ),
+        (
+            "MeerkatMachine",
             "DiscardRecoveredOperationRecord",
             SeamClassification::NoOwnerRealization,
             "Local recovered-operation discard record retained inside the ops lifecycle region",

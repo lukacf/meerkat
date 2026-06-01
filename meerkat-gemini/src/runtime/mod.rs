@@ -19,10 +19,10 @@ use serde::Deserialize;
 use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
+    OAuthLoginCredentialAdmission, begin_managed_store_oauth_refresh_lifecycle,
     load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
     mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
-    refresh_allowed,
+    resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -518,71 +518,73 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
                     let mut managed =
                         load_managed_store_tokens_with_lifecycle(env, binding).await?;
-                    let lifecycle = managed.lifecycle;
                     let persisted = managed.tokens.clone();
-                    let effective_tokens = if lifecycle == ManagedStoreLifecycle::Authorized
-                        && persisted.primary_secret.is_some()
-                        && !env.force_refresh
-                    {
-                        persisted
-                    } else {
-                        if !refresh_allowed(binding) {
-                            return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
-                        }
-                        let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
-                            env,
-                            binding,
-                            &mut managed,
-                        )?;
-                        let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                            Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                        });
-                        let coord = managed_store_oauth_refresh_failure_coordinator(
-                            coord,
-                            env.clone(),
-                            binding.clone(),
-                            refresh_started,
-                        );
-                        let endpoints = oauth::code_assist_endpoints("http://127.0.0.1:0/callback");
-                        let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
-                            managed.store.clone(),
-                            coord,
-                            endpoints,
-                            managed.key.clone(),
-                        );
-                        let commit_env = env.clone();
-                        let commit_binding = binding.clone();
-                        let commit: oauth::TokenCommitFn = Box::new(move |tokens| {
-                            Box::pin(async move {
-                                publish_managed_store_tokens_lifecycle_and_save(
-                                    &commit_env,
-                                    &commit_binding,
-                                    &managed,
-                                    &tokens,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    meerkat_auth_core::RefreshError::Refresh(e.to_string())
-                                })
-                            })
-                        });
-                        let refreshed = runtime
-                            .refresh_tokens_with_commit(commit, env.force_refresh)
-                            .await;
-                        refreshed.map_err(|e| {
-                            let observation =
-                                google_code_assist_oauth_refresh_failure_observation(&e);
-                            let failure = mark_managed_store_oauth_refresh_failed(
+                    // Cached-vs-refresh disposition owned by the per-binding
+                    // AuthMachine: feed the pure observations and mirror the
+                    // verdict (see anthropic runtime for the full contract).
+                    let effective_tokens = match resolve_oauth_login_credential_disposition(
+                        env,
+                        binding,
+                        persisted.primary_secret.is_some(),
+                    )? {
+                        OAuthLoginCredentialAdmission::UseCached => persisted,
+                        OAuthLoginCredentialAdmission::BeginRefresh => {
+                            let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
                                 env,
                                 binding,
+                                &mut managed,
+                            )?;
+                            let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
+                            });
+                            let coord = managed_store_oauth_refresh_failure_coordinator(
+                                coord,
+                                env.clone(),
+                                binding.clone(),
                                 refresh_started,
-                                observation,
-                            )
-                            .err()
-                            .map(|err| format!("; {err}"))
-                            .unwrap_or_default();
-                            google_code_assist_oauth_refresh_error(e, failure)
-                        })?
+                            );
+                            let endpoints =
+                                oauth::code_assist_endpoints("http://127.0.0.1:0/callback");
+                            let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
+                                managed.store.clone(),
+                                coord,
+                                endpoints,
+                                managed.key.clone(),
+                            );
+                            let commit_env = env.clone();
+                            let commit_binding = binding.clone();
+                            let commit: oauth::TokenCommitFn = Box::new(move |tokens| {
+                                Box::pin(async move {
+                                    publish_managed_store_tokens_lifecycle_and_save(
+                                        &commit_env,
+                                        &commit_binding,
+                                        &managed,
+                                        &tokens,
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        meerkat_auth_core::RefreshError::Refresh(e.to_string())
+                                    })
+                                })
+                            });
+                            let refreshed = runtime
+                                .refresh_tokens_with_commit(commit, env.force_refresh)
+                                .await;
+                            refreshed.map_err(|e| {
+                                let observation =
+                                    google_code_assist_oauth_refresh_failure_observation(&e);
+                                let failure = mark_managed_store_oauth_refresh_failed(
+                                    env,
+                                    binding,
+                                    refresh_started,
+                                    observation,
+                                )
+                                .err()
+                                .map(|err| format!("; {err}"))
+                                .unwrap_or_default();
+                                google_code_assist_oauth_refresh_error(e, failure)
+                            })?
+                        }
                     };
                     let access = effective_tokens
                         .primary_secret

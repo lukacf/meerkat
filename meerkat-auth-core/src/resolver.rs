@@ -220,6 +220,70 @@ fn resolve_credential_use_admission(
         })
 }
 
+/// Machine-mirrored actionable outcome of the OAuth-login cached-vs-refresh
+/// disposition. The provider runtime shell maps exactly one branch:
+/// [`UseCached`](OAuthLoginCredentialAdmission::UseCached) uses the persisted
+/// credential directly, [`BeginRefresh`](OAuthLoginCredentialAdmission::BeginRefresh)
+/// runs `begin_managed_store_oauth_refresh_lifecycle` and the provider OAuth
+/// refresh. The refresh-disallowed / reauth / lease-absent dispositions are
+/// surfaced as the matching [`ProviderAuthError`] rather than a variant, so the
+/// provider never re-derives the use-vs-refresh-vs-error decision.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthLoginCredentialAdmission {
+    /// Use the cached/persisted credential as-is.
+    UseCached,
+    /// Begin an OAuth refresh.
+    BeginRefresh,
+}
+
+/// Route the OAuth-login cached-vs-refresh decision through the per-binding
+/// AuthMachine's `ResolveOAuthLoginCredentialDisposition` classifier and mirror
+/// the verdict. The provider runtime extracts only the pure observations it
+/// holds — whether a persisted secret is present, whether the caller forced a
+/// refresh, and whether the binding config permits silent refresh — and the
+/// machine composes the full disposition. The shell decides nothing.
+///
+/// `Authorized` -> [`UseCached`](OAuthLoginCredentialAdmission::UseCached),
+/// `RefreshRequired` -> [`BeginRefresh`](OAuthLoginCredentialAdmission::BeginRefresh),
+/// `RefreshDisallowed` -> `Err(RefreshRequired)`, `ReauthRequired` -> reauth
+/// error, `LeaseAbsent`/`AlreadyRefreshing` -> lease-absent error.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_oauth_login_credential_disposition(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    credential_present: bool,
+) -> Result<OAuthLoginCredentialAdmission, ProviderAuthError> {
+    let auth_lease = env
+        .auth_lease_handle
+        .as_ref()
+        .ok_or_else(lease_absent_error)?;
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let facts = meerkat_core::handles::OAuthLoginCredentialFacts {
+        credential_present,
+        force_refresh: env.force_refresh,
+        refresh_allowed: refresh_allowed(binding),
+    };
+    let disposition = auth_lease
+        .resolve_oauth_login_credential_disposition(&lease_key, facts)
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine OAuth-login credential disposition classification failed: {e}"
+            ))
+        })?;
+    match disposition {
+        CredentialUseDisposition::Authorized => Ok(OAuthLoginCredentialAdmission::UseCached),
+        CredentialUseDisposition::RefreshRequired => {
+            Ok(OAuthLoginCredentialAdmission::BeginRefresh)
+        }
+        CredentialUseDisposition::RefreshDisallowed => Err(refresh_required_error()),
+        CredentialUseDisposition::ReauthRequired => Err(user_reauth_required_error()),
+        CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
+            Err(lease_absent_error())
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn credential_phase_from_snapshot(
     snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
@@ -347,6 +411,9 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         CredentialUseDisposition::Authorized => ManagedStoreLifecycle::Authorized,
         CredentialUseDisposition::RefreshRequired => ManagedStoreLifecycle::RefreshRequired,
         CredentialUseDisposition::ReauthRequired => return Err(user_reauth_required_error()),
+        // `RefreshDisallowed` is only emitted by the OAuth-login disposition, not
+        // the `UseCredential` intent; fail closed if it ever surfaces here.
+        CredentialUseDisposition::RefreshDisallowed => return Err(refresh_required_error()),
         CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
             return Err(lease_absent_error());
         }
@@ -487,6 +554,9 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
             Ok(false)
         }
         CredentialUseDisposition::ReauthRequired => Err(user_reauth_required_error()),
+        // `RefreshDisallowed` is only emitted by the OAuth-login disposition, not
+        // the `BeginRefresh` intent; fail closed if it ever surfaces here.
+        CredentialUseDisposition::RefreshDisallowed => Err(refresh_required_error()),
         CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::Authorized => {
             Err(lease_absent_error())
         }
@@ -850,6 +920,9 @@ pub fn require_credential_lifecycle_authority(
     )? {
         CredentialUseDisposition::Authorized => Ok(()),
         CredentialUseDisposition::RefreshRequired => Err(refresh_required_error()),
+        // `RefreshDisallowed` is only emitted by the OAuth-login disposition, not
+        // the `HoldAuthority` intent; fail closed if it ever surfaces here.
+        CredentialUseDisposition::RefreshDisallowed => Err(refresh_required_error()),
         CredentialUseDisposition::ReauthRequired => Err(user_reauth_required_error()),
         CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
             Err(lease_absent_error())

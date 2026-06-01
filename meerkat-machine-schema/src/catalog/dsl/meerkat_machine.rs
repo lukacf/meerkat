@@ -3417,6 +3417,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 state: Enum<RuntimeLifecycleObservedState>,
                 current_run_bound: bool,
             },
+            ResolveVisibleRuntimePhase {
+                dsl_phase: Enum<RuntimeLifecycleObservedState>,
+                dsl_pre_run_phase: Option<Enum<RuntimeLifecycleObservedState>>,
+                control_phase: Enum<RuntimeLifecycleObservedState>,
+                control_pre_run_phase: Option<Enum<RuntimeLifecycleObservedState>>,
+                has_runtime_persistence: bool,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -4195,6 +4202,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 queue_admission: Enum<RuntimeQueueAdmission>,
                 run_binding: Enum<RuntimeLoopRunBinding>,
             },
+            // Machine-owned arbitration of the authoritative/visible runtime
+            // phase between the DSL lifecycle authority and the durable control
+            // projection. `publish_control` is the terminal-precedence decision
+            // (whether the published control projection supersedes the live DSL
+            // phase); `selected_raw_phase` is the chosen phase without the
+            // visibility rewrite; `visible_phase` is the externally-visible phase
+            // after the Running+pre_run(Retired)->Retired rewrite. The shell
+            // mirrors all three and re-derives nothing.
+            VisibleRuntimePhaseResolved {
+                publish_control: bool,
+                selected_raw_phase: Enum<RuntimeLifecycleObservedState>,
+                visible_phase: Enum<RuntimeLifecycleObservedState>,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -4605,6 +4625,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RuntimeLifecycleStateClassified => local,
         disposition RuntimeLifecycleDurabilityClassified => local,
         disposition RuntimeLoopQueueAdmissionClassified => local,
+        disposition VisibleRuntimePhaseResolved => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -9862,6 +9883,203 @@ macro_rules! meerkat_catalog_machine_dsl {
                 current_run_bound: current_run_bound,
                 queue_admission: RuntimeQueueAdmission::BlocksQueue,
                 run_binding: RuntimeLoopRunBinding::Blocked
+            }
+        }
+
+        // ResolveVisibleRuntimePhase: generated authority for the
+        // authoritative/visible runtime-phase arbitration between the DSL
+        // lifecycle authority and the durable control projection. The shell
+        // feeds only the five pure RuntimeState observations (the live DSL
+        // phase + its pre-run marker, the published control phase + its pre-run
+        // marker, and whether this session is runtime-persistent). The machine
+        // owns BOTH the terminal-precedence policy (`publish_control`) AND the
+        // Running+pre_run(Retired)->Retired visibility rewrite; the shell mirrors
+        // `publish_control`, `selected_raw_phase`, and `visible_phase` verbatim.
+        //
+        // `publish_control` is true iff:
+        //   has_runtime_persistence
+        //   && control_phase != dsl_phase
+        //   && (dsl_phase terminal {Retired,Stopped,Destroyed}
+        //       || control_phase {Running,Retired,Stopped,Destroyed})
+        //   && NOT (control==Retired && dsl==Running && dsl_pre_run==Some(Retired))
+        // (the special case fails closed to publish_control=false so the live
+        // run-return-in-progress DSL phase keeps visibility authority).
+        //
+        // When publish_control: selected_raw_phase = control_phase and
+        // visible_phase = visible(control_phase, control_pre_run_phase).
+        // Otherwise: selected_raw_phase = dsl_phase and
+        // visible_phase = visible(dsl_phase, dsl_pre_run_phase), where
+        // visible(p, pr) rewrites Running+Some(Retired) pre-run to Retired.
+        // Each transition self-loops in Idle on a transient projection authority
+        // (classification never mutates the session machine).
+
+        // publish_control == true: control supersedes DSL.
+        transition ResolveVisibleRuntimePhasePublishControlVisibleRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "publish_control" {
+                has_runtime_persistence == true
+                && control_phase != dsl_phase
+                && (
+                    dsl_phase == RuntimeLifecycleObservedState::Retired
+                    || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                    || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                    || control_phase == RuntimeLifecycleObservedState::Running
+                    || control_phase == RuntimeLifecycleObservedState::Retired
+                    || control_phase == RuntimeLifecycleObservedState::Stopped
+                    || control_phase == RuntimeLifecycleObservedState::Destroyed
+                )
+                && !(
+                    control_phase == RuntimeLifecycleObservedState::Retired
+                    && dsl_phase == RuntimeLifecycleObservedState::Running
+                    && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            guard "control_visible_rewrite" {
+                control_phase == RuntimeLifecycleObservedState::Running
+                && control_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: true,
+                selected_raw_phase: control_phase,
+                visible_phase: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        transition ResolveVisibleRuntimePhasePublishControlNoRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "publish_control" {
+                has_runtime_persistence == true
+                && control_phase != dsl_phase
+                && (
+                    dsl_phase == RuntimeLifecycleObservedState::Retired
+                    || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                    || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                    || control_phase == RuntimeLifecycleObservedState::Running
+                    || control_phase == RuntimeLifecycleObservedState::Retired
+                    || control_phase == RuntimeLifecycleObservedState::Stopped
+                    || control_phase == RuntimeLifecycleObservedState::Destroyed
+                )
+                && !(
+                    control_phase == RuntimeLifecycleObservedState::Retired
+                    && dsl_phase == RuntimeLifecycleObservedState::Running
+                    && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            guard "control_no_visible_rewrite" {
+                !(
+                    control_phase == RuntimeLifecycleObservedState::Running
+                    && control_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: true,
+                selected_raw_phase: control_phase,
+                visible_phase: control_phase
+            }
+        }
+
+        // publish_control == false: live DSL phase keeps visibility authority.
+        transition ResolveVisibleRuntimePhaseKeepDslVisibleRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "keep_dsl" {
+                !(
+                    has_runtime_persistence == true
+                    && control_phase != dsl_phase
+                    && (
+                        dsl_phase == RuntimeLifecycleObservedState::Retired
+                        || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                        || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                        || control_phase == RuntimeLifecycleObservedState::Running
+                        || control_phase == RuntimeLifecycleObservedState::Retired
+                        || control_phase == RuntimeLifecycleObservedState::Stopped
+                        || control_phase == RuntimeLifecycleObservedState::Destroyed
+                    )
+                    && !(
+                        control_phase == RuntimeLifecycleObservedState::Retired
+                        && dsl_phase == RuntimeLifecycleObservedState::Running
+                        && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                    )
+                )
+            }
+            guard "dsl_visible_rewrite" {
+                dsl_phase == RuntimeLifecycleObservedState::Running
+                && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: false,
+                selected_raw_phase: dsl_phase,
+                visible_phase: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        transition ResolveVisibleRuntimePhaseKeepDslNoRewrite {
+            per_phase [Idle]
+            on input ResolveVisibleRuntimePhase {
+                dsl_phase,
+                dsl_pre_run_phase,
+                control_phase,
+                control_pre_run_phase,
+                has_runtime_persistence
+            }
+            guard "keep_dsl" {
+                !(
+                    has_runtime_persistence == true
+                    && control_phase != dsl_phase
+                    && (
+                        dsl_phase == RuntimeLifecycleObservedState::Retired
+                        || dsl_phase == RuntimeLifecycleObservedState::Stopped
+                        || dsl_phase == RuntimeLifecycleObservedState::Destroyed
+                        || control_phase == RuntimeLifecycleObservedState::Running
+                        || control_phase == RuntimeLifecycleObservedState::Retired
+                        || control_phase == RuntimeLifecycleObservedState::Stopped
+                        || control_phase == RuntimeLifecycleObservedState::Destroyed
+                    )
+                    && !(
+                        control_phase == RuntimeLifecycleObservedState::Retired
+                        && dsl_phase == RuntimeLifecycleObservedState::Running
+                        && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                    )
+                )
+            }
+            guard "dsl_no_visible_rewrite" {
+                !(
+                    dsl_phase == RuntimeLifecycleObservedState::Running
+                    && dsl_pre_run_phase == Some(RuntimeLifecycleObservedState::Retired)
+                )
+            }
+            update {}
+            to Idle
+            emit VisibleRuntimePhaseResolved {
+                publish_control: false,
+                selected_raw_phase: dsl_phase,
+                visible_phase: dsl_phase
             }
         }
 

@@ -10642,6 +10642,14 @@ pub mod inputs {
         pub current_run_bound: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveVisibleRuntimePhase {
+        pub dsl_phase: RuntimeLifecycleObservedState,
+        pub dsl_pre_run_phase: Option<RuntimeLifecycleObservedState>,
+        pub control_phase: RuntimeLifecycleObservedState,
+        pub control_pre_run_phase: Option<RuntimeLifecycleObservedState>,
+        pub has_runtime_persistence: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
         pub session_id: SessionId,
         pub run_id: RunId,
@@ -11661,6 +11669,7 @@ pub enum Input {
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
     ClassifyRuntimeLifecycleDurability(inputs::ClassifyRuntimeLifecycleDurability),
     ClassifyRuntimeLoopQueueAdmission(inputs::ClassifyRuntimeLoopQueueAdmission),
+    ResolveVisibleRuntimePhase(inputs::ResolveVisibleRuntimePhase),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -11965,6 +11974,7 @@ impl Input {
             Self::ClassifyRuntimeLoopQueueAdmission(_) => {
                 InputKind::ClassifyRuntimeLoopQueueAdmission
             }
+            Self::ResolveVisibleRuntimePhase(_) => InputKind::ResolveVisibleRuntimePhase,
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -12274,6 +12284,7 @@ pub enum InputKind {
     ClassifyRuntimeLifecycleState,
     ClassifyRuntimeLifecycleDurability,
     ClassifyRuntimeLoopQueueAdmission,
+    ResolveVisibleRuntimePhase,
     Prepare,
     Commit,
     Fail,
@@ -12803,6 +12814,12 @@ pub mod effects {
         pub current_run_bound: bool,
         pub queue_admission: RuntimeQueueAdmission,
         pub run_binding: RuntimeLoopRunBinding,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct VisibleRuntimePhaseResolved {
+        pub publish_control: bool,
+        pub selected_raw_phase: RuntimeLifecycleObservedState,
+        pub visible_phase: RuntimeLifecycleObservedState,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
@@ -13373,6 +13390,7 @@ pub enum Effect {
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
     RuntimeLifecycleDurabilityClassified(effects::RuntimeLifecycleDurabilityClassified),
     RuntimeLoopQueueAdmissionClassified(effects::RuntimeLoopQueueAdmissionClassified),
+    VisibleRuntimePhaseResolved(effects::VisibleRuntimePhaseResolved),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -13527,6 +13545,7 @@ pub enum EffectKind {
     RuntimeLifecycleStateClassified,
     RuntimeLifecycleDurabilityClassified,
     RuntimeLoopQueueAdmissionClassified,
+    VisibleRuntimePhaseResolved,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -14190,6 +14209,10 @@ pub enum TransitionId {
     ClassifyRuntimeLoopQueueRetiredIdle,
     ClassifyRuntimeLoopQueueStoppedIdle,
     ClassifyRuntimeLoopQueueDestroyedIdle,
+    ResolveVisibleRuntimePhasePublishControlVisibleRewriteIdle,
+    ResolveVisibleRuntimePhasePublishControlNoRewriteIdle,
+    ResolveVisibleRuntimePhaseKeepDslVisibleRewriteIdle,
+    ResolveVisibleRuntimePhaseKeepDslNoRewriteIdle,
     ResolveAdmissionIdempotencyNoKeyIdle,
     ResolveAdmissionIdempotencyNoKeyAttached,
     ResolveAdmissionIdempotencyNoKeyRunning,

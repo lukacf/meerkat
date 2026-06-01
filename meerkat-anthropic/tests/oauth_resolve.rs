@@ -36,6 +36,51 @@ fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
     realm_with_oauth_binding_source(auth_method, CredentialSourceSpec::PlatformDefault)
 }
 
+fn realm_with_oauth_binding_no_refresh(auth_method: &str) -> RealmConnectionSet {
+    let mut backend = BTreeMap::new();
+    backend.insert(
+        "anthropic_api".into(),
+        BackendProfileConfig {
+            provider: "anthropic".into(),
+            backend_kind: "anthropic_api".into(),
+            base_url: None,
+            options: serde_json::json!({"realm_id": "dev"}),
+        },
+    );
+    let mut auth = BTreeMap::new();
+    auth.insert(
+        "claude_oauth".into(),
+        AuthProfileConfig {
+            provider: "anthropic".into(),
+            auth_method: auth_method.into(),
+            source: CredentialSourceSpec::PlatformDefault,
+            constraints: AuthConstraints {
+                allow_interactive_login: true,
+                allow_refresh: false,
+                ..Default::default()
+            },
+            metadata_defaults: Default::default(),
+        },
+    );
+    let mut binding = BTreeMap::new();
+    binding.insert(
+        "default_claude".into(),
+        ProviderBindingConfig {
+            backend_profile: "anthropic_api".into(),
+            auth_profile: "claude_oauth".into(),
+            default_model: None,
+            policy: Default::default(),
+        },
+    );
+    let section = RealmConfigSection {
+        backend,
+        auth,
+        binding,
+        default_binding: Some("default_claude".into()),
+    };
+    RealmConnectionSet::from_config("dev", &section).unwrap()
+}
+
 fn realm_with_oauth_binding_source(
     auth_method: &str,
     source: CredentialSourceSpec,
@@ -641,6 +686,49 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
         stored.primary_secret.as_deref(),
         Some("forced-claude-access")
     );
+}
+
+#[tokio::test]
+async fn claude_ai_oauth_force_refresh_with_refresh_disallowed_errors_refresh_required() {
+    // FOLD 2: a fresh credential + force_refresh forces the refresh branch, but
+    // the binding disallows silent refresh. The AuthMachine-owned OAuth-login
+    // disposition emits RefreshDisallowed, which the provider mirrors as the
+    // RefreshRequired error — exactly the prior shell `!refresh_allowed` gate.
+    let key = TokenKey::parse("dev", "default_claude").expect("valid slugs");
+    let store = Arc::new(EphemeralTokenStore::new());
+    let fresh = PersistedTokens {
+        auth_mode: PersistedAuthMode::ClaudeAiOauth,
+        primary_secret: Some("fresh-claude-access".into()),
+        refresh_token: Some("refresh-claude".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: vec![],
+        account_id: None,
+        metadata: serde_json::Value::Null,
+    };
+    let (marked_fresh, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&fresh, 1, Some(1_000));
+    store.save(&key, &marked_fresh).await.unwrap();
+
+    let realm = realm_with_oauth_binding_no_refresh("claude_ai_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease)
+        .with_force_refresh(true);
+    let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
+        meerkat_anthropic::AnthropicProviderRuntime,
+    ));
+    let err = registry
+        .resolve(&realm, &default_auth_binding(), &env)
+        .await
+        .unwrap_err();
+    match err {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::RefreshRequired,
+        ) => {}
+        other => panic!("expected RefreshRequired, got {other:?}"),
+    }
 }
 
 // --- oauth_to_api_key path → persisted api_key ------------------------

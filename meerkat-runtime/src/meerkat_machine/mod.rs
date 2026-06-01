@@ -378,6 +378,85 @@ pub fn classify_runtime_loop_queue_admission(
         })
 }
 
+/// Machine-owned arbitration verdict between the live DSL lifecycle phase and
+/// the durable control projection, emitted by generated MeerkatMachine
+/// authority. `publish_control` is the terminal-precedence decision (the
+/// published control projection supersedes the live DSL phase);
+/// `selected_raw_phase` is the chosen phase without the visibility rewrite;
+/// `visible_phase` is the externally-visible phase after the
+/// Running+pre_run(Retired)->Retired rewrite. The shell mirrors all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleRuntimePhasePlan {
+    pub publish_control: bool,
+    pub selected_raw_phase: RuntimeState,
+    pub visible_phase: RuntimeState,
+}
+
+/// Resolve the authoritative/visible runtime phase through generated
+/// MeerkatMachine authority. The shell feeds only the five pure
+/// [`RuntimeState`] observations it already holds; the machine owns BOTH the
+/// terminal-precedence `publish_control` policy AND the
+/// Running+pre_run(Retired)->Retired visibility rewrite. The shell mirrors the
+/// emitted verdict and re-derives nothing, failing closed if no verdict is
+/// emitted.
+pub fn resolve_visible_runtime_phase(
+    dsl_phase: RuntimeState,
+    dsl_pre_run_phase: Option<RuntimeState>,
+    control_phase: RuntimeState,
+    control_pre_run_phase: Option<RuntimeState>,
+    has_runtime_persistence: bool,
+) -> Result<VisibleRuntimePhasePlan, String> {
+    let observed_dsl = dsl_authority::observed_runtime_lifecycle_state(dsl_phase);
+    let observed_control = dsl_authority::observed_runtime_lifecycle_state(control_phase);
+    let observed_dsl_pre_run =
+        dsl_pre_run_phase.map(dsl_authority::observed_runtime_lifecycle_state);
+    let observed_control_pre_run =
+        control_pre_run_phase.map(dsl_authority::observed_runtime_lifecycle_state);
+    let mut authority = projection_authority();
+    let transition = dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::ResolveVisibleRuntimePhase {
+            dsl_phase: observed_dsl,
+            dsl_pre_run_phase: observed_dsl_pre_run,
+            control_phase: observed_control,
+            control_pre_run_phase: observed_control_pre_run,
+            has_runtime_persistence,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "MeerkatMachine rejected visible runtime phase resolution \
+             (dsl={dsl_phase}, control={control_phase}, persistence={has_runtime_persistence}): {err}"
+        )
+    })?;
+
+    transition
+        .into_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            dsl::MeerkatMachineEffect::VisibleRuntimePhaseResolved {
+                publish_control,
+                selected_raw_phase,
+                visible_phase,
+            } => Some(VisibleRuntimePhasePlan {
+                publish_control,
+                selected_raw_phase: dsl_authority::runtime_state_from_observed_lifecycle_state(
+                    selected_raw_phase,
+                ),
+                visible_phase: dsl_authority::runtime_state_from_observed_lifecycle_state(
+                    visible_phase,
+                ),
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "MeerkatMachine emitted no visible runtime phase resolution \
+                 (dsl={dsl_phase}, control={control_phase}, persistence={has_runtime_persistence})"
+            )
+        })
+}
+
 /// Resolve the public lifecycle class for a machine-derived input phase
 /// through generated MeerkatMachine authority.
 pub fn resolve_input_public_lifecycle_projection(

@@ -3360,6 +3360,292 @@ auth_machine_ResolveCredentialUseAdmissionReleasedReleased(arg_intent) ==
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_ResolveOAuthLoginCredentialDispositionUseCachedValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (auth_machine_credential_present /\ packet.payload.credential_present /\ (packet.payload.force_refresh = FALSE))
+       /\ auth_machine_phase' = "Valid"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "Authorized"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionUseCachedValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionUseCachedValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshValidValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (~((auth_machine_credential_present /\ packet.payload.credential_present /\ (packet.payload.force_refresh = FALSE))) /\ packet.payload.refresh_allowed)
+       /\ auth_machine_phase' = "Valid"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshValidValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshValidValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (~((auth_machine_credential_present /\ packet.payload.credential_present /\ (packet.payload.force_refresh = FALSE))) /\ (packet.payload.refresh_allowed = FALSE))
+       /\ auth_machine_phase' = "Valid"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshDisallowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ packet.payload.refresh_allowed
+       /\ auth_machine_phase' = "Expiring"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ packet.payload.refresh_allowed
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ packet.payload.refresh_allowed
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "ReauthRequired"
+       /\ packet.payload.refresh_allowed
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Released"
+       /\ packet.payload.refresh_allowed
+       /\ auth_machine_phase' = "Released"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Released"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ (packet.payload.refresh_allowed = FALSE)
+       /\ auth_machine_phase' = "Expiring"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshDisallowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (packet.payload.refresh_allowed = FALSE)
+       /\ auth_machine_phase' = "Expired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshDisallowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ (packet.payload.refresh_allowed = FALSE)
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshDisallowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "ReauthRequired"
+       /\ (packet.payload.refresh_allowed = FALSE)
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshDisallowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased(arg_credential_present, arg_force_refresh, arg_refresh_allowed) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "ResolveOAuthLoginCredentialDisposition"
+       /\ packet.payload.credential_present = arg_credential_present
+       /\ packet.payload.force_refresh = arg_force_refresh
+       /\ packet.payload.refresh_allowed = arg_refresh_allowed
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Released"
+       /\ (packet.payload.refresh_allowed = FALSE)
+       /\ auth_machine_phase' = "Released"
+       /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "CredentialUseAdmissionResolved", payload |-> [disposition |-> "RefreshDisallowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Released"]}
+       /\ UNCHANGED << obligation_auth_lease_lifecycle_publication >>
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_oauth_flow_membership_consistent == ((DOMAIN auth_machine_oauth_browser_flow_providers = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_redirect_uris = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_expires_at_millis = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_providers = auth_machine_oauth_device_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_expires_at_millis = auth_machine_oauth_device_flow_ids) /\ (\A flow_id \in auth_machine_oauth_device_poll_ids : (flow_id \in auth_machine_oauth_device_flow_ids)) /\ (auth_machine_oauth_outstanding_flow_count = (Cardinality(auth_machine_oauth_browser_flow_ids) + Cardinality(auth_machine_oauth_device_flow_ids))))
 
 DeliverQueuedRoute ==
@@ -3509,6 +3795,19 @@ CoreNext ==
     \/ \E arg_intent \in CredentialUseIntentValues : auth_machine_ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing(arg_intent)
     \/ \E arg_intent \in CredentialUseIntentValues : auth_machine_ResolveCredentialUseAdmissionReauthRequiredReauthRequired(arg_intent)
     \/ \E arg_intent \in CredentialUseIntentValues : auth_machine_ResolveCredentialUseAdmissionReleasedReleased(arg_intent)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionUseCachedValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshValidValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
+    \/ \E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased(arg_credential_present, arg_force_refresh, arg_refresh_allowed)
     \/ QuiescentStutter
 
 InjectNext ==
@@ -3675,6 +3974,19 @@ WitnessFairness_auth_lease_lifecycle_publication_round_trip_6 ==
     /\ WF_vars(\E arg_intent \in CredentialUseIntentValues : auth_machine_ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing(arg_intent))
     /\ WF_vars(\E arg_intent \in CredentialUseIntentValues : auth_machine_ResolveCredentialUseAdmissionReauthRequiredReauthRequired(arg_intent))
     /\ WF_vars(\E arg_intent \in CredentialUseIntentValues : auth_machine_ResolveCredentialUseAdmissionReleasedReleased(arg_intent))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionUseCachedValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshValidValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedValidValid(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpiring(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidExpired(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidRefreshing(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReauthRequired(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshNonValidReleased(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpiring(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidExpired(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
+    /\ WF_vars(\E arg_credential_present \in BOOLEAN : \E arg_force_refresh \in BOOLEAN : \E arg_refresh_allowed \in BOOLEAN : auth_machine_ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased(arg_credential_present, arg_force_refresh, arg_refresh_allowed))
 
 WitnessSpec_auth_lease_lifecycle_publication_round_trip ==
     /\ WitnessInit_auth_lease_lifecycle_publication_round_trip

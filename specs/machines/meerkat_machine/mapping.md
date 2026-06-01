@@ -1709,6 +1709,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyRuntimeLoopQueueDestroyedIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+- `ResolveVisibleRuntimePhasePublishControlVisibleRewriteIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+- `ResolveVisibleRuntimePhasePublishControlNoRewriteIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+- `ResolveVisibleRuntimePhaseKeepDslVisibleRewriteIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `ResolveVisibleRuntimePhaseKeepDslNoRewriteIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `ResolveAdmissionIdempotencyNoKeyIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -4960,6 +4972,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeLoopQueueAdmissionClassified`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `VisibleRuntimePhaseResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `session_registration_and_binding`, `ops_completion_and_waiters`, `recycle_and_compaction`, `model_routing_and_image_operation`
 - `PostAdmissionSignal`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

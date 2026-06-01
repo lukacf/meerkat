@@ -357,6 +357,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLifecycleDurability`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLoopQueueAdmission`(state: RuntimeLifecycleObservedState, current_run_bound: Bool)
+- `ResolveVisibleRuntimePhase`(dsl_phase: RuntimeLifecycleObservedState, dsl_pre_run_phase: Option<RuntimeLifecycleObservedState>, control_phase: RuntimeLifecycleObservedState, control_pre_run_phase: Option<RuntimeLifecycleObservedState>, has_runtime_persistence: Bool)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -610,6 +611,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeLifecycleStateClassified`(state: RuntimeLifecycleObservedState, terminality: RuntimeLifecycleTerminality, input_admission: RuntimeInputAdmission, queue_admission: RuntimeQueueAdmission, prepare_admission: RuntimePrepareAdmission, ingress_admission: RuntimeIngressAdmission)
 - `RuntimeLifecycleDurabilityClassified`(state: RuntimeLifecycleObservedState, durable_state: RuntimeLifecycleObservedState)
 - `RuntimeLoopQueueAdmissionClassified`(state: RuntimeLifecycleObservedState, current_run_bound: Bool, queue_admission: RuntimeQueueAdmission, run_binding: RuntimeLoopRunBinding)
+- `VisibleRuntimePhaseResolved`(publish_control: Bool, selected_raw_phase: RuntimeLifecycleObservedState, visible_phase: RuntimeLifecycleObservedState)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -6134,6 +6136,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `destroyed_state`
   - `no_current_run`
 - Emits: `RuntimeLoopQueueAdmissionClassified`
+- To: `Idle`
+
+### `ResolveVisibleRuntimePhasePublishControlVisibleRewriteIdle`
+- From: `Idle`
+- On: `ResolveVisibleRuntimePhase`(dsl_phase, dsl_pre_run_phase, control_phase, control_pre_run_phase, has_runtime_persistence)
+- Guards:
+  - `publish_control`
+  - `control_visible_rewrite`
+- Emits: `VisibleRuntimePhaseResolved`
+- To: `Idle`
+
+### `ResolveVisibleRuntimePhasePublishControlNoRewriteIdle`
+- From: `Idle`
+- On: `ResolveVisibleRuntimePhase`(dsl_phase, dsl_pre_run_phase, control_phase, control_pre_run_phase, has_runtime_persistence)
+- Guards:
+  - `publish_control`
+  - `control_no_visible_rewrite`
+- Emits: `VisibleRuntimePhaseResolved`
+- To: `Idle`
+
+### `ResolveVisibleRuntimePhaseKeepDslVisibleRewriteIdle`
+- From: `Idle`
+- On: `ResolveVisibleRuntimePhase`(dsl_phase, dsl_pre_run_phase, control_phase, control_pre_run_phase, has_runtime_persistence)
+- Guards:
+  - `keep_dsl`
+  - `dsl_visible_rewrite`
+- Emits: `VisibleRuntimePhaseResolved`
+- To: `Idle`
+
+### `ResolveVisibleRuntimePhaseKeepDslNoRewriteIdle`
+- From: `Idle`
+- On: `ResolveVisibleRuntimePhase`(dsl_phase, dsl_pre_run_phase, control_phase, control_pre_run_phase, has_runtime_persistence)
+- Guards:
+  - `keep_dsl`
+  - `dsl_no_visible_rewrite`
+- Emits: `VisibleRuntimePhaseResolved`
 - To: `Idle`
 
 ### `ResolveAdmissionIdempotencyNoKeyIdle`

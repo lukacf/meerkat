@@ -36,6 +36,54 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
     )
 }
 
+fn openai_realm_no_refresh(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
+    let mut backend = BTreeMap::new();
+    backend.insert(
+        backend_kind.into(),
+        BackendProfileConfig {
+            provider: "openai".into(),
+            backend_kind: backend_kind.into(),
+            base_url: None,
+            options: serde_json::json!({"realm_id": "dev"}),
+        },
+    );
+    let mut auth = BTreeMap::new();
+    auth.insert(
+        "chatgpt_auth".into(),
+        AuthProfileConfig {
+            provider: "openai".into(),
+            auth_method: auth_method.into(),
+            source: CredentialSourceSpec::PlatformDefault,
+            constraints: AuthConstraints {
+                allow_interactive_login: true,
+                allow_refresh: false,
+                ..Default::default()
+            },
+            metadata_defaults: Default::default(),
+        },
+    );
+    let mut binding = BTreeMap::new();
+    binding.insert(
+        "default_chatgpt".into(),
+        ProviderBindingConfig {
+            backend_profile: backend_kind.into(),
+            auth_profile: "chatgpt_auth".into(),
+            default_model: None,
+            policy: Default::default(),
+        },
+    );
+    RealmConnectionSet::from_config(
+        "dev",
+        &RealmConfigSection {
+            backend,
+            auth,
+            binding,
+            default_binding: Some("default_chatgpt".into()),
+        },
+    )
+    .unwrap()
+}
+
 fn openai_realm_with_source(
     backend_kind: &str,
     auth_method: &str,
@@ -321,6 +369,51 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
         Some("forced-refresh-chatgpt-access")
     );
     assert!(meerkat_core::tokens_lifecycle_published(&stored));
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_force_refresh_with_refresh_disallowed_errors_refresh_required()
+ {
+    // FOLD 2: fresh credential + force_refresh forces the refresh branch, but
+    // the binding disallows silent refresh -> AuthMachine emits RefreshDisallowed
+    // and the provider mirrors the RefreshRequired error.
+    let store = Arc::new(EphemeralTokenStore::new());
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("fresh-chatgpt-access".into()),
+        refresh_token: Some("rt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    let (marked_persisted, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&persisted, 1, Some(1_000));
+    store.save(&key, &marked_persisted).await.unwrap();
+
+    let realm = openai_realm_no_refresh("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(auth_lease)
+        .with_force_refresh(true);
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let err = registry
+        .resolve(&realm, &default_auth_binding(), &env)
+        .await
+        .unwrap_err();
+    match err {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::RefreshRequired,
+        ) => {}
+        other => panic!("expected RefreshRequired, got {other:?}"),
+    }
 }
 
 #[tokio::test]

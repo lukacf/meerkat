@@ -81,6 +81,7 @@ impl LeaseFreshnessObserver {
                 return Err(AuthError::UserReauthRequired);
             }
             CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed
             | CredentialUseDisposition::AlreadyRefreshing
             | CredentialUseDisposition::LeaseAbsent => return Ok(false),
         }
@@ -211,6 +212,10 @@ impl LeaseFreshnessObserver {
                 Ok(LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh))
             }
             CredentialUseDisposition::ReauthRequired => Err(AuthError::UserReauthRequired),
+            // `RefreshDisallowed` is only emitted by the OAuth-login disposition,
+            // not the `BeginRefresh` intent; fail closed onto a refresh-required
+            // error if it ever surfaces here.
+            CredentialUseDisposition::RefreshDisallowed => Err(AuthError::RefreshRequired),
             CredentialUseDisposition::AlreadyRefreshing => Ok(LeaseRefreshStart::WaitForInFlight),
             CredentialUseDisposition::LeaseAbsent => Ok(LeaseRefreshStart::Started(
                 LeaseRefreshLifecycle::InitialAcquire,

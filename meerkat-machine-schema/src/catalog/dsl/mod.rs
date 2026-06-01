@@ -239,6 +239,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "Authorized",
                     "RefreshRequired",
+                    "RefreshDisallowed",
                     "ReauthRequired",
                     "LeaseAbsent",
                     "AlreadyRefreshing",
@@ -252,6 +253,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDeviceFlow"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDevicePoll"),
             InputVariantId::from_trusted_catalog_literal("ResolveCredentialUseAdmission"),
+            InputVariantId::from_trusted_catalog_literal("ResolveOAuthLoginCredentialDisposition"),
         ],
     )
 }
@@ -1802,6 +1804,7 @@ runtime_internal_inputs!(
         ResolveTranscriptEditAdmission,
         ResolveTurnSurfaceResult,
         ResolveUserInterruptPublicResult,
+        ResolveVisibleRuntimePhase,
         ResolveWaitAllAdmission,
         RestoreDeferredSessionArchive,
         RestoreMobOperatorAuthority,

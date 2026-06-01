@@ -51,6 +51,10 @@ macro_rules! auth_catalog_machine_dsl {
             Authorized,
             /// Caller must refresh first (BeginRefresh callers fire `begin_refresh`).
             RefreshRequired,
+            /// A refresh is required to proceed but the binding's config does not
+            /// permit silent refresh (`allow_refresh == false`); the caller
+            /// surfaces a refresh-required error instead of beginning a refresh.
+            RefreshDisallowed,
             /// Interactive user reauthorization is required.
             ReauthRequired,
             /// No usable lease is present.
@@ -187,6 +191,26 @@ macro_rules! auth_catalog_machine_dsl {
                 // verdict and fails closed; it decides nothing. Each transition
                 // self-loops in its phase (classification never mutates state).
                 ResolveCredentialUseAdmission { intent: Enum<CredentialUseIntent> },
+                // OAuth-login cached-vs-refresh disposition. The provider
+                // runtime shell (meerkat-{anthropic,openai,gemini}) extracts only
+                // the pure observations it holds — whether a persisted credential
+                // secret is present (`credential_present`), whether the caller
+                // forced a refresh (`force_refresh`), and whether the binding
+                // config permits silent refresh (`refresh_allowed`) — and drives
+                // this read-only input. This machine composes the COMPLETE
+                // (lifecycle_phase, self.credential_present, credential_present,
+                // force_refresh, refresh_allowed) -> disposition policy, emitting
+                // `CredentialUseAdmissionResolved`: Authorized -> use the cached
+                // credential, RefreshRequired -> begin an OAuth refresh,
+                // RefreshDisallowed -> refresh-required error, ReauthRequired ->
+                // reauth error, LeaseAbsent -> lease-absent error. The shell
+                // mirrors the verdict and decides nothing. Each transition
+                // self-loops in its phase (classification never mutates state).
+                ResolveOAuthLoginCredentialDisposition {
+                    credential_present: bool,
+                    force_refresh: bool,
+                    refresh_allowed: bool,
+                },
             }
 
             effect AuthMachineEffect {
@@ -1592,6 +1616,82 @@ macro_rules! auth_catalog_machine_dsl {
                 update {}
                 to Released
                 emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::LeaseAbsent }
+            }
+
+            // --- OAuth-login cached-vs-refresh disposition ---
+            //
+            // Composes the provider-runtime shell's prior composite
+            // (`lifecycle == Authorized && primary_secret.is_some() &&
+            // !force_refresh` use-cached; else `refresh_allowed ? begin-refresh :
+            // Err(RefreshRequired)`). `lifecycle == Authorized` is exactly this
+            // machine's `UseCredential` verdict — phase Valid with its own
+            // `self.credential_present`. The shell's `primary_secret.is_some()`
+            // arrives as the `credential_present` observation, the force-refresh
+            // override as `force_refresh`, and the binding refresh-capability
+            // config as `refresh_allowed`. Each transition self-loops; the
+            // guards partition the full input space.
+
+            // Use the cached credential: phase Valid with a published credential,
+            // a present persisted secret, and no forced refresh.
+            transition ResolveOAuthLoginCredentialDispositionUseCached {
+                per_phase [Valid]
+                on input ResolveOAuthLoginCredentialDisposition { credential_present, force_refresh, refresh_allowed }
+                guard "use_cached" {
+                    self.credential_present
+                    && credential_present
+                    && force_refresh == false
+                }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::Authorized }
+            }
+
+            // Begin a refresh: not eligible to use the cached credential and the
+            // binding permits silent refresh.
+            transition ResolveOAuthLoginCredentialDispositionRefreshValid {
+                per_phase [Valid]
+                on input ResolveOAuthLoginCredentialDisposition { credential_present, force_refresh, refresh_allowed }
+                guard "needs_refresh_allowed" {
+                    !(self.credential_present && credential_present && force_refresh == false)
+                    && refresh_allowed
+                }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+
+            // Refresh required but config-disallowed -> refresh-required error.
+            transition ResolveOAuthLoginCredentialDispositionRefreshDisallowedValid {
+                per_phase [Valid]
+                on input ResolveOAuthLoginCredentialDisposition { credential_present, force_refresh, refresh_allowed }
+                guard "needs_refresh_disallowed" {
+                    !(self.credential_present && credential_present && force_refresh == false)
+                    && refresh_allowed == false
+                }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshDisallowed }
+            }
+
+            // Non-Valid phases never satisfy use-cached (the shell's
+            // `lifecycle == Authorized` requires phase Valid), so the disposition
+            // is purely refresh-or-error gated by `refresh_allowed`.
+            transition ResolveOAuthLoginCredentialDispositionRefreshNonValid {
+                per_phase [Expiring, Expired, Refreshing, ReauthRequired, Released]
+                on input ResolveOAuthLoginCredentialDisposition { credential_present, force_refresh, refresh_allowed }
+                guard "refresh_allowed" { refresh_allowed }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+
+            transition ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValid {
+                per_phase [Expiring, Expired, Refreshing, ReauthRequired, Released]
+                on input ResolveOAuthLoginCredentialDisposition { credential_present, force_refresh, refresh_allowed }
+                guard "refresh_disallowed" { refresh_allowed == false }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshDisallowed }
             }
         }
             }

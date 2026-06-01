@@ -38,7 +38,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 body: "host-authored steering".into(),
             },
         ]),
-        model: Some(ModelId::new("claude-opus-4-7")),
+        model: Some(ModelId::new("claude-opus-4-8")),
         provider: Some(Provider::Anthropic),
         provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             temperature: Some(0.2),
@@ -297,21 +297,21 @@ fn merge_collection_fields_accumulate() {
 #[test]
 fn merge_identical_scalars_is_ok() {
     let mut left = RuntimeTurnMetadata {
-        model: Some(ModelId::new("claude-opus-4-7")),
+        model: Some(ModelId::new("claude-opus-4-8")),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        model: Some(ModelId::new("claude-opus-4-7")),
+        model: Some(ModelId::new("claude-opus-4-8")),
         ..Default::default()
     };
     left.merge(right).expect("matching scalars do not conflict");
-    assert_eq!(left.model, Some(ModelId::new("claude-opus-4-7")));
+    assert_eq!(left.model, Some(ModelId::new("claude-opus-4-8")));
 }
 
 #[test]
 fn merge_scalar_conflict_refuses_model() {
     let mut left = RuntimeTurnMetadata {
-        model: Some(ModelId::new("claude-opus-4-7")),
+        model: Some(ModelId::new("claude-opus-4-8")),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {

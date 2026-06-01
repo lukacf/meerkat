@@ -2768,6 +2768,22 @@ impl MultiBackendProvisioner {
         })
     }
 
+    async fn bridge_supervisor_payload_for_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
+        let authority = self.supervisor_bridge.authority().await;
+        let spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(recipient)
+            .await?;
+        Ok(super::bridge_protocol::BridgeSupervisorPayload {
+            supervisor: spec.into(),
+            epoch: authority.epoch,
+            protocol_version: authority.protocol_version,
+        })
+    }
+
     fn bridge_rejection_reply(
         protocol_version: super::bridge_protocol::BridgeProtocolVersion,
         value: &serde_json::Value,
@@ -2785,7 +2801,7 @@ impl MultiBackendProvisioner {
         binding: Option<PeerOnlyBindingParts<'_>>,
         rebind_authority: Option<&PeerOnlyRebindAuthority>,
     ) -> Result<PeerOnlySupervisorAuthorization, MobError> {
-        let payload = self.bridge_supervisor_payload().await?;
+        let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         self.supervisor_bridge.trust_recipient(peer).await?;
@@ -2850,6 +2866,11 @@ impl MultiBackendProvisioner {
             }
             return Err(Self::bridge_rejection_error(rejection));
         }
+        let _ack = super::bridge_protocol::decode_bridge_ack(
+            &command,
+            value,
+            "authorize supervisor response",
+        )?;
         Ok(PeerOnlySupervisorAuthorization {
             peer: peer.clone(),
             rebind_required: None,
@@ -2881,7 +2902,9 @@ impl MultiBackendProvisioner {
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        serde_json::from_value(value).map_err(|error| {
+        let payload =
+            super::bridge_protocol::decode_bridge_success_payload(command, value, "command")?;
+        serde_json::from_value(payload).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
         })
     }
@@ -2895,7 +2918,10 @@ impl MultiBackendProvisioner {
     ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
         let bootstrap_token = Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
         let authority = self.supervisor_bridge.authority().await;
-        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(peer)
+            .await?;
         let command = super::bridge_protocol::BridgeCommand::BindMember(
             super::bridge_protocol::BridgeBindPayload {
                 supervisor: sup_spec.into(),
@@ -3125,7 +3151,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     });
                 }
                 let peer = authorization.peer;
-                let payload = self.bridge_supervisor_payload().await?;
+                let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
                 let command = super::bridge_protocol::BridgeCommand::RetireMember(payload);
                 let _retire: super::bridge_protocol::BridgeRetireResponse = self
                     .send_bridge_command_typed(&peer, &command, Duration::from_secs(10))
@@ -3174,7 +3200,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     });
                 }
                 let peer = authorization.peer;
-                let payload = self.bridge_supervisor_payload().await?;
+                let payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
                 let command = super::bridge_protocol::BridgeCommand::InterruptMember(payload);
                 let _ack: super::bridge_protocol::BridgeAck = self
                     .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
@@ -3250,7 +3276,10 @@ impl MobProvisioner for MultiBackendProvisioner {
                 }
                 let peer = authorization.peer;
                 let authority = self.supervisor_bridge.authority().await;
-                let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+                let sup_spec = self
+                    .supervisor_bridge
+                    .supervisor_spec_for_recipient(&peer)
+                    .await?;
                 let command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
                     super::bridge_protocol::BridgeDeliveryPayload {
                         supervisor: sup_spec.into(),
@@ -3359,7 +3388,10 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
         let peer = authorization.peer;
         let authority = self.supervisor_bridge.authority().await;
-        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(&peer)
+            .await?;
         let mob_peer_overlay = desired_trust.bridge_handoff();
         for desired_peer in desired_trust.peers() {
             let command = super::bridge_protocol::BridgeCommand::WireMember(

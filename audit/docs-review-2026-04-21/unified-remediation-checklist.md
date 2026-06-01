@@ -116,7 +116,7 @@ detailed evidence/source material.
   Affected: `docs/concepts/configuration.mdx`
   Source: agent 02
 
-- [x] Fix the Anthropic provider table so it no longer presents `claude-opus-4-6` as both the top recommendation and the fallback.
+- [x] Fix the Anthropic provider table so it no longer presents the same Opus line as both the top recommendation and the fallback.
   Affected: `docs/concepts/providers.mdx`
   Source: agent 02
 

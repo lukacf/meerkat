@@ -48,7 +48,7 @@ impl Pack for PanelPack {
                 "moderator",
                 "moderator-skill",
                 "Neutral moderator — keeps discussion productive",
-                resolve_model(overrides, "moderator", "claude-opus-4-7"),
+                resolve_model(overrides, "moderator", "claude-opus-4-8"),
             ),
             (
                 "purist",

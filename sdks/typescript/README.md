@@ -107,7 +107,7 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | `string \| ContentBlock[]` | **(required)** | The user prompt for the first turn. |
-| `options.model` | `string` | Server default (typically `claude-sonnet-4-5`) | LLM model name (e.g. `"gpt-5.2"`, `"gemini-3.5-flash"`, `"claude-opus-4-6"`). |
+| `options.model` | `string` | Server default (typically `claude-sonnet-4-5`) | LLM model name (e.g. `"gpt-5.2"`, `"gemini-3.5-flash"`, `"claude-opus-4-8"`). |
 | `options.provider` | `string` | Resolved from the model registry | Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). |
 | `options.systemPrompt` | `string` | `undefined` | Override the default system prompt. |
 | `options.maxTokens` | `number` | `undefined` | Maximum output tokens for the LLM response. |

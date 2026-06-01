@@ -20,7 +20,7 @@ import sys
 import httpx
 
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-opus-4-6"
+MODEL = "claude-opus-4-8"
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 if not API_KEY:

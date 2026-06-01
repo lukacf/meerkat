@@ -167,7 +167,7 @@ impl SystemContextStageError {
 /// Request to create a new session and run the first turn.
 #[derive(Debug)]
 pub struct CreateSessionRequest {
-    /// Model name (e.g. "claude-opus-4-6").
+    /// Model name (e.g. "claude-opus-4-8").
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,

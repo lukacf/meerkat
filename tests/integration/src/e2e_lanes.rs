@@ -208,6 +208,7 @@ macro_rules! e2e_smoke_lane_entries {
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
             suite(e2e_smoke_cli_background_job_idle_keepalive, "cli-background-job-idle-keepalive");
             suite(e2e_smoke_mob_live_smoke, "mob-live-smoke");
+            suite(e2e_smoke_mob_external_tcp_production_drain, "mob-external-tcp-production-drain");
             suite(e2e_smoke_mob_flow_runtime_suite, "mob-flow-runtime");
         }
     };
@@ -4907,6 +4908,25 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                     "--nocapture",
                 ],
                 output_policy: OutputPolicy::CargoTest,
+            },
+        }),
+        "mob-external-tcp-production-drain" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "Mob external TCP production drain smoke",
+            timeout_secs: 300,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_flow_runtime",
+                test_name: "e2e_external_tcp_production_drain_bind_and_turn_smoke",
+                features: &["integration-real-tests"],
+                all_features: false,
             },
         }),
         _ => None,

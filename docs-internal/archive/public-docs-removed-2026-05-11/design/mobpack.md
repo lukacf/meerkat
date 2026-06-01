@@ -78,7 +78,7 @@ default = "claude-sonnet-4-6"
 min_context_window = 128000               # reject models that can't fit the workload
 
 [profiles.lead]
-model = "claude-opus-4-6"                 # profile-level model override
+model = "claude-opus-4-8"                 # profile-level model override
 
 [surfaces]
 cli = true
@@ -244,7 +244,7 @@ rkat mob deploy release-triage.mobpack --surface rpc
 
 # Override config at deploy time
 ANTHROPIC_API_KEY=sk-... rkat mob deploy release-triage.mobpack \
-  --model claude-opus-4-6 \
+  --model claude-opus-4-8 \
   --budget-max-tokens 100000
 ```
 

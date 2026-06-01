@@ -1,10 +1,12 @@
 use crate::MobError;
+use crate::definition::SupervisorBridgeEndpointConfig;
 use crate::store::{SupervisorAuthorityBridgeAuthority, SupervisorAuthorityRecord};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, InputStreamMode, PeerAddress, PeerId, PeerRoute, PeerTransport, SendReceipt,
+    TrustedPeerDescriptor,
 };
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, TerminalityClass};
 use meerkat_core::time_compat::{Duration, Instant};
@@ -16,6 +18,7 @@ use tokio::sync::{Mutex, RwLock};
 
 pub(crate) struct MobSupervisorBridge {
     participant_name: String,
+    endpoint_config: SupervisorBridgeEndpointConfig,
     authority: StdRwLock<SupervisorAuthorityRecord>,
     runtime: RwLock<Arc<meerkat_comms::CommsRuntime>>,
     dsl: RwLock<Arc<meerkat_runtime::HandleDslAuthority>>,
@@ -31,19 +34,25 @@ pub(crate) struct MobSupervisorBridge {
 
 pub(crate) struct PreparedSupervisorBridgeRotation {
     authority: SupervisorAuthorityRecord,
-    runtime: Arc<meerkat_comms::CommsRuntime>,
-    dsl: Arc<meerkat_runtime::HandleDslAuthority>,
+    prebuilt: Option<(
+        Arc<meerkat_comms::CommsRuntime>,
+        Arc<meerkat_runtime::HandleDslAuthority>,
+    )>,
 }
 
 impl MobSupervisorBridge {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         mob_id: &crate::MobId,
         authority: SupervisorAuthorityRecord,
+        endpoint_config: Option<SupervisorBridgeEndpointConfig>,
     ) -> Result<Self, MobError> {
         let participant_name = format!("{mob_id}/__mob_supervisor__");
-        let (runtime, dsl) = Self::build_runtime(&participant_name, &authority)?;
+        let endpoint_config = endpoint_config.unwrap_or_default();
+        let (runtime, dsl) =
+            Self::build_runtime(&participant_name, &authority, &endpoint_config).await?;
         Ok(Self {
             participant_name,
+            endpoint_config,
             authority: StdRwLock::new(authority),
             runtime: RwLock::new(runtime),
             dsl: RwLock::new(dsl),
@@ -52,9 +61,10 @@ impl MobSupervisorBridge {
         })
     }
 
-    fn build_runtime(
+    async fn build_runtime(
         participant_name: &str,
         authority: &SupervisorAuthorityRecord,
+        endpoint_config: &SupervisorBridgeEndpointConfig,
     ) -> Result<
         (
             Arc<meerkat_comms::CommsRuntime>,
@@ -73,10 +83,79 @@ impl MobSupervisorBridge {
                 "failed to construct mob supervisor comms runtime '{participant_name}': {error}"
             ))
         })?;
-        let runtime = Arc::new(runtime);
-        let dsl =
-            Self::install_supervisor_peer_request_response_authority(&runtime, participant_name)?;
-        Ok((runtime, dsl))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut runtime = runtime;
+            let bind_address = Self::supervisor_bind_address(endpoint_config)?;
+            runtime
+                .set_listen_tcp_for_unstarted_runtime(bind_address)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to configure mob supervisor comms listener '{participant_name}': {error}"
+                    ))
+                })?;
+            runtime.start_listeners().await.map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to start mob supervisor comms listener '{participant_name}': {error}"
+                ))
+            })?;
+            let runtime = Arc::new(runtime);
+            let dsl = Self::install_supervisor_peer_request_response_authority(
+                &runtime,
+                participant_name,
+            )?;
+            Ok((runtime, dsl))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let runtime = Arc::new(runtime);
+            let dsl = Self::install_supervisor_peer_request_response_authority(
+                &runtime,
+                participant_name,
+            )?;
+            Ok((runtime, dsl))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn supervisor_bind_address(
+        endpoint_config: &SupervisorBridgeEndpointConfig,
+    ) -> Result<std::net::SocketAddr, MobError> {
+        match endpoint_config.bind_address.as_deref() {
+            Some(raw) => raw.parse::<std::net::SocketAddr>().map_err(|error| {
+                MobError::WiringError(format!(
+                    "invalid mob supervisor bridge bind_address '{raw}': {error}"
+                ))
+            }),
+            None => Ok(std::net::SocketAddr::from(([127, 0, 0, 1], 0))),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn has_fixed_supervisor_bind_port(
+        endpoint_config: &SupervisorBridgeEndpointConfig,
+    ) -> Result<bool, MobError> {
+        Ok(endpoint_config
+            .bind_address
+            .as_deref()
+            .map(|raw| {
+                raw.parse::<std::net::SocketAddr>()
+                    .map(|socket| socket.port() != 0)
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "invalid mob supervisor bridge bind_address '{raw}': {error}"
+                        ))
+                    })
+            })
+            .transpose()?
+            .unwrap_or(false))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn has_fixed_supervisor_bind_port(
+        _endpoint_config: &SupervisorBridgeEndpointConfig,
+    ) -> Result<bool, MobError> {
+        Ok(false)
     }
 
     /// Supervisor bridge runtimes intentionally issue semantic peer
@@ -144,31 +223,86 @@ impl MobSupervisorBridge {
         Ok(dsl)
     }
 
-    pub(crate) fn prepare_rotation(
+    pub(crate) async fn prepare_rotation(
         &self,
         authority: SupervisorAuthorityRecord,
         generated_authority: &SupervisorAuthorityBridgeAuthority,
     ) -> Result<PreparedSupervisorBridgeRotation, MobError> {
         generated_authority.verify_record(&authority)?;
-        let (runtime, dsl) = Self::build_runtime(&self.participant_name, &authority)?;
+        // For an ephemeral bind port (the default) the replacement runtime is
+        // built ahead of commit, preserving the two-phase "build-can-fail /
+        // commit-is-atomic" rotation contract. A fixed TCP bind port cannot be
+        // double-bound while the live runtime still holds it, so its rebuild is
+        // deferred to commit, which stops the old listener first.
+        let prebuilt = if Self::has_fixed_supervisor_bind_port(&self.endpoint_config)? {
+            None
+        } else {
+            Some(
+                Self::build_runtime(&self.participant_name, &authority, &self.endpoint_config)
+                    .await?,
+            )
+        };
         Ok(PreparedSupervisorBridgeRotation {
             authority,
-            runtime,
-            dsl,
+            prebuilt,
         })
     }
 
     pub(crate) async fn commit_prepared_rotation(
         &self,
         prepared: PreparedSupervisorBridgeRotation,
-    ) {
+    ) -> Result<(), MobError> {
+        let mut runtime_guard = self.runtime.write().await;
+        let (runtime, dsl) = match prepared.prebuilt {
+            Some(prebuilt) => prebuilt,
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                runtime_guard.stop_listeners_for_rebind().await;
+                Self::build_runtime(
+                    &self.participant_name,
+                    &prepared.authority,
+                    &self.endpoint_config,
+                )
+                .await?
+            }
+        };
         *self
             .authority
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = prepared.authority;
-        *self.runtime.write().await = prepared.runtime;
-        *self.dsl.write().await = prepared.dsl;
+        *runtime_guard = runtime;
+        *self.dsl.write().await = dsl;
         self.buffered_candidates.lock().await.clear();
+        Ok(())
+    }
+
+    /// Rebuild the supervisor runtime under a (possibly new) authority record,
+    /// swapping authority, runtime, and DSL together under the runtime write
+    /// lock. For a fixed TCP bind port the live listener is stopped first so the
+    /// rebuilt runtime can re-bind it. Used by `send_bridge_command_as_authority`
+    /// to temporarily adopt a rotation-target authority and restore afterward.
+    async fn replace_runtime_authority_locked(
+        &self,
+        authority: SupervisorAuthorityRecord,
+        clear_buffered_candidates: bool,
+    ) -> Result<(), MobError> {
+        let mut runtime_guard = self.runtime.write().await;
+        #[cfg(not(target_arch = "wasm32"))]
+        if Self::has_fixed_supervisor_bind_port(&self.endpoint_config)? {
+            runtime_guard.stop_listeners_for_rebind().await;
+        }
+        let (runtime, dsl) =
+            Self::build_runtime(&self.participant_name, &authority, &self.endpoint_config).await?;
+        *self
+            .authority
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = authority;
+        *runtime_guard = runtime;
+        *self.dsl.write().await = dsl;
+        if clear_buffered_candidates {
+            self.buffered_candidates.lock().await.clear();
+        }
+        Ok(())
     }
 
     pub(crate) async fn authority(&self) -> SupervisorAuthorityRecord {
@@ -282,13 +416,87 @@ impl MobSupervisorBridge {
     }
 
     pub(crate) async fn supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
+        let authority = self.authority().await;
+        self.supervisor_spec_with_address(&authority, format!("inproc://{}", self.participant_name))
+    }
+
+    pub(crate) async fn routable_supervisor_spec(&self) -> Result<TrustedPeerDescriptor, MobError> {
+        let authority = self.authority().await;
         let runtime = self.runtime().await;
-        let public_key = runtime.public_key();
+        let address = self.supervisor_routable_address(runtime.as_ref())?;
+        self.supervisor_spec_with_address(&authority, address)
+    }
+
+    pub(crate) async fn supervisor_spec_for_recipient(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        self.supervisor_spec_for_authority_and_recipient(&self.authority().await, recipient)
+            .await
+    }
+
+    pub(crate) async fn supervisor_spec_for_authority_and_recipient(
+        &self,
+        authority: &SupervisorAuthorityRecord,
+        recipient: &TrustedPeerDescriptor,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        if recipient.address.transport() == PeerTransport::Inproc {
+            self.supervisor_spec_with_address(
+                authority,
+                format!("inproc://{}", self.participant_name),
+            )
+        } else {
+            let runtime = self.runtime().await;
+            let address = self.supervisor_routable_address(runtime.as_ref())?;
+            self.supervisor_spec_with_address(authority, address)
+        }
+    }
+
+    fn supervisor_routable_address(
+        &self,
+        runtime: &meerkat_comms::CommsRuntime,
+    ) -> Result<String, MobError> {
+        if let Some(address) = self.endpoint_config.advertised_address.as_deref() {
+            let parsed = PeerAddress::parse(address).map_err(|error| {
+                MobError::WiringError(format!(
+                    "invalid mob supervisor bridge advertised_address '{address}': {error}"
+                ))
+            })?;
+            if parsed.transport() != PeerTransport::Tcp {
+                return Err(MobError::WiringError(format!(
+                    "mob supervisor bridge advertised_address must use tcp transport, got '{}'",
+                    parsed.transport()
+                )));
+            }
+            return Ok(address.to_string());
+        }
+        let address = CoreCommsRuntime::advertised_address(runtime)
+            .unwrap_or_else(|| format!("inproc://{}", self.participant_name));
+        if let Ok(parsed) = PeerAddress::parse(&address)
+            && parsed.transport() == PeerTransport::Tcp
+            && let Ok(socket) = parsed.endpoint().parse::<std::net::SocketAddr>()
+            && socket.ip().is_unspecified()
+        {
+            return Err(MobError::WiringError(
+                "mob supervisor bridge bind_address uses an unspecified interface; \
+                 backend.external.supervisor_bridge.advertised_address is required"
+                    .to_string(),
+            ));
+        }
+        Ok(address)
+    }
+
+    fn supervisor_spec_with_address(
+        &self,
+        authority: &SupervisorAuthorityRecord,
+        address: String,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        let public_key = authority.keypair().public_key();
         TrustedPeerDescriptor::unsigned_with_pubkey(
             self.participant_name.clone(),
-            public_key.to_peer_id().as_str(),
+            authority.public_peer_id.clone(),
             *public_key.as_bytes(),
-            format!("inproc://{}", self.participant_name),
+            address,
         )
         .map_err(|error| MobError::WiringError(format!("invalid supervisor spec: {error}")))
     }
@@ -317,12 +525,52 @@ impl MobSupervisorBridge {
         timeout: Duration,
     ) -> Result<serde_json::Value, MobError> {
         let _request_guard = self.request_lock.lock().await;
+        if Self::has_fixed_supervisor_bind_port(&self.endpoint_config)? {
+            let previous_authority = self.authority().await;
+            let restore_after_send = previous_authority != *authority;
+            if restore_after_send {
+                self.replace_runtime_authority_locked(authority.clone(), false)
+                    .await?;
+            }
+            let send_result = async {
+                let runtime = self.runtime().await;
+                runtime
+                    .add_trusted_peer(recipient.clone())
+                    .await
+                    .map_err(MobError::from)?;
+                self.request_json_with_runtime(
+                    &runtime,
+                    recipient,
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
+                    command,
+                    timeout,
+                )
+                .await
+            }
+            .await;
+            if restore_after_send {
+                if let Err(restore_error) = self
+                    .replace_runtime_authority_locked(previous_authority, false)
+                    .await
+                {
+                    return match send_result {
+                        Ok(_) => Err(restore_error),
+                        Err(send_error) => Err(MobError::Internal(format!(
+                            "alternate supervisor authority bridge request failed: {send_error}; \
+                             additionally failed to restore supervisor bridge authority: {restore_error}"
+                        ))),
+                    };
+                }
+            }
+            return send_result;
+        }
         let probe_participant_name = format!(
             "{}/pending-supervisor-probe/{}",
             self.participant_name,
             uuid::Uuid::new_v4()
         );
-        let (runtime, dsl) = Self::build_runtime(&probe_participant_name, authority)?;
+        let (runtime, dsl) =
+            Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
         Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
         self.request_json_with_runtime(
             &runtime,
@@ -670,15 +918,19 @@ mod tests {
         )
     }
 
-    #[test]
-    fn supervisor_runtime_installs_generated_peer_comms_authority() {
+    #[tokio::test]
+    async fn supervisor_runtime_installs_generated_peer_comms_authority() {
         let authority = SupervisorAuthorityRecord::generate(
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let (runtime, _dsl) =
-            MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/authority-test", &authority)
-                .expect("supervisor runtime should build");
+        let (runtime, _dsl) = MobSupervisorBridge::build_runtime(
+            "mob/__mob_supervisor__/authority-test",
+            &authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("supervisor runtime should build");
 
         assert!(
             runtime.peer_comms_machine_authority_required(),
@@ -694,15 +946,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn supervisor_terminal_response_cleans_pending_request_via_authority() {
+    #[tokio::test]
+    async fn supervisor_terminal_response_cleans_pending_request_via_authority() {
         let authority = SupervisorAuthorityRecord::generate(
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let (runtime, _dsl) =
-            MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/terminal-test", &authority)
-                .expect("supervisor runtime should build");
+        let (runtime, _dsl) = MobSupervisorBridge::build_runtime(
+            "mob/__mob_supervisor__/terminal-test",
+            &authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("supervisor runtime should build");
         let request_envelope_id = uuid::Uuid::new_v4();
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
         let handle = runtime
@@ -726,15 +982,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn supervisor_request_timeout_cleans_pending_request_via_authority() {
+    #[tokio::test]
+    async fn supervisor_request_timeout_cleans_pending_request_via_authority() {
         let authority = SupervisorAuthorityRecord::generate(
             meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
             ),
         );
-        let (runtime, _dsl) =
-            MobSupervisorBridge::build_runtime("mob/__mob_supervisor__/timeout-test", &authority)
-                .expect("supervisor runtime should build");
+        let (runtime, _dsl) = MobSupervisorBridge::build_runtime(
+            "mob/__mob_supervisor__/timeout-test",
+            &authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("supervisor runtime should build");
         let request_envelope_id = uuid::Uuid::new_v4();
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(request_envelope_id);
         let handle = runtime

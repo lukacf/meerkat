@@ -90,7 +90,7 @@ Apply the Rust Design Guidelines with extreme prejudice:
 - Binary must be `rkat`, not `meerkat`
 - Config directory must be `.rkat/`
 - Crate names follow `meerkat-*` pattern
-- Model names must use current versions (claude-opus-4-6, gpt-5.2, gemini-3-flash-preview)
+- Model names must use current versions (claude-opus-4-8, gpt-5.5, gemini-3.5-flash)
 - No older model names (gpt-4o-mini, gemini-2.0-flash, claude-3-7-sonnet-*)
 
 ### 6. VERSION AND SCHEMA HYGIENE

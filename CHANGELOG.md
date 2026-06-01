@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.30] - 2026-06-01
+
+Meerkat 0.6.30 fixes production external TCP bridge replies and compacted
+singleton retire/archive recovery.
+
+### Fixed
+
+- **External bridge reply routing** (#746) — repairs target-runtime trust
+  projection before idempotent `BindMember` acknowledgements, and decodes the
+  canonical `BridgeReply` envelope emitted by production `comms_drain` so
+  external TCP member binds can complete the supervisor round trip.
+- **Compacted singleton retire stranding** (#747) — lets runtime-backed session
+  projections persist after a legitimate compaction when the durable store lags
+  across the compaction boundary, avoiding `MonotonicityViolation` during
+  archive.
+- **Mob disposal hardening** (#747) — removes dead roster anchors even when
+  `ArchiveSession` fails, so respawn/reset can recover without requiring a
+  process restart.
+
+## [0.6.29] - 2026-06-01
+
+Meerkat 0.6.29 fixes remote external mob binding so TCP-backed members can
+reply through a routable supervisor bridge.
+
+### Fixed
+
+- **Remote external bind routing** (#744) — gives mob supervisor bridge
+  runtimes a signed TCP listener while preserving in-process descriptors for
+  local members, and uses recipient-aware supervisor descriptors so TCP
+  external members bind and reply through a routable supervisor address.
+- **External TCP bind regression coverage** (#744) — adds coverage for a TCP
+  external bind followed by a peer turn on the remote runtime.
+
+## [0.6.28] - 2026-05-31
+
+Meerkat 0.6.28 updates the Anthropic default catalog target to Claude Opus
+4.8 and refreshes the surrounding examples, docs, and capability metadata.
+
+### Changed
+
+- **Anthropic Opus 4.8 default** (#743) — promotes the default Anthropic
+  catalog model from `claude-opus-4-7` to `claude-opus-4-8`, retargets
+  examples/tests/docs away from older Opus defaults, and keeps Opus 4.7 only
+  where it remains an intentional legacy or fallback catalog entry.
+- **Opus 4.8 capability metadata** (#743) — documents the current Opus 4.8 API
+  behavior around adaptive thinking, `xhigh` effort, fast mode, beta/header
+  handling, and unsupported non-default sampling knobs.
+
 ## [0.6.27] - 2026-05-28
 
 Meerkat 0.6.27 hardens mob lifecycle cleanup when session-bound members fail

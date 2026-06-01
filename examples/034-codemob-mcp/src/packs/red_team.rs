@@ -60,7 +60,7 @@ impl Pack for RedTeamPack {
         profiles.insert(
             ProfileName::from("judge"),
             turn_driven_profile(
-                resolve_model(overrides, "judge", "claude-opus-4-7"),
+                resolve_model(overrides, "judge", "claude-opus-4-8"),
                 "judge-skill",
                 "Judge — balanced assessment",
                 pp,

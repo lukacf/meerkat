@@ -1302,7 +1302,7 @@ pub struct CommsRuntime {
     #[cfg(target_arch = "wasm32")]
     inproc_namespace: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
-    listener_handles: Vec<ListenerHandle>,
+    listener_handles: Mutex<Vec<ListenerHandle>>,
     #[cfg(not(target_arch = "wasm32"))]
     listeners_started: bool,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1449,7 +1449,7 @@ impl CommsRuntime {
             inbox: Arc::new(AsyncMutex::new(inbox)),
             inbox_notify,
             config: config.clone(),
-            listener_handles: Vec::new(),
+            listener_handles: Mutex::new(Vec::new()),
             listeners_started: false,
             _session_identity_claim: None,
             bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
@@ -1558,7 +1558,7 @@ impl CommsRuntime {
             #[cfg(target_arch = "wasm32")]
             inproc_namespace: namespace.clone(),
             #[cfg(not(target_arch = "wasm32"))]
-            listener_handles: Vec::new(),
+            listener_handles: Mutex::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]
             listeners_started: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1586,6 +1586,18 @@ impl CommsRuntime {
             crate::PeerMeta::default(),
         );
         Ok(runtime)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_listen_tcp_for_unstarted_runtime(
+        &mut self,
+        listen_tcp: std::net::SocketAddr,
+    ) -> Result<(), CommsRuntimeError> {
+        if self.listeners_started {
+            return Err(CommsRuntimeError::AlreadyStarted);
+        }
+        self.config.listen_tcp = Some(listen_tcp);
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1651,7 +1663,7 @@ impl CommsRuntime {
             inbox: Arc::new(AsyncMutex::new(inbox)),
             inbox_notify,
             config,
-            listener_handles: Vec::new(),
+            listener_handles: Mutex::new(Vec::new()),
             listeners_started: false,
             _session_identity_claim: Some(claim),
             bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
@@ -1967,7 +1979,7 @@ impl CommsRuntime {
                 inbox_sender.clone(),
             )
             .await?;
-            self.listener_handles.push(handle);
+            self.listener_handles.lock().push(handle);
         }
 
         if let Some(ref addr) = self.config.listen_tcp {
@@ -1979,7 +1991,10 @@ impl CommsRuntime {
                 inbox_sender.clone(),
             )
             .await?;
-            self.listener_handles.push(handle);
+            if let Some(local_addr) = handle.local_addr {
+                self.config.listen_tcp = Some(local_addr);
+            }
+            self.listener_handles.lock().push(handle);
         }
 
         // === Plain event listeners — run ADDITIONALLY when auth=Open ===
@@ -2003,14 +2018,14 @@ impl CommsRuntime {
                     max_line_length,
                 )
                 .await?;
-                self.listener_handles.push(handle);
+                self.listener_handles.lock().push(handle);
             }
 
             #[cfg(unix)]
             if let Some(ref path) = self.config.event_listen_uds {
                 let handle =
                     spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length).await?;
-                self.listener_handles.push(handle);
+                self.listener_handles.lock().push(handle);
             }
         }
 
@@ -2719,10 +2734,25 @@ impl CommsRuntime {
     pub fn shutdown(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            for handle in self.listener_handles.drain(..) {
+            for handle in self.listener_handles.lock().drain(..) {
                 handle.abort();
             }
             self.listeners_started = false;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn abort_listeners_for_rebind(&self) {
+        for handle in self.listener_handles.lock().drain(..) {
+            handle.abort();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn stop_listeners_for_rebind(&self) {
+        let handles = self.listener_handles.lock().drain(..).collect::<Vec<_>>();
+        for handle in handles {
+            handle.abort_and_wait().await;
         }
     }
 }
@@ -2788,12 +2818,18 @@ impl Drop for CommsRuntime {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ListenerHandle {
     handle: JoinHandle<()>,
+    local_addr: Option<std::net::SocketAddr>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ListenerHandle {
     pub fn abort(&self) {
         self.handle.abort();
+    }
+
+    async fn abort_and_wait(self) {
+        self.handle.abort();
+        let _ = self.handle.await;
     }
 }
 
@@ -2824,7 +2860,10 @@ async fn spawn_uds_listener(
             });
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        handle,
+        local_addr: None,
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2836,6 +2875,7 @@ async fn spawn_tcp_listener(
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
     let listener = TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let (keypair, inbox_sender) = (keypair.clone(), inbox_sender.clone());
@@ -2844,7 +2884,10 @@ async fn spawn_tcp_listener(
             });
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        handle,
+        local_addr: Some(local_addr),
+    })
 }
 
 /// Max concurrent connections for the plain listener (DoS protection).
@@ -2878,7 +2921,10 @@ async fn spawn_plain_tcp_listener(
             });
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        handle,
+        local_addr: None,
+    })
 }
 
 #[cfg(unix)]
@@ -2918,7 +2964,10 @@ async fn spawn_plain_uds_listener(
             });
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        handle,
+        local_addr: None,
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

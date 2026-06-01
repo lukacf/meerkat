@@ -497,7 +497,7 @@ client.requireCapability("skills");  // throws CapabilityUnavailableError if not
 
 ```typescript
 const config = await client.getConfig();
-await client.setConfig({ ...config.config, model: "claude-opus-4-6" });
+await client.setConfig({ ...config.config, model: "claude-opus-4-8" });
 const updated = await client.patchConfig({ max_tokens: 8192 });
 console.log(updated.config.max_tokens);
 ```

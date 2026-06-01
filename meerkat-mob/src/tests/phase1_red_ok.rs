@@ -10,7 +10,7 @@ id = "pipeline"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true

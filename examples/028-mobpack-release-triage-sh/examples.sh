@@ -56,7 +56,7 @@ capabilities = ["comms"]
 
 [models]
 default = "claude-sonnet-4-6"
-lead = "claude-opus-4-7"
+lead = "claude-opus-4-8"
 TOML
 
 cat > "$MOB_DIR/config/defaults.toml" <<'TOML'
@@ -75,7 +75,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
   "orchestrator": { "profile": "lead" },
   "profiles": {
     "lead": {
-      "model": "claude-opus-4-7",
+      "model": "claude-opus-4-8",
       "skills": ["lead-playbook"],
       "peer_description": "Release lead who owns severity, decisions, and executive updates",
       "external_addressable": true,

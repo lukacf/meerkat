@@ -2,14 +2,14 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.6.27
+Contract version: 0.6.30
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 
 
-CONTRACT_VERSION = "0.6.27"
+CONTRACT_VERSION = "0.6.30"
 
 
 @dataclass
@@ -929,6 +929,7 @@ class MobEventRouterConfigInput:
 class MobExternalBackendConfigInput:
     """Request payload for MobExternalBackendConfigInput."""
     address_base: str
+    supervisor_bridge: Optional[Any] = None
 
 
 @dataclass

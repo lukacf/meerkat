@@ -125,7 +125,7 @@ pub struct ImageGenerationProviderDefaults {
 const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 
 /// Default model ID per provider. First recommended model wins.
-const DEFAULT_ANTHROPIC: &str = "claude-opus-4-7";
+const DEFAULT_ANTHROPIC: &str = "claude-opus-4-8";
 const DEFAULT_OPENAI: &str = "gpt-5.5";
 const DEFAULT_GEMINI: &str = "gemini-3.5-flash";
 

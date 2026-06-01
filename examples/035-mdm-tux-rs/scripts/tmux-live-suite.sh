@@ -40,7 +40,7 @@ default_live_provider_matrix() {
   export MDM_HIVE_PROVIDER="${MDM_HIVE_PROVIDER:-gemini}"
   export MDM_TARGET_A_MODEL="${MDM_TARGET_A_MODEL:-gpt-5.5}"
   export MDM_TARGET_A_PROVIDER="${MDM_TARGET_A_PROVIDER:-openai}"
-  export MDM_TARGET_B_MODEL="${MDM_TARGET_B_MODEL:-claude-opus-4-7}"
+  export MDM_TARGET_B_MODEL="${MDM_TARGET_B_MODEL:-claude-opus-4-8}"
   export MDM_TARGET_B_PROVIDER="${MDM_TARGET_B_PROVIDER:-anthropic}"
 }
 

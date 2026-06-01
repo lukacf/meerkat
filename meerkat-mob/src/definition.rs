@@ -65,6 +65,23 @@ pub struct WiringRules {
 pub struct ExternalBackendConfig {
     /// Base address prefix used to publish external peer addresses.
     pub address_base: String,
+    /// Supervisor bridge endpoint used by remote external members to send
+    /// bridge replies back to this mob supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_bridge: Option<SupervisorBridgeEndpointConfig>,
+}
+
+/// TCP endpoint configuration for the mob supervisor bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SupervisorBridgeEndpointConfig {
+    /// Local socket address the supervisor bridge should bind, for example
+    /// `0.0.0.0:42000` or `127.0.0.1:0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+    /// Address advertised to external members, for example
+    /// `tcp://supervisor.example.com:42000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_address: Option<String>,
 }
 
 /// Backend selection and backend-specific settings for the mob.
@@ -550,7 +567,7 @@ id = "code-review"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-6"
+model = "claude-opus-4-8"
 skills = ["orchestrator-skill"]
 peer_description = "Coordinates code review"
 external_addressable = true
@@ -600,7 +617,7 @@ path = "skills/reviewer.md"
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
             .unwrap();
-        assert_eq!(lead.model, "claude-opus-4-6");
+        assert_eq!(lead.model, "claude-opus-4-8");
         assert!(lead.tools.mob);
         assert!(lead.tools.comms);
         assert!(lead.external_addressable);
@@ -653,7 +670,7 @@ path = "skills/reviewer.md"
                 m.insert(
                     ProfileName::from("lead"),
                     ProfileBinding::Inline(Profile {
-                        model: "claude-opus-4-6".to_string(),
+                        model: "claude-opus-4-8".to_string(),
                         skills: vec!["skill-a".to_string()],
                         tools: ToolConfig::default(),
                         peer_description: "The leader".to_string(),

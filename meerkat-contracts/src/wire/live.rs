@@ -2629,7 +2629,7 @@ mod tests {
                 actual_channels: 2,
             },
             WireLiveConfigRejectionReason::ChannelIdentitySwap {
-                from_model: "claude-opus-4-6".into(),
+                from_model: "claude-opus-4-8".into(),
                 from_provider: WireProvider::Anthropic,
                 to_model: "gpt-5.4".into(),
                 to_provider: WireProvider::OpenAi,
@@ -2722,7 +2722,7 @@ mod tests {
         // serialized `OpenAI` as `"open_a_i"`. The new `WireProvider`
         // must serialize as `"openai"`.
         let v = WireLiveConfigRejectionReason::ChannelIdentitySwap {
-            from_model: "claude-opus-4-6".into(),
+            from_model: "claude-opus-4-8".into(),
             from_provider: WireProvider::Anthropic,
             to_model: "gpt-5.4".into(),
             to_provider: WireProvider::OpenAi,

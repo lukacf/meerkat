@@ -15,8 +15,8 @@ use meerkat_mob::{
         BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode,
         EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
         FrameStepSpec, LimitsSpec, OrchestratorConfig, PolicyMode, RepeatUntilSpec, RoleWiringRule,
-        SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorSpec, TopologyRule,
-        TopologySpec, WiringRules,
+        SkillSource, SpawnPolicyConfig, StepOutputFormat, SupervisorBridgeEndpointConfig,
+        SupervisorSpec, TopologyRule, TopologySpec, WiringRules,
     },
 };
 use std::convert::TryFrom;
@@ -132,6 +132,12 @@ fn decode_backend(input: MobBackendConfigInput) -> BackendConfig {
         default: decode_backend_kind(input.default),
         external: input.external.map(|external| ExternalBackendConfig {
             address_base: external.address_base,
+            supervisor_bridge: external.supervisor_bridge.map(|supervisor_bridge| {
+                SupervisorBridgeEndpointConfig {
+                    bind_address: supervisor_bridge.bind_address,
+                    advertised_address: supervisor_bridge.advertised_address,
+                }
+            }),
         }),
     }
 }

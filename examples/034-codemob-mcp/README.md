@@ -43,7 +43,7 @@ Quick opinion from a single agent. Returns a `session_id` for multi-turn convers
 
 ```
 consult(question: "Should I use a B-tree or hash map for this index?")
-consult(question: "Review this function", context: "<code>", model: "claude-opus-4-7")
+consult(question: "Review this function", context: "<code>", model: "claude-opus-4-8")
 
 # Custom persona
 consult(
@@ -128,7 +128,7 @@ Every agent in every pack uses a distinct model by default — different trainin
 
 | Model | Provider | Strengths | Used as default for |
 |-------|----------|-----------|-------------------|
-| `claude-opus-4-7` | Anthropic | Strongest reasoning | Judge, moderator, synthesizer, orchestrator |
+| `claude-opus-4-8` | Anthropic | Strongest reasoning | Judge, moderator, synthesizer, orchestrator |
 | `gpt-5.5` | OpenAI | Strongest general + code | Implementer, critic, advisor, security reviewer |
 | `gemini-3.1-pro-preview` | Google | Strong general | General reviewer, purist, guardian |
 | `gemini-3.1-flash-lite-preview` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
@@ -168,7 +168,7 @@ Override the default model for any role in a pack:
 deliberate(
   pack: "review",
   task: "...",
-  model_overrides: {"security": "claude-opus-4-7", "perf": "gpt-5.5-pro"}
+  model_overrides: {"security": "claude-opus-4-8", "perf": "gpt-5.5-pro"}
 )
 ```
 

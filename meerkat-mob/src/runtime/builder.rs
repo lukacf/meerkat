@@ -1998,10 +1998,18 @@ impl MobBuilder {
                     definition.id
                 ))
             })?;
-        let supervisor_bridge = Arc::new(MobSupervisorBridge::new(
-            &definition.id,
-            supervisor_authority.clone(),
-        )?);
+        let supervisor_bridge = Arc::new(
+            MobSupervisorBridge::new(
+                &definition.id,
+                supervisor_authority.clone(),
+                definition
+                    .backend
+                    .external
+                    .as_ref()
+                    .and_then(|external| external.supervisor_bridge.clone()),
+            )
+            .await?,
+        );
 
         Self::start_runtime(
             definition,
@@ -2191,10 +2199,18 @@ impl MobBuilder {
                 )));
             }
         };
-        let supervisor_bridge = Arc::new(MobSupervisorBridge::new(
-            &definition.id,
-            supervisor_authority,
-        )?);
+        let supervisor_bridge = Arc::new(
+            MobSupervisorBridge::new(
+                &definition.id,
+                supervisor_authority,
+                definition
+                    .backend
+                    .external
+                    .as_ref()
+                    .and_then(|external| external.supervisor_bridge.clone()),
+            )
+            .await?,
+        );
         let mut roster = Roster::project(&mob_events);
         #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);

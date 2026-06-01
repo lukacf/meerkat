@@ -11976,11 +11976,12 @@ mod tests {
             self.fail_after_saves
                 .store(usize::MAX, AtomicOrdering::Release);
         }
-    }
 
-    #[async_trait]
-    impl meerkat::SessionStore for ToggleFailSaveStore {
-        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+        // Shared injection check so the runtime-backed projection write
+        // (`save_authoritative_projection_if_current_revision`) honors the same
+        // forced/countdown failures as `save`. Each durable projection write
+        // consumes one countdown tick regardless of which path performs it.
+        fn check_injected_failure(&self) -> Result<(), meerkat_store::SessionStoreError> {
             if self.fail_save.load(AtomicOrdering::Acquire) {
                 return Err(meerkat_store::SessionStoreError::Internal(
                     "forced save failure".to_string(),
@@ -12009,7 +12010,29 @@ mod tests {
                     break;
                 }
             }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for ToggleFailSaveStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            self.check_injected_failure()?;
             self.inner.save(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), meerkat_store::SessionStoreError> {
+            self.check_injected_failure()?;
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
         }
 
         async fn load(
@@ -12399,7 +12422,7 @@ mod tests {
             auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("claude-opus-4-6".to_string()),
+            model: Some("claude-opus-4-8".to_string()),
             ..Default::default()
         };
 
@@ -12413,7 +12436,7 @@ mod tests {
             meerkat_core::Provider::Anthropic,
             "model-only turn overrides should keep the provider when the target model is owned by it"
         );
-        assert_eq!(resolved.model, "claude-opus-4-6");
+        assert_eq!(resolved.model, "claude-opus-4-8");
     }
 
     #[tokio::test]
@@ -19318,7 +19341,7 @@ mod tests {
         // Start turn with model override on pending session.
         let (event_tx, _rx) = mpsc::channel(100);
         let overrides = TurnOverrides {
-            model: Some("claude-opus-4-6".to_string()),
+            model: Some("claude-opus-4-8".to_string()),
             ..Default::default()
         };
         let result = runtime
@@ -19556,7 +19579,7 @@ mod tests {
         // parameter validation layer.
         let (event_tx, _rx) = mpsc::channel(100);
         let overrides = TurnOverrides {
-            model: Some("claude-opus-4-6".to_string()),
+            model: Some("claude-opus-4-8".to_string()),
             ..Default::default()
         };
         let result = runtime
@@ -19588,7 +19611,7 @@ mod tests {
             "session_id": "test-id",
             "prompt": "hello",
             "keep_alive": true,
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-8",
             "provider": "anthropic",
             "max_tokens": 4096,
             "system_prompt": "You are helpful",
@@ -19602,7 +19625,7 @@ mod tests {
         assert_eq!(params.session_id, "test-id");
         assert_eq!(params.prompt, ContentInput::Text("hello".to_string()));
         assert_eq!(params.keep_alive, Some(true));
-        assert_eq!(params.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(params.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(params.provider.as_deref(), Some("anthropic"));
         assert_eq!(params.max_tokens, Some(4096));
         assert_eq!(params.system_prompt.as_deref(), Some("You are helpful"));

@@ -382,12 +382,12 @@ mod tests {
     }
 
     #[test]
-    fn opus_47_effort_includes_xhigh() {
+    fn opus_48_effort_includes_xhigh() {
         let caps =
-            capabilities_for(crate::Provider::Anthropic, "claude-opus-4-7").expect("opus 4.7 row");
+            capabilities_for(crate::Provider::Anthropic, "claude-opus-4-8").expect("opus 4.8 row");
         let schema = build_params_schema(caps);
         let values = enum_values_for(&schema, "effort").expect("effort enum");
-        assert!(values.contains("xhigh"), "opus 4.7 must advertise xhigh");
+        assert!(values.contains("xhigh"), "opus 4.8 must advertise xhigh");
         assert!(values.contains("low"));
         assert!(values.contains("max"));
     }

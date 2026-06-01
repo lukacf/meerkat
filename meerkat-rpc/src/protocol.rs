@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn request_roundtrip_numeric_id() {
-        let json = r#"{"jsonrpc":"2.0","id":42,"method":"session/create","params":{"model":"claude-opus-4-6"}}"#;
+        let json = r#"{"jsonrpc":"2.0","id":42,"method":"session/create","params":{"model":"claude-opus-4-8"}}"#;
         let req: RpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.jsonrpc, "2.0");
         assert_eq!(req.id, Some(RpcId::Num(42)));

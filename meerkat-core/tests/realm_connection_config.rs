@@ -50,7 +50,7 @@ default_model = "gpt-5.1"
 [realm.dev.binding.default_anthropic]
 backend_profile = "anthropic_default"
 auth_profile = "anthropic_api_key"
-default_model = "claude-opus-4-7"
+default_model = "claude-opus-4-8"
 
 [realm.dev]
 default_binding = "default_openai"
@@ -133,7 +133,7 @@ fn from_config_happy_path_resolves_binding() {
         .expect("default_anthropic is a valid binding in the fixture");
     assert_eq!(
         anthropic_binding.default_model.as_deref(),
-        Some("claude-opus-4-7")
+        Some("claude-opus-4-8")
     );
     assert_eq!(anthropic_backend.provider, Provider::Anthropic);
     assert_eq!(anthropic_auth.provider, Provider::Anthropic);

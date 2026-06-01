@@ -488,8 +488,6 @@ pub enum OAuthFlowError {
     },
     #[error("failed to generate oauth state token")]
     StateGenerationFailed,
-    #[error("oauth state registry is at capacity ({max_outstanding} outstanding flows)")]
-    CapacityExceeded { max_outstanding: usize },
     #[error("oauth device code poll is already in progress")]
     DevicePollInProgress,
     #[error("oauth device code is already admitted")]
@@ -1077,35 +1075,6 @@ impl OAuthFlowRegistry {
         created_at: Instant,
     ) -> Result<(), OAuthFlowError> {
         let mut flows = self.flows.lock();
-        let device_flows = self.device_flows.lock();
-        if flows.len() + device_flows.len() >= self.max_outstanding {
-            return Err(OAuthFlowError::CapacityExceeded {
-                max_outstanding: self.max_outstanding,
-            });
-        }
-        flows.insert(
-            state,
-            OAuthFlowRecord {
-                target,
-                provider,
-                redirect_uri,
-                pkce_verifier,
-                created_at,
-            },
-        );
-        Ok(())
-    }
-
-    pub fn insert_restored_browser_flow_without_capacity(
-        &self,
-        state: String,
-        target: AuthBindingRef,
-        provider: OAuthProviderIdentity,
-        redirect_uri: String,
-        pkce_verifier: String,
-        created_at: Instant,
-    ) -> Result<(), OAuthFlowError> {
-        let mut flows = self.flows.lock();
         flows.insert(
             state,
             OAuthFlowRecord {
@@ -1120,41 +1089,6 @@ impl OAuthFlowRegistry {
     }
 
     pub fn insert_restored_device_flow(
-        &self,
-        target: AuthBindingRef,
-        provider: OAuthProviderIdentity,
-        device_code: String,
-        created_at: Instant,
-        expires_at: Instant,
-    ) -> Result<(), OAuthFlowError> {
-        let flows = self.flows.lock();
-        let mut device_flows = self.device_flows.lock();
-        if device_flows.contains_key(&device_code) {
-            return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted);
-        }
-        if flows.len() + device_flows.len() >= self.max_outstanding {
-            return Err(OAuthFlowError::CapacityExceeded {
-                max_outstanding: self.max_outstanding,
-            });
-        }
-        let record = OAuthDeviceFlowRecord {
-            target,
-            provider,
-            device_code: device_code.clone(),
-            created_at,
-            expires_at,
-        };
-        device_flows.insert(
-            device_code,
-            OAuthDeviceFlowState {
-                record,
-                poll_lease: None,
-            },
-        );
-        Ok(())
-    }
-
-    pub fn insert_restored_device_flow_without_capacity(
         &self,
         target: AuthBindingRef,
         provider: OAuthProviderIdentity,
@@ -1202,11 +1136,6 @@ impl OAuthFlowRegistry {
         let mut device_flows = self.device_flows.lock();
         let expired_browser = take_expired_locked(&mut flows, self.ttl);
         let expired_device = take_expired_device_locked(&mut device_flows);
-        if flows.len() + device_flows.len() >= self.max_outstanding {
-            return Err(OAuthFlowError::CapacityExceeded {
-                max_outstanding: self.max_outstanding,
-            });
-        }
         flows.insert(state.clone(), record);
         Ok((
             state,
@@ -1233,37 +1162,6 @@ impl OAuthFlowRegistry {
         let mut device_flows = self.device_flows.lock();
         let expired_browser = take_expired_locked(&mut flows, self.ttl);
         let expired_device = take_expired_device_locked(&mut device_flows);
-        if flows.len() + device_flows.len() >= self.max_outstanding {
-            return Err(OAuthFlowError::CapacityExceeded {
-                max_outstanding: self.max_outstanding,
-            });
-        }
-        flows.insert(state, record);
-        Ok(OAuthPrunedFlows::from_expired(
-            expired_browser,
-            expired_device,
-        ))
-    }
-
-    pub fn insert_browser_flow_with_pruned_without_capacity(
-        &self,
-        state: String,
-        target: AuthBindingRef,
-        provider: OAuthProviderIdentity,
-        redirect_uri: String,
-        pkce_verifier: String,
-    ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
-        let record = OAuthFlowRecord {
-            target,
-            provider,
-            redirect_uri,
-            pkce_verifier,
-            created_at: Instant::now(),
-        };
-        let mut flows = self.flows.lock();
-        let mut device_flows = self.device_flows.lock();
-        let expired_browser = take_expired_locked(&mut flows, self.ttl);
-        let expired_device = take_expired_device_locked(&mut device_flows);
         flows.insert(state, record);
         Ok(OAuthPrunedFlows::from_expired(
             expired_browser,
@@ -1272,49 +1170,6 @@ impl OAuthFlowRegistry {
     }
 
     pub fn admit_device_code_with_pruned(
-        &self,
-        target: AuthBindingRef,
-        provider: OAuthProviderIdentity,
-        device_code: String,
-        expires_in: Duration,
-    ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
-        let mut flows = self.flows.lock();
-        let mut device_flows = self.device_flows.lock();
-        let expired_browser = take_expired_locked(&mut flows, self.ttl);
-        let expired_device = take_expired_device_locked(&mut device_flows);
-        if device_flows.contains_key(&device_code) {
-            return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted);
-        }
-        if flows.len() + device_flows.len() >= self.max_outstanding {
-            return Err(OAuthFlowError::CapacityExceeded {
-                max_outstanding: self.max_outstanding,
-            });
-        }
-        let now = Instant::now();
-        let expires_at = now
-            .checked_add(expires_in)
-            .ok_or(OAuthFlowError::DeviceExpiryOutOfRange)?;
-        let record = OAuthDeviceFlowRecord {
-            target,
-            provider,
-            device_code: device_code.clone(),
-            created_at: now,
-            expires_at,
-        };
-        device_flows.insert(
-            device_code,
-            OAuthDeviceFlowState {
-                record,
-                poll_lease: None,
-            },
-        );
-        Ok(OAuthPrunedFlows::from_expired(
-            expired_browser,
-            expired_device,
-        ))
-    }
-
-    pub fn admit_device_code_with_pruned_without_capacity(
         &self,
         target: AuthBindingRef,
         provider: OAuthProviderIdentity,
@@ -1899,58 +1754,6 @@ mod tests {
             ),
             Err(OAuthFlowError::Missing)
         ));
-    }
-
-    #[test]
-    fn oauth_state_registry_rejects_start_at_capacity() {
-        let registry = OAuthFlowRegistry::new_with_capacity(Duration::from_secs(60), 2);
-        let first = registry
-            .start(
-                target(),
-                OAuthProviderIdentity::OpenAiChatGpt,
-                "http://127.0.0.1/callback",
-                "first",
-            )
-            .expect("state generation succeeds");
-        let second = registry
-            .start(
-                target(),
-                OAuthProviderIdentity::OpenAiChatGpt,
-                "http://127.0.0.1/callback",
-                "second",
-            )
-            .expect("state generation succeeds");
-        let third = registry.start(
-            target(),
-            OAuthProviderIdentity::OpenAiChatGpt,
-            "http://127.0.0.1/callback",
-            "third",
-        );
-
-        assert!(matches!(
-            third,
-            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 2 })
-        ));
-        assert!(
-            registry
-                .consume(
-                    &first,
-                    &target(),
-                    OAuthProviderIdentity::OpenAiChatGpt,
-                    "http://127.0.0.1/callback"
-                )
-                .is_ok()
-        );
-        assert!(
-            registry
-                .consume(
-                    &second,
-                    &target(),
-                    OAuthProviderIdentity::OpenAiChatGpt,
-                    "http://127.0.0.1/callback"
-                )
-                .is_ok()
-        );
     }
 
     #[test]

@@ -587,7 +587,7 @@ impl RuntimeOAuthFlowHandle {
             &record.redirect_uri,
             expires_at_millis,
         )?;
-        self.registry.insert_restored_browser_flow_without_capacity(
+        self.registry.insert_restored_browser_flow(
             state.to_string(),
             record.target.clone(),
             record.provider,
@@ -770,7 +770,7 @@ impl RuntimeOAuthFlowHandle {
         }
         if self
             .registry
-            .insert_restored_browser_flow_without_capacity(
+            .insert_restored_browser_flow(
                 persisted.state.clone(),
                 persisted.target.clone(),
                 provider,
@@ -813,7 +813,7 @@ impl RuntimeOAuthFlowHandle {
         }
         if self
             .registry
-            .insert_restored_device_flow_without_capacity(
+            .insert_restored_device_flow(
                 persisted.target.clone(),
                 provider,
                 persisted.device_code.clone(),
@@ -1446,15 +1446,13 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         self.admit_browser(&target, &state, provider, &redirect_uri, expires_at)?;
         let (lifecycle_pruned, lifecycle_pruned_snapshot) =
             self.retain_registry_payloads_with_lifecycle();
-        let inserted = self
-            .registry
-            .insert_browser_flow_with_pruned_without_capacity(
-                state.clone(),
-                target.clone(),
-                provider,
-                redirect_uri.clone(),
-                pkce_verifier,
-            );
+        let inserted = self.registry.insert_browser_flow_with_pruned(
+            state.clone(),
+            target.clone(),
+            provider,
+            redirect_uri.clone(),
+            pkce_verifier,
+        );
         let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {
@@ -1574,14 +1572,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         self.admit_device(&target, &device_code, provider, machine_expires_at)?;
         let (lifecycle_pruned, lifecycle_pruned_snapshot) =
             self.retain_registry_payloads_with_lifecycle();
-        let inserted = self
-            .registry
-            .admit_device_code_with_pruned_without_capacity(
-                target.clone(),
-                provider,
-                device_code.clone(),
-                expires_in,
-            );
+        let inserted = self.registry.admit_device_code_with_pruned(
+            target.clone(),
+            provider,
+            device_code.clone(),
+            expires_in,
+        );
         let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {

@@ -1084,13 +1084,6 @@ pub async fn handle_auth_login_start(
         verifier,
     ) {
         Ok(state) => state,
-        Err(OAuthFlowError::CapacityExceeded { .. }) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                "oauth state registry is at capacity",
-            );
-        }
         Err(e) => {
             return RpcResponse::error(
                 id,
@@ -1343,13 +1336,11 @@ pub async fn handle_auth_login_device_start(
                 resp.device_code.clone(),
                 std::time::Duration::from_secs(resp.expires_in),
             ) {
-                let message = match err {
-                    OAuthFlowError::CapacityExceeded { .. } => {
-                        "oauth state registry is at capacity".to_string()
-                    }
-                    other => format!("oauth device state initialization failed: {other}"),
-                };
-                return RpcResponse::error(id, error::INTERNAL_ERROR, message);
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("oauth device state initialization failed: {err}"),
+                );
             }
             RpcResponse::success(
                 id,
@@ -1619,13 +1610,6 @@ pub async fn handle_auth_login_provision_api_key(
         "provision-api-key".to_string(),
     ) {
         Ok(state) => state,
-        Err(OAuthFlowError::CapacityExceeded { .. }) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                "oauth state registry is at capacity",
-            );
-        }
         Err(e) => {
             return RpcResponse::error(
                 id,
@@ -2872,8 +2856,7 @@ mod tests {
                         "test should reach the default OAuth flow capacity before 2048 starts"
                     );
                 }
-                Err(OAuthFlowError::CapacityExceeded { .. })
-                | Err(OAuthFlowError::LifecycleRejected {
+                Err(OAuthFlowError::LifecycleRejected {
                     operation: "admit_oauth_browser_flow",
                     ..
                 }) => break,

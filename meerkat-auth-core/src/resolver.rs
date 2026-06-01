@@ -312,9 +312,6 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, now)?;
     let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let snapshot = restore_snapshot.snapshot().clone();
-    if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
-        return Err(user_reauth_required_error());
-    }
     let phase = credential_phase_from_snapshot(&snapshot);
     if is_oauth_login
         && matches!(

@@ -1071,13 +1071,6 @@ pub async fn start_login(
         verifier,
     ) {
         Ok(state) => state,
-        Err(OAuthFlowError::CapacityExceeded { .. }) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "oauth state registry is at capacity" })),
-            )
-                .into_response();
-        }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1375,17 +1368,13 @@ pub async fn start_device_login(
                 resp.device_code.clone(),
                 std::time::Duration::from_secs(resp.expires_in),
             ) {
-                let (status, message) = match err {
-                    OAuthFlowError::CapacityExceeded { .. } => (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "oauth state registry is at capacity".to_string(),
-                    ),
-                    other => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("oauth device state initialization failed: {other}"),
-                    ),
-                };
-                return (status, Json(serde_json::json!({ "error": message }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("oauth device state initialization failed: {err}")
+                    })),
+                )
+                    .into_response();
             }
             (
                 StatusCode::OK,

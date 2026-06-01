@@ -602,3 +602,36 @@ machine-owned-disposition):
 
 Gates: drift 10/6; check --workspace --all-features --tests clean (no codegen-bootstrap stub remains);
 machine-codegen 94; classifier ratchet pass; core+workgraph+mob+session --all-features 2561 passed; seam 0 debt.
+
+## CONVERGENCE ROUND 9 (re-sweep + 2 blind reviews) — auth cleanup
+alpha verdict CLEAN (1 LOW presentational note: supervisor_activation_error string-contains adds a diagnostic
+LINE, not a verdict). beta VIOLATIONS_FOUND 1 LOW (resolver ReauthRequired remnant). sweep 3 (oauth capacity
+MEDIUM 3rd-flag + 2 LOW). Sweep coverage confirmed the WHOLE tree clean across 12 domains. Folded the 2 genuine
+cleanup items:
+
+### FOLDED (remnant) — resolver ReauthRequired credential-use pre-check (beta LOW) -> deleted, machine owns it
+resolver.rs load_managed_store_tokens_with_lifecycle had an EARLY shell `if phase==ReauthRequired { Err(reauth) }`
+remnant left from the round-5 credential-use fold. The SAME function later routes resolve_credential_use_admission
+(UseCredential) which the AuthMachine ResolveCredentialUseAdmission classifies ReauthRequired -> ReauthRequired
+disposition -> user_reauth_required_error. Deleted the duplicate early pre-check; the verdict now comes solely
+from the machine-routed seam. Behavior preserved (verified machine-path covers ReauthRequired).
+
+### DELETED (legacy authority path) — oauth-flow capacity shell verdict (sweep MEDIUM 3rd-flag)
+OAuthFlowRegistry start_with_pruned/admit_device_code_with_pruned had a shell `if count >= max_outstanding {
+Err(CapacityExceeded) }` capacity admission duplicating AuthMachine AdmitOAuthBrowserFlow/AdmitOAuthDeviceFlow.
+The production RuntimeOAuthFlowHandle already routes capacity through AuthMachine (LifecycleRejected). Made the
+registry a PURE flow-store: deleted all shell capacity checks, collapsed the _with_pruned/_without_capacity twins
+into single capacity-free store-mutations, DELETED the now-unconstructed OAuthFlowError::CapacityExceeded variant
++ its dead surface match arms (rest/rpc fall through to the existing generic-error arm the runtime path already
+hit). Deleted the bare-registry capacity test (AuthMachine-routed capacity covered by the runtime test). AuthMachine
+is now the sole oauth-flow capacity authority.
+
+### DEFENDED — round-9 LOWs not VIOLATIONS by the blind reviewers (presentational / projection / machine-routed):
+- supervisor_activation_error string-contains (alpha LOW): adds a human-readable diagnostic LINE to a rollback
+  error report; presentational, decides no machine verdict (alpha verdict CLEAN).
+- tools.rs coarse spawn gate (sweep LOW): reflects machine-owned can_spawn_any_profile scope projection as a
+  fast-path early-out; the authoritative per-spawn admission is machine-routed (resolve_spawn_member_admission).
+- should_restore_deferred_start_turn (sweep LOW possible): recovery/restore disposition; pre-run-failure typed obs.
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; auth-core+runtime+rest+rpc --all-features 1923
+passed; machine-codegen 94; clippy --all-features -D warnings clean; seam 0 debt. Behavior preserved.

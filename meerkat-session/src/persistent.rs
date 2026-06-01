@@ -870,7 +870,8 @@ async fn save_session_projection_with_storage_normalization_bridge(
         Ok(()) => Ok(()),
         Err(
             error @ (SessionStoreError::TranscriptContinuityViolation { .. }
-            | SessionStoreError::InvalidTranscriptRewrite { .. }),
+            | SessionStoreError::InvalidTranscriptRewrite { .. }
+            | SessionStoreError::MonotonicityViolation { .. }),
         ) => {
             let Some(previous) = store.load(session.id()).await? else {
                 return Err(error);
@@ -6467,6 +6468,91 @@ mod tests {
         }
     }
 
+    struct MonotonicityOnceStore {
+        inner: MemoryStore,
+        fail_next_save: AtomicBool,
+    }
+
+    impl MonotonicityOnceStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                fail_next_save: AtomicBool::new(false),
+            }
+        }
+
+        fn fail_next_save_with_monotonicity(&self) {
+            self.fail_next_save.store(true, Ordering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for MonotonicityOnceStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            if self.fail_next_save.swap(false, Ordering::AcqRel) {
+                return Err(SessionStoreError::MonotonicityViolation {
+                    id: session.id().clone(),
+                    prev_len: session.messages().len() + 1,
+                    new_len: session.messages().len(),
+                });
+            }
+            self.inner.save(session).await
+        }
+
+        async fn save_transcript_rewrite(
+            &self,
+            session: &Session,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), SessionStoreError> {
+            self.inner.save_transcript_rewrite(session, commit).await
+        }
+
+        async fn save_authoritative_projection(
+            &self,
+            session: &Session,
+        ) -> Result<(), SessionStoreError> {
+            self.inner.save_authoritative_projection(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), SessionStoreError> {
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn delete_if_current_revision(
+            &self,
+            id: &SessionId,
+            expected_current_revision: &str,
+        ) -> Result<bool, SessionStoreError> {
+            self.inner
+                .delete_if_current_revision(id, expected_current_revision)
+                .await
+        }
+    }
+
     struct BlockingArchiveSaveStore {
         inner: MemoryStore,
         block_archived_saves: AtomicBool,
@@ -9060,6 +9146,71 @@ mod tests {
         assert_eq!(
             saved.transcript_revision().expect("saved revision"),
             incoming_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn test_projection_bridge_recovers_monotonicity_with_verified_projection() {
+        let store = MonotonicityOnceStore::new();
+        let blob_store = memory_blob_store();
+
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text(
+            "persisted prompt before compaction".to_string(),
+        )));
+        previous.push(Message::Assistant(meerkat_core::AssistantMessage {
+            content: "persisted answer before compaction".to_string(),
+            tool_calls: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+        }));
+        store
+            .save(&previous)
+            .await
+            .expect("seed previous projection");
+        let parent_revision = previous.transcript_revision().expect("parent revision");
+
+        let mut compacted = previous.clone();
+        let commit = compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: previous.messages().len(),
+                },
+                vec![Message::User(UserMessage::text(
+                    "[Context compacted] persisted summary".to_string(),
+                ))],
+                TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .expect("compaction rewrite should commit");
+        store
+            .save_transcript_rewrite(&compacted, &commit)
+            .await
+            .expect("seed audited compacted projection");
+        let compacted_revision = compacted
+            .transcript_revision()
+            .expect("compacted revision should digest");
+
+        store.fail_next_save_with_monotonicity();
+        save_session_projection_with_storage_normalization_bridge(
+            &store,
+            blob_store.as_ref(),
+            &compacted,
+        )
+        .await
+        .expect("verified projection bridge should recover monotonicity rejection");
+
+        let saved = store
+            .load(compacted.id())
+            .await
+            .expect("load saved projection")
+            .expect("projection should remain persisted");
+        assert_eq!(
+            saved.transcript_revision().expect("saved revision"),
+            compacted_revision
         );
     }
 

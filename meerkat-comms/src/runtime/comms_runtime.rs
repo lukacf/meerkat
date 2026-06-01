@@ -2713,8 +2713,11 @@ impl CommsRuntime {
             // Register the waiter BEFORE draining so a message that arrives
             // between the drain returning empty and the await cannot be lost.
             // inbox_notify uses notify_waiters() which only wakes already-
-            // registered listeners.
-            let notified = self.inbox_notify.notified();
+            // registered listeners, and a `Notified` future is not registered
+            // until it is pinned and `enable()`d (or first polled) — so do that
+            // here, before the drain, not at the trailing `.await`.
+            let mut notified = std::pin::pin!(self.inbox_notify.notified());
+            notified.as_mut().enable();
             {
                 let mut inbox = self.inbox.lock().await;
                 // Consume one entry at a time so back-to-back messages are
@@ -2727,7 +2730,7 @@ impl CommsRuntime {
                     }
                 }
             }
-            notified.await;
+            notified.as_mut().await;
         }
     }
 

@@ -87,11 +87,17 @@ pub fn spawn_comms_drain(
         // transitions; no shell-local mirror.
 
         loop {
-            // Register BEFORE drain — notify_waiters() guarantees wakeup
-            // from creation, so a message arriving between drain-returns-empty
-            // and the await cannot be lost. No enable() needed.
-            // (Mirrors the pattern in CommsRuntime::recv_message.)
-            let notified = inbox_notify.notified();
+            // Register the waiter BEFORE draining. `notify_waiters()` only wakes
+            // waiters that are already registered, and a `Notified` future is not
+            // registered until it is first polled — so we pin and `enable()` it
+            // here. Without the `enable()`, an inbox admission whose
+            // `notify_waiters()` fires in the window between the drain returning
+            // empty and the await first polling `notified` is lost; with the mob
+            // `Duration::MAX` idle timeout that stalls the drain forever (a peer
+            // message reported "sent" but never drained, e.g. a readout leg that
+            // arrives after the recipient went idle).
+            let mut notified = std::pin::pin!(inbox_notify.notified());
+            notified.as_mut().enable();
 
             let candidates = comms_runtime.drain_peer_input_candidates().await;
             if candidates.is_empty() {
@@ -106,7 +112,7 @@ pub fn spawn_comms_drain(
                         .await;
                     return;
                 }
-                if crate::tokio::time::timeout(timeout_dur, notified)
+                if crate::tokio::time::timeout(timeout_dur, notified.as_mut())
                     .await
                     .is_err()
                 {

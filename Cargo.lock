@@ -3108,6 +3108,7 @@ dependencies = [
  "meerkat-machine-schema",
  "opus",
  "rubato",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

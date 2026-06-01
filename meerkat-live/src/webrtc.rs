@@ -1006,7 +1006,23 @@ mod tests {
     use meerkat_core::types::SessionId;
     use tokio::sync::mpsc;
 
+    /// rustls 0.23 requires a process-global default `CryptoProvider`. webrtc's
+    /// DTLS handshake (driven at connect time by these tests) panics without one
+    /// whenever more than one provider feature is active in the build graph —
+    /// e.g. under a full `--workspace --all-features` union that pulls both
+    /// `ring` and `aws-lc-rs` through other crates, which disables rustls's
+    /// implicit single-provider default. Install `ring` explicitly, idempotently,
+    /// so the webrtc tests are robust across feature combinations.
+    fn ensure_test_crypto_provider() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
     async fn new_browser_peer() -> RTCPeerConnection {
+        ensure_test_crypto_provider();
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs().unwrap();
         APIBuilder::new()

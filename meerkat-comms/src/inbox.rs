@@ -109,6 +109,9 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) raw_item_id: InteractionId,
     pub(crate) item: InboxItem,
     pub(crate) class: PeerInputClass,
+    /// Machine-owned actionable grouping verdict, mirrored from the
+    /// MeerkatMachine PeerIngress classification effect (via `PreparedIngressItem`).
+    pub(crate) actionable: bool,
     pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
@@ -327,6 +330,7 @@ impl ClassifiedInboxQueue {
             raw_item_id: prepared.raw_item_id,
             item: prepared.item,
             class: prepared.class,
+            actionable: prepared.actionable,
             auth: prepared.auth,
             kind,
             from_peer: prepared.from_peer,
@@ -337,7 +341,7 @@ impl ClassifiedInboxQueue {
             response_terminality: prepared.response_terminality,
             text_projection: prepared.text_projection,
         };
-        let is_actionable = entry.class.is_actionable();
+        let is_actionable = entry.actionable;
         self.entries.push_back(entry);
         AdmissionPushDecision {
             outcome: AdmissionOutcome::Admitted,
@@ -388,7 +392,7 @@ impl ClassifiedInboxQueue {
         let queued_entries: Vec<_> = self.entries.iter().map(snapshot_entry).collect();
         let actionable_count = queued_entries
             .iter()
-            .filter(|entry| entry.class.is_actionable())
+            .filter(|entry| entry.actionable)
             .count();
         let response_count = queued_entries
             .iter()
@@ -921,6 +925,7 @@ fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
             InboxItem::PlainEvent { interaction_id, .. } => interaction_id.map(InteractionId),
         },
         class: entry.class,
+        actionable: entry.actionable,
         kind: entry.kind,
         from_peer_display: entry
             .from_peer

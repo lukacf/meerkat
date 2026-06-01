@@ -485,16 +485,24 @@ macro_rules! mob_catalog_machine_dsl {
             // the shell mirrors (Deny -> access_denied).
             ResolveCurrentMobAdmission { can_manage_mob: bool },
             // Coarse spawn-tool admission for the spawn-member tool surfaces
-            // (`spawn_member` / `spawn_many_members`). The tool shell extracts a
-            // single pure observation — whether the operator can spawn ANY
-            // profile in the current mob (a machine-owned operator-scope
-            // set-non-empty projection) — and feeds it here. MobMachine — not
-            // the tool shell — decides the Allow/Deny admission verdict, which
-            // the shell mirrors (Deny -> access_denied). This coarse gate has
-            // unique coverage over the empty-specs `spawn_many_members` case
-            // (zero per-member iterations fire no per-member admission), so it
-            // must be machine-routed rather than reduced in the shell.
-            ResolveSpawnToolAdmission { can_spawn_any_profile: bool },
+            // (`spawn_member` / `spawn_many_members`). The tool shell extracts
+            // TWO raw, atomic observations — whether the operator can manage the
+            // current mob (`can_manage_mob`, a machine-minted operator-scope
+            // membership projection) and whether the operator's spawn-profile
+            // scope for the mob is non-empty (`spawn_profile_scope_present`, a
+            // machine-owned operator-scope set-non-empty projection) — and feeds
+            // BOTH here without pre-composing them. MobMachine — not the tool
+            // shell — composes the disjunction (`can_manage_mob ||
+            // spawn_profile_scope_present`) and decides the Allow/Deny admission
+            // verdict, which the shell mirrors (Deny -> access_denied). This
+            // coarse gate has unique coverage over the empty-specs
+            // `spawn_many_members` case (zero per-member iterations fire no
+            // per-member admission), so it must be machine-routed rather than
+            // reduced in the shell.
+            ResolveSpawnToolAdmission {
+                can_manage_mob: bool,
+                spawn_profile_scope_present: bool,
+            },
             // Operator create-mob admission for the mob-creation tool surface.
             // The tool shell extracts a single pure observation — whether the
             // operator holds the create-mobs capability bit (a machine-minted
@@ -1535,8 +1543,10 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResolveSpawnToolAdmissionAllowed {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ResolveSpawnToolAdmission { can_spawn_any_profile }
-            guard "spawn_any_profile_allows" { can_spawn_any_profile == true }
+            on input ResolveSpawnToolAdmission { can_manage_mob, spawn_profile_scope_present }
+            guard "spawn_scope_allows" {
+                can_manage_mob == true || spawn_profile_scope_present == true
+            }
             update {}
             to Running
             emit SpawnToolAdmissionResolved { admission: MobSpawnToolAdmissionKind::Allowed }
@@ -1544,8 +1554,10 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResolveSpawnToolAdmissionDenied {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ResolveSpawnToolAdmission { can_spawn_any_profile }
-            guard "no_spawn_any_profile_denies" { can_spawn_any_profile == false }
+            on input ResolveSpawnToolAdmission { can_manage_mob, spawn_profile_scope_present }
+            guard "no_spawn_scope_denies" {
+                can_manage_mob == false && spawn_profile_scope_present == false
+            }
             update {}
             to Running
             emit SpawnToolAdmissionResolved { admission: MobSpawnToolAdmissionKind::Denied }

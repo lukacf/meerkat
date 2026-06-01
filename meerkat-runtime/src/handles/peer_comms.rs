@@ -226,6 +226,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
 
 struct PeerIngressClassifiedEffect {
     class: mm_dsl::PeerIngressInputClass,
+    actionable: bool,
     kind: mm_dsl::PeerIngressAdmittedKind,
     auth: mm_dsl::PeerIngressAuthClass,
     lifecycle_kind: Option<mm_dsl::PeerIngressLifecycleClass>,
@@ -243,6 +244,7 @@ fn classified_effect(
         .find_map(|effect| match effect {
             mm_dsl::MeerkatMachineEffect::PeerIngressClassified {
                 class,
+                actionable,
                 kind,
                 auth,
                 lifecycle_kind,
@@ -251,6 +253,7 @@ fn classified_effect(
                 response_terminality,
             } => Some(PeerIngressClassifiedEffect {
                 class,
+                actionable,
                 kind,
                 auth,
                 lifecycle_kind,
@@ -365,6 +368,7 @@ fn classification_from_effect(
 
     meerkat_core::PeerIngressClassification {
         class,
+        actionable: effect.actionable,
         kind,
         auth,
         lifecycle_kind: effect.lifecycle_kind.map(lifecycle_from_dsl),
@@ -708,6 +712,145 @@ mod tests {
             meerkat_core::PeerIngressAuthDecision::Required
         );
         assert_eq!(admission.request_id.as_deref(), Some("request-1"));
+    }
+
+    #[test]
+    fn machine_emits_actionable_bit_matching_grouping_for_classified_envelopes() {
+        // The machine is the authority on the actionable grouping; assert the
+        // emitted `actionable` bit matches the documented 7-of-12 grouping for
+        // every class the MeerkatMachine PeerIngress classifier can emit.
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+
+        // ActionableMessage -> actionable
+        let message = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "m1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Message {
+                    body: "hi".to_string(),
+                },
+            })
+            .expect("attached should classify message");
+        assert_eq!(
+            message.classification.class,
+            meerkat_core::PeerInputClass::ActionableMessage
+        );
+        assert!(message.classification.actionable);
+
+        // ActionableRequest -> actionable
+        let request = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "r1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "do.work".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("attached should classify request");
+        assert_eq!(
+            request.classification.class,
+            meerkat_core::PeerInputClass::ActionableRequest
+        );
+        assert!(request.classification.actionable);
+
+        // ResponseTerminal -> actionable (responses need a pending request, but
+        // the classification grouping is independent of correlation; the
+        // machine emits the bit on the class). Verify via a completed response.
+        let response = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "resp-1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Response {
+                    in_reply_to: uuid::Uuid::new_v4().to_string(),
+                    status: meerkat_core::ResponseStatus::Completed,
+                    result: serde_json::json!({}),
+                },
+            })
+            .expect("attached should classify response");
+        assert_eq!(
+            response.classification.class,
+            meerkat_core::PeerInputClass::ResponseTerminal
+        );
+        assert!(response.classification.actionable);
+
+        // PeerLifecycleAdded -> NOT actionable
+        let lifecycle = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "lc-1".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                    kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+                    params: serde_json::json!({ "peer": "worker-1" }),
+                },
+            })
+            .expect("attached should classify lifecycle");
+        assert_eq!(
+            lifecycle.classification.class,
+            meerkat_core::PeerInputClass::PeerLifecycleAdded
+        );
+        assert!(!lifecycle.classification.actionable);
+
+        // Ack -> NOT actionable
+        let ack = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "ack-1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Ack {
+                    in_reply_to: uuid::Uuid::new_v4().to_string(),
+                },
+            })
+            .expect("attached should classify ack");
+        assert_eq!(ack.classification.class, meerkat_core::PeerInputClass::Ack);
+        assert!(!ack.classification.actionable);
+
+        // PlainEvent -> actionable
+        let plain = handle
+            .classify_plain_event(PeerIngressPlainEventFacts {
+                source_name: "external".to_string(),
+                body: "event".to_string(),
+            })
+            .expect("attached should classify plain event");
+        assert_eq!(
+            plain.classification.class,
+            meerkat_core::PeerInputClass::PlainEvent
+        );
+        assert!(plain.classification.actionable);
+
+        // SilentRequest -> NOT actionable
+        let silent_state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            silent_intent_overrides: BTreeSet::from(["probe.silent".to_string()]),
+            ..Default::default()
+        };
+        let silent_authority = Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(silent_state).expect("recoverable"),
+        ));
+        let silent_handle = RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(
+            silent_authority,
+        )));
+        let silent = silent_handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "s1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "probe.silent".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("attached should classify silent request");
+        assert_eq!(
+            silent.classification.class,
+            meerkat_core::PeerInputClass::SilentRequest
+        );
+        assert!(!silent.classification.actionable);
     }
 
     #[test]

@@ -678,7 +678,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MobEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
 - `LiveChannelStatusResolved`(channel_id: String, status: LiveChannelPublicStatus, sequence: u64, status_observation_sequence: u64, degradation_reason: Option<LiveChannelDegradationReason>, degradation_detail: Option<String>)
 - `EnqueueClassifiedEntry`
-- `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
+- `PeerIngressClassified`(class: PeerIngressInputClass, actionable: Bool, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `PeerResponseReplyClassified`(response_terminality: PeerIngressResponseTerminality)
 - `PeerIngressReceiveResolved`(outcome: PeerIngressReceiveOutcomeClass, admission_diagnostic: Option<PeerIngressAdmissionDiagnosticClass>, phase: PeerIngressAuthorityPhaseClass)
 - `PeerIngressDequeueResolved`(phase: PeerIngressAuthorityPhaseClass)

@@ -4428,6 +4428,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             EnqueueClassifiedEntry,
             PeerIngressClassified {
                 class: Enum<PeerIngressInputClass>,
+                // Machine-owned actionable grouping verdict: encodes which
+                // input classes wake the actionable runtime-ingress consumer.
+                // The shell mirrors this bit rather than re-deriving the
+                // many-to-one class->actionable POLICY.
+                actionable: bool,
                 kind: Enum<PeerIngressAdmittedKind>,
                 auth: Enum<PeerIngressAuthClass>,
                 lifecycle_kind: Option<Enum<PeerIngressLifecycleClass>>,
@@ -10547,6 +10552,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableMessage,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Message,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -10568,6 +10574,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableMessage,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Message,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -10592,6 +10599,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -10622,6 +10630,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -10652,6 +10661,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -10682,6 +10692,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -10712,6 +10723,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -10742,6 +10754,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -10772,6 +10785,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -10802,6 +10816,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -10832,6 +10847,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -10862,6 +10878,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -10892,6 +10909,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -10922,6 +10940,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -10952,6 +10971,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -10983,6 +11003,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -11008,6 +11029,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -11033,6 +11055,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -11061,6 +11084,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11089,6 +11113,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11114,6 +11139,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -11139,6 +11165,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -11164,6 +11191,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::SupervisorBridgeExempt,
                 lifecycle_kind: None,
@@ -11192,6 +11220,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11220,6 +11249,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11244,6 +11274,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -11274,6 +11305,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -11304,6 +11336,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleAdded,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
@@ -11334,6 +11367,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -11364,6 +11398,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -11394,6 +11429,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -11424,6 +11460,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -11454,6 +11491,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleRetired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
@@ -11484,6 +11522,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -11514,6 +11553,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -11544,6 +11584,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -11574,6 +11615,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -11604,6 +11646,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PeerLifecycleUnwired,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Request,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
@@ -11634,6 +11677,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseProgress,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11658,6 +11702,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseProgress,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11682,6 +11727,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11706,6 +11752,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11730,6 +11777,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11754,6 +11802,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ResponseTerminal,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::Response,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11775,6 +11824,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::Ack,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Ack,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11796,6 +11846,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::Ack,
+                actionable: false,
                 kind: PeerIngressAdmittedKind::Ack,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11813,6 +11864,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PlainEvent,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::PlainEvent,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,
@@ -11830,6 +11882,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit EnqueueClassifiedEntry
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::PlainEvent,
+                actionable: true,
                 kind: PeerIngressAdmittedKind::PlainEvent,
                 auth: PeerIngressAuthClass::Required,
                 lifecycle_kind: None,

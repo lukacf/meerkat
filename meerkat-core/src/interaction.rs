@@ -300,20 +300,26 @@ pub enum PeerInputClass {
     PlainEvent,
 }
 
-impl PeerInputClass {
-    /// Returns true if this class is actionable runtime ingress.
-    pub fn is_actionable(&self) -> bool {
-        matches!(
-            self,
-            Self::ActionableMessage
-                | Self::ActionableRequest
-                | Self::ResponseProgress
-                | Self::ResponseTerminal
-                | Self::PlainEvent
-                | Self::PeerLifecycleKickoffFailed
-                | Self::PeerLifecycleKickoffCancelled
-        )
-    }
+/// Pure typed mirror of the actionable grouping the MeerkatMachine PeerIngress
+/// region encodes on its classification effect. This is NOT consumed by the
+/// live admission path (comms mirrors the machine-emitted `actionable` bit on
+/// `PeerIngressClassification`); it exists only so the core-side
+/// [`PeerIngressClassification`] constructors stay coherent with the machine
+/// and so the parity test can assert agreement. The many-to-one
+/// class->actionable POLICY lives in the canonical machine DSL, not here —
+/// mirroring the `work_graph_error_kind` precedent where the variant map is a
+/// pure projection while the grouping policy is machine-owned.
+const fn peer_input_class_actionable_grouping(class: PeerInputClass) -> bool {
+    matches!(
+        class,
+        PeerInputClass::ActionableMessage
+            | PeerInputClass::ActionableRequest
+            | PeerInputClass::ResponseProgress
+            | PeerInputClass::ResponseTerminal
+            | PeerInputClass::PlainEvent
+            | PeerInputClass::PeerLifecycleKickoffFailed
+            | PeerInputClass::PeerLifecycleKickoffCancelled
+    )
 }
 
 /// Typed auth exemption recognized by peer ingress authority.
@@ -544,6 +550,12 @@ impl PeerIngressFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressClassification {
     pub class: PeerInputClass,
+    /// Machine-owned actionable grouping verdict. The MeerkatMachine PeerIngress
+    /// region encodes which input classes wake the actionable runtime-ingress
+    /// consumer and emits this bit on its classification effect; downstream
+    /// shells mirror it rather than re-deriving the many-to-one
+    /// class->actionable POLICY.
+    pub actionable: bool,
     pub kind: PeerIngressKind,
     pub auth: PeerIngressAuthDecision,
     pub lifecycle_kind: Option<PeerLifecycleKind>,
@@ -554,6 +566,7 @@ impl PeerIngressClassification {
     pub const fn required(class: PeerInputClass, kind: PeerIngressKind) -> Self {
         Self {
             class,
+            actionable: peer_input_class_actionable_grouping(class),
             kind,
             auth: PeerIngressAuthDecision::Required,
             lifecycle_kind: None,
@@ -569,6 +582,7 @@ impl PeerIngressClassification {
         };
         Self {
             class,
+            actionable: peer_input_class_actionable_grouping(class),
             kind: PeerIngressKind::Request,
             auth: PeerIngressAuthDecision::Required,
             lifecycle_kind: Some(kind),
@@ -853,6 +867,10 @@ pub struct PeerIngressEntrySnapshot {
     pub interaction_id: Option<InteractionId>,
     /// Pre-computed ingress classification.
     pub class: PeerInputClass,
+    /// Machine-owned actionable grouping verdict carried at ingress time.
+    /// Mirrors the MeerkatMachine PeerIngress classification effect; consumers
+    /// filter on this bit instead of re-deriving the class->actionable grouping.
+    pub actionable: bool,
     /// Coarse admitted kind.
     pub kind: PeerIngressKind,
     /// Display-only sender label, if applicable. Not route/trust authority.
@@ -1065,5 +1083,57 @@ mod tests {
             value.get("blocks").is_none(),
             "blocks: None should not appear in JSON"
         );
+    }
+
+    /// Parity: the core-side actionable grouping mirror must agree with the
+    /// MeerkatMachine PeerIngress grouping for every one of the 12
+    /// `PeerInputClass` variants (the 7-of-12 actionable set). The machine
+    /// emits the live `actionable` bit; this asserts the mirror used by the
+    /// `PeerIngressClassification` constructors stays in lock-step with that
+    /// grouping so neither drifts.
+    #[test]
+    fn actionable_grouping_mirror_matches_machine_grouping_for_all_variants() {
+        // Exhaustive match forces this test to break if a variant is added,
+        // so the grouping verdict for every class stays explicit.
+        for (class, expected_actionable) in [
+            (PeerInputClass::ActionableMessage, true),
+            (PeerInputClass::ActionableRequest, true),
+            (PeerInputClass::ResponseProgress, true),
+            (PeerInputClass::ResponseTerminal, true),
+            (PeerInputClass::PlainEvent, true),
+            (PeerInputClass::PeerLifecycleKickoffFailed, true),
+            (PeerInputClass::PeerLifecycleKickoffCancelled, true),
+            (PeerInputClass::PeerLifecycleAdded, false),
+            (PeerInputClass::PeerLifecycleRetired, false),
+            (PeerInputClass::PeerLifecycleUnwired, false),
+            (PeerInputClass::SilentRequest, false),
+            (PeerInputClass::Ack, false),
+        ] {
+            assert_eq!(
+                peer_input_class_actionable_grouping(class),
+                expected_actionable,
+                "actionable grouping verdict drifted for {class:?}"
+            );
+        }
+        // Compile-time exhaustiveness guard: if a variant is added without a
+        // grouping decision in the explicit list above, this exhaustive match
+        // fails to compile, forcing the new variant's grouping to be declared.
+        fn assert_variant_covered(class: PeerInputClass) {
+            match class {
+                PeerInputClass::ActionableMessage
+                | PeerInputClass::ActionableRequest
+                | PeerInputClass::ResponseProgress
+                | PeerInputClass::ResponseTerminal
+                | PeerInputClass::PlainEvent
+                | PeerInputClass::PeerLifecycleKickoffFailed
+                | PeerInputClass::PeerLifecycleKickoffCancelled
+                | PeerInputClass::PeerLifecycleAdded
+                | PeerInputClass::PeerLifecycleRetired
+                | PeerInputClass::PeerLifecycleUnwired
+                | PeerInputClass::SilentRequest
+                | PeerInputClass::Ack => (),
+            }
+        }
+        assert_variant_covered(PeerInputClass::Ack);
     }
 }

@@ -5313,22 +5313,27 @@ impl MobHandle {
     /// Resolve the coarse spawn-tool admission verdict for the spawn-member
     /// tool surfaces (`spawn_member` / `spawn_many_members`).
     ///
-    /// The tool surface extracts a single raw observation — whether the
-    /// operator can spawn ANY profile in the current mob (a machine-owned
-    /// operator-scope set-non-empty projection) — and feeds it here. MobMachine,
-    /// not the tool surface, decides the Allow/Deny verdict; the surface mirrors
-    /// the returned verdict (`SpawnToolAdmission::Denied` -> `access_denied`).
-    /// This coarse gate uniquely covers the empty-specs `spawn_many_members`
-    /// case (where zero per-member iterations fire no per-member admission), so
-    /// it must be machine-routed rather than reduced in the shell. Fails closed
-    /// if the machine emits no verdict.
+    /// The tool surface extracts TWO raw, atomic observations — whether the
+    /// operator can manage the current mob (`can_manage_mob`) and whether the
+    /// operator's spawn-profile scope for the mob is non-empty
+    /// (`spawn_profile_scope_present`, a machine-owned operator-scope
+    /// set-non-empty projection) — and feeds BOTH here WITHOUT pre-composing
+    /// them. MobMachine, not the tool surface, composes the disjunction and
+    /// decides the Allow/Deny verdict; the surface mirrors the returned verdict
+    /// (`SpawnToolAdmission::Denied` -> `access_denied`). This coarse gate
+    /// uniquely covers the empty-specs `spawn_many_members` case (where zero
+    /// per-member iterations fire no per-member admission), so it must be
+    /// machine-routed rather than reduced in the shell. Fails closed if the
+    /// machine emits no verdict.
     pub async fn resolve_spawn_tool_admission(
         &self,
-        can_spawn_any_profile: bool,
+        can_manage_mob: bool,
+        spawn_profile_scope_present: bool,
     ) -> Result<SpawnToolAdmission, MobError> {
         let effects = self
             .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnToolAdmission {
-                can_spawn_any_profile,
+                can_manage_mob,
+                spawn_profile_scope_present,
             })
             .await?;
         let admission = effects

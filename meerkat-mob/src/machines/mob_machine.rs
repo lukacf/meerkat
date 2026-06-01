@@ -1984,14 +1984,22 @@ mod tests {
     #[test]
     fn spawn_tool_admission_is_decided_by_machine() {
         use MobSpawnToolAdmissionKind as Admission;
-        // can_spawn_any_profile -> expected verdict.
-        let cases = [(true, Admission::Allowed), (false, Admission::Denied)];
-        for (can_spawn_any_profile, expected) in cases {
+        // The shell feeds the TWO raw facts; the machine composes the
+        // disjunction (`can_manage_mob || spawn_profile_scope_present`). Only
+        // false/false denies — this is the empty-specs spawn_many deny case.
+        let cases = [
+            (true, true, Admission::Allowed),
+            (true, false, Admission::Allowed),
+            (false, true, Admission::Allowed),
+            (false, false, Admission::Denied),
+        ];
+        for (can_manage_mob, spawn_profile_scope_present, expected) in cases {
             let mut authority = MobMachineAuthority::new();
             let transition = MobMachineMutator::apply(
                 &mut authority,
                 MobMachineInput::ResolveSpawnToolAdmission {
-                    can_spawn_any_profile,
+                    can_manage_mob,
+                    spawn_profile_scope_present,
                 },
             )
             .expect("spawn-tool admission should resolve a verdict");
@@ -2002,7 +2010,7 @@ mod tests {
             assert_eq!(
                 admission,
                 Some(expected),
-                "for can_spawn_any_profile={can_spawn_any_profile}"
+                "for can_manage_mob={can_manage_mob} spawn_profile_scope_present={spawn_profile_scope_present}"
             );
         }
     }

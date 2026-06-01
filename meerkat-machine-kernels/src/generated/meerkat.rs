@@ -13160,6 +13160,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PeerIngressClassified {
         pub class: PeerIngressInputClass,
+        pub actionable: bool,
         pub kind: PeerIngressAdmittedKind,
         pub auth: PeerIngressAuthClass,
         pub lifecycle_kind: Option<PeerIngressLifecycleClass>,

@@ -37,6 +37,10 @@ pub(crate) struct PreparedIngressItem {
     pub(crate) raw_item_id: InteractionId,
     pub(crate) kind: PeerIngressKind,
     pub(crate) class: PeerInputClass,
+    /// Machine-owned actionable grouping verdict, mirrored from the
+    /// MeerkatMachine PeerIngress classification effect. The inbox mirrors this
+    /// bit instead of re-deriving the class->actionable grouping locally.
+    pub(crate) actionable: bool,
     pub(crate) auth: PeerIngressAuthDecision,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
@@ -258,6 +262,7 @@ impl IngressClassificationContext {
                     raw_item_id: InteractionId(envelope.id),
                     kind: classification.kind,
                     class: classification.class,
+                    actionable: classification.actionable,
                     auth: classification.auth,
                     trusted_sender,
                     from_peer: Some(from_name),
@@ -296,6 +301,7 @@ impl IngressClassificationContext {
                     raw_item_id: InteractionId(interaction_id),
                     kind: classification.kind,
                     class: classification.class,
+                    actionable: classification.actionable,
                     auth: classification.auth,
                     trusted_sender: true,
                     from_peer: None,

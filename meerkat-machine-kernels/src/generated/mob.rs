@@ -4070,7 +4070,8 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSpawnToolAdmission {
-        pub can_spawn_any_profile: bool,
+        pub can_manage_mob: bool,
+        pub spawn_profile_scope_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveCreateMobAdmission {

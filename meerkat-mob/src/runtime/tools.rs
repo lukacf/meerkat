@@ -599,26 +599,26 @@ impl MobOperatorToolDispatcher {
         ))
     }
 
-    fn can_spawn_any_profile_in_current_mob(&self) -> bool {
-        let mob_id = self.handle.definition().id.as_str();
-        self.authority_context.can_spawn_any_profile_in_mob(mob_id)
-    }
-
     /// Coarse spawn-tool admission for the spawn-member tool surfaces.
     ///
-    /// Extracts a single pure observation — whether the operator can spawn ANY
-    /// profile in the current mob (a machine-owned operator-scope set-non-empty
-    /// projection) — and feeds it to MobMachine. MobMachine, not this shell,
-    /// decides the Allow/Deny verdict; we mirror it (Denied -> access_denied).
-    /// This coarse gate uniquely covers the empty-specs `spawn_many_members`
-    /// case (where the per-member loop runs zero iterations and fires no
-    /// per-member admission), so the deny must be machine-routed here rather
-    /// than reduced in the shell. Fails closed.
+    /// Extracts TWO raw, atomic observations — whether the operator can manage
+    /// the current mob (`can_manage_mob`) and whether the operator's
+    /// spawn-profile scope for the mob is non-empty (`spawn_profile_scope_present`)
+    /// — and feeds BOTH to MobMachine WITHOUT pre-composing them. MobMachine,
+    /// not this shell, composes the `can_manage_mob || spawn_profile_scope_present`
+    /// disjunction and decides the Allow/Deny verdict; we mirror it (Denied ->
+    /// access_denied). This coarse gate uniquely covers the empty-specs
+    /// `spawn_many_members` case (where the per-member loop runs zero iterations
+    /// and fires no per-member admission), so the deny must be machine-routed
+    /// here rather than reduced in the shell. Fails closed.
     async fn ensure_spawn_tool_scope(&self, tool_name: &str) -> Result<(), ToolError> {
-        let can_spawn_any_profile = self.can_spawn_any_profile_in_current_mob();
+        let mob_id = self.handle.definition().id.as_str();
+        let can_manage_mob = self.authority_context.can_manage_mob(mob_id);
+        let spawn_profile_scope_present =
+            self.authority_context.spawn_profile_scope_present(mob_id);
         let admission = self
             .handle
-            .resolve_spawn_tool_admission(can_spawn_any_profile)
+            .resolve_spawn_tool_admission(can_manage_mob, spawn_profile_scope_present)
             .await
             .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
         match admission {

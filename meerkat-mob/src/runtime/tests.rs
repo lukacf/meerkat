@@ -3411,9 +3411,9 @@ fn generated_mob_operator_authority_with_spawn_profile(
 ) -> meerkat_core::service::MobToolAuthorityContext {
     // Create-only authority with NO manage scope on the target mob, granted a
     // single spawnable profile in that mob. This yields
-    // `can_spawn_any_profile_in_mob == true` (spawn scope non-empty) without
+    // `spawn_profile_scope_present == true` (spawn scope non-empty) without
     // `can_manage_mob`, so current-mob management tools stay denied while the
-    // coarse spawn-tool gate must admit.
+    // coarse spawn-tool gate must admit (the machine composes the disjunction).
     let authority = meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
         .expect("generated create-only mob authority should be accepted");
     let authority =

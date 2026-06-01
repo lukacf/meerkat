@@ -1038,8 +1038,9 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     },
     MobMachineRuntimeInternalClassificationRecord {
         // Coarse spawn-tool admission for the spawn-member tool surfaces is
-        // decided by MobMachine from the tool surface's pure
-        // can-spawn-any-profile observation; the tool surface drives this as an
+        // decided by MobMachine, which composes the disjunction from the tool
+        // surface's TWO raw observations (can_manage_mob,
+        // spawn_profile_scope_present); the tool surface drives this as an
         // operator-scope admission input, not a standalone surface command.
         input: MobMachineCatalogInput::ResolveSpawnToolAdmission,
         reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,

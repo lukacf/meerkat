@@ -578,12 +578,16 @@ impl MobToolAuthorityContext {
                 .is_some_and(|profiles| profiles.contains(profile))
     }
 
-    pub fn can_spawn_any_profile_in_mob(&self, mob_id: &str) -> bool {
-        self.can_manage_mob(mob_id)
-            || self
-                .spawn_profile_scope()
-                .get(mob_id)
-                .is_some_and(|profiles| !profiles.is_empty())
+    /// Raw, atomic observation: whether the operator holds a non-empty
+    /// spawn-profile scope for `mob_id`. This is one of the two pure facts the
+    /// spawn-tool shell feeds to MobMachine's `ResolveSpawnToolAdmission`
+    /// (alongside [`Self::can_manage_mob`]); the machine — not the shell —
+    /// composes the disjunction into the Allow/Deny verdict. This is NOT a
+    /// pre-reduced admission conclusion.
+    pub fn spawn_profile_scope_present(&self, mob_id: &str) -> bool {
+        self.spawn_profile_scope()
+            .get(mob_id)
+            .is_some_and(|profiles| !profiles.is_empty())
     }
 }
 
@@ -1891,7 +1895,7 @@ mod tests {
             None,
         );
 
-        assert!(ctx.can_spawn_any_profile_in_mob("mob-1"));
+        assert!(ctx.spawn_profile_scope_present("mob-1"));
         assert!(ctx.can_spawn_profile_in_mob("mob-1", "investigator"));
         assert!(!ctx.can_spawn_profile_in_mob("mob-1", "writer"));
         assert!(!ctx.can_manage_mob("mob-1"));
@@ -1919,7 +1923,7 @@ mod tests {
         assert!(!restored.can_create_mobs());
         assert!(!restored.can_mutate_profiles());
         assert!(!restored.can_manage_mob("mob-1"));
-        assert!(!restored.can_spawn_any_profile_in_mob("mob-1"));
+        assert!(!restored.spawn_profile_scope_present("mob-1"));
         assert!(restored.caller_provenance().is_none());
         assert!(restored.audit_invocation_id().is_none());
     }

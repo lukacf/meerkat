@@ -713,3 +713,34 @@ audit-generated-headers 37 paths all honest.
   judged likely-out-of-canonical-machine-scope).
 - ensure_supervisor_authorized None-cause arm `None => false` (fail-closed no-rebind for an absent typed cause;
   the typed-cause path is machine-routed via ClassifyBridgeRejectionRecovery).
+
+## CONVERGENCE ROUND 12 — actionable-grouping folded + spawn-tool disjunction de-theatered
+sweep: NO confirmed canonical-domain violations EXCEPT is_actionable; 2 LOW projections. beta CLEAN. alpha
+VIOLATIONS 1 LOW (ensure_spawn_tool_scope pre-composed disjunction fold-theater). Folded both genuine:
+
+### FOLDED — PeerInputClass::is_actionable many-to-one grouping -> MeerkatMachine (sweep MEDIUM)
+interaction.rs is_actionable matches! folded 7-of-12 machine-emitted PeerInputClass variants into an actionable
+wake verdict consumed by comms inbox to gate actionable_notify (the work_graph_error_kind anti-pattern: shell
+re-derives a machine-owned grouping). FOLD: added machine-owned `actionable: bool` to the MeerkatMachine
+PeerIngressClassified effect (all 48 emit sites carry the grouping verdict: 15 true / 33 false); threaded through
+RuntimePeerCommsHandle -> PeerIngressClassification -> PreparedIngressItem -> ClassifiedInboxEntry; inbox.rs's 3
+live is_actionable() sites now mirror entry.actionable. PeerInputClass::is_actionable() DELETED (replaced by a
+private const-fn grouping used ONLY by the core constructors + a parity test asserting agreement with the machine).
+
+### FOLDED (de-theater) — ResolveSpawnToolAdmission pre-composed disjunction -> raw facts (alpha LOW)
+The round-10 fold fed a PRE-REDUCED bool can_spawn_any_profile (= can_manage_mob || profile_scope_non_empty)
+to the machine -- fold-theater (machine couldn't recompute). FOLD: ResolveSpawnToolAdmission now takes raw
+{ can_manage_mob, spawn_profile_scope_present } and COMPOSES the disjunction in its guards. Shell extracts the
+two atomic observations separately (can_manage_mob + new pure projection spawn_profile_scope_present), feeds
+both, mirrors. Deleted the can_spawn_any_profile_in_mob / _in_current_mob disjunction helpers. Empty-specs
+spawn_many deny preserved (only false/false denies).
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; classifier ratchet pass;
+core+comms+runtime+mob+mob-mcp --all-features 3796 passed; seam 0 debt; clippy --all-features -D warnings clean.
+
+### DEFENDED — round-12 sweep LOWs:
+- error.rs is_recoverable (sweep LOW): TELEMETRY-ONLY non-branching (event.rs retryable diagnostic flag); the live
+  recovery fork routes through MeerkatMachine ClassifyLlmFailureRecovery.
+- live_adapter LiveAdapterStatus is_terminal/accepts_commands (sweep LOW): non-canonical transport-adapter
+  connection-state projection (meerkat-live); the machine-owned live CHANNEL lifecycle routes through MeerkatMachine
+  LiveTopologyReconfiguration + the generated LiveChannelCloseCommitAuthority bridge token.

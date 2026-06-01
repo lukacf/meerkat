@@ -79,6 +79,122 @@ impl std::fmt::Display for AuthLifecyclePhase {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CredentialUseDisposition {
+    #[default]
+    #[serde(rename = "Authorized")]
+    Authorized,
+    #[serde(rename = "RefreshRequired")]
+    RefreshRequired,
+    #[serde(rename = "ReauthRequired")]
+    ReauthRequired,
+    #[serde(rename = "LeaseAbsent")]
+    LeaseAbsent,
+    #[serde(rename = "AlreadyRefreshing")]
+    AlreadyRefreshing,
+}
+impl CredentialUseDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Authorized => "Authorized",
+            Self::RefreshRequired => "RefreshRequired",
+            Self::ReauthRequired => "ReauthRequired",
+            Self::LeaseAbsent => "LeaseAbsent",
+            Self::AlreadyRefreshing => "AlreadyRefreshing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CredentialUseDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Authorized" => Ok(Self::Authorized),
+            "RefreshRequired" => Ok(Self::RefreshRequired),
+            "ReauthRequired" => Ok(Self::ReauthRequired),
+            "LeaseAbsent" => Ok(Self::LeaseAbsent),
+            "AlreadyRefreshing" => Ok(Self::AlreadyRefreshing),
+            other => Err(format!("invalid CredentialUseDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CredentialUseDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CredentialUseDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CredentialUseIntent {
+    #[default]
+    #[serde(rename = "UseCredential")]
+    UseCredential,
+    #[serde(rename = "HoldAuthority")]
+    HoldAuthority,
+    #[serde(rename = "BeginRefresh")]
+    BeginRefresh,
+}
+impl CredentialUseIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UseCredential => "UseCredential",
+            Self::HoldAuthority => "HoldAuthority",
+            Self::BeginRefresh => "BeginRefresh",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CredentialUseIntent {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UseCredential" => Ok(Self::UseCredential),
+            "HoldAuthority" => Ok(Self::HoldAuthority),
+            "BeginRefresh" => Ok(Self::BeginRefresh),
+            other => Err(format!("invalid CredentialUseIntent value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CredentialUseIntent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CredentialUseIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -261,6 +377,10 @@ pub mod inputs {
     pub struct ExpireOAuthDeviceFlow {
         pub flow_id: String,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveCredentialUseAdmission {
+        pub intent: CredentialUseIntent,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -291,6 +411,7 @@ pub enum Input {
     FinishOAuthDevicePoll(inputs::FinishOAuthDevicePoll),
     ConsumeOAuthDeviceFlow(inputs::ConsumeOAuthDeviceFlow),
     ExpireOAuthDeviceFlow(inputs::ExpireOAuthDeviceFlow),
+    ResolveCredentialUseAdmission(inputs::ResolveCredentialUseAdmission),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -323,6 +444,7 @@ impl Input {
             Self::FinishOAuthDevicePoll(_) => InputKind::FinishOAuthDevicePoll,
             Self::ConsumeOAuthDeviceFlow(_) => InputKind::ConsumeOAuthDeviceFlow,
             Self::ExpireOAuthDeviceFlow(_) => InputKind::ExpireOAuthDeviceFlow,
+            Self::ResolveCredentialUseAdmission(_) => InputKind::ResolveCredentialUseAdmission,
         }
     }
 }
@@ -354,6 +476,7 @@ pub enum InputKind {
     FinishOAuthDevicePoll,
     ConsumeOAuthDeviceFlow,
     ExpireOAuthDeviceFlow,
+    ResolveCredentialUseAdmission,
 }
 
 pub mod effects {
@@ -368,17 +491,23 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeRefreshLoop {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CredentialUseAdmissionResolved {
+        pub disposition: CredentialUseDisposition,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
     EmitLifecycleEvent(effects::EmitLifecycleEvent),
     WakeRefreshLoop(effects::WakeRefreshLoop),
+    CredentialUseAdmissionResolved(effects::CredentialUseAdmissionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
     EmitLifecycleEvent,
     WakeRefreshLoop,
+    CredentialUseAdmissionResolved,
 }
 
 #[allow(non_camel_case_types)]
@@ -494,6 +623,24 @@ pub enum TransitionId {
     ExpireOAuthDeviceFlowExpired,
     ExpireOAuthDeviceFlowRefreshing,
     ExpireOAuthDeviceFlowReauthRequired,
+    ResolveCredentialUseAdmissionValidUseAuthorizedValid,
+    ResolveCredentialUseAdmissionValidHoldAuthorizedValid,
+    ResolveCredentialUseAdmissionValidBeginRefreshValid,
+    ResolveCredentialUseAdmissionValidNoCredentialValid,
+    ResolveCredentialUseAdmissionExpiringUseRefreshExpiring,
+    ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring,
+    ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring,
+    ResolveCredentialUseAdmissionExpiringNoCredentialExpiring,
+    ResolveCredentialUseAdmissionExpiredUseRefreshExpired,
+    ResolveCredentialUseAdmissionExpiredHoldRefreshExpired,
+    ResolveCredentialUseAdmissionExpiredBeginRefreshExpired,
+    ResolveCredentialUseAdmissionExpiredNoCredentialExpired,
+    ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing,
+    ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing,
+    ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing,
+    ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing,
+    ResolveCredentialUseAdmissionReauthRequiredReauthRequired,
+    ResolveCredentialUseAdmissionReleasedReleased,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

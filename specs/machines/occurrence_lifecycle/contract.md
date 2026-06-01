@@ -51,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SyncTargetSnapshot`(target_binding_key: String, target_materialized_session_id: Option<SessionId>)
 - `RecordReceipt`(correlation_id: Option<String>, detail: Option<String>, materialized_session_id: Option<SessionId>, runtime_outcome_key: Option<String>)
 - `ClassifyDue`(now_utc_ms: u64)
+- `ClassifyOccurrenceTerminality`
 - `ClassifyClaimedDispatchDisposition`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `ClassifyCompletionSupersession`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
@@ -82,6 +83,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DueClaimEligible`
 - `DueMisfireRequired`
 - `DueLeaseExpired`
+- `OccurrenceTerminalityClassified`(terminal: Bool)
 - `ClaimedDispatchDispositionClassified`(disposition: ClaimedDispatchDisposition, superseded_by_revision: Option<u64>)
 - `CompletionSupersessionClassified`(disposition: CompletionSupersessionDisposition, superseded_by_revision: Option<u64>)
 - `DeliveryFailed`
@@ -998,6 +1000,60 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyDue`(now_utc_ms)
 - Emits: `DueNoAction`
 - To: `DeliveryFailed`
+
+### `ClassifyOccurrenceTerminalityTerminalCompleted`
+- From: `Completed`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Completed`
+
+### `ClassifyOccurrenceTerminalityTerminalSkipped`
+- From: `Skipped`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Skipped`
+
+### `ClassifyOccurrenceTerminalityTerminalMisfired`
+- From: `Misfired`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Misfired`
+
+### `ClassifyOccurrenceTerminalityTerminalSuperseded`
+- From: `Superseded`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Superseded`
+
+### `ClassifyOccurrenceTerminalityTerminalDeliveryFailed`
+- From: `DeliveryFailed`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `DeliveryFailed`
+
+### `ClassifyOccurrenceTerminalityLivePending`
+- From: `Pending`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Pending`
+
+### `ClassifyOccurrenceTerminalityLiveClaimed`
+- From: `Claimed`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Claimed`
+
+### `ClassifyOccurrenceTerminalityLiveDispatching`
+- From: `Dispatching`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `Dispatching`
+
+### `ClassifyOccurrenceTerminalityLiveAwaitingCompletion`
+- From: `AwaitingCompletion`
+- On: `ClassifyOccurrenceTerminality`()
+- Emits: `OccurrenceTerminalityClassified`
+- To: `AwaitingCompletion`
 
 ### `ClassifyClaimedDispatchDispositionFutureRevision`
 - From: `Claimed`

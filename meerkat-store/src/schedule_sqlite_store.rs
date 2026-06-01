@@ -234,7 +234,7 @@ impl SqliteScheduleStore {
                 let bytes = row?;
                 let occurrence: Occurrence =
                     serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
-                if !filter.include_terminal && occurrence.phase.is_terminal() {
+                if !filter.include_terminal && occurrence.is_terminal() {
                     continue;
                 }
                 if filter

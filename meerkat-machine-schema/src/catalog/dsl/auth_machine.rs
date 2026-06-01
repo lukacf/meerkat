@@ -27,6 +27,38 @@ use super::OptionValueExt;
 #[macro_export]
 macro_rules! auth_catalog_machine_dsl {
     ($rust_crate:literal, $rust_module:literal) => {
+        /// Typed credential-use intent fed by the resolver shell. Identifies
+        /// WHICH credential gate is asking, never a policy decision: the
+        /// AuthMachine owns the (phase, credential_present, intent) ->
+        /// disposition verdict.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum CredentialUseIntent {
+            /// Resolver "use the credential now" read (`resolve_managed_store_secret`).
+            UseCredential,
+            /// Resolver post-publish lifecycle-authority gate
+            /// (`require_credential_lifecycle_authority`).
+            HoldAuthority,
+            /// Resolver OAuth-refresh begin gate
+            /// (`begin_managed_store_oauth_refresh_lifecycle`).
+            BeginRefresh,
+        }
+
+        /// Machine-owned credential-use disposition verdict the resolver shell
+        /// mirrors rather than deciding.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum CredentialUseDisposition {
+            /// Credential may be used / lifecycle authority is held.
+            Authorized,
+            /// Caller must refresh first (BeginRefresh callers fire `begin_refresh`).
+            RefreshRequired,
+            /// Interactive user reauthorization is required.
+            ReauthRequired,
+            /// No usable lease is present.
+            LeaseAbsent,
+            /// A refresh is already in flight; the begin-refresh caller no-ops.
+            AlreadyRefreshing,
+        }
+
         meerkat_machine_dsl::machine! {
         machine AuthMachine {
             version: 1,
@@ -144,6 +176,17 @@ macro_rules! auth_catalog_machine_dsl {
                 FinishOAuthDevicePoll { flow_id: String },
                 ConsumeOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
                 ExpireOAuthDeviceFlow { flow_id: String },
+                // Credential-use admission classification. The resolver shell
+                // (meerkat-auth-core) extracts only the typed `intent` — WHICH
+                // credential gate is asking (use the credential now / hold
+                // post-publish lifecycle authority / begin an OAuth refresh) —
+                // and drives this read-only input. This machine owns the
+                // COMPLETE (lifecycle_phase, credential_present, intent) ->
+                // disposition POLICY using its own state, emitting
+                // `CredentialUseAdmissionResolved`. The shell mirrors the
+                // verdict and fails closed; it decides nothing. Each transition
+                // self-loops in its phase (classification never mutates state).
+                ResolveCredentialUseAdmission { intent: Enum<CredentialUseIntent> },
             }
 
             effect AuthMachineEffect {
@@ -154,10 +197,18 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_published_at_millis: Option<u64>,
                 },
                 WakeRefreshLoop,
+                // Credential-use disposition decided by this machine. The
+                // resolver shell mirrors `disposition`: Authorized -> use the
+                // credential / proceed, RefreshRequired -> the caller refreshes
+                // (BeginRefresh callers fire `begin_refresh`), ReauthRequired ->
+                // user-reauth error, LeaseAbsent -> lease-absent error,
+                // AlreadyRefreshing -> a refresh is already in flight (no-op).
+                CredentialUseAdmissionResolved { disposition: Enum<CredentialUseDisposition> },
             }
 
             disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication,
             disposition WakeRefreshLoop => local,
+            disposition CredentialUseAdmissionResolved => local,
 
             invariant oauth_flow_membership_consistent {
                 self.oauth_browser_flow_providers.keys() == self.oauth_browser_flow_ids
@@ -1330,6 +1381,217 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation: self.credential_generation,
                     credential_published_at_millis: self.credential_published_at_millis,
                 }
+            }
+
+            // --- Credential-use admission classification ---
+            //
+            // This machine owns the COMPLETE credential-use disposition POLICY,
+            // reproducing exactly the behavior the resolver shell previously
+            // duplicated across four `match phase` reducers. The verdict is a
+            // pure function of this machine's own `lifecycle_phase` and
+            // `credential_present`, plus the typed `intent` the shell feeds:
+            //
+            //   UseCredential  (resolver "use the credential now" read):
+            //     Valid+cred                -> Authorized
+            //     {Expiring,Expired,Refreshing}+cred -> RefreshRequired
+            //     ReauthRequired            -> ReauthRequired
+            //     otherwise                 -> LeaseAbsent
+            //   HoldAuthority  (resolver post-publish lifecycle-authority gate):
+            //     {Valid,Expiring,Refreshing}+cred -> Authorized
+            //     Expired+cred              -> RefreshRequired
+            //     ReauthRequired            -> ReauthRequired
+            //     otherwise                 -> LeaseAbsent
+            //   BeginRefresh   (resolver OAuth-refresh begin gate):
+            //     {Valid,Expiring,Expired}+cred -> RefreshRequired
+            //     Refreshing                -> AlreadyRefreshing
+            //     ReauthRequired            -> ReauthRequired
+            //     otherwise                 -> LeaseAbsent
+            //
+            // Each transition self-loops in its phase. The (phase, intent,
+            // credential_present) coverage is total and mutually exclusive.
+
+            // Valid
+            transition ResolveCredentialUseAdmissionValidUseAuthorized {
+                per_phase [Valid]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "valid_use_authorized" {
+                    intent == CredentialUseIntent::UseCredential && self.credential_present
+                }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::Authorized }
+            }
+            transition ResolveCredentialUseAdmissionValidHoldAuthorized {
+                per_phase [Valid]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "valid_hold_authorized" {
+                    intent == CredentialUseIntent::HoldAuthority && self.credential_present
+                }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::Authorized }
+            }
+            transition ResolveCredentialUseAdmissionValidBeginRefresh {
+                per_phase [Valid]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "valid_begin_refresh" {
+                    intent == CredentialUseIntent::BeginRefresh && self.credential_present
+                }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionValidNoCredential {
+                per_phase [Valid]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "valid_no_credential" { self.credential_present == false }
+                update {}
+                to Valid
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::LeaseAbsent }
+            }
+
+            // Expiring
+            transition ResolveCredentialUseAdmissionExpiringUseRefresh {
+                per_phase [Expiring]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expiring_use_refresh" {
+                    intent == CredentialUseIntent::UseCredential && self.credential_present
+                }
+                update {}
+                to Expiring
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionExpiringHoldAuthorized {
+                per_phase [Expiring]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expiring_hold_authorized" {
+                    intent == CredentialUseIntent::HoldAuthority && self.credential_present
+                }
+                update {}
+                to Expiring
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::Authorized }
+            }
+            transition ResolveCredentialUseAdmissionExpiringBeginRefresh {
+                per_phase [Expiring]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expiring_begin_refresh" {
+                    intent == CredentialUseIntent::BeginRefresh && self.credential_present
+                }
+                update {}
+                to Expiring
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionExpiringNoCredential {
+                per_phase [Expiring]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expiring_no_credential" { self.credential_present == false }
+                update {}
+                to Expiring
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::LeaseAbsent }
+            }
+
+            // Expired
+            transition ResolveCredentialUseAdmissionExpiredUseRefresh {
+                per_phase [Expired]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expired_use_refresh" {
+                    intent == CredentialUseIntent::UseCredential && self.credential_present
+                }
+                update {}
+                to Expired
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionExpiredHoldRefresh {
+                per_phase [Expired]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expired_hold_refresh" {
+                    intent == CredentialUseIntent::HoldAuthority && self.credential_present
+                }
+                update {}
+                to Expired
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionExpiredBeginRefresh {
+                per_phase [Expired]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expired_begin_refresh" {
+                    intent == CredentialUseIntent::BeginRefresh && self.credential_present
+                }
+                update {}
+                to Expired
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionExpiredNoCredential {
+                per_phase [Expired]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "expired_no_credential" { self.credential_present == false }
+                update {}
+                to Expired
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::LeaseAbsent }
+            }
+
+            // Refreshing
+            transition ResolveCredentialUseAdmissionRefreshingUseRefresh {
+                per_phase [Refreshing]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "refreshing_use_refresh" {
+                    intent == CredentialUseIntent::UseCredential && self.credential_present
+                }
+                update {}
+                to Refreshing
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::RefreshRequired }
+            }
+            transition ResolveCredentialUseAdmissionRefreshingHoldAuthorized {
+                per_phase [Refreshing]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "refreshing_hold_authorized" {
+                    intent == CredentialUseIntent::HoldAuthority && self.credential_present
+                }
+                update {}
+                to Refreshing
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::Authorized }
+            }
+            transition ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshing {
+                per_phase [Refreshing]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "refreshing_begin_already" {
+                    intent == CredentialUseIntent::BeginRefresh
+                }
+                update {}
+                to Refreshing
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::AlreadyRefreshing }
+            }
+            transition ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHold {
+                per_phase [Refreshing]
+                on input ResolveCredentialUseAdmission { intent }
+                guard "refreshing_no_credential" {
+                    self.credential_present == false
+                    && (
+                        intent == CredentialUseIntent::UseCredential
+                        || intent == CredentialUseIntent::HoldAuthority
+                    )
+                }
+                update {}
+                to Refreshing
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::LeaseAbsent }
+            }
+
+            // ReauthRequired — credential state irrelevant.
+            transition ResolveCredentialUseAdmissionReauthRequired {
+                per_phase [ReauthRequired]
+                on input ResolveCredentialUseAdmission { intent }
+                update {}
+                to ReauthRequired
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::ReauthRequired }
+            }
+
+            // Released — always lease-absent.
+            transition ResolveCredentialUseAdmissionReleased {
+                per_phase [Released]
+                on input ResolveCredentialUseAdmission { intent }
+                update {}
+                to Released
+                emit CredentialUseAdmissionResolved { disposition: CredentialUseDisposition::LeaseAbsent }
             }
         }
             }

@@ -254,6 +254,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTerminalityLiveBlocked`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessOpenOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessInProgressInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessNotClaimableAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessNotClaimableBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessNotClaimableCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessNotClaimableCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
+- `ClassifyReadinessNotClaimableFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_topology_legality`
 - `ClassifyBlockerSatisfactionAbsent`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_topology_legality`
@@ -568,6 +589,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublicConfirmationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `WorkItemReadinessClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_create_update_ready_claim`, `workgraph_claim_release_recovery`, `workgraph_block_close_evidence`, `workgraph_topology_legality`
 
 ### Invariants
 - `absent_has_zero_revision`

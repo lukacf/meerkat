@@ -348,12 +348,69 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExpireOAuthDeviceFlowReauthRequired`
   - anchors: `oauth_flow_handle`
   - scenarios: `oauth_device_flow_lifecycle`
+- `ResolveCredentialUseAdmissionValidUseAuthorizedValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionValidHoldAuthorizedValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionValidBeginRefreshValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionValidNoCredentialValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiringUseRefreshExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiringNoCredentialExpiring`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiredUseRefreshExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiredHoldRefreshExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiredBeginRefreshExpired`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionExpiredNoCredentialExpired`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionReauthRequiredReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `reauth_release_and_publication`
+- `ResolveCredentialUseAdmissionReleasedReleased`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
 
 ### Effects
 - `EmitLifecycleEvent`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
 - `WakeRefreshLoop`
+  - anchors: `auth_lease_handle`
+  - scenarios: `reauth_release_and_publication`
+- `CredentialUseAdmissionResolved`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
 

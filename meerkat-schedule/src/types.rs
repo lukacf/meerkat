@@ -967,26 +967,6 @@ pub enum OccurrencePhase {
     DeliveryFailed,
 }
 
-impl OccurrencePhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed
-                | Self::Skipped
-                | Self::Misfired
-                | Self::Superseded
-                | Self::DeliveryFailed
-        )
-    }
-
-    pub fn holds_active_lease(self) -> bool {
-        matches!(
-            self,
-            Self::Claimed | Self::Dispatching | Self::AwaitingCompletion
-        )
-    }
-}
-
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

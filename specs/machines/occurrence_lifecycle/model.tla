@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for OccurrenceLifecycleMachine.
 
-CONSTANTS ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, SessionIdValues, StringValues
+CONSTANTS BooleanValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, ScheduleIdValues, SessionIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -1024,6 +1024,69 @@ ClassifyDueDeliveryFailedNoAction(now_utc_ms) ==
     /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
 
 
+ClassifyOccurrenceTerminalityTerminalCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityTerminalSkipped ==
+    /\ phase = "Skipped"
+    /\ phase' = "Skipped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityTerminalMisfired ==
+    /\ phase = "Misfired"
+    /\ phase' = "Misfired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityTerminalSuperseded ==
+    /\ phase = "Superseded"
+    /\ phase' = "Superseded"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityTerminalDeliveryFailed ==
+    /\ phase = "DeliveryFailed"
+    /\ phase' = "DeliveryFailed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityLivePending ==
+    /\ phase = "Pending"
+    /\ phase' = "Pending"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityLiveClaimed ==
+    /\ phase = "Claimed"
+    /\ phase' = "Claimed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityLiveDispatching ==
+    /\ phase = "Dispatching"
+    /\ phase' = "Dispatching"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
+ClassifyOccurrenceTerminalityLiveAwaitingCompletion ==
+    /\ phase = "AwaitingCompletion"
+    /\ phase' = "AwaitingCompletion"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << occurrence_id, schedule_id, schedule_revision, occurrence_ordinal, trigger_key, target_binding_key, misfire_policy, misfire_policy_key, overlap_policy, overlap_policy_key, missing_target_policy, missing_target_policy_key, due_at_utc_ms, misfire_deadline_utc_ms, claimed_by, lease_expires_at_utc_ms, claimed_at_utc_ms, claim_token, delivery_correlation_id, target_materialized_session_id, receipt_recorded_at_utc_ms, last_receipt_recorded_at_utc_ms, last_receipt_attempt, last_receipt_stage, last_receipt_failure_class, last_receipt_detail, last_receipt_correlation_id, last_receipt_materialized_session_id, runtime_outcome_key, receipt_stage, receipt_failure_class, receipt_detail, failure_class, failure_detail, dispatched_at_utc_ms, completed_at_utc_ms, attempt_count, superseded_by_revision >>
+
+
 ClassifyClaimedDispatchDispositionFutureRevision(schedule_phase, current_schedule_revision) ==
     /\ phase = "Claimed"
     /\ (current_schedule_revision < schedule_revision)
@@ -1832,6 +1895,15 @@ Next ==
     \/ \E now_utc_ms \in 0..2 : ClassifyDueMisfiredNoAction(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDueSupersededNoAction(now_utc_ms)
     \/ \E now_utc_ms \in 0..2 : ClassifyDueDeliveryFailedNoAction(now_utc_ms)
+    \/ ClassifyOccurrenceTerminalityTerminalCompleted
+    \/ ClassifyOccurrenceTerminalityTerminalSkipped
+    \/ ClassifyOccurrenceTerminalityTerminalMisfired
+    \/ ClassifyOccurrenceTerminalityTerminalSuperseded
+    \/ ClassifyOccurrenceTerminalityTerminalDeliveryFailed
+    \/ ClassifyOccurrenceTerminalityLivePending
+    \/ ClassifyOccurrenceTerminalityLiveClaimed
+    \/ ClassifyOccurrenceTerminalityLiveDispatching
+    \/ ClassifyOccurrenceTerminalityLiveAwaitingCompletion
     \/ \E schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E current_schedule_revision \in 0..2 : ClassifyClaimedDispatchDispositionFutureRevision(schedule_phase, current_schedule_revision)
     \/ \E schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E current_schedule_revision \in 0..2 : ClassifyClaimedDispatchDispositionFrozen(schedule_phase, current_schedule_revision)
     \/ \E schedule_phase \in ClaimedDispatchSchedulePhaseValues : \E current_schedule_revision \in 0..2 : ClassifyClaimedDispatchDispositionSupersedeDeleted(schedule_phase, current_schedule_revision)

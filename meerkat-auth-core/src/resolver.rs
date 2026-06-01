@@ -20,7 +20,7 @@ use meerkat_core::auth::{
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::handles::AuthLeasePhase;
+use meerkat_core::handles::{AuthLeasePhase, CredentialUseDisposition};
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
     AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
@@ -200,18 +200,24 @@ fn refresh_required_error() -> ProviderAuthError {
     ProviderAuthError::Auth(AuthError::RefreshRequired)
 }
 
+/// Drive the per-binding AuthMachine's credential-use admission classifier and
+/// mirror the emitted disposition. The machine owns the `(lifecycle_phase,
+/// credential_present, intent)` -> disposition POLICY; this shell helper only
+/// translates the handle's `DslTransitionError` into a resolver error and never
+/// decides the disposition.
 #[cfg(not(target_arch = "wasm32"))]
-fn auth_lease_phase_error(phase: Option<AuthLeasePhase>) -> ProviderAuthError {
-    match phase {
-        Some(AuthLeasePhase::Valid) => ProviderAuthError::Auth(AuthError::Other(
-            "internal auth gate error: valid lease rejected".into(),
-        )),
-        Some(AuthLeasePhase::Expiring | AuthLeasePhase::Expired | AuthLeasePhase::Refreshing) => {
-            refresh_required_error()
-        }
-        Some(AuthLeasePhase::ReauthRequired) => user_reauth_required_error(),
-        Some(AuthLeasePhase::Released) | None => lease_absent_error(),
-    }
+fn resolve_credential_use_admission(
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    lease_key: &meerkat_core::handles::LeaseKey,
+    intent: meerkat_core::handles::CredentialUseIntent,
+) -> Result<CredentialUseDisposition, ProviderAuthError> {
+    auth_lease
+        .resolve_credential_use_admission(lease_key, intent)
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine credential-use admission classification failed: {e}"
+            ))
+        })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -331,31 +337,32 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         }
     }
 
-    match phase {
-        Some(AuthLeasePhase::Valid) => Ok(managed_store_tokens(
-            store,
-            key,
-            tokens,
-            Some(snapshot),
-            Some(restore_snapshot),
-            ManagedStoreLifecycle::Authorized,
-            lifecycle_guard,
-        )),
-        Some(AuthLeasePhase::Expiring | AuthLeasePhase::Expired | AuthLeasePhase::Refreshing) => {
-            Ok(managed_store_tokens(
-                store,
-                key,
-                tokens,
-                Some(snapshot),
-                Some(restore_snapshot),
-                ManagedStoreLifecycle::RefreshRequired,
-                lifecycle_guard,
-            ))
+    // The credential-use disposition is owned by the per-binding AuthMachine,
+    // not this shell: we feed only the typed `UseCredential` intent and mirror
+    // the emitted verdict. Authorized -> usable now, RefreshRequired -> mark for
+    // refresh, ReauthRequired/LeaseAbsent -> the matching error. AlreadyRefreshing
+    // cannot arise for the `UseCredential` intent.
+    let lifecycle = match resolve_credential_use_admission(
+        auth_lease,
+        &lease_key,
+        meerkat_core::handles::CredentialUseIntent::UseCredential,
+    )? {
+        CredentialUseDisposition::Authorized => ManagedStoreLifecycle::Authorized,
+        CredentialUseDisposition::RefreshRequired => ManagedStoreLifecycle::RefreshRequired,
+        CredentialUseDisposition::ReauthRequired => return Err(user_reauth_required_error()),
+        CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
+            return Err(lease_absent_error());
         }
-        Some(AuthLeasePhase::ReauthRequired | AuthLeasePhase::Released) | None => {
-            Err(auth_lease_phase_error(phase))
-        }
-    }
+    };
+    Ok(managed_store_tokens(
+        store,
+        key,
+        tokens,
+        Some(snapshot),
+        Some(restore_snapshot),
+        lifecycle,
+        lifecycle_guard,
+    ))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -453,12 +460,19 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
                 .into(),
         ));
     }
-    match current_snapshot.phase {
-        Some(
-            meerkat_core::handles::AuthLeasePhase::Valid
-            | meerkat_core::handles::AuthLeasePhase::Expiring
-            | meerkat_core::handles::AuthLeasePhase::Expired,
-        ) if current_snapshot.credential_present => {
+    // The begin-refresh disposition is owned by the per-binding AuthMachine: we
+    // feed only the typed `BeginRefresh` intent and mirror the verdict.
+    // RefreshRequired -> begin the refresh and report it started (Ok(true));
+    // AlreadyRefreshing -> a refresh is already in flight (Ok(false));
+    // ReauthRequired/LeaseAbsent -> the matching error.
+    match resolve_credential_use_admission(
+        env.auth_lease_handle
+            .as_ref()
+            .ok_or_else(lease_absent_error)?,
+        &lease_key,
+        meerkat_core::handles::CredentialUseIntent::BeginRefresh,
+    )? {
+        CredentialUseDisposition::RefreshRequired => {
             auth_lease.begin_refresh(&lease_key).map_err(|e| {
                 ProviderAuthError::SourceResolutionFailed(format!(
                     "AuthMachine lifecycle begin_refresh failed: {e}"
@@ -470,20 +484,15 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
             previous.lifecycle_restore_snapshot = Some(refreshing_snapshot);
             Ok(true)
         }
-        Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) => {
-            Err(user_reauth_required_error())
-        }
-        Some(meerkat_core::handles::AuthLeasePhase::Refreshing) => {
+        CredentialUseDisposition::AlreadyRefreshing => {
             previous.lifecycle_snapshot = Some(current_snapshot);
             previous.lifecycle_restore_snapshot = Some(current_restore_snapshot);
             Ok(false)
         }
-        Some(meerkat_core::handles::AuthLeasePhase::Released) | None => Err(lease_absent_error()),
-        Some(
-            meerkat_core::handles::AuthLeasePhase::Valid
-            | meerkat_core::handles::AuthLeasePhase::Expiring
-            | meerkat_core::handles::AuthLeasePhase::Expired,
-        ) => Err(lease_absent_error()),
+        CredentialUseDisposition::ReauthRequired => Err(user_reauth_required_error()),
+        CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::Authorized => {
+            Err(lease_absent_error())
+        }
     }
 }
 
@@ -832,18 +841,21 @@ pub fn require_credential_lifecycle_authority(
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
-    let snapshot = auth_lease.snapshot(&lease_key);
-    if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired) {
-        return Err(user_reauth_required_error());
-    }
-    let phase = credential_phase_from_snapshot(&snapshot);
-    match phase {
-        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => {
-            Ok(())
-        }
-        Some(AuthLeasePhase::Expired) => Err(refresh_required_error()),
-        Some(AuthLeasePhase::ReauthRequired | AuthLeasePhase::Released) | None => {
-            Err(auth_lease_phase_error(phase))
+    // The post-publish lifecycle-authority disposition is owned by the
+    // per-binding AuthMachine: we feed only the typed `HoldAuthority` intent and
+    // mirror the verdict. Authorized -> authority held, RefreshRequired -> the
+    // refresh-required error, ReauthRequired/LeaseAbsent -> the matching error.
+    // AlreadyRefreshing cannot arise for the `HoldAuthority` intent.
+    match resolve_credential_use_admission(
+        auth_lease,
+        &lease_key,
+        meerkat_core::handles::CredentialUseIntent::HoldAuthority,
+    )? {
+        CredentialUseDisposition::Authorized => Ok(()),
+        CredentialUseDisposition::RefreshRequired => Err(refresh_required_error()),
+        CredentialUseDisposition::ReauthRequired => Err(user_reauth_required_error()),
+        CredentialUseDisposition::LeaseAbsent | CredentialUseDisposition::AlreadyRefreshing => {
+            Err(lease_absent_error())
         }
     }
 }

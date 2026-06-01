@@ -50,12 +50,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinishOAuthDevicePoll`(flow_id: String)
 - `ConsumeOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `ExpireOAuthDeviceFlow`(flow_id: String)
+- `ResolveCredentialUseAdmission`(intent: CredentialUseIntent)
 
 ## Signals
 
 ## Effects
 - `EmitLifecycleEvent`(new_state: AuthLifecyclePhase, expires_at: Option<u64>, credential_generation: u64, credential_published_at_millis: Option<u64>)
 - `WakeRefreshLoop`
+- `CredentialUseAdmissionResolved`(disposition: CredentialUseDisposition)
 
 ## Invariants
 - `oauth_flow_membership_consistent`
@@ -1013,6 +1015,146 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `device_flow_present`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
+
+### `ResolveCredentialUseAdmissionValidUseAuthorizedValid`
+- From: `Valid`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `valid_use_authorized`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveCredentialUseAdmissionValidHoldAuthorizedValid`
+- From: `Valid`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `valid_hold_authorized`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveCredentialUseAdmissionValidBeginRefreshValid`
+- From: `Valid`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `valid_begin_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveCredentialUseAdmissionValidNoCredentialValid`
+- From: `Valid`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `valid_no_credential`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Valid`
+
+### `ResolveCredentialUseAdmissionExpiringUseRefreshExpiring`
+- From: `Expiring`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expiring_use_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expiring`
+
+### `ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring`
+- From: `Expiring`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expiring_hold_authorized`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expiring`
+
+### `ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring`
+- From: `Expiring`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expiring_begin_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expiring`
+
+### `ResolveCredentialUseAdmissionExpiringNoCredentialExpiring`
+- From: `Expiring`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expiring_no_credential`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expiring`
+
+### `ResolveCredentialUseAdmissionExpiredUseRefreshExpired`
+- From: `Expired`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expired_use_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expired`
+
+### `ResolveCredentialUseAdmissionExpiredHoldRefreshExpired`
+- From: `Expired`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expired_hold_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expired`
+
+### `ResolveCredentialUseAdmissionExpiredBeginRefreshExpired`
+- From: `Expired`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expired_begin_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expired`
+
+### `ResolveCredentialUseAdmissionExpiredNoCredentialExpired`
+- From: `Expired`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `expired_no_credential`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Expired`
+
+### `ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing`
+- From: `Refreshing`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `refreshing_use_refresh`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Refreshing`
+
+### `ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing`
+- From: `Refreshing`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `refreshing_hold_authorized`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Refreshing`
+
+### `ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing`
+- From: `Refreshing`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `refreshing_begin_already`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Refreshing`
+
+### `ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing`
+- From: `Refreshing`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Guards:
+  - `refreshing_no_credential`
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Refreshing`
+
+### `ResolveCredentialUseAdmissionReauthRequiredReauthRequired`
+- From: `ReauthRequired`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Emits: `CredentialUseAdmissionResolved`
+- To: `ReauthRequired`
+
+### `ResolveCredentialUseAdmissionReleasedReleased`
+- From: `Released`
+- On: `ResolveCredentialUseAdmission`(intent)
+- Emits: `CredentialUseAdmissionResolved`
+- To: `Released`
 
 ## Coverage
 ### Code Anchors

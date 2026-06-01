@@ -788,23 +788,64 @@ impl WorkGraphMachine {
         Ok((item, event))
     }
 
-    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
-        let owner_key = wg_dsl::WorkOwnerKey {
-            kind: wg_dsl::WorkOwnerKind::Label,
-            id: "__ready_probe__".to_string(),
-        };
-        apply_item_dsl(
-            item,
-            item.machine_state.unresolved_blocker_count,
-            wg_dsl::WorkGraphLifecycleInput::Claim {
-                expected_revision: item.revision,
-                owner_key,
-                now_utc_ms: datetime_to_millis(now),
-                lease_expires_at_utc_ms: None,
-            },
-            Some(item.revision),
+    /// Classify whether a work item is ready to claim at `now`.
+    ///
+    /// The shell extracts only the raw wall-clock `now` (a pure observation) and
+    /// drives the canonical `WorkGraphLifecycleMachine`'s `ClassifyReadiness`
+    /// input over the item's recovered machine state. The machine owns the
+    /// readiness POLICY — reproducing exactly the `Claim` transition guards
+    /// (`ClaimOpen` / `ClaimExpiredInProgress`) — and emits the verdict; this
+    /// function mirrors the emitted `WorkItemReadinessClassified.ready`, failing
+    /// closed if the machine refuses or emits no verdict. It decides nothing.
+    pub fn classify_readiness(item: &WorkItem, now: DateTime<Utc>) -> Result<bool, WorkGraphError> {
+        validate_item_machine_projection(item)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            item.machine_state.clone(),
         )
-        .is_ok()
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyReadiness {
+                now_utc_ms: datetime_to_millis(now),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused readiness classification: {error:?}",
+                item.id
+            ))
+        })?;
+
+        let mut classified = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::WorkItemReadinessClassified { ready } = effect
+                && classified.replace(*ready).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple readiness verdicts",
+                    item.id
+                )));
+            }
+        }
+
+        classified.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no readiness verdict",
+                item.id
+            ))
+        })
+    }
+
+    /// Mirror the machine-owned readiness verdict as a `bool`, failing closed.
+    ///
+    /// The readiness verdict belongs to the canonical
+    /// `WorkGraphLifecycleMachine` (see
+    /// [`WorkGraphMachine::classify_readiness`]). This filter-facing projection
+    /// mirrors the machine bool; if the machine refuses to classify, it fails
+    /// closed by treating the item as NOT ready so an unclassifiable item is
+    /// never offered as claimable work.
+    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
+        Self::classify_readiness(item, now).unwrap_or(false)
     }
 
     pub fn ready_items(items: Vec<WorkItem>, now: DateTime<Utc>) -> Vec<WorkItem> {
@@ -1491,6 +1532,78 @@ mod tests {
         .expect("update due");
 
         assert!(WorkGraphMachine::ready_items(vec![item], now).is_empty());
+    }
+
+    #[test]
+    fn readiness_is_decided_by_machine_matching_claim_guards() {
+        let now = Utc::now();
+
+        // A fresh open item with no blockers and no time windows is ready —
+        // exactly what the `ClaimOpen` guard accepts.
+        let open = create("ready-open", now);
+        assert_eq!(open.status, WorkStatus::Open);
+        assert!(
+            WorkGraphMachine::classify_readiness(&open, now).expect("classify open"),
+            "an unblocked, due-eligible open item must be machine-classified ready"
+        );
+        assert!(WorkGraphMachine::is_ready(&open, now));
+
+        // A future-due open item is not ready (mirrors `due_eligible` guard).
+        let (future, _) = WorkGraphMachine::update_item(
+            open,
+            UpdateWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                title: None,
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: Some(now + Duration::hours(1)),
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            },
+            now,
+        )
+        .expect("update future due");
+        assert!(
+            !WorkGraphMachine::classify_readiness(&future, now).expect("classify future"),
+            "a future-due open item must be machine-classified not ready"
+        );
+        assert!(!WorkGraphMachine::is_ready(&future, now));
+
+        // A claimed (InProgress) item with a live lease is NOT ready; once the
+        // lease expires it becomes ready (mirrors `ClaimExpiredInProgress`).
+        let claimable = create("reclaim", now);
+        let (claimed, _) = WorkGraphMachine::claim_item(
+            claimable,
+            ClaimWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                owner: owner("worker"),
+                lease_seconds: Some(30),
+                lease_expires_at: None,
+            },
+            now,
+        )
+        .expect("claim");
+        assert_eq!(claimed.status, WorkStatus::InProgress);
+        assert!(
+            !WorkGraphMachine::classify_readiness(&claimed, now).expect("classify live lease"),
+            "an in-progress item with a live lease must not be machine-classified ready"
+        );
+        let after_lease = now + Duration::seconds(31);
+        assert!(
+            WorkGraphMachine::classify_readiness(&claimed, after_lease)
+                .expect("classify expired lease"),
+            "an in-progress item with an expired lease must be machine-classified ready"
+        );
+        assert!(WorkGraphMachine::is_ready(&claimed, after_lease));
     }
 
     #[test]

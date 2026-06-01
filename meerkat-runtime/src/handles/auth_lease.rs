@@ -998,6 +998,9 @@ impl RuntimeAuthLeaseHandle {
                 "consume_oauth_device_flow"
             }
             auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow { .. } => "expire_oauth_device_flow",
+            auth_dsl::AuthMachineInput::ResolveCredentialUseAdmission { .. } => {
+                "resolve_credential_use_admission"
+            }
         }
     }
 }
@@ -1013,6 +1016,44 @@ fn map_phase(phase: auth_dsl::AuthLifecyclePhase) -> AuthLeasePhase {
         auth_dsl::AuthLifecyclePhase::Refreshing => AuthLeasePhase::Refreshing,
         auth_dsl::AuthLifecyclePhase::ReauthRequired => AuthLeasePhase::ReauthRequired,
         auth_dsl::AuthLifecyclePhase::Released => AuthLeasePhase::Released,
+    }
+}
+
+fn credential_use_intent_to_dsl(
+    intent: meerkat_core::handles::CredentialUseIntent,
+) -> auth_dsl::CredentialUseIntent {
+    match intent {
+        meerkat_core::handles::CredentialUseIntent::UseCredential => {
+            auth_dsl::CredentialUseIntent::UseCredential
+        }
+        meerkat_core::handles::CredentialUseIntent::HoldAuthority => {
+            auth_dsl::CredentialUseIntent::HoldAuthority
+        }
+        meerkat_core::handles::CredentialUseIntent::BeginRefresh => {
+            auth_dsl::CredentialUseIntent::BeginRefresh
+        }
+    }
+}
+
+fn credential_use_disposition_from_dsl(
+    disposition: auth_dsl::CredentialUseDisposition,
+) -> meerkat_core::handles::CredentialUseDisposition {
+    match disposition {
+        auth_dsl::CredentialUseDisposition::Authorized => {
+            meerkat_core::handles::CredentialUseDisposition::Authorized
+        }
+        auth_dsl::CredentialUseDisposition::RefreshRequired => {
+            meerkat_core::handles::CredentialUseDisposition::RefreshRequired
+        }
+        auth_dsl::CredentialUseDisposition::ReauthRequired => {
+            meerkat_core::handles::CredentialUseDisposition::ReauthRequired
+        }
+        auth_dsl::CredentialUseDisposition::LeaseAbsent => {
+            meerkat_core::handles::CredentialUseDisposition::LeaseAbsent
+        }
+        auth_dsl::CredentialUseDisposition::AlreadyRefreshing => {
+            meerkat_core::handles::CredentialUseDisposition::AlreadyRefreshing
+        }
     }
 }
 
@@ -1352,6 +1393,60 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         Ok(auth_transition)
     }
 
+    fn resolve_credential_use_admission(
+        &self,
+        lease_key: &LeaseKey,
+        intent: meerkat_core::handles::CredentialUseIntent,
+    ) -> Result<meerkat_core::handles::CredentialUseDisposition, DslTransitionError> {
+        const CONTEXT: &str = "AuthLeaseHandle::resolve_credential_use_admission";
+        let guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // No registered lease for this binding mirrors the resolver's prior
+        // credential-filtered `None` phase: the lease is absent.
+        let Some(authority) = guard.authorities.get(lease_key) else {
+            return Ok(meerkat_core::handles::CredentialUseDisposition::LeaseAbsent);
+        };
+        // Read-only classification: recover a transient authority over the live
+        // state so the registry is never mutated and no lifecycle audit fires.
+        let mut transient =
+            auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+        let transition = auth_dsl::AuthMachineMutator::apply(
+            &mut transient,
+            auth_dsl::AuthMachineInput::ResolveCredentialUseAdmission {
+                intent: credential_use_intent_to_dsl(intent),
+            },
+        )
+        .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+
+        let mut resolved = None;
+        for effect in transition.effects() {
+            if let auth_dsl::AuthMachineEffect::CredentialUseAdmissionResolved { disposition } =
+                effect
+            {
+                if resolved.replace(*disposition).is_some() {
+                    return Err(DslTransitionError::new(
+                        CONTEXT,
+                        format!(
+                            "AuthMachine emitted multiple credential-use dispositions for `{lease_key}`"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        resolved
+            .map(credential_use_disposition_from_dsl)
+            .ok_or_else(|| {
+                DslTransitionError::new(
+                    CONTEXT,
+                    format!("AuthMachine emitted no credential-use disposition for `{lease_key}`"),
+                )
+            })
+    }
+
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
@@ -1440,6 +1535,141 @@ mod tests {
         let snap = h.snapshot(&k);
         assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_800_000_900));
+    }
+
+    #[test]
+    fn credential_use_admission_is_decided_by_authmachine() {
+        use meerkat_core::handles::CredentialUseDisposition as Disp;
+        use meerkat_core::handles::CredentialUseIntent as Intent;
+
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "creduse_openai");
+
+        // No registered lease -> LeaseAbsent for every intent.
+        for intent in [
+            Intent::UseCredential,
+            Intent::HoldAuthority,
+            Intent::BeginRefresh,
+        ] {
+            assert_eq!(
+                h.resolve_credential_use_admission(&k, intent).unwrap(),
+                Disp::LeaseAbsent,
+                "unregistered lease must classify LeaseAbsent for {intent:?}"
+            );
+        }
+
+        // Valid + credential present.
+        h.acquire_lease(&k, 1_800_000_000).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::UseCredential)
+                .unwrap(),
+            Disp::Authorized
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::HoldAuthority)
+                .unwrap(),
+            Disp::Authorized
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::BeginRefresh)
+                .unwrap(),
+            Disp::RefreshRequired
+        );
+
+        // Expiring: UseCredential -> RefreshRequired, HoldAuthority -> Authorized,
+        // BeginRefresh -> RefreshRequired.
+        h.mark_expiring(&k).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::UseCredential)
+                .unwrap(),
+            Disp::RefreshRequired
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::HoldAuthority)
+                .unwrap(),
+            Disp::Authorized
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::BeginRefresh)
+                .unwrap(),
+            Disp::RefreshRequired
+        );
+
+        // Refreshing: UseCredential -> RefreshRequired, HoldAuthority -> Authorized,
+        // BeginRefresh -> AlreadyRefreshing.
+        h.begin_refresh(&k).unwrap();
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Refreshing));
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::UseCredential)
+                .unwrap(),
+            Disp::RefreshRequired
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::HoldAuthority)
+                .unwrap(),
+            Disp::Authorized
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(&k, Intent::BeginRefresh)
+                .unwrap(),
+            Disp::AlreadyRefreshing
+        );
+
+        // Expired: every intent -> RefreshRequired.
+        let kx = lease("dev", "creduse_expired");
+        h.acquire_lease(&kx, 1_800_000_000).unwrap();
+        h.observe_credential_freshness(&kx, 1_800_000_001, 60)
+            .unwrap();
+        assert_eq!(h.snapshot(&kx).phase, Some(AuthLeasePhase::Expired));
+        for intent in [
+            Intent::UseCredential,
+            Intent::HoldAuthority,
+            Intent::BeginRefresh,
+        ] {
+            assert_eq!(
+                h.resolve_credential_use_admission(&kx, intent).unwrap(),
+                Disp::RefreshRequired,
+                "expired lease must classify RefreshRequired for {intent:?}"
+            );
+        }
+
+        // ReauthRequired: every intent -> ReauthRequired.
+        let kr = lease("dev", "creduse_reauth");
+        h.acquire_lease(&kr, 1_800_000_000).unwrap();
+        h.mark_reauth_required(&kr).unwrap();
+        assert_eq!(h.snapshot(&kr).phase, Some(AuthLeasePhase::ReauthRequired));
+        for intent in [
+            Intent::UseCredential,
+            Intent::HoldAuthority,
+            Intent::BeginRefresh,
+        ] {
+            assert_eq!(
+                h.resolve_credential_use_admission(&kr, intent).unwrap(),
+                Disp::ReauthRequired,
+                "reauth-required lease must classify ReauthRequired for {intent:?}"
+            );
+        }
+
+        // Released: every intent -> LeaseAbsent.
+        let kl = lease("dev", "creduse_released");
+        h.acquire_lease(&kl, 1_800_000_000).unwrap();
+        h.release_lease(&kl).unwrap();
+        for intent in [
+            Intent::UseCredential,
+            Intent::HoldAuthority,
+            Intent::BeginRefresh,
+        ] {
+            assert_eq!(
+                h.resolve_credential_use_admission(&kl, intent).unwrap(),
+                Disp::LeaseAbsent,
+                "released lease must classify LeaseAbsent for {intent:?}"
+            );
+        }
+
+        // Classification is read-only: the live phase is unchanged after probing.
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Refreshing));
     }
 
     #[test]

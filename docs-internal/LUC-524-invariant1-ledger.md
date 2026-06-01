@@ -443,3 +443,39 @@ guards; the typed witness feeding it is sweep-acknowledged as mostly-machine-rou
 
 Gates: drift 10/6; check clean; machine-codegen 94 pass; mob+mob-mcp+workgraph 1238/1332 passed;
 classifier ratchet pass; seam 0 debt; no wire/schema change. Re-running round 5 to confirm two-clean holds.
+
+## CONVERGENCE ROUND 5 (re-sweep + 2 blind reviews) + feature-gated-break fix
+alpha CLEAN; beta found 1 (OccurrencePhase::is_terminal MEDIUM); sweep found 3 (resolver credential-use
+MEDIUM, is_ready probe LOW, retry LOW-defensible). Folded the 3 genuine:
+
+### FOLDED — OccurrencePhase::is_terminal handwritten terminality reducer -> OccurrenceLifecycle (beta MEDIUM)
+matches!(Completed|Skipped|Misfired|Superseded|DeliveryFailed) duplicated the machine terminal-phase
+truth in the shell. -> OccurrenceLifecycle ClassifyOccurrenceTerminality {} -> OccurrenceTerminalityClassified
+{ terminal } (per-phase classifier over the exact terminal[] set). Occurrence::is_terminal() now mirrors
+(fail-closed to terminal). Deleted OccurrencePhase::is_terminal + holds_active_lease (dead, zero consumers).
+
+### FOLDED — resolver credential-use admission fork (4 duplicated shell reducers) -> AuthMachine (sweep MEDIUM)
+Four match-phase reducers (auth_lease_phase_error, load/resolve managed-store, begin_refresh) decided
+authorize/refresh/reauth/absent over the machine-owned AuthLeasePhase = 4 truth paths. -> AuthMachine
+ResolveCredentialUseAdmission { intent } -> CredentialUseAdmissionResolved { Authorized|RefreshRequired|
+ReauthRequired|LeaseAbsent|AlreadyRefreshing }; the machine owns the full (phase,credential,intent)->disposition
+matrix. AuthLeaseHandle::resolve_credential_use_admission trait seam (core trait, no auth-core->runtime cycle);
+all 4 reducers replaced with a mirror, exact error variants preserved; auth_lease_phase_error deleted.
+
+### FOLDED — WorkGraphMachine::is_ready probe-and-skip -> WorkGraphLifecycle ClassifyReadiness (sweep LOW)
+is_ready applied a synthetic __ready_probe__ Claim transition + .is_ok() (probe-and-skip anti-pattern).
+-> WorkGraphLifecycle ClassifyReadiness { now_utc_ms } -> WorkItemReadinessClassified { ready } (classifier
+guards reproduce the Claim guards exactly). is_ready mirrors (fail-closed to NOT ready); synthetic probe deleted.
+
+### FEATURE-GATED-BREAK FIX (verification-gap catch): the round-5 FOLD A deletion of OccurrencePhase::is_terminal
+broke a SECOND consumer the fold agent missed — meerkat-store/src/schedule_sqlite_store.rs:237
+occurrence.phase.is_terminal() — which is behind the `sqlite` feature, so default-feature builds/tests/agent
+gates did NOT catch it. Caught by `check --workspace --all-features`. Fixed to occurrence.is_terminal()
+(the machine-backed wrapper). LESSON: deletions need an --all-features sweep (feature-gated consumers).
+Workspace --all-features check now clean; meerkat-store --all-features 56 tests pass.
+
+### DEFENDED — retry recoverable/fatal (sweep LOW): sweep-acknowledged machine-routed-mirror (RecoverableFailure
+revalidates via llm_failure_kind_recoverable + retries_remaining). No change.
+
+Gates: drift 10/6; workspace --all-features check clean; machine-codegen 94; schedule+auth-core+workgraph 290
++ store(sqlite) 56 pass; ratchets pass; seam 0 debt. Re-running convergence (round 6) to certify two-clean on final tree.

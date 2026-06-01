@@ -513,7 +513,7 @@ impl ScheduleStore for MemoryScheduleStore {
             .occurrences
             .values()
             .filter(|occurrence| {
-                (filter.include_terminal || !occurrence.phase.is_terminal())
+                (filter.include_terminal || !occurrence.is_terminal())
                     && filter
                         .schedule_id
                         .as_ref()

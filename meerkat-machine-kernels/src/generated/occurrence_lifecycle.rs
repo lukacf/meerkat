@@ -653,6 +653,8 @@ pub enum OccurrenceLifecycleInputVariant {
     RecordReceipt,
     #[serde(rename = "ClassifyDue")]
     ClassifyDue,
+    #[serde(rename = "ClassifyOccurrenceTerminality")]
+    ClassifyOccurrenceTerminality,
     #[serde(rename = "ClassifyClaimedDispatchDisposition")]
     ClassifyClaimedDispatchDisposition,
     #[serde(rename = "ClassifyCompletionSupersession")]
@@ -691,6 +693,7 @@ impl OccurrenceLifecycleInputVariant {
             Self::SyncTargetSnapshot => "SyncTargetSnapshot",
             Self::RecordReceipt => "RecordReceipt",
             Self::ClassifyDue => "ClassifyDue",
+            Self::ClassifyOccurrenceTerminality => "ClassifyOccurrenceTerminality",
             Self::ClassifyClaimedDispatchDisposition => "ClassifyClaimedDispatchDisposition",
             Self::ClassifyCompletionSupersession => "ClassifyCompletionSupersession",
             Self::Claim => "Claim",
@@ -717,6 +720,7 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "SyncTargetSnapshot" => Ok(Self::SyncTargetSnapshot),
             "RecordReceipt" => Ok(Self::RecordReceipt),
             "ClassifyDue" => Ok(Self::ClassifyDue),
+            "ClassifyOccurrenceTerminality" => Ok(Self::ClassifyOccurrenceTerminality),
             "ClassifyClaimedDispatchDisposition" => Ok(Self::ClassifyClaimedDispatchDisposition),
             "ClassifyCompletionSupersession" => Ok(Self::ClassifyCompletionSupersession),
             "Claim" => Ok(Self::Claim),
@@ -1310,6 +1314,8 @@ pub mod inputs {
         pub now_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyOccurrenceTerminality {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyClaimedDispatchDisposition {
         pub schedule_phase: ClaimedDispatchSchedulePhase,
         pub current_schedule_revision: u64,
@@ -1394,6 +1400,7 @@ pub enum Input {
     SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     RecordReceipt(inputs::RecordReceipt),
     ClassifyDue(inputs::ClassifyDue),
+    ClassifyOccurrenceTerminality(inputs::ClassifyOccurrenceTerminality),
     ClassifyClaimedDispatchDisposition(inputs::ClassifyClaimedDispatchDisposition),
     ClassifyCompletionSupersession(inputs::ClassifyCompletionSupersession),
     Claim(inputs::Claim),
@@ -1417,6 +1424,7 @@ impl Input {
             Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::RecordReceipt(_) => InputKind::RecordReceipt,
             Self::ClassifyDue(_) => InputKind::ClassifyDue,
+            Self::ClassifyOccurrenceTerminality(_) => InputKind::ClassifyOccurrenceTerminality,
             Self::ClassifyClaimedDispatchDisposition(_) => {
                 InputKind::ClassifyClaimedDispatchDisposition
             }
@@ -1445,6 +1453,7 @@ pub enum InputKind {
     SyncTargetSnapshot,
     RecordReceipt,
     ClassifyDue,
+    ClassifyOccurrenceTerminality,
     ClassifyClaimedDispatchDisposition,
     ClassifyCompletionSupersession,
     Claim,
@@ -1493,6 +1502,10 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DueLeaseExpired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OccurrenceTerminalityClassified {
+        pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClaimedDispatchDispositionClassified {
         pub disposition: ClaimedDispatchDisposition,
         pub superseded_by_revision: Option<u64>,
@@ -1529,6 +1542,7 @@ pub enum Effect {
     DueClaimEligible(effects::DueClaimEligible),
     DueMisfireRequired(effects::DueMisfireRequired),
     DueLeaseExpired(effects::DueLeaseExpired),
+    OccurrenceTerminalityClassified(effects::OccurrenceTerminalityClassified),
     ClaimedDispatchDispositionClassified(effects::ClaimedDispatchDispositionClassified),
     CompletionSupersessionClassified(effects::CompletionSupersessionClassified),
     DeliveryFailed(effects::DeliveryFailed),
@@ -1549,6 +1563,7 @@ pub enum EffectKind {
     DueClaimEligible,
     DueMisfireRequired,
     DueLeaseExpired,
+    OccurrenceTerminalityClassified,
     ClaimedDispatchDispositionClassified,
     CompletionSupersessionClassified,
     DeliveryFailed,
@@ -1673,6 +1688,15 @@ pub enum TransitionId {
     ClassifyDueMisfiredNoAction,
     ClassifyDueSupersededNoAction,
     ClassifyDueDeliveryFailedNoAction,
+    ClassifyOccurrenceTerminalityTerminalCompleted,
+    ClassifyOccurrenceTerminalityTerminalSkipped,
+    ClassifyOccurrenceTerminalityTerminalMisfired,
+    ClassifyOccurrenceTerminalityTerminalSuperseded,
+    ClassifyOccurrenceTerminalityTerminalDeliveryFailed,
+    ClassifyOccurrenceTerminalityLivePending,
+    ClassifyOccurrenceTerminalityLiveClaimed,
+    ClassifyOccurrenceTerminalityLiveDispatching,
+    ClassifyOccurrenceTerminalityLiveAwaitingCompletion,
     ClassifyClaimedDispatchDispositionFutureRevision,
     ClassifyClaimedDispatchDispositionFrozen,
     ClassifyClaimedDispatchDispositionSupersedeDeleted,

@@ -1526,6 +1526,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "OccurrenceLifecycleMachine",
+            "OccurrenceTerminalityClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local terminality verdict over the occurrence's machine-owned lifecycle_phase; the store filter mirrors it instead of a handwritten phase matches!",
+        ),
+        (
+            "OccurrenceLifecycleMachine",
             "ClaimedDispatchDispositionClassified",
             SeamClassification::NoOwnerRealization,
             "Local claimed-occurrence pre-dispatch disposition (Frozen/Supersede/Ready/FutureRevision) decided by the occurrence machine; the driver mirrors it instead of classifying schedule facts itself",
@@ -1641,6 +1647,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "WorkItemTerminalityClassified",
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph terminality verdict must align with canonical WorkGraph lifecycle-phase truth; the service mirrors it to gate attention binding/projection admission and fails closed",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "WorkItemReadinessClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph readiness verdict reproduces the Claim transition guards (ClaimOpen / ClaimExpiredInProgress) over canonical item state; the ready_items filter mirrors it and fails closed instead of probe-and-skip claiming",
         ),
         (
             "WorkGraphLifecycleMachine",
@@ -1916,6 +1928,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "WakeRefreshLoop",
             SeamClassification::NoOwnerRealization,
             "Local refresh-loop wake consumed by the per-binding auth refresh task",
+        ),
+        (
+            "AuthMachine",
+            "CredentialUseAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Credential-use disposition (Authorized/RefreshRequired/ReauthRequired/LeaseAbsent/AlreadyRefreshing) is decided by the per-binding AuthMachine from its own (lifecycle_phase, credential_present) plus the resolver's typed intent; the auth-core resolver mirrors it instead of duplicating the phase->disposition policy across four match-phase reducers",
         ),
     ]
 }

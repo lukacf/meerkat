@@ -129,6 +129,15 @@ machine! {
                 runtime_outcome_key: Option<String>
             },
             ClassifyDue { now_utc_ms: u64 },
+            // Terminality classification. This machine owns the lifecycle_phase
+            // and the terminal-phase SET (`terminal [Completed, Skipped,
+            // Misfired, Superseded, DeliveryFailed]` above). The shell extracts
+            // no fact — it drives this input over the occurrence's recovered
+            // machine state and mirrors the emitted
+            // OccurrenceTerminalityClassified.terminal, failing closed. Each
+            // transition self-loops in its phase (classification never mutates
+            // lifecycle state).
+            ClassifyOccurrenceTerminality {},
             // Claimed-occurrence pre-dispatch reconciliation. The driver shell
             // observes the owning schedule's current phase and revision (pure
             // observations) and feeds them here together with the occurrence's
@@ -210,6 +219,9 @@ machine! {
             DueClaimEligible,
             DueMisfireRequired,
             DueLeaseExpired,
+            // Terminality verdict over the machine-owned lifecycle_phase. The
+            // shell mirrors `terminal`; it decides nothing.
+            OccurrenceTerminalityClassified { terminal: bool },
             // Claimed-occurrence pre-dispatch disposition decided by the
             // occurrence authority. The driver shell mirrors `disposition`:
             // Frozen releases the lease for the paused schedule, Supersede
@@ -271,6 +283,7 @@ machine! {
         disposition DueClaimEligible => local,
         disposition DueMisfireRequired => local,
         disposition DueLeaseExpired => local,
+        disposition OccurrenceTerminalityClassified => local,
         disposition ClaimedDispatchDispositionClassified => local,
         disposition CompletionSupersessionClassified => local,
         disposition DeliveryFailed => external,
@@ -752,6 +765,31 @@ machine! {
             guard { self.lifecycle_phase == Phase::DeliveryFailed }
             to DeliveryFailed
             emit DueNoAction
+        }
+
+        // --- Terminality classification ---
+        //
+        // The terminality verdict over the machine-owned lifecycle_phase is a
+        // machine fact. The shell drives this input over the occurrence's
+        // recovered state and mirrors the emitted `terminal`. Each transition
+        // self-loops in its phase (classification never mutates lifecycle
+        // state). The terminal phase set here is exactly `terminal [Completed,
+        // Skipped, Misfired, Superseded, DeliveryFailed]` declared above.
+
+        transition ClassifyOccurrenceTerminalityTerminal {
+            per_phase [Completed, Skipped, Misfired, Superseded, DeliveryFailed]
+            on input ClassifyOccurrenceTerminality {}
+            update {}
+            to Pending
+            emit OccurrenceTerminalityClassified { terminal: true }
+        }
+
+        transition ClassifyOccurrenceTerminalityLive {
+            per_phase [Pending, Claimed, Dispatching, AwaitingCompletion]
+            on input ClassifyOccurrenceTerminality {}
+            update {}
+            to Pending
+            emit OccurrenceTerminalityClassified { terminal: false }
         }
 
         // --- Claimed-occurrence pre-dispatch disposition ---

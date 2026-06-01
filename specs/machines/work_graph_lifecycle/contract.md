@@ -47,6 +47,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyBlockerSatisfied`(blocker_present: Bool, blocker_lifecycle_phase: WorkLifecycleState)
 - `ClassifyCreateStatusAdmission`(requested_status: WorkLifecycleState)
 - `ClassifyPublicConfirmationAdmission`(completion_policy: WorkCompletionPolicy)
+- `ClassifyReadiness`(now_utc_ms: u64)
 
 ## Signals
 
@@ -64,11 +65,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BlockerSatisfactionClassified`(satisfied: Bool)
 - `CreateStatusAdmissionClassified`(admission: WorkCreateStatusAdmissionKind)
 - `PublicConfirmationAdmissionClassified`(admission: WorkPublicConfirmationAdmissionKind)
+- `WorkItemReadinessClassified`(ready: Bool)
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
 - `completion_policy_is_satisfied`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>, host_confirmation_count: u64, principal_confirmation_count: u64, supervisor_confirmation_owner_keys: Set<WorkOwnerKey>, reviewer_confirmation_owner_keys: Set<WorkOwnerKey>) -> `Bool`
 - `evidence_kind_owner_key_present`(evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>) -> `Bool`
+- `claim_time_window_eligible`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, now_utc_ms: u64) -> `Bool`
 
 ## Invariants
 - `absent_has_zero_revision`
@@ -720,6 +723,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyTerminality`()
 - Emits: `WorkItemTerminalityClassified`
 - To: `Blocked`
+
+### `ClassifyReadinessOpenOpen`
+- From: `Open`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `Open`
+
+### `ClassifyReadinessInProgressInProgress`
+- From: `InProgress`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `InProgress`
+
+### `ClassifyReadinessNotClaimableAbsent`
+- From: `Absent`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `Absent`
+
+### `ClassifyReadinessNotClaimableBlocked`
+- From: `Blocked`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `Blocked`
+
+### `ClassifyReadinessNotClaimableCompleted`
+- From: `Completed`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `Completed`
+
+### `ClassifyReadinessNotClaimableCancelled`
+- From: `Cancelled`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `Cancelled`
+
+### `ClassifyReadinessNotClaimableFailed`
+- From: `Failed`
+- On: `ClassifyReadiness`(now_utc_ms)
+- Emits: `WorkItemReadinessClassified`
+- To: `Failed`
 
 ### `ClassifyBlockerSatisfactionAbsent`
 - From: `Absent`

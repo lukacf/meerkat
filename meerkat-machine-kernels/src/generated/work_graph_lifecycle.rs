@@ -702,6 +702,10 @@ pub mod inputs {
     pub struct ClassifyPublicConfirmationAdmission {
         pub completion_policy: WorkCompletionPolicy,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyReadiness {
+        pub now_utc_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -723,6 +727,7 @@ pub enum Input {
     ClassifyBlockerSatisfied(inputs::ClassifyBlockerSatisfied),
     ClassifyCreateStatusAdmission(inputs::ClassifyCreateStatusAdmission),
     ClassifyPublicConfirmationAdmission(inputs::ClassifyPublicConfirmationAdmission),
+    ClassifyReadiness(inputs::ClassifyReadiness),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -746,6 +751,7 @@ impl Input {
             Self::ClassifyPublicConfirmationAdmission(_) => {
                 InputKind::ClassifyPublicConfirmationAdmission
             }
+            Self::ClassifyReadiness(_) => InputKind::ClassifyReadiness,
         }
     }
 }
@@ -768,6 +774,7 @@ pub enum InputKind {
     ClassifyBlockerSatisfied,
     ClassifyCreateStatusAdmission,
     ClassifyPublicConfirmationAdmission,
+    ClassifyReadiness,
 }
 
 pub mod effects {
@@ -815,6 +822,10 @@ pub mod effects {
     pub struct PublicConfirmationAdmissionClassified {
         pub admission: WorkPublicConfirmationAdmissionKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct WorkItemReadinessClassified {
+        pub ready: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -832,6 +843,7 @@ pub enum Effect {
     BlockerSatisfactionClassified(effects::BlockerSatisfactionClassified),
     CreateStatusAdmissionClassified(effects::CreateStatusAdmissionClassified),
     PublicConfirmationAdmissionClassified(effects::PublicConfirmationAdmissionClassified),
+    WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -848,6 +860,7 @@ pub enum EffectKind {
     BlockerSatisfactionClassified,
     CreateStatusAdmissionClassified,
     PublicConfirmationAdmissionClassified,
+    WorkItemReadinessClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -932,6 +945,13 @@ pub enum TransitionId {
     ClassifyTerminalityLiveOpen,
     ClassifyTerminalityLiveInProgress,
     ClassifyTerminalityLiveBlocked,
+    ClassifyReadinessOpenOpen,
+    ClassifyReadinessInProgressInProgress,
+    ClassifyReadinessNotClaimableAbsent,
+    ClassifyReadinessNotClaimableBlocked,
+    ClassifyReadinessNotClaimableCompleted,
+    ClassifyReadinessNotClaimableCancelled,
+    ClassifyReadinessNotClaimableFailed,
     ClassifyBlockerSatisfactionAbsent,
     ClassifyBlockerSatisfactionOpen,
     ClassifyBlockerSatisfactionInProgress,

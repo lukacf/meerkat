@@ -133,6 +133,43 @@ pub enum AuthLeasePhase {
     Released,
 }
 
+/// Typed credential-use intent fed by the resolver shell to the AuthMachine's
+/// credential-use admission classifier.
+///
+/// Identifies WHICH credential gate is asking — never a policy decision. The
+/// per-binding AuthMachine owns the `(lifecycle_phase, credential_present,
+/// intent)` -> [`CredentialUseDisposition`] verdict; the resolver shell extracts
+/// only this typed intent and mirrors the emitted verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialUseIntent {
+    /// Resolver "use the credential now" read.
+    UseCredential,
+    /// Resolver post-publish lifecycle-authority gate.
+    HoldAuthority,
+    /// Resolver OAuth-refresh begin gate.
+    BeginRefresh,
+}
+
+/// Machine-owned credential-use disposition the resolver shell mirrors.
+///
+/// Decided by the per-binding AuthMachine's credential-use admission classifier
+/// from its own `(lifecycle_phase, credential_present)` plus the shell-supplied
+/// [`CredentialUseIntent`]. The resolver shell maps each variant to its existing
+/// behavior/error and never decides the disposition itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialUseDisposition {
+    /// Credential may be used / lifecycle authority is held.
+    Authorized,
+    /// Caller must refresh first.
+    RefreshRequired,
+    /// Interactive user reauthorization is required.
+    ReauthRequired,
+    /// No usable lease is present.
+    LeaseAbsent,
+    /// A refresh is already in flight; the begin-refresh caller no-ops.
+    AlreadyRefreshing,
+}
+
 /// Typed classification of why a DSL transition was rejected.
 ///
 /// Emitted by the generated kernel's `apply` / `apply_signal` methods and
@@ -1647,6 +1684,30 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         Err(DslTransitionError::new(
             "AuthLeaseHandle::restore_published_credential_lifecycle",
             "restoring durable auth lifecycle publications requires generated AuthMachine authority",
+        ))
+    }
+
+    /// Classify the credential-use disposition for a binding under `intent`.
+    ///
+    /// Drives the per-binding AuthMachine's `ResolveCredentialUseAdmission`
+    /// read-only classifier over the live machine and mirrors the emitted
+    /// `CredentialUseAdmissionResolved` disposition. The AuthMachine owns the
+    /// complete `(lifecycle_phase, credential_present, intent)` -> disposition
+    /// POLICY; the caller (the auth-core resolver) extracts only the typed
+    /// `intent` and mirrors the verdict.
+    ///
+    /// Production handles must implement this through generated AuthMachine
+    /// authority. The default fails closed so a handwritten handle cannot become
+    /// a credential-use reducer.
+    fn resolve_credential_use_admission(
+        &self,
+        lease_key: &LeaseKey,
+        intent: CredentialUseIntent,
+    ) -> Result<CredentialUseDisposition, DslTransitionError> {
+        let _ = (lease_key, intent);
+        Err(DslTransitionError::new(
+            "AuthLeaseHandle::resolve_credential_use_admission",
+            "classifying credential-use admission requires generated AuthMachine authority",
         ))
     }
 

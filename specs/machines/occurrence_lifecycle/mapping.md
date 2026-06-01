@@ -359,6 +359,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyDueDeliveryFailedNoAction`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityTerminalCompleted`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityTerminalSkipped`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityTerminalMisfired`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityTerminalSuperseded`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityTerminalDeliveryFailed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_terminal_classification`
+- `ClassifyOccurrenceTerminalityLivePending`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityLiveClaimed`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityLiveDispatching`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
+- `ClassifyOccurrenceTerminalityLiveAwaitingCompletion`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_lease_recovery`
 - `ClassifyClaimedDispatchDispositionFutureRevision`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
@@ -544,6 +571,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DueLeaseExpired`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
+- `OccurrenceTerminalityClassified`
+  - anchors: `occurrence_lifecycle`
+  - scenarios: `occurrence_start_complete_fail`, `occurrence_claim_dispatch_completion`, `occurrence_terminal_classification`, `occurrence_lease_recovery`
 - `ClaimedDispatchDispositionClassified`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`

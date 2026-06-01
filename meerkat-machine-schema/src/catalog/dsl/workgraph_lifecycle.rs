@@ -452,6 +452,16 @@ machine! {
             // surface mirrors the verdict (Admitted -> proceed,
             // DeniedRequiresTrustedHost -> InvalidInput), failing closed.
             ClassifyPublicConfirmationAdmission { completion_policy: Enum<WorkCompletionPolicy> },
+            // Readiness classification. An item is "ready" iff it is claimable
+            // right now — exactly the condition the `Claim` transition guards
+            // accept (`ClaimOpen` from Open, or `ClaimExpiredInProgress`
+            // reclaiming an expired in-progress lease). This machine owns that
+            // readiness POLICY; the shell extracts only the raw wall-clock
+            // `now_utc_ms` (a pure observation) and drives this input over the
+            // recovered item state, mirroring the emitted
+            // WorkItemReadinessClassified.ready, failing closed. Each transition
+            // self-loops in its phase (classification never mutates state).
+            ClassifyReadiness { now_utc_ms: u64 },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -473,6 +483,7 @@ machine! {
             PublicConfirmationAdmissionClassified {
                 admission: Enum<WorkPublicConfirmationAdmissionKind>,
             },
+            WorkItemReadinessClassified { ready: bool },
         }
 
         invariant absent_has_zero_revision {
@@ -604,6 +615,7 @@ machine! {
         disposition BlockerSatisfactionClassified => local,
         disposition CreateStatusAdmissionClassified => local,
         disposition PublicConfirmationAdmissionClassified => local,
+        disposition WorkItemReadinessClassified => local,
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
@@ -1274,6 +1286,71 @@ machine! {
             update {}
             to Absent
             emit WorkItemTerminalityClassified { terminal: false }
+        }
+
+        // --- Readiness classification ---
+        //
+        // An item is "ready" iff it is claimable right now. The readiness
+        // condition reproduces EXACTLY the `Claim` transition guards: an Open
+        // item is ready when its blockers are resolved and its due / not-before
+        // / snooze windows are all eligible (`ClaimOpen`); an InProgress item is
+        // ready only when its prior claim's lease has expired and the same
+        // eligibility holds (`ClaimExpiredInProgress`); every other phase is not
+        // ready. The shell extracts only `now_utc_ms` and mirrors the verdict.
+        // Each transition self-loops in its phase.
+
+        helper claim_time_window_eligible(
+            due_at_utc_ms: Option<u64>,
+            not_before_utc_ms: Option<u64>,
+            snoozed_until_utc_ms: Option<u64>,
+            now_utc_ms: u64
+        ) -> bool {
+            (if due_at_utc_ms == None { true } else { due_at_utc_ms.get("value") <= now_utc_ms })
+            && (if not_before_utc_ms == None { true } else { not_before_utc_ms.get("value") <= now_utc_ms })
+            && (if snoozed_until_utc_ms == None { true } else { snoozed_until_utc_ms.get("value") <= now_utc_ms })
+        }
+
+        transition ClassifyReadinessOpen {
+            per_phase [Open]
+            on input ClassifyReadiness { now_utc_ms }
+            update {}
+            to Open
+            emit WorkItemReadinessClassified {
+                ready: self.unresolved_blocker_count == 0
+                    && claim_time_window_eligible(
+                        self.due_at_utc_ms,
+                        self.not_before_utc_ms,
+                        self.snoozed_until_utc_ms,
+                        now_utc_ms
+                    )
+            }
+        }
+
+        transition ClassifyReadinessInProgress {
+            per_phase [InProgress]
+            on input ClassifyReadiness { now_utc_ms }
+            update {}
+            to InProgress
+            emit WorkItemReadinessClassified {
+                ready: self.claim_owner_key != None
+                    && self.lease_expires_at_utc_ms != None
+                    && self.lease_expires_at_utc_ms.get("value") <= now_utc_ms
+                    && self.unresolved_blocker_count == 0
+                    && claim_time_window_eligible(
+                        self.due_at_utc_ms,
+                        self.not_before_utc_ms,
+                        self.snoozed_until_utc_ms,
+                        now_utc_ms
+                    )
+            }
+        }
+
+        transition ClassifyReadinessNotClaimable {
+            per_phase [Absent, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyReadiness { now_utc_ms }
+            update {}
+            to Absent
+            emit WorkItemReadinessClassified { ready: false }
         }
 
         // --- Per-blocking-edge satisfaction classification ---

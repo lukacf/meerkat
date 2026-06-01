@@ -366,6 +366,7 @@ pub enum OccurrenceLifecycleInput {
     ClassifyDue {
         now_utc: DateTime<Utc>,
     },
+    ClassifyOccurrenceTerminality,
     ClassifyClaimedDispatchDisposition {
         schedule_phase: SchedulePhase,
         current_schedule_revision: ScheduleRevision,
@@ -443,6 +444,9 @@ pub enum OccurrenceLifecycleEffect {
     DueClaimEligible,
     DueMisfireRequired,
     DueLeaseExpired,
+    OccurrenceTerminalityClassified {
+        terminal: bool,
+    },
     ClaimedDispatchDispositionClassified {
         disposition: ClaimedDispatchDisposition,
         superseded_by_revision: Option<ScheduleRevision>,
@@ -756,6 +760,10 @@ pub enum OccurrenceLifecycleError {
     },
     #[error("OccurrenceLifecycleMachine emitted ambiguous due classification effects: {effects:?}")]
     AmbiguousDueClassification { effects: Vec<&'static str> },
+    #[error("OccurrenceLifecycleMachine did not emit a terminality verdict")]
+    MissingTerminalityClassification,
+    #[error("OccurrenceLifecycleMachine emitted multiple terminality verdicts")]
+    AmbiguousTerminalityClassification,
     #[error(
         "OccurrenceLifecycleMachine did not emit a claimed-dispatch disposition for the observed schedule facts"
     )]
@@ -884,6 +892,33 @@ impl Occurrence {
             .clone()
             .apply(OccurrenceLifecycleInput::ClassifyDue { now_utc })?;
         due_action_from_effects(&mutator.effects)
+    }
+
+    /// Classify whether this occurrence is terminal.
+    ///
+    /// The shell extracts no fact: it drives the canonical
+    /// `OccurrenceLifecycleMachine`'s `ClassifyOccurrenceTerminality` input over
+    /// the occurrence's recovered machine state. The machine owns the
+    /// lifecycle_phase and the terminal-phase SET; this function mirrors the
+    /// emitted `OccurrenceTerminalityClassified.terminal`, failing closed if the
+    /// machine refuses or emits no verdict. It decides nothing.
+    pub fn classify_terminality(&self) -> Result<bool, OccurrenceLifecycleError> {
+        let mutator = self
+            .clone()
+            .apply(OccurrenceLifecycleInput::ClassifyOccurrenceTerminality)?;
+        terminality_from_effects(&mutator.effects)
+    }
+
+    /// Mirror the machine-owned terminality verdict as a `bool`, failing closed.
+    ///
+    /// The terminality verdict belongs to the canonical
+    /// `OccurrenceLifecycleMachine` (see [`Occurrence::classify_terminality`]).
+    /// This consumer-facing projection mirrors the machine bool; if the machine
+    /// refuses to classify (e.g. the recovered state is rejected), it fails
+    /// closed by treating the occurrence as terminal so an unclassifiable
+    /// occurrence is never offered as live work.
+    pub fn is_terminal(&self) -> bool {
+        self.classify_terminality().unwrap_or(true)
     }
 
     /// Classify the pre-dispatch disposition of this claimed occurrence against
@@ -1108,6 +1143,9 @@ fn convert_occurrence_input(
             occ_dsl::OccurrenceLifecycleInput::ClassifyDue {
                 now_utc_ms: occurrence_datetime_to_millis(*now_utc, "now_utc")?,
             }
+        }
+        OccurrenceLifecycleInput::ClassifyOccurrenceTerminality => {
+            occ_dsl::OccurrenceLifecycleInput::ClassifyOccurrenceTerminality {}
         }
         OccurrenceLifecycleInput::ClassifyClaimedDispatchDisposition {
             schedule_phase,
@@ -1609,6 +1647,11 @@ fn map_occurrence_effect(
         occ_dsl::OccurrenceLifecycleEffect::DueLeaseExpired => {
             OccurrenceLifecycleEffect::DueLeaseExpired
         }
+        occ_dsl::OccurrenceLifecycleEffect::OccurrenceTerminalityClassified { terminal } => {
+            OccurrenceLifecycleEffect::OccurrenceTerminalityClassified {
+                terminal: *terminal,
+            }
+        }
         occ_dsl::OccurrenceLifecycleEffect::ClaimedDispatchDispositionClassified {
             disposition,
             superseded_by_revision,
@@ -1662,6 +1705,22 @@ fn due_action_from_effects(
         });
     }
     Ok(first_action)
+}
+
+fn terminality_from_effects(
+    effects: &[OccurrenceLifecycleEffect],
+) -> Result<bool, OccurrenceLifecycleError> {
+    let mut verdicts = effects.iter().filter_map(|effect| match effect {
+        OccurrenceLifecycleEffect::OccurrenceTerminalityClassified { terminal } => Some(*terminal),
+        _ => None,
+    });
+    let Some(terminal) = verdicts.next() else {
+        return Err(OccurrenceLifecycleError::MissingTerminalityClassification);
+    };
+    if verdicts.next().is_some() {
+        return Err(OccurrenceLifecycleError::AmbiguousTerminalityClassification);
+    }
+    Ok(terminal)
 }
 
 fn claimed_dispatch_verdict_from_effects(
@@ -2825,6 +2884,48 @@ mod tests {
             .apply(OccurrenceLifecycleInput::Complete { at_utc: Utc::now() })
             .expect("completion should pass generated authority")
             .into_occurrence()
+    }
+
+    #[test]
+    fn terminality_is_decided_by_occurrence_authority() {
+        // Live phases mirror `false`; terminal phases mirror `true`. The
+        // verdict is owned by OccurrenceLifecycleMachine's
+        // ClassifyOccurrenceTerminality, not a handwritten shell matches!.
+        let pending = sample_occurrence();
+        assert_eq!(pending.phase, OccurrencePhase::Pending);
+        assert!(!pending.classify_terminality().expect("classify pending"));
+        assert!(!pending.is_terminal());
+
+        let claimed = sample_claimed_occurrence();
+        assert_eq!(claimed.phase, OccurrencePhase::Claimed);
+        assert!(!claimed.classify_terminality().expect("classify claimed"));
+        assert!(!claimed.is_terminal());
+
+        let completed = sample_completed_occurrence();
+        assert_eq!(completed.phase, OccurrencePhase::Completed);
+        assert!(
+            completed
+                .classify_terminality()
+                .expect("classify completed")
+        );
+        assert!(completed.is_terminal());
+
+        // Superseded is terminal and records a revision (invariant-satisfying
+        // terminal state recovered through the real machine).
+        let superseded = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::Supersede {
+                superseded_by_revision: ScheduleRevision(2),
+                at_utc: Utc::now(),
+            })
+            .expect("supersede should pass generated authority")
+            .into_occurrence();
+        assert_eq!(superseded.phase, OccurrencePhase::Superseded);
+        assert!(
+            superseded
+                .classify_terminality()
+                .expect("classify superseded")
+        );
+        assert!(superseded.is_terminal());
     }
 
     fn classify_rejected_occurrence_input(

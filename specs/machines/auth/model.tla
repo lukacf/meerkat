@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for AuthMachine.
 
-CONSTANTS AuthLifecyclePhaseValues, BooleanValues, NatValues, SetOfStringValues, StringValues
+CONSTANTS AuthLifecyclePhaseValues, BooleanValues, CredentialUseDispositionValues, CredentialUseIntentValues, NatValues, SetOfStringValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -1389,6 +1389,148 @@ ExpireOAuthDeviceFlowReauthRequired(flow_id) ==
     /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis >>
 
 
+ResolveCredentialUseAdmissionValidUseAuthorizedValid(intent) ==
+    /\ phase = "Valid"
+    /\ ((intent = "UseCredential") /\ credential_present)
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionValidHoldAuthorizedValid(intent) ==
+    /\ phase = "Valid"
+    /\ ((intent = "HoldAuthority") /\ credential_present)
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionValidBeginRefreshValid(intent) ==
+    /\ phase = "Valid"
+    /\ ((intent = "BeginRefresh") /\ credential_present)
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionValidNoCredentialValid(intent) ==
+    /\ phase = "Valid"
+    /\ (credential_present = FALSE)
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiringUseRefreshExpiring(intent) ==
+    /\ phase = "Expiring"
+    /\ ((intent = "UseCredential") /\ credential_present)
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring(intent) ==
+    /\ phase = "Expiring"
+    /\ ((intent = "HoldAuthority") /\ credential_present)
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring(intent) ==
+    /\ phase = "Expiring"
+    /\ ((intent = "BeginRefresh") /\ credential_present)
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiringNoCredentialExpiring(intent) ==
+    /\ phase = "Expiring"
+    /\ (credential_present = FALSE)
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiredUseRefreshExpired(intent) ==
+    /\ phase = "Expired"
+    /\ ((intent = "UseCredential") /\ credential_present)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiredHoldRefreshExpired(intent) ==
+    /\ phase = "Expired"
+    /\ ((intent = "HoldAuthority") /\ credential_present)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiredBeginRefreshExpired(intent) ==
+    /\ phase = "Expired"
+    /\ ((intent = "BeginRefresh") /\ credential_present)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionExpiredNoCredentialExpired(intent) ==
+    /\ phase = "Expired"
+    /\ (credential_present = FALSE)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing(intent) ==
+    /\ phase = "Refreshing"
+    /\ ((intent = "UseCredential") /\ credential_present)
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing(intent) ==
+    /\ phase = "Refreshing"
+    /\ ((intent = "HoldAuthority") /\ credential_present)
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing(intent) ==
+    /\ phase = "Refreshing"
+    /\ (intent = "BeginRefresh")
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing(intent) ==
+    /\ phase = "Refreshing"
+    /\ ((credential_present = FALSE) /\ ((intent = "UseCredential") \/ (intent = "HoldAuthority")))
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionReauthRequiredReauthRequired(intent) ==
+    /\ phase = "ReauthRequired"
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
+ResolveCredentialUseAdmissionReleasedReleased(intent) ==
+    /\ phase = "Released"
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
+
+
 Next ==
     \/ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : Acquire(expires_at_ts, arg_credential_published_at_millis)
     \/ MarkExpiring
@@ -1500,6 +1642,24 @@ Next ==
     \/ \E flow_id \in StringValues : ExpireOAuthDeviceFlowExpired(flow_id)
     \/ \E flow_id \in StringValues : ExpireOAuthDeviceFlowRefreshing(flow_id)
     \/ \E flow_id \in StringValues : ExpireOAuthDeviceFlowReauthRequired(flow_id)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionValidUseAuthorizedValid(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionValidHoldAuthorizedValid(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionValidBeginRefreshValid(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionValidNoCredentialValid(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiringUseRefreshExpiring(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiringHoldAuthorizedExpiring(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiringBeginRefreshExpiring(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiringNoCredentialExpiring(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiredUseRefreshExpired(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiredHoldRefreshExpired(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiredBeginRefreshExpired(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionExpiredNoCredentialExpired(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionRefreshingUseRefreshRefreshing(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionRefreshingHoldAuthorizedRefreshing(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionReauthRequiredReauthRequired(intent)
+    \/ \E intent \in CredentialUseIntentValues : ResolveCredentialUseAdmissionReleasedReleased(intent)
     \/ TerminalStutter
 
 oauth_flow_membership_consistent == ((DOMAIN oauth_browser_flow_providers = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_redirect_uris = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_expires_at_millis = oauth_browser_flow_ids) /\ (DOMAIN oauth_device_flow_providers = oauth_device_flow_ids) /\ (DOMAIN oauth_device_flow_expires_at_millis = oauth_device_flow_ids) /\ (\A flow_id \in oauth_device_poll_ids : (flow_id \in oauth_device_flow_ids)) /\ (oauth_outstanding_flow_count = (Cardinality(oauth_browser_flow_ids) + Cardinality(oauth_device_flow_ids))))

@@ -218,23 +218,40 @@ pub fn approval_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 
 pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
-        vec![NamedTypeBinding::string_enum(
-            "AuthLifecyclePhase",
-            &[
-                "Valid",
-                "Expiring",
-                "Expired",
-                "Refreshing",
-                "ReauthRequired",
-                "Released",
-            ],
-        )],
+        vec![
+            NamedTypeBinding::string_enum(
+                "AuthLifecyclePhase",
+                &[
+                    "Valid",
+                    "Expiring",
+                    "Expired",
+                    "Refreshing",
+                    "ReauthRequired",
+                    "Released",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "CredentialUseIntent",
+                &["UseCredential", "HoldAuthority", "BeginRefresh"],
+            ),
+            NamedTypeBinding::string_enum(
+                "CredentialUseDisposition",
+                &[
+                    "Authorized",
+                    "RefreshRequired",
+                    "ReauthRequired",
+                    "LeaseAbsent",
+                    "AlreadyRefreshing",
+                ],
+            ),
+        ],
         vec![
             InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
             InputVariantId::from_trusted_catalog_literal("RestoreCredentialLifecycleSnapshot"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthBrowserFlow"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDeviceFlow"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDevicePoll"),
+            InputVariantId::from_trusted_catalog_literal("ResolveCredentialUseAdmission"),
         ],
     )
 }
@@ -2414,6 +2431,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "SyncTargetSnapshot",
                     "RecordReceipt",
                     "ClassifyDue",
+                    "ClassifyOccurrenceTerminality",
                     "ClassifyClaimedDispatchDisposition",
                     "ClassifyCompletionSupersession",
                     "Claim",

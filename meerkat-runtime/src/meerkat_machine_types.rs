@@ -737,6 +737,7 @@ meerkat_machine_runtime_internal_inputs!(
         BoundaryComplete,
         BoundaryContinue,
         ClassifyTurnTerminalCauseClass,
+        ClassifyTurnTerminality,
         ClearSessionLlmState,
         HydrateSessionLlmState,
         LlmReturnedTerminal,

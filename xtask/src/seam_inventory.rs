@@ -446,6 +446,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "TurnTerminalityClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Turn-terminality verdict (which turn phases are terminal) is decided by MeerkatMachine ClassifyTurnTerminality over the machine-owned turn_phase; the turn-state owner mirrors it onto the snapshot turn_terminal and the agent loop / session host consume that instead of reclassifying TurnPhase locally, failing closed",
+        ),
+        (
+            "MeerkatMachine",
             "TurnSurfaceResultResolved",
             SeamClassification::SurfaceResultAlignment,
             "Surface-result class projection feeds the codegen-derived classify_terminal table and must align with canonical terminal outcome/cause truth",
@@ -1671,6 +1677,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "PublicConfirmationAdmissionClassified",
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph public-confirmation admission verdict (Admitted/DeniedRequiresTrustedHost) is decided by WorkGraphLifecycleMachine from the machine-owned completion_policy observation; the public-confirm surface mirrors it (DeniedRequiresTrustedHost -> InvalidInput) instead of deciding the trust-scoped eligibility itself",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "CompletionPolicyMutationAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph completion-policy mutation admission verdict (Admitted/Denied) is decided by WorkGraphLifecycleMachine by comparing the requested completion policy in full against the machine-owned policy; the update shell mirrors it (Denied -> InvalidInput) instead of deciding the immutability invariant itself",
         ),
         //
         // =========================================================================

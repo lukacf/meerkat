@@ -759,6 +759,112 @@ async fn attention_bound_update_cannot_change_completion_policy() {
 }
 
 #[tokio::test]
+async fn update_with_unchanged_completion_policy_is_admitted_by_machine() {
+    // The completion-policy immutability verdict is owned by
+    // WorkGraphLifecycleMachine's ClassifyCompletionPolicyMutationAdmission, not
+    // a shell reducer. A request that carries the SAME completion policy is a
+    // no-op on policy and must be admitted (the rest of the update applies).
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000118").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Stable policy".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let updated = service
+        .update(UpdateWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            title: Some("Stable policy (renamed)".to_string()),
+            description: None,
+            priority: None,
+            completion_policy: Some(WorkCompletionPolicy::HostConfirmed),
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect("update with unchanged completion policy is admitted");
+    assert_eq!(
+        updated.completion_policy,
+        WorkCompletionPolicy::HostConfirmed
+    );
+    assert_eq!(updated.title, "Stable policy (renamed)");
+    assert_eq!(updated.revision, goal.item.revision + 1);
+}
+
+#[tokio::test]
+async fn update_changing_supervisor_owner_key_is_denied_by_machine() {
+    // The immutability verdict compares the completion policy IN FULL — the
+    // machine-owned variant AND its payload (supervisor owner key / reviewer
+    // quorum threshold). A request that keeps the Supervisor variant but mutates
+    // the supervisor owner key still changes the policy and must be denied.
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000119").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Supervised goal".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::Supervisor {
+                owner_key: WorkOwnerKey::principal("supervisor-original").expect("principal"),
+            },
+            delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+
+    let err = service
+        .update(UpdateWorkItemRequest {
+            id: goal.item.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            title: None,
+            description: None,
+            priority: None,
+            completion_policy: Some(WorkCompletionPolicy::Supervisor {
+                owner_key: WorkOwnerKey::principal("supervisor-replacement").expect("principal"),
+            }),
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect_err("changing the supervisor owner key changes the completion policy");
+    assert!(matches!(
+        err,
+        meerkat_workgraph::WorkGraphError::InvalidInput(_)
+    ));
+}
+
+#[tokio::test]
 async fn direct_terminal_close_stops_attention_bindings_for_item() {
     let service = WorkGraphService::new(std::sync::Arc::new(
         meerkat_workgraph::MemoryWorkGraphStore::new(),

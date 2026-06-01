@@ -3295,7 +3295,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .ok()
             .flatten()
-            .is_some_and(|snapshot| snapshot.turn_phase.is_terminal())
+            .is_some_and(|snapshot| snapshot.turn_terminal)
     }
 
     fn reject_runtime_backed_direct_start_turn(&self) -> Result<(), SessionError> {

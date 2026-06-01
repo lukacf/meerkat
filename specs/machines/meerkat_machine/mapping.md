@@ -4727,6 +4727,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTurnTerminalCauseClassOtherFailureIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `ClassifyTurnTerminalityTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyTurnTerminalityTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyTurnTerminalityTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyTurnTerminalityNonTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyTurnTerminalityNonTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyTurnTerminalityNonTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -4894,6 +4912,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TurnTerminalCauseClassResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`
+- `TurnTerminalityClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `TurnSurfaceResultResolved`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`

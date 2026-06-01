@@ -146,16 +146,6 @@ pub enum WorkStatus {
     Failed,
 }
 
-impl WorkStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-
-    pub fn is_terminal_success(self) -> bool {
-        matches!(self, Self::Completed)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -356,13 +346,6 @@ pub struct WorkClaim {
     pub lease_expires_at: Option<DateTime<Utc>>,
 }
 
-impl WorkClaim {
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        self.lease_expires_at
-            .is_none_or(|lease_expires_at| lease_expires_at > now)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExternalWorkRef {
@@ -498,16 +481,6 @@ pub enum WorkAttentionStatus {
     },
     Superseded,
     Stopped,
-}
-
-impl WorkAttentionStatus {
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        match self {
-            Self::Active => true,
-            Self::Paused { until } => until.is_some_and(|until| until <= now),
-            Self::Superseded | Self::Stopped => false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

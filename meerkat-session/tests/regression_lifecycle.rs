@@ -1267,6 +1267,7 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
     let expected = AgentExecutionSnapshot {
         loop_state: meerkat_core::state::LoopState::WaitingForOps,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::WaitingForOps,
+        turn_terminal: false,
         active_run_id: Some(RunId::new()),
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: Some(
@@ -1324,6 +1325,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
     let expected_execution = AgentExecutionSnapshot {
         loop_state: meerkat_core::state::LoopState::CallingLlm,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
+        turn_terminal: false,
         active_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: None,
@@ -1385,6 +1387,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
     let expected_execution = AgentExecutionSnapshot {
         loop_state: meerkat_core::state::LoopState::CallingLlm,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
+        turn_terminal: false,
         active_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: None,

@@ -89,6 +89,58 @@ impl std::fmt::Display for WorkCompletionPolicy {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum WorkCompletionPolicyMutationAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Admitted")]
+    Admitted,
+}
+impl WorkCompletionPolicyMutationAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::Admitted => "Admitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkCompletionPolicyMutationAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "Admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "invalid WorkCompletionPolicyMutationAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkCompletionPolicyMutationAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkCompletionPolicyMutationAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum WorkCreateStatusAdmissionKind {
     #[default]
     #[serde(rename = "Denied")]
@@ -703,6 +755,12 @@ pub mod inputs {
         pub completion_policy: WorkCompletionPolicy,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyCompletionPolicyMutationAdmission {
+        pub requested_completion_policy: WorkCompletionPolicy,
+        pub requested_completion_supervisor_owner_key: Option<WorkOwnerKey>,
+        pub requested_completion_reviewer_quorum_threshold: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyReadiness {
         pub now_utc_ms: u64,
     }
@@ -727,6 +785,7 @@ pub enum Input {
     ClassifyBlockerSatisfied(inputs::ClassifyBlockerSatisfied),
     ClassifyCreateStatusAdmission(inputs::ClassifyCreateStatusAdmission),
     ClassifyPublicConfirmationAdmission(inputs::ClassifyPublicConfirmationAdmission),
+    ClassifyCompletionPolicyMutationAdmission(inputs::ClassifyCompletionPolicyMutationAdmission),
     ClassifyReadiness(inputs::ClassifyReadiness),
 }
 impl Input {
@@ -751,6 +810,9 @@ impl Input {
             Self::ClassifyPublicConfirmationAdmission(_) => {
                 InputKind::ClassifyPublicConfirmationAdmission
             }
+            Self::ClassifyCompletionPolicyMutationAdmission(_) => {
+                InputKind::ClassifyCompletionPolicyMutationAdmission
+            }
             Self::ClassifyReadiness(_) => InputKind::ClassifyReadiness,
         }
     }
@@ -774,6 +836,7 @@ pub enum InputKind {
     ClassifyBlockerSatisfied,
     ClassifyCreateStatusAdmission,
     ClassifyPublicConfirmationAdmission,
+    ClassifyCompletionPolicyMutationAdmission,
     ClassifyReadiness,
 }
 
@@ -823,6 +886,10 @@ pub mod effects {
         pub admission: WorkPublicConfirmationAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompletionPolicyMutationAdmissionClassified {
+        pub admission: WorkCompletionPolicyMutationAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WorkItemReadinessClassified {
         pub ready: bool,
     }
@@ -843,6 +910,9 @@ pub enum Effect {
     BlockerSatisfactionClassified(effects::BlockerSatisfactionClassified),
     CreateStatusAdmissionClassified(effects::CreateStatusAdmissionClassified),
     PublicConfirmationAdmissionClassified(effects::PublicConfirmationAdmissionClassified),
+    CompletionPolicyMutationAdmissionClassified(
+        effects::CompletionPolicyMutationAdmissionClassified,
+    ),
     WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -860,6 +930,7 @@ pub enum EffectKind {
     BlockerSatisfactionClassified,
     CreateStatusAdmissionClassified,
     PublicConfirmationAdmissionClassified,
+    CompletionPolicyMutationAdmissionClassified,
     WorkItemReadinessClassified,
 }
 
@@ -1043,6 +1114,20 @@ pub enum TransitionId {
     ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted,
     ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled,
     ClassifyPublicConfirmationAdmissionReviewerQuorumFailed,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedOpen,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled,
+    ClassifyCompletionPolicyMutationAdmissionUnchangedFailed,
+    ClassifyCompletionPolicyMutationAdmissionChangedAbsent,
+    ClassifyCompletionPolicyMutationAdmissionChangedOpen,
+    ClassifyCompletionPolicyMutationAdmissionChangedInProgress,
+    ClassifyCompletionPolicyMutationAdmissionChangedBlocked,
+    ClassifyCompletionPolicyMutationAdmissionChangedCompleted,
+    ClassifyCompletionPolicyMutationAdmissionChangedCancelled,
+    ClassifyCompletionPolicyMutationAdmissionChangedFailed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

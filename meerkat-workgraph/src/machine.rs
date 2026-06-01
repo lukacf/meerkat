@@ -29,6 +29,16 @@ pub use wg_dsl::WorkGraphPublicErrorClass;
 /// mirrors the emitted verdict.
 pub use wg_dsl::WorkPublicConfirmationAdmissionKind;
 
+/// Machine-owned admission verdict for a requested mutation of a work item's
+/// `completion_policy`.
+///
+/// Re-exported from the canonical `WorkGraphLifecycleMachine` DSL: the machine is
+/// the sole authority for the immutability invariant "a work item's completion
+/// policy is fixed at creation and cannot be changed by an update" (see
+/// `WorkGraphMachine::classify_completion_policy_mutation_admission`). The shell
+/// mirrors the emitted verdict.
+pub use wg_dsl::WorkCompletionPolicyMutationAdmissionKind;
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkAttentionMachine;
 
@@ -357,6 +367,66 @@ impl WorkGraphMachine {
         admission.ok_or_else(|| {
             WorkGraphError::Store(format!(
                 "WorkGraphLifecycle public-confirmation admission emitted no verdict for {policy:?}"
+            ))
+        })
+    }
+
+    /// Resolve whether a requested completion-policy mutation is admissible.
+    ///
+    /// The immutability invariant "a work item's completion policy is fixed at
+    /// creation and cannot be changed by an update" is owned by the canonical
+    /// `WorkGraphLifecycleMachine`, not the shell. The shell performs only a pure
+    /// typed extraction of the requested completion policy into the DSL
+    /// observation (variant plus supervisor owner key plus reviewer quorum
+    /// threshold), drives the machine's `ClassifyCompletionPolicyMutationAdmission`
+    /// input over the item's recovered machine state, and mirrors the emitted
+    /// `CompletionPolicyMutationAdmissionClassified` verdict. The machine compares
+    /// the requested policy — in full — against its own machine-owned completion
+    /// policy; this function decides nothing and fails closed if the machine
+    /// refuses or emits no verdict.
+    pub fn classify_completion_policy_mutation_admission(
+        item: &WorkItem,
+        requested: &crate::types::WorkCompletionPolicy,
+    ) -> Result<wg_dsl::WorkCompletionPolicyMutationAdmissionKind, WorkGraphError> {
+        validate_item_machine_projection(item)?;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(
+            item.machine_state.clone(),
+        )
+        .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy: requested.to_machine(),
+                requested_completion_supervisor_owner_key: requested.supervisor_owner_key(),
+                requested_completion_reviewer_quorum_threshold: requested
+                    .reviewer_quorum_threshold(),
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidTransition(format!(
+                "work item {} refused completion-policy mutation classification: {error:?}",
+                item.id
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::CompletionPolicyMutationAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple completion-policy mutation verdicts",
+                    item.id
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no completion-policy mutation verdict",
+                item.id
             ))
         })
     }
@@ -1328,7 +1398,12 @@ fn seconds_to_duration(seconds: u64) -> Duration {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::redundant_clone
+)]
 mod tests {
     use super::*;
     use crate::types::{

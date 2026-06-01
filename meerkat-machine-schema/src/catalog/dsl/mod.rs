@@ -1730,6 +1730,7 @@ runtime_internal_inputs!(
         ClassifyRuntimeLifecycleState,
         ClassifyRuntimeLoopQueueAdmission,
         ClassifySurfaceRequestTerminal,
+        ClassifyTurnTerminality,
         ClassifyTurnTerminalCauseClass,
         ClearSessionLlmState,
         ClearTurnToolOverlay,
@@ -2661,6 +2662,10 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "WorkPublicConfirmationAdmissionKind",
                 &["DeniedRequiresTrustedHost", "Admitted"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkCompletionPolicyMutationAdmissionKind",
+                &["Denied", "Admitted"],
             ),
             NamedTypeBinding::type_path_struct(
                 "WorkOwnerKey",

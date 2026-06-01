@@ -180,10 +180,11 @@ impl WorkGraphService {
         let now = self.store.get_store_time_utc().await?;
         let mut attention = Vec::new();
         for binding in self.store.list_attention(filter).await? {
-            if status_filter
-                .as_ref()
-                .is_none_or(|status| attention_status_matches_at(&binding.status, status, now))
-            {
+            let matches = match status_filter.as_ref() {
+                Some(status) => attention_status_matches_at(&binding, status, now)?,
+                None => true,
+            };
+            if matches {
                 attention.push(binding);
             }
         }
@@ -452,23 +453,6 @@ impl WorkGraphService {
         Ok(GoalRequestCloseResult { item, attention })
     }
 
-    async fn validate_completion_policy_update(
-        &self,
-        item: &WorkItem,
-        requested: Option<&WorkCompletionPolicy>,
-    ) -> Result<(), WorkGraphError> {
-        let Some(requested) = requested else {
-            return Ok(());
-        };
-        if requested == &item.completion_policy {
-            return Ok(());
-        }
-        Err(WorkGraphError::InvalidInput(format!(
-            "completion policy for work item {} cannot be changed by update",
-            item.id
-        )))
-    }
-
     pub async fn get(
         &self,
         realm_id: Option<String>,
@@ -671,8 +655,25 @@ impl WorkGraphService {
                 request.id.clone(),
             )
             .await?;
-        self.validate_completion_policy_update(&item, request.completion_policy.as_ref())
-            .await?;
+        // The immutability invariant "a work item's completion policy is fixed at
+        // creation and cannot be changed by an update" is owned by
+        // WorkGraphLifecycleMachine, not this surface. When the request carries a
+        // completion policy we extract it as a pure typed observation, drive the
+        // machine's completion-policy mutation admission classifier over the
+        // recovered item state, and mirror the verdict: Denied -> the same
+        // InvalidInput rejection, Admitted -> proceed. Fails closed.
+        if let Some(requested) = request.completion_policy.as_ref() {
+            match WorkGraphMachine::classify_completion_policy_mutation_admission(&item, requested)?
+            {
+                crate::machine::WorkCompletionPolicyMutationAdmissionKind::Admitted => {}
+                crate::machine::WorkCompletionPolicyMutationAdmissionKind::Denied => {
+                    return Err(WorkGraphError::InvalidInput(format!(
+                        "completion policy for work item {} cannot be changed by update",
+                        item.id
+                    )));
+                }
+            }
+        }
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::update_item(item, request, now)?;
         self.store
@@ -1325,18 +1326,27 @@ fn is_reserved_confirmation_evidence_kind(kind: &str) -> bool {
 }
 
 fn attention_status_matches_at(
-    status: &WorkAttentionStatus,
+    binding: &WorkAttentionBinding,
     filter: &WorkAttentionStatus,
     now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    match filter {
-        WorkAttentionStatus::Active => status.is_active_at(now),
+) -> Result<bool, WorkGraphError> {
+    // The "active at now" verdict over the machine-owned lifecycle phase +
+    // paused-until deadline is a WorkAttentionLifecycleMachine fact: it is exactly
+    // the machine's ClassifyAttentionEligibility verdict (Active, or Paused past
+    // its deadline). The shell extracts no fact — it drives the machine classifier
+    // and mirrors the emitted eligibility, failing closed. The Superseded/Stopped
+    // filter arms remain a pure typed phase observation.
+    Ok(match filter {
+        WorkAttentionStatus::Active => WorkAttentionMachine::classify_eligibility_at(binding, now)?,
         WorkAttentionStatus::Paused { .. } => {
-            matches!(status, WorkAttentionStatus::Paused { .. }) && !status.is_active_at(now)
+            matches!(binding.status, WorkAttentionStatus::Paused { .. })
+                && !WorkAttentionMachine::classify_eligibility_at(binding, now)?
         }
-        WorkAttentionStatus::Superseded => matches!(status, WorkAttentionStatus::Superseded),
-        WorkAttentionStatus::Stopped => matches!(status, WorkAttentionStatus::Stopped),
-    }
+        WorkAttentionStatus::Superseded => {
+            matches!(binding.status, WorkAttentionStatus::Superseded)
+        }
+        WorkAttentionStatus::Stopped => matches!(binding.status, WorkAttentionStatus::Stopped),
+    })
 }
 
 /// Count the unresolved blocking edges for `item`.

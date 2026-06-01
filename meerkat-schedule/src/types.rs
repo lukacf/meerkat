@@ -946,12 +946,6 @@ pub enum SchedulePhase {
     Deleted,
 }
 
-impl SchedulePhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Deleted)
-    }
-}
-
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

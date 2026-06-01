@@ -630,6 +630,13 @@ pub struct TurnStateSnapshot {
     /// handles do the same from their in-core test state.
     pub loop_state: LoopState,
     pub turn_phase: TurnPhase,
+    /// Machine-owned turn-terminality verdict.
+    ///
+    /// Consumers must not reclassify [`TurnPhase`] locally. This bool is the
+    /// `TurnTerminalityClassified.terminal` verdict emitted by the canonical
+    /// MeerkatMachine `ClassifyTurnTerminality` input over the same DSL snapshot
+    /// as `turn_phase`; the turn-state owner mirrors it, failing closed.
+    pub turn_terminal: bool,
     /// Typed primitive kind recorded by the DSL (dogma #5, #19 — no stringly
     /// discriminants). `None` means no primitive is currently in flight.
     pub primitive_kind: Option<TurnPrimitiveKind>,

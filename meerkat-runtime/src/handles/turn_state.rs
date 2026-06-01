@@ -579,10 +579,8 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 }
             })
             .collect();
-        let active_run_id = if matches!(
-            turn_phase,
-            TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled
-        ) {
+        let turn_terminal = classify_turn_terminal(&state);
+        let active_run_id = if turn_terminal {
             None
         } else {
             state.current_run_id.as_ref().map(parse_snapshot_run_id)
@@ -591,6 +589,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             active_run_id,
             loop_state: map_loop_state(state.turn_phase),
             turn_phase,
+            turn_terminal,
             primitive_kind: state.primitive_kind.map(TurnPrimitiveKind::from),
             admitted_content_shape: state.admitted_content_shape.map(Into::into),
             vision_enabled: state.vision_enabled,
@@ -627,6 +626,37 @@ fn parse_snapshot_run_id(run_id: &mm_dsl::RunId) -> RunId {
     uuid::Uuid::parse_str(&run_id.0)
         .map(RunId::from_uuid)
         .expect("generated MeerkatMachine current_run_id projection must be well formed")
+}
+
+/// Mirror the canonical MeerkatMachine turn-terminality verdict over the
+/// recovered turn state.
+///
+/// The terminality verdict (which turn phases are terminal) is a machine fact:
+/// this owner extracts no fact — it recovers a read-only authority from the DSL
+/// state, drives the `ClassifyTurnTerminality` input, and mirrors the emitted
+/// `TurnTerminalityClassified.terminal`. It decides nothing. Fails closed:
+/// an unclassifiable state is treated as terminal so a live run is never assumed
+/// to still be active off an unreadable snapshot.
+fn classify_turn_terminal(state: &mm_dsl::MeerkatMachineState) -> bool {
+    let Ok(mut authority) = mm_dsl::MeerkatMachineAuthority::recover_from_state(state.clone())
+    else {
+        return true;
+    };
+    let Ok(transition) = mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::ClassifyTurnTerminality {},
+    ) else {
+        return true;
+    };
+    let mut classified = None;
+    for effect in transition.effects() {
+        if let mm_dsl::MeerkatMachineEffect::TurnTerminalityClassified { terminal } = effect
+            && classified.replace(*terminal).is_some()
+        {
+            return true;
+        }
+    }
+    classified.unwrap_or(true)
 }
 
 /// Exhaustive 1-to-1 projection of the DSL's typed turn phase into the

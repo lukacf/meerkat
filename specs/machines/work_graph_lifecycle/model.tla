@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkPublicConfirmationAdmissionKindValues
+CONSTANTS BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkPublicConfirmationAdmissionKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -1647,6 +1647,118 @@ ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy) =
     /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
+ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Absent"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionUnchangedOpen(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Open"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "InProgress"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Blocked"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Completed"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Cancelled"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionUnchangedFailed(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Failed"
+    /\ ((requested_completion_policy = completion_policy) /\ (requested_completion_supervisor_owner_key = completion_supervisor_owner_key) /\ (requested_completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedAbsent(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Absent"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedOpen(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Open"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedInProgress(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "InProgress"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedBlocked(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Blocked"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedCompleted(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Completed"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedCancelled(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Cancelled"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCompletionPolicyMutationAdmissionChangedFailed(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold) ==
+    /\ phase = "Failed"
+    /\ ((requested_completion_policy # completion_policy) \/ (requested_completion_supervisor_owner_key # completion_supervisor_owner_key) \/ (requested_completion_reviewer_quorum_threshold # completion_reviewer_quorum_threshold))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
 Next ==
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
@@ -1825,6 +1937,20 @@ Next ==
     \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy)
     \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy)
     \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedOpen(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionUnchangedFailed(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedAbsent(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedOpen(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedInProgress(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedBlocked(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedCompleted(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedCancelled(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+    \/ \E requested_completion_policy \in WorkCompletionPolicyValues : \E requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E requested_completion_reviewer_quorum_threshold \in OptionU64Values : ClassifyCompletionPolicyMutationAdmissionChangedFailed(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
     \/ TerminalStutter
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))

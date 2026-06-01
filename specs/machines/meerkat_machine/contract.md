@@ -350,6 +350,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyTurnTerminalCauseClass`(cause_kind: Option<TurnTerminalCauseKind>)
+- `ClassifyTurnTerminality`
 - `ResolveTurnSurfaceResult`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass)
 - `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
@@ -601,6 +602,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputPublicTerminalOutcomeResolved`(input_id: String, terminal_outcome: Option<InputPublicTerminalOutcome>)
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
 - `TurnTerminalCauseClassResolved`(cause_kind: Option<TurnTerminalCauseKind>, cause_class: TerminalCauseClass)
+- `TurnTerminalityClassified`(terminal: Bool)
 - `TurnSurfaceResultResolved`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass, surface_class: SurfaceResultClass)
 - `StoredInputStateSeedAuthorized`(input_id: String)
 - `RuntimeLifecycleStateClassified`(state: RuntimeLifecycleObservedState, terminality: RuntimeLifecycleTerminality, input_admission: RuntimeInputAdmission, queue_admission: RuntimeQueueAdmission, prepare_admission: RuntimePrepareAdmission, ingress_admission: RuntimeIngressAdmission)
@@ -15668,6 +15670,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cause_other_failure`
 - Emits: `TurnTerminalCauseClassResolved`
 - To: `Idle`
+
+### `ClassifyTurnTerminalityTerminalIdle`
+- From: `Idle`
+- On: `ClassifyTurnTerminality`()
+- Guards:
+  - `turn_phase_terminal`
+- Emits: `TurnTerminalityClassified`
+- To: `Idle`
+
+### `ClassifyTurnTerminalityTerminalAttached`
+- From: `Attached`
+- On: `ClassifyTurnTerminality`()
+- Guards:
+  - `turn_phase_terminal`
+- Emits: `TurnTerminalityClassified`
+- To: `Attached`
+
+### `ClassifyTurnTerminalityTerminalRunning`
+- From: `Running`
+- On: `ClassifyTurnTerminality`()
+- Guards:
+  - `turn_phase_terminal`
+- Emits: `TurnTerminalityClassified`
+- To: `Running`
+
+### `ClassifyTurnTerminalityNonTerminalIdle`
+- From: `Idle`
+- On: `ClassifyTurnTerminality`()
+- Guards:
+  - `turn_phase_non_terminal`
+- Emits: `TurnTerminalityClassified`
+- To: `Idle`
+
+### `ClassifyTurnTerminalityNonTerminalAttached`
+- From: `Attached`
+- On: `ClassifyTurnTerminality`()
+- Guards:
+  - `turn_phase_non_terminal`
+- Emits: `TurnTerminalityClassified`
+- To: `Attached`
+
+### `ClassifyTurnTerminalityNonTerminalRunning`
+- From: `Running`
+- On: `ClassifyTurnTerminality`()
+- Guards:
+  - `turn_phase_non_terminal`
+- Emits: `TurnTerminalityClassified`
+- To: `Running`
 
 ### `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
 - From: `Idle`

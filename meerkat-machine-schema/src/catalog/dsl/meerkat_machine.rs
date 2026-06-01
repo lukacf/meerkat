@@ -3348,6 +3348,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             ClassifyTurnTerminalCauseClass {
                 cause_kind: Option<Enum<TurnTerminalCauseKind>>,
             },
+            // Turn-terminality classification. This machine owns the turn_phase
+            // field; the terminality verdict (which turn phases are terminal) is a
+            // machine fact. The shell extracts no fact — it drives this input over
+            // the recovered machine state and mirrors the emitted
+            // TurnTerminalityClassified.terminal, failing closed.
+            ClassifyTurnTerminality {},
             ResolveTurnSurfaceResult {
                 outcome: Enum<TurnTerminalOutcome>,
                 cause_class: Enum<TerminalCauseClass>,
@@ -4124,6 +4130,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cause_kind: Option<Enum<TurnTerminalCauseKind>>,
                 cause_class: Enum<TerminalCauseClass>,
             },
+            TurnTerminalityClassified { terminal: bool },
             TurnSurfaceResultResolved {
                 outcome: Enum<TurnTerminalOutcome>,
                 cause_class: Enum<TerminalCauseClass>,
@@ -4546,6 +4553,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
         disposition TurnTerminalCauseClassResolved => local,
+        disposition TurnTerminalityClassified => local,
         disposition TurnSurfaceResultResolved => local,
         disposition StoredInputStateSeedAuthorized => local,
         disposition RuntimeLifecycleStateClassified => local,
@@ -19147,6 +19155,44 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit TurnTerminalCauseClassResolved { cause_kind: cause_kind, cause_class: TerminalCauseClass::OtherFailure }
+        }
+
+        // ClassifyTurnTerminality: this machine owns the turn_phase field and the
+        // turn-terminality verdict (which turn phases are terminal). The shell
+        // extracts no fact — it drives this input over the recovered machine state
+        // and mirrors the emitted TurnTerminalityClassified.terminal, failing
+        // closed. The terminal turn-phase set is {Completed, Failed, Cancelled};
+        // every other turn phase is non-terminal. Self-loops in the machine phase
+        // (pure classification, no state mutation).
+        transition ClassifyTurnTerminalityTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyTurnTerminality {}
+            guard "turn_phase_terminal" {
+                self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
+            }
+            update {}
+            to Idle
+            emit TurnTerminalityClassified { terminal: true }
+        }
+
+        transition ClassifyTurnTerminalityNonTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyTurnTerminality {}
+            guard "turn_phase_non_terminal" {
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::ApplyingPrimitive
+                || self.turn_phase == TurnPhase::CallingLlm
+                || self.turn_phase == TurnPhase::WaitingForOps
+                || self.turn_phase == TurnPhase::DrainingBoundary
+                || self.turn_phase == TurnPhase::Extracting
+                || self.turn_phase == TurnPhase::ErrorRecovery
+                || self.turn_phase == TurnPhase::Cancelling
+            }
+            update {}
+            to Idle
+            emit TurnTerminalityClassified { terminal: false }
         }
 
         // ResolveTurnSurfaceResult: generated surface-result classification

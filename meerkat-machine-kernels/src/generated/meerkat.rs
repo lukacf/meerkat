@@ -10547,6 +10547,8 @@ pub mod inputs {
         pub cause_kind: Option<TurnTerminalCauseKind>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTurnTerminality {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveTurnSurfaceResult {
         pub outcome: TurnTerminalOutcome,
         pub cause_class: TerminalCauseClass,
@@ -11592,6 +11594,7 @@ pub enum Input {
     ResolveInputPublicTerminalOutcome(inputs::ResolveInputPublicTerminalOutcome),
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     ClassifyTurnTerminalCauseClass(inputs::ClassifyTurnTerminalCauseClass),
+    ClassifyTurnTerminality(inputs::ClassifyTurnTerminality),
     ResolveTurnSurfaceResult(inputs::ResolveTurnSurfaceResult),
     AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
@@ -11890,6 +11893,7 @@ impl Input {
             }
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::ClassifyTurnTerminalCauseClass(_) => InputKind::ClassifyTurnTerminalCauseClass,
+            Self::ClassifyTurnTerminality(_) => InputKind::ClassifyTurnTerminality,
             Self::ResolveTurnSurfaceResult(_) => InputKind::ResolveTurnSurfaceResult,
             Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
             Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
@@ -12201,6 +12205,7 @@ pub enum InputKind {
     ResolveInputPublicTerminalOutcome,
     ClassifyInputTerminality,
     ClassifyTurnTerminalCauseClass,
+    ClassifyTurnTerminality,
     ResolveTurnSurfaceResult,
     AuthorizeStoredInputStateSeed,
     ClassifyRuntimeLifecycleState,
@@ -12696,6 +12701,10 @@ pub mod effects {
     pub struct TurnTerminalCauseClassResolved {
         pub cause_kind: Option<TurnTerminalCauseKind>,
         pub cause_class: TerminalCauseClass,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TurnTerminalityClassified {
+        pub terminal: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnSurfaceResultResolved {
@@ -13289,6 +13298,7 @@ pub enum Effect {
     InputPublicTerminalOutcomeResolved(effects::InputPublicTerminalOutcomeResolved),
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     TurnTerminalCauseClassResolved(effects::TurnTerminalCauseClassResolved),
+    TurnTerminalityClassified(effects::TurnTerminalityClassified),
     TurnSurfaceResultResolved(effects::TurnSurfaceResultResolved),
     StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
@@ -13441,6 +13451,7 @@ pub enum EffectKind {
     InputPublicTerminalOutcomeResolved,
     InputBehavioralTerminalityResolved,
     TurnTerminalCauseClassResolved,
+    TurnTerminalityClassified,
     TurnSurfaceResultResolved,
     StoredInputStateSeedAuthorized,
     RuntimeLifecycleStateClassified,
@@ -15115,6 +15126,12 @@ pub enum TransitionId {
     ClassifyTurnTerminalCauseClassRetryExhaustedIdle,
     ClassifyTurnTerminalCauseClassStructuredOutputValidationFailedIdle,
     ClassifyTurnTerminalCauseClassOtherFailureIdle,
+    ClassifyTurnTerminalityTerminalIdle,
+    ClassifyTurnTerminalityTerminalAttached,
+    ClassifyTurnTerminalityTerminalRunning,
+    ClassifyTurnTerminalityNonTerminalIdle,
+    ClassifyTurnTerminalityNonTerminalAttached,
+    ClassifyTurnTerminalityNonTerminalRunning,
     ResolveTurnSurfaceResultNoneMissingTerminalIdle,
     ResolveTurnSurfaceResultCompletedSuccessIdle,
     ResolveTurnSurfaceResultCompletedFailureIdle,

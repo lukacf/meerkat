@@ -479,3 +479,47 @@ revalidates via llm_failure_kind_recoverable + retries_remaining). No change.
 
 Gates: drift 10/6; workspace --all-features check clean; machine-codegen 94; schedule+auth-core+workgraph 290
 + store(sqlite) 56 pass; ratchets pass; seam 0 debt. Re-running convergence (round 6) to certify two-clean on final tree.
+
+## CONVERGENCE ROUND 6 + WHOLE-CLASS DRAIN (terminality/expiry reducers)
+sweep: 1 HIGH-certain (completion_policy immutability) + 2 self-cleared (retry, resolve_binding). alpha: 1
+(SchedulePhase::is_terminal). beta: 2 (TurnPhase::is_terminal + dead coordination reducers). Rather than
+one-sibling-per-round, enumerated + dispositioned the ENTIRE handwritten is_terminal/is_expired/is_active/
+overlaps reducer class (~28 sites), folding genuine canonical-machine-phase duplications, deleting dead
+leftovers, and DEFENDING legitimate ones (anti-over-fold).
+
+### FOLDED (HIGH) — completion_policy immutability -> WorkGraphLifecycle
+service.rs validate_completion_policy_update shell-enforced "completion_policy immutable after creation"
+AND the DSL Update* transitions wrote it UNCONDITIONALLY (machine would silently accept a change). Added
+WorkGraphLifecycle ClassifyCompletionPolicyMutationAdmission { requested_policy + supervisor_owner_key +
+reviewer_quorum_threshold } -> Admitted|Denied (full-policy compare, not variant-only). service.rs::update
+mirrors Denied -> same InvalidInput message; validate_completion_policy_update DELETED.
+
+### FOLDED (class) — canonical-machine-phase terminality duplications
+- TurnPhase::is_terminal (turn_execution_authority.rs, MeerkatMachine turn phase, consumed live) ->
+  MeerkatMachine ClassifyTurnTerminality {} -> TurnTerminalityClassified { terminal }; carried as machine-owned
+  turn_terminal on TurnStateSnapshot/AgentExecutionSnapshot; both handles drive+mirror (fail-closed-to-terminal);
+  consumers (agent/state.rs x2, session/persistent.rs, runtime handle) updated; method deleted; declared in BOTH
+  MeerkatMachine parity lists.
+- WorkStatus::is_terminal (workgraph) -> existing WorkGraphMachine::classify_terminality (fail-closed); consumer
+  store.rs item_matches_filter mirrors; method deleted.
+- WorkAttentionStatus::is_active_at (workgraph) -> existing WorkAttentionMachine ClassifyAttentionEligibility;
+  attention_status_matches_at now Result-propagating; method deleted.
+
+### DELETED (dead leftovers from earlier folds; zero production consumers, --all-features verified)
+SchedulePhase::is_terminal; WorkStatus::is_terminal_success; WorkClaim::is_active_at; mob coordination
+WorkIntentStatus/ResourceClaimStatus::is_terminal + WorkIntent/ResourceClaim::is_expired_at/is_active_at +
+ResourceClaim::overlaps_resources (7 methods + 3 tests). Types retained (used by MobMachine conversions).
+
+### DEFENDED (anti-over-fold; NOT canonical-machine-phase duplications)
+LoopState::is_terminal (user-facing public projection, test-only consumer); InputState::is_terminal (reads
+machine-set terminal_outcome field); peer_correlation Outbound/Inbound/InteractionStream::is_terminal
+(test-only; production terminality routes through DSL TerminalityClass); live_adapter LiveAdapterStatus
+(non-canonical live-adapter status); machines/mob_machine.rs + meerkat_machine/mod.rs is_terminal (machine's
+OWN emitted-class projection); mob_member_lifecycle_projection (reads machine status); flow_frame/turn_admission
+(#[cfg(test)] / machine-emitted projection); Occurrence::is_terminal (already machine-backed).
+
+### DEFENDED (sweep self-cleared): retry recoverable/fatal (RecoverableFailure guards revalidate);
+resolve_binding (config-eval-feeding-machine; external-requires-explicit-binding structural rule).
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; machine-schema parity
+119; broad nextest --all-features 3868 passed; clippy --all-features -D warnings clean; seam 0 debt.

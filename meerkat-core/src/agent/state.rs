@@ -298,6 +298,16 @@ where
         Ok(self.runtime_turn_authority_snapshot()?.turn_phase)
     }
 
+    /// Mirror the machine-owned turn-terminality verdict.
+    ///
+    /// The terminality verdict (which turn phases are terminal) is a MeerkatMachine
+    /// fact emitted by `ClassifyTurnTerminality` and carried on the turn-state
+    /// snapshot as `turn_terminal`; this loop mirrors it and never reclassifies
+    /// `TurnPhase` locally.
+    pub(super) fn turn_terminal(&self) -> Result<bool, AgentError> {
+        Ok(self.runtime_turn_authority_snapshot()?.turn_terminal)
+    }
+
     fn turn_cancel_after_boundary(&self) -> Result<bool, AgentError> {
         Ok(self
             .runtime_turn_authority_snapshot()?
@@ -1003,7 +1013,7 @@ where
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
         error: &AgentError,
     ) -> Result<(), AgentError> {
-        if self.turn_phase()?.is_terminal() {
+        if self.turn_terminal()? {
             return Ok(());
         }
         self.terminal_error_detail = Some(error.to_string());
@@ -2353,7 +2363,7 @@ where
                                     },
                                 )?;
 
-                                if !self.turn_phase()?.is_terminal() {
+                                if !self.turn_terminal()? {
                                     // Authority decided to retry — push retry prompt
                                     self.session
                                         .push(Message::User(UserMessage::text(retry_prompt)));

@@ -132,6 +132,7 @@ fn runtime_execution_snapshot(
     Some(crate::AgentExecutionSnapshot {
         loop_state: snapshot.loop_state,
         turn_phase,
+        turn_terminal: snapshot.turn_terminal,
         active_run_id: snapshot.active_run_id,
         primitive_kind,
         admitted_content_shape: snapshot.admitted_content_shape,

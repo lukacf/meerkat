@@ -147,6 +147,12 @@ impl LlmStreamResult {
 pub struct AgentExecutionSnapshot {
     pub loop_state: LoopState,
     pub turn_phase: TurnPhase,
+    /// Machine-owned turn-terminality verdict.
+    ///
+    /// The `TurnTerminalityClassified.terminal` verdict emitted by the canonical
+    /// MeerkatMachine `ClassifyTurnTerminality` input. Consumers mirror this bool
+    /// and must not reclassify [`TurnPhase`] locally.
+    pub turn_terminal: bool,
     pub active_run_id: Option<RunId>,
     pub primitive_kind: TurnPrimitiveKind,
     pub admitted_content_shape: Option<ContentShape>,

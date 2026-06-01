@@ -29,10 +29,6 @@ pub enum TurnPhase {
 }
 
 impl TurnPhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-
     pub fn is_extracting(self) -> bool {
         matches!(self, Self::Extracting)
     }

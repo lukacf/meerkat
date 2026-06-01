@@ -572,6 +572,36 @@ impl TestTurnStateHandle {
         self.apply_with_effects(input, context).map(|_| ())
     }
 
+    /// Mirror the canonical MeerkatMachine turn-terminality verdict over `state`.
+    ///
+    /// The terminality verdict (which turn phases are terminal) is a machine
+    /// fact: this test owner extracts no fact — it drives the read-only
+    /// `ClassifyTurnTerminality` input over the supplied DSL state (discarding the
+    /// self-loop's next state) and mirrors the emitted
+    /// `TurnTerminalityClassified.terminal`. It decides nothing. Fails closed:
+    /// an unclassifiable state is treated as terminal.
+    fn classify_turn_terminal(&self, state: &KernelState) -> bool {
+        let Ok(outcome) = self
+            .kernel
+            .transition(state, &input("ClassifyTurnTerminality", std::iter::empty()))
+        else {
+            return true;
+        };
+        let mut classified = None;
+        for effect in &outcome.effects {
+            if effect.variant != effect_id("TurnTerminalityClassified") {
+                continue;
+            }
+            let Some(KernelValue::Bool(terminal)) = effect.fields.get(&field_id("terminal")) else {
+                return true;
+            };
+            if classified.replace(*terminal).is_some() {
+                return true;
+            }
+        }
+        classified.unwrap_or(true)
+    }
+
     pub(crate) fn run_completed_effect_count(&self) -> usize {
         self.run_completed_effects.load(Ordering::SeqCst)
     }
@@ -1145,11 +1175,10 @@ impl TurnStateHandle for TestTurnStateHandle {
                     })
                 })
                 .collect::<Result<BTreeSet<_>, DslTransitionError>>()?;
+            let turn_terminal = self.classify_turn_terminal(&state);
             let active_run_id = match turn_phase {
-                TurnPhase::Ready
-                | TurnPhase::Completed
-                | TurnPhase::Failed
-                | TurnPhase::Cancelled => None,
+                TurnPhase::Ready => None,
+                _ if turn_terminal => None,
                 _ => option_named_string(&state, "current_run_id", "RunId", CONTEXT)?
                     .map(|id| parse_run_id(&id, "current_run_id", CONTEXT))
                     .transpose()?,
@@ -1159,6 +1188,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                 active_run_id,
                 loop_state: loop_state_from_turn_phase(turn_phase),
                 turn_phase,
+                turn_terminal,
                 primitive_kind: option_enum_variant(
                     &state,
                     "primitive_kind",

@@ -47,6 +47,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyBlockerSatisfied`(blocker_present: Bool, blocker_lifecycle_phase: WorkLifecycleState)
 - `ClassifyCreateStatusAdmission`(requested_status: WorkLifecycleState)
 - `ClassifyPublicConfirmationAdmission`(completion_policy: WorkCompletionPolicy)
+- `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy: WorkCompletionPolicy, requested_completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_completion_reviewer_quorum_threshold: Option<u64>)
 - `ClassifyReadiness`(now_utc_ms: u64)
 
 ## Signals
@@ -65,6 +66,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BlockerSatisfactionClassified`(satisfied: Bool)
 - `CreateStatusAdmissionClassified`(admission: WorkCreateStatusAdmissionKind)
 - `PublicConfirmationAdmissionClassified`(admission: WorkPublicConfirmationAdmissionKind)
+- `CompletionPolicyMutationAdmissionClassified`(admission: WorkCompletionPolicyMutationAdmissionKind)
 - `WorkItemReadinessClassified`(ready: Bool)
 
 ## Helpers
@@ -1480,9 +1482,121 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PublicConfirmationAdmissionClassified`
 - To: `Failed`
 
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedAbsent`
+- From: `Absent`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedOpen`
+- From: `Open`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedInProgress`
+- From: `InProgress`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedBlocked`
+- From: `Blocked`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedCompleted`
+- From: `Completed`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCompletionPolicyMutationAdmissionUnchangedFailed`
+- From: `Failed`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_unchanged`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedAbsent`
+- From: `Absent`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedOpen`
+- From: `Open`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedInProgress`
+- From: `InProgress`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedBlocked`
+- From: `Blocked`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedCompleted`
+- From: `Completed`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCompletionPolicyMutationAdmissionChangedFailed`
+- From: `Failed`
+- On: `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - `completion_policy_changed`
+- Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Failed`
+
 ## Coverage
 ### Code Anchors
-- `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, and topology legality
+- `meerkat-workgraph/src/machine.rs` — WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality
 
 ### Scenarios
 - `workgraph_create_update_ready_claim` — CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, blocker satisfaction, public create status defaulting, create status admission classifies open and blocked as admissible creation states and denies the rest, and CAS revision

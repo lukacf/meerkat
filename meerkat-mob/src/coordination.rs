@@ -162,16 +162,6 @@ pub enum WorkIntentStatus {
     Cancelled,
 }
 
-impl WorkIntentStatus {
-    #[must_use]
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            WorkIntentStatus::Completed | WorkIntentStatus::Cancelled
-        )
-    }
-}
-
 /// A product-neutral declaration of mob work over affected resources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,18 +181,6 @@ pub struct WorkIntent {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
-}
-
-impl WorkIntent {
-    #[must_use]
-    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
-        self.expires_at.is_some_and(|expires_at| expires_at <= now)
-    }
-
-    #[must_use]
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        !self.status.is_terminal() && !self.is_expired_at(now)
-    }
 }
 
 /// Advisory strength for a mob resource claim.
@@ -229,18 +207,6 @@ pub enum ResourceClaimStatus {
     Cancelled,
 }
 
-impl ResourceClaimStatus {
-    #[must_use]
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            ResourceClaimStatus::Released
-                | ResourceClaimStatus::Expired
-                | ResourceClaimStatus::Cancelled
-        )
-    }
-}
-
 /// A mob-owned claim over one or more affected resources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -260,26 +226,6 @@ pub struct ResourceClaim {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
-}
-
-impl ResourceClaim {
-    #[must_use]
-    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
-        matches!(self.status, ResourceClaimStatus::Expired)
-            || self.expires_at.is_some_and(|expires_at| expires_at <= now)
-    }
-
-    #[must_use]
-    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        !self.status.is_terminal() && !self.is_expired_at(now)
-    }
-
-    #[must_use]
-    pub fn overlaps_resources(&self, resources: &BTreeSet<CoordinationResourceRef>) -> bool {
-        self.resources
-            .iter()
-            .any(|resource| resources.contains(resource))
-    }
 }
 
 /// Mob-owned coordination event.
@@ -361,15 +307,6 @@ pub enum MobCoordinationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, TimeZone};
-
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 4, 26, 12, 0, 0).unwrap()
-    }
-
-    fn resource(value: &str) -> CoordinationResourceRef {
-        CoordinationResourceRef::new(value).expect("valid resource")
-    }
 
     #[test]
     fn coordination_newtypes_reject_empty_and_control_chars() {
@@ -377,45 +314,5 @@ mod tests {
         assert!(ResourceClaimId::new("\n").is_err());
         assert!(CoordinationResourceRef::new("").is_err());
         assert!(WorkIntentId::new("intent-1").is_ok());
-    }
-
-    #[test]
-    fn work_intent_status_terminal_projection_matches_machine() {
-        assert!(!WorkIntentStatus::Planned.is_terminal());
-        assert!(!WorkIntentStatus::Active.is_terminal());
-        assert!(!WorkIntentStatus::Blocked.is_terminal());
-        assert!(WorkIntentStatus::Completed.is_terminal());
-        assert!(WorkIntentStatus::Cancelled.is_terminal());
-    }
-
-    #[test]
-    fn resource_claim_status_terminal_projection_matches_machine() {
-        assert!(!ResourceClaimStatus::Active.is_terminal());
-        assert!(ResourceClaimStatus::Released.is_terminal());
-        assert!(ResourceClaimStatus::Expired.is_terminal());
-        assert!(ResourceClaimStatus::Cancelled.is_terminal());
-    }
-
-    #[test]
-    fn resource_claim_overlap_and_active_projection() {
-        let claim = ResourceClaim {
-            id: ResourceClaimId::new("claim-1").unwrap(),
-            revision: 1,
-            kind: ResourceClaimKind::Exclusive,
-            status: ResourceClaimStatus::Active,
-            owner: CoordinationOwner::agent(AgentIdentity::from("worker-1")),
-            owning_refs: CoordinationRecordRefs::default(),
-            resources: [resource("file:/src/lib.rs")].into_iter().collect(),
-            reason: None,
-            metadata: SurfaceMetadata::default(),
-            created_at: now(),
-            updated_at: now(),
-            expires_at: Some(now() - Duration::seconds(1)),
-        };
-
-        assert!(claim.overlaps_resources(&[resource("file:/src/lib.rs")].into_iter().collect()));
-        // Expired-by-timestamp records are not active even when status is Active.
-        assert!(claim.is_expired_at(now()));
-        assert!(!claim.is_active_at(now()));
     }
 }

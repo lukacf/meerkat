@@ -286,6 +286,36 @@ pub enum WorkPublicConfirmationAdmissionKind {
     Admitted,
 }
 
+/// Machine-owned admission verdict for a requested mutation of a work item's
+/// `completion_policy`. This machine — not the shell — owns the immutability
+/// invariant "a work item's completion policy is fixed at creation and cannot be
+/// changed by an update". The shell extracts the requested completion policy as a
+/// pure typed observation (variant plus supervisor owner key plus reviewer quorum
+/// threshold), drives `ClassifyCompletionPolicyMutationAdmission` over the
+/// recovered item state, and mirrors the verdict: `Admitted` (the requested
+/// policy is identical to the current machine-owned policy, so the update is a
+/// no-op on policy) -> proceed, `Denied` (the requested policy differs) -> reject
+/// with the same `InvalidInput` rejection. Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCompletionPolicyMutationAdmissionKind {
+    #[default]
+    Denied,
+    Admitted,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -452,6 +482,22 @@ machine! {
             // surface mirrors the verdict (Admitted -> proceed,
             // DeniedRequiresTrustedHost -> InvalidInput), failing closed.
             ClassifyPublicConfirmationAdmission { completion_policy: Enum<WorkCompletionPolicy> },
+            // Completion-policy mutation admission classification. This machine
+            // owns the immutability invariant "a work item's completion policy is
+            // fixed at creation and cannot be changed by an update". The shell
+            // extracts the REQUESTED completion policy as a pure typed observation
+            // (variant plus supervisor owner key plus reviewer quorum threshold)
+            // and drives this input over the item's recovered machine state; this
+            // machine compares the requested policy against its own
+            // machine-owned completion policy and emits
+            // CompletionPolicyMutationAdmissionClassified. The shell mirrors the
+            // verdict (Admitted -> the policy is unchanged, proceed; Denied -> the
+            // policy would change, reject with InvalidInput), failing closed.
+            ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy: Enum<WorkCompletionPolicy>,
+                requested_completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                requested_completion_reviewer_quorum_threshold: Option<u64>,
+            },
             // Readiness classification. An item is "ready" iff it is claimable
             // right now — exactly the condition the `Claim` transition guards
             // accept (`ClaimOpen` from Open, or `ClaimExpiredInProgress`
@@ -482,6 +528,9 @@ machine! {
             CreateStatusAdmissionClassified { admission: Enum<WorkCreateStatusAdmissionKind> },
             PublicConfirmationAdmissionClassified {
                 admission: Enum<WorkPublicConfirmationAdmissionKind>,
+            },
+            CompletionPolicyMutationAdmissionClassified {
+                admission: Enum<WorkCompletionPolicyMutationAdmissionKind>,
             },
             WorkItemReadinessClassified { ready: bool },
         }
@@ -615,6 +664,7 @@ machine! {
         disposition BlockerSatisfactionClassified => local,
         disposition CreateStatusAdmissionClassified => local,
         disposition PublicConfirmationAdmissionClassified => local,
+        disposition CompletionPolicyMutationAdmissionClassified => local,
         disposition WorkItemReadinessClassified => local,
 
         transition CreateOpen {
@@ -1498,6 +1548,54 @@ machine! {
             update {}
             to Absent
             emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        // --- Completion-policy mutation admission classification ---
+        //
+        // This machine owns the immutability invariant "a work item's completion
+        // policy is fixed at creation and cannot be changed by an update". The
+        // shell extracts the requested completion policy as a pure typed
+        // observation (variant plus supervisor owner key plus reviewer quorum
+        // threshold) and drives this input over the item's recovered state; this
+        // machine compares the requested policy — in full — against its own
+        // machine-owned completion policy and emits the verdict. Admitted iff the
+        // requested policy is identical to the current policy (the update is a
+        // no-op on policy); Denied otherwise. The shell mirrors the verdict and
+        // never decides. Phase-independent: self-loops over every phase so the
+        // classification is total regardless of the authority's phase, and never
+        // mutates lifecycle state.
+        transition ClassifyCompletionPolicyMutationAdmissionUnchanged {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy,
+                requested_completion_supervisor_owner_key,
+                requested_completion_reviewer_quorum_threshold
+            }
+            guard "completion_policy_unchanged" {
+                requested_completion_policy == self.completion_policy
+                    && requested_completion_supervisor_owner_key == self.completion_supervisor_owner_key
+                    && requested_completion_reviewer_quorum_threshold == self.completion_reviewer_quorum_threshold
+            }
+            update {}
+            to Absent
+            emit CompletionPolicyMutationAdmissionClassified { admission: WorkCompletionPolicyMutationAdmissionKind::Admitted }
+        }
+
+        transition ClassifyCompletionPolicyMutationAdmissionChanged {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCompletionPolicyMutationAdmission {
+                requested_completion_policy,
+                requested_completion_supervisor_owner_key,
+                requested_completion_reviewer_quorum_threshold
+            }
+            guard "completion_policy_changed" {
+                requested_completion_policy != self.completion_policy
+                    || requested_completion_supervisor_owner_key != self.completion_supervisor_owner_key
+                    || requested_completion_reviewer_quorum_threshold != self.completion_reviewer_quorum_threshold
+            }
+            update {}
+            to Absent
+            emit CompletionPolicyMutationAdmissionClassified { admission: WorkCompletionPolicyMutationAdmissionKind::Denied }
         }
     }
 }

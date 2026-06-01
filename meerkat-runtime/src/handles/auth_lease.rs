@@ -1425,15 +1425,14 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         for effect in transition.effects() {
             if let auth_dsl::AuthMachineEffect::CredentialUseAdmissionResolved { disposition } =
                 effect
+                && resolved.replace(*disposition).is_some()
             {
-                if resolved.replace(*disposition).is_some() {
-                    return Err(DslTransitionError::new(
-                        CONTEXT,
-                        format!(
-                            "AuthMachine emitted multiple credential-use dispositions for `{lease_key}`"
-                        ),
-                    ));
-                }
+                return Err(DslTransitionError::new(
+                    CONTEXT,
+                    format!(
+                        "AuthMachine emitted multiple credential-use dispositions for `{lease_key}`"
+                    ),
+                ));
             }
         }
 

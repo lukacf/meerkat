@@ -659,7 +659,12 @@ fn item_matches_filter(item: &WorkItem, filter: &WorkItemFilter) -> bool {
     if !filter.statuses.is_empty() && !filter.statuses.contains(&item.status) {
         return false;
     }
-    if !filter.include_terminal && item.status.is_terminal() {
+    // The terminality verdict (which lifecycle phases are terminal) is a machine
+    // fact owned by WorkGraphLifecycleMachine, not this filter. We drive the
+    // machine's ClassifyTerminality over the item's recovered state and mirror the
+    // verdict, failing closed: an item the machine cannot classify is treated as
+    // terminal so it is never surfaced as live work when terminals are excluded.
+    if !filter.include_terminal && WorkGraphMachine::classify_terminality(item).unwrap_or(true) {
         return false;
     }
     filter

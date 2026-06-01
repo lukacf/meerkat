@@ -5,6 +5,7 @@ use serde_json::json;
 
 use crate::WorkGraphError;
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
+use crate::machines::workgraph_lifecycle as wg_dsl;
 use crate::store::{WorkGraphEventFilter, WorkGraphStore};
 use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
@@ -18,7 +19,7 @@ use crate::types::{
     WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind,
     WorkEvidenceKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot,
     WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
-    WorkOwnerKey, WorkOwnerKind, WorkStatus,
+    WorkOwnerKey, WorkStatus,
 };
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
@@ -1205,28 +1206,78 @@ fn confirmation_evidence_for_policy(
     principal: Option<&WorkOwnerKey>,
     mut evidence: WorkEvidenceRef,
 ) -> Result<WorkEvidenceRef, WorkGraphError> {
-    match policy {
-        WorkCompletionPolicy::SelfAttest => {
-            if evidence.kind.trim().is_empty() {
-                return Err(WorkGraphError::InvalidInput(
-                    "self-attest confirmation evidence kind must not be empty".to_string(),
-                ));
-            }
+    // The eligibility "is this confirming principal + supplied evidence kind
+    // admissible for this completion policy" is owned by
+    // WorkGraphLifecycleMachine, not this shell. We extract only pure typed
+    // observations (the typed evidence-kind observation parsed from the opaque
+    // evidence.kind string; the machine reads the completion policy + supervisor
+    // owner key + requested principal owner key + kind), drive the machine's
+    // confirmation-admission classifier, and mirror the verdict. On Admitted we
+    // proceed to stamp the canonicalized evidence (pure mechanical
+    // canonicalization, not a verdict); each Denied* maps back to the exact same
+    // InvalidInput rejection the shell previously produced. Fails closed.
+    let supplied_evidence_kind = observe_confirmation_evidence_kind(&evidence);
+    match WorkGraphMachine::classify_confirmation_admission(
+        policy,
+        principal,
+        supplied_evidence_kind,
+    )? {
+        wg_dsl::WorkConfirmationAdmissionKind::Admitted => {}
+        wg_dsl::WorkConfirmationAdmissionKind::DeniedSelfAttestEmptyEvidenceKind => {
+            return Err(WorkGraphError::InvalidInput(
+                "self-attest confirmation evidence kind must not be empty".to_string(),
+            ));
         }
+        wg_dsl::WorkConfirmationAdmissionKind::DeniedPrincipalRequired => {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "{} requires a confirming principal",
+                completion_policy_name(policy)
+            )));
+        }
+        wg_dsl::WorkConfirmationAdmissionKind::DeniedPrincipalKindMismatch => {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "{} requires a principal owner key",
+                completion_policy_name(policy)
+            )));
+        }
+        wg_dsl::WorkConfirmationAdmissionKind::DeniedSupervisorMismatch => {
+            let owner_key_canonical = match policy {
+                WorkCompletionPolicy::Supervisor { owner_key } => owner_key.canonical(),
+                // The machine only emits this verdict for the Supervisor policy;
+                // fail closed if it is ever emitted for any other policy.
+                _ => {
+                    return Err(WorkGraphError::Store(format!(
+                        "WorkGraphLifecycle emitted supervisor-mismatch verdict for non-supervisor policy {}",
+                        completion_policy_name(policy)
+                    )));
+                }
+            };
+            return Err(WorkGraphError::InvalidInput(format!(
+                "{} requires confirmation from {}",
+                completion_policy_name(policy),
+                owner_key_canonical
+            )));
+        }
+        wg_dsl::WorkConfirmationAdmissionKind::DeniedEvidenceKind => {
+            let expected = required_confirmation_evidence_kind(policy);
+            return Err(WorkGraphError::InvalidInput(format!(
+                "{} requires {expected} evidence, got {}",
+                completion_policy_name(policy),
+                evidence.kind
+            )));
+        }
+    }
+
+    // Admitted: stamp the canonicalized evidence. The principal presence /
+    // identity has already been validated by the machine verdict above.
+    match policy {
+        WorkCompletionPolicy::SelfAttest => {}
         WorkCompletionPolicy::HostConfirmed => {
-            require_evidence_kind(policy, &evidence, "host_confirmation")?;
             evidence.confirmation_kind = Some(WorkEvidenceKind::HostConfirmation);
             evidence.confirming_owner_key = None;
         }
         WorkCompletionPolicy::PrincipalConfirmed => {
-            let principal = require_principal(policy, principal)?;
-            if principal.kind != WorkOwnerKind::Principal {
-                return Err(WorkGraphError::InvalidInput(format!(
-                    "{} requires a principal owner key",
-                    completion_policy_name(policy)
-                )));
-            }
-            require_evidence_kind(policy, &evidence, "principal_confirmation")?;
+            let principal = require_admitted_principal(policy, principal)?;
             let canonical = principal.canonical();
             evidence.id = canonical.clone();
             evidence.label = Some(canonical);
@@ -1234,15 +1285,6 @@ fn confirmation_evidence_for_policy(
             evidence.confirming_owner_key = Some(principal.clone());
         }
         WorkCompletionPolicy::Supervisor { owner_key } => {
-            let principal = require_principal(policy, principal)?;
-            if principal != owner_key {
-                return Err(WorkGraphError::InvalidInput(format!(
-                    "{} requires confirmation from {}",
-                    completion_policy_name(policy),
-                    owner_key.canonical()
-                )));
-            }
-            require_evidence_kind(policy, &evidence, "supervisor_confirmation")?;
             let canonical = owner_key.canonical();
             evidence.id = canonical.clone();
             evidence.label = Some(canonical);
@@ -1250,8 +1292,7 @@ fn confirmation_evidence_for_policy(
             evidence.confirming_owner_key = Some(owner_key.clone());
         }
         WorkCompletionPolicy::ReviewerQuorum { .. } => {
-            let principal = require_principal(policy, principal)?;
-            require_evidence_kind(policy, &evidence, "reviewer_confirmation")?;
+            let principal = require_admitted_principal(policy, principal)?;
             let canonical = principal.canonical();
             evidence.id = canonical.clone();
             evidence.label = Some(canonical);
@@ -1262,31 +1303,59 @@ fn confirmation_evidence_for_policy(
     Ok(evidence)
 }
 
-fn require_principal<'a>(
+/// Pure typed extraction of the OPAQUE `evidence.kind` provenance string into
+/// the machine's confirmation-evidence observation. The recognized reserved
+/// confirmation literals map 1:1 onto a variant; an empty trimmed string is
+/// `Empty`; everything else is `Other`. This performs NO admission decision.
+fn observe_confirmation_evidence_kind(
+    evidence: &WorkEvidenceRef,
+) -> wg_dsl::WorkConfirmationEvidenceObservation {
+    if evidence.kind.trim().is_empty() {
+        return wg_dsl::WorkConfirmationEvidenceObservation::Empty;
+    }
+    match evidence.kind.as_str() {
+        "host_confirmation" => wg_dsl::WorkConfirmationEvidenceObservation::HostConfirmation,
+        "principal_confirmation" => {
+            wg_dsl::WorkConfirmationEvidenceObservation::PrincipalConfirmation
+        }
+        "supervisor_confirmation" => {
+            wg_dsl::WorkConfirmationEvidenceObservation::SupervisorConfirmation
+        }
+        "reviewer_confirmation" => {
+            wg_dsl::WorkConfirmationEvidenceObservation::ReviewerConfirmation
+        }
+        _ => wg_dsl::WorkConfirmationEvidenceObservation::Other,
+    }
+}
+
+/// The reserved confirmation-evidence literal each completion policy requires.
+/// Used only to reconstruct the exact InvalidInput message when the machine
+/// emits an evidence-kind denial. `SelfAttest` never produces an evidence-kind
+/// denial.
+fn required_confirmation_evidence_kind(policy: &WorkCompletionPolicy) -> &'static str {
+    match policy {
+        WorkCompletionPolicy::SelfAttest => "self_attest",
+        WorkCompletionPolicy::HostConfirmed => "host_confirmation",
+        WorkCompletionPolicy::PrincipalConfirmed => "principal_confirmation",
+        WorkCompletionPolicy::Supervisor { .. } => "supervisor_confirmation",
+        WorkCompletionPolicy::ReviewerQuorum { .. } => "reviewer_confirmation",
+    }
+}
+
+/// Recover the confirming principal after the machine has already ADMITTED the
+/// confirmation. The machine's `Admitted` verdict already proves a principal was
+/// supplied for the policies that require one; this fails closed if the
+/// principal is unexpectedly absent.
+fn require_admitted_principal<'a>(
     policy: &WorkCompletionPolicy,
     principal: Option<&'a WorkOwnerKey>,
 ) -> Result<&'a WorkOwnerKey, WorkGraphError> {
     principal.ok_or_else(|| {
-        WorkGraphError::InvalidInput(format!(
-            "{} requires a confirming principal",
+        WorkGraphError::Store(format!(
+            "WorkGraphLifecycle admitted {} confirmation without a confirming principal",
             completion_policy_name(policy)
         ))
     })
-}
-
-fn require_evidence_kind(
-    policy: &WorkCompletionPolicy,
-    evidence: &WorkEvidenceRef,
-    expected: &str,
-) -> Result<(), WorkGraphError> {
-    if evidence.kind == expected {
-        return Ok(());
-    }
-    Err(WorkGraphError::InvalidInput(format!(
-        "{} requires {expected} evidence, got {}",
-        completion_policy_name(policy),
-        evidence.kind
-    )))
 }
 
 fn reject_reserved_confirmation_evidence_refs(
@@ -2051,5 +2120,201 @@ mod tests {
             .await
             .expect("all events");
         assert_eq!(all_events.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // FOLD 1: confirmation_evidence_for_policy routes admission through the
+    // WorkGraphLifecycleMachine ClassifyConfirmationAdmission classifier; these
+    // tests pin the admit verdict and each typed denial (with exact messages).
+    // ------------------------------------------------------------------
+
+    use super::confirmation_evidence_for_policy;
+    use crate::WorkGraphError;
+    use crate::types::{WorkCompletionPolicy, WorkEvidenceKind, WorkEvidenceRef, WorkOwnerKind};
+
+    fn evidence(kind: &str) -> WorkEvidenceRef {
+        WorkEvidenceRef {
+            kind: kind.to_string(),
+            id: "ev-1".to_string(),
+            label: None,
+            summary: None,
+            confirmation_kind: None,
+            confirming_owner_key: None,
+        }
+    }
+
+    #[test]
+    fn confirmation_admission_self_attest_admits_nonempty() {
+        let stamped = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::SelfAttest,
+            None,
+            evidence("anything"),
+        )
+        .expect("self-attest non-empty evidence admitted");
+        // SelfAttest leaves the evidence unchanged (no canonical confirmation).
+        assert_eq!(stamped.confirmation_kind, None);
+    }
+
+    #[test]
+    fn confirmation_admission_self_attest_rejects_empty() {
+        let err = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::SelfAttest,
+            None,
+            evidence("   "),
+        )
+        .expect_err("empty self-attest evidence is rejected");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "self-attest confirmation evidence kind must not be empty"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirmation_admission_host_confirmed_admits_and_stamps() {
+        let stamped = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::HostConfirmed,
+            None,
+            evidence("host_confirmation"),
+        )
+        .expect("host confirmation admitted");
+        assert_eq!(
+            stamped.confirmation_kind,
+            Some(WorkEvidenceKind::HostConfirmation)
+        );
+        assert_eq!(stamped.confirming_owner_key, None);
+    }
+
+    #[test]
+    fn confirmation_admission_host_confirmed_rejects_wrong_evidence_kind() {
+        let err = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::HostConfirmed,
+            None,
+            evidence("self_attest"),
+        )
+        .expect_err("host confirmation requires host_confirmation evidence");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "host_confirmed requires host_confirmation evidence, got self_attest"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirmation_admission_principal_confirmed_requires_principal() {
+        let err = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::PrincipalConfirmed,
+            None,
+            evidence("principal_confirmation"),
+        )
+        .expect_err("principal-confirmed requires a confirming principal");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "principal_confirmed requires a confirming principal"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirmation_admission_principal_confirmed_requires_principal_kind() {
+        let agent = WorkOwnerKey::new(WorkOwnerKind::Agent, "a-1").expect("owner key");
+        let err = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::PrincipalConfirmed,
+            Some(&agent),
+            evidence("principal_confirmation"),
+        )
+        .expect_err("principal-confirmed requires a principal-kind owner key");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "principal_confirmed requires a principal owner key"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirmation_admission_principal_confirmed_admits_and_stamps() {
+        let principal = WorkOwnerKey::principal("p-1").expect("principal key");
+        let stamped = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::PrincipalConfirmed,
+            Some(&principal),
+            evidence("principal_confirmation"),
+        )
+        .expect("principal confirmation admitted");
+        assert_eq!(
+            stamped.confirmation_kind,
+            Some(WorkEvidenceKind::PrincipalConfirmation)
+        );
+        assert_eq!(stamped.confirming_owner_key, Some(principal.clone()));
+        assert_eq!(stamped.id, principal.canonical());
+    }
+
+    #[test]
+    fn confirmation_admission_supervisor_rejects_mismatched_principal() {
+        let owner = WorkOwnerKey::principal("boss").expect("owner");
+        let other = WorkOwnerKey::principal("intruder").expect("other");
+        let err = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::Supervisor {
+                owner_key: owner.clone(),
+            },
+            Some(&other),
+            evidence("supervisor_confirmation"),
+        )
+        .expect_err("supervisor requires confirmation from the named owner");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if *msg == format!("supervisor requires confirmation from {}", owner.canonical())),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirmation_admission_supervisor_admits_and_stamps() {
+        let owner = WorkOwnerKey::principal("boss").expect("owner");
+        let stamped = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::Supervisor {
+                owner_key: owner.clone(),
+            },
+            Some(&owner),
+            evidence("supervisor_confirmation"),
+        )
+        .expect("supervisor confirmation admitted");
+        assert_eq!(
+            stamped.confirmation_kind,
+            Some(WorkEvidenceKind::SupervisorConfirmation)
+        );
+        assert_eq!(stamped.confirming_owner_key, Some(owner.clone()));
+        assert_eq!(stamped.id, owner.canonical());
+    }
+
+    #[test]
+    fn confirmation_admission_reviewer_quorum_admits_and_stamps() {
+        let reviewer = WorkOwnerKey::principal("rev-1").expect("reviewer");
+        let stamped = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+            Some(&reviewer),
+            evidence("reviewer_confirmation"),
+        )
+        .expect("reviewer confirmation admitted");
+        assert_eq!(
+            stamped.confirmation_kind,
+            Some(WorkEvidenceKind::ReviewerConfirmation)
+        );
+        assert_eq!(stamped.confirming_owner_key, Some(reviewer));
+    }
+
+    #[test]
+    fn confirmation_admission_reviewer_quorum_rejects_wrong_evidence_kind() {
+        let reviewer = WorkOwnerKey::principal("rev-1").expect("reviewer");
+        let err = confirmation_evidence_for_policy(
+            &WorkCompletionPolicy::ReviewerQuorum { threshold: 1 },
+            Some(&reviewer),
+            evidence("host_confirmation"),
+        )
+        .expect_err("reviewer quorum requires reviewer_confirmation evidence");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "reviewer_quorum requires reviewer_confirmation evidence, got host_confirmation"),
+            "unexpected error: {err:?}"
+        );
     }
 }

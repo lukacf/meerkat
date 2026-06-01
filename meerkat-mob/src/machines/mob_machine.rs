@@ -707,6 +707,16 @@ pub enum MobProfileMutationAdmissionKind {
     Allowed,
 }
 
+/// Machine-owned eligibility verdict for a within-mob member operation (spawn
+/// finalization, peer messaging, respawn finalization). The actor mirrors this:
+/// `DeniedNotRunning` -> `InvalidTransition` to `Running`, `Admitted` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobMemberOperationEligibilityKind {
+    #[default]
+    DeniedNotRunning,
+    Admitted,
+}
+
 /// Pure wire-projection bridge rejection cause, mirroring every variant of the
 /// wire `BridgeRejectionCause`. The mob bridge consumer maps the typed wire
 /// cause onto this and feeds it to MobMachine for recovery classification.

@@ -864,16 +864,19 @@ pub(crate) fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::Wo
     }
 }
 
-pub(crate) fn work_owner_key_to_machine(owner: &WorkOwnerKey) -> wg_dsl::WorkOwnerKey {
-    let kind = match owner.kind {
+pub(crate) fn work_owner_kind_to_machine(kind: WorkOwnerKind) -> wg_dsl::WorkOwnerKind {
+    match kind {
         WorkOwnerKind::Principal => wg_dsl::WorkOwnerKind::Principal,
         WorkOwnerKind::Agent => wg_dsl::WorkOwnerKind::Agent,
         WorkOwnerKind::Session => wg_dsl::WorkOwnerKind::Session,
         WorkOwnerKind::Mob => wg_dsl::WorkOwnerKind::Mob,
         WorkOwnerKind::Label => wg_dsl::WorkOwnerKind::Label,
-    };
+    }
+}
+
+pub(crate) fn work_owner_key_to_machine(owner: &WorkOwnerKey) -> wg_dsl::WorkOwnerKey {
     wg_dsl::WorkOwnerKey {
-        kind,
+        kind: work_owner_kind_to_machine(owner.kind),
         id: owner.id.clone(),
     }
 }

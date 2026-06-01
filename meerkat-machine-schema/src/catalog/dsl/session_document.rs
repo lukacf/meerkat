@@ -82,6 +82,27 @@ pub enum SystemContextAppendDecision {
     RejectConflict,
 }
 
+/// Machine-owned admission verdict for a PERSIST-TIME system-context append
+/// continuity check.
+///
+/// The session store's atomic append-only save guard must decide whether an
+/// incoming persisted system prompt is an admissible runtime-context-append
+/// continuation of the previously persisted one. This is the SAME machine that
+/// owns the staging-path append disposition ([`SystemContextAppendDecision`]);
+/// the persist-time decision is its own append-admission verdict over the
+/// structural prefix observations plus the typed `is_runtime_context_append`
+/// provenance marker (NOT a `[Runtime System Context]` content prefix). The
+/// session-store shell extracts those pure observations, drives
+/// `ResolveSystemContextPersistAppendAdmission`, and mirrors the verdict:
+/// `Admit` -> the divergence is an admissible append, `Reject` -> it is not.
+/// Fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SystemContextPersistAppendAdmission {
+    #[default]
+    Reject,
+    Admit,
+}
+
 /// Typed provenance class for a runtime system-context append.
 ///
 /// This is the canonical replacement for the retired `runtime:steer:` string
@@ -375,6 +396,24 @@ machine! {
                 active_keys_have_known_pending_or_seen: bool,
                 seen_keys_match_known_appends: bool,
             },
+            // Persist-time system-context append-admission continuity check.
+            // The session-store atomic append-only save guard extracts the pure
+            // structural observations (whether a previous system prompt exists,
+            // whether the incoming content is byte-identical, whether it extends
+            // the previous content as a prefix, whether the appended remainder
+            // begins with the canonical separator) plus the typed
+            // `is_runtime_context_append` provenance marker, and feeds them
+            // here. THIS machine — not a handwritten shell bool reducer — owns
+            // the verdict "is this incoming persisted prompt an admissible
+            // runtime-context-append continuation of the persisted one". The
+            // shell mirrors `Admit`/`Reject` and decides nothing.
+            ResolveSystemContextPersistAppendAdmission {
+                has_previous: bool,
+                content_identical: bool,
+                content_extends_previous: bool,
+                appended_starts_with_separator: bool,
+                incoming_is_runtime_context_append: bool,
+            },
 
             // -----------------------------------------------------------
             // Realtime-transcript region (folded from the retired
@@ -598,6 +637,11 @@ machine! {
                 discard: bool,
             },
             SystemContextSnapshotRestoreAuthorized,
+            // Persist-time append-admission verdict. The session-store shell
+            // mirrors `Admit`/`Reject` onto its atomic append-only save guard.
+            SystemContextPersistAppendAdmissionResolved {
+                admission: Enum<SystemContextPersistAppendAdmission>,
+            },
 
             // Realtime-transcript region effects. The action vector is the
             // machine's decision; the shell mirrors each flag onto its bulky
@@ -697,6 +741,28 @@ machine! {
         ) -> bool {
             idempotency_key_present == false
                 || (existing_key_matches == false && existing_key_conflicts == false)
+        }
+
+        // Persist-time append-admission verdict. Admissible iff the incoming
+        // persisted prompt is either a byte-identical no-op refresh of an
+        // existing prompt, OR a prefix-preserving append (separator-delimited)
+        // carrying the typed runtime-context-append provenance, OR — when there
+        // is no previous prompt — itself a typed runtime-context-append. Every
+        // other shape is rejected. Mirrors the retired
+        // `system_context_is_append` shell reducer exactly.
+        helper persist_append_is_admissible(
+            has_previous: bool,
+            content_identical: bool,
+            content_extends_previous: bool,
+            appended_starts_with_separator: bool,
+            incoming_is_runtime_context_append: bool
+        ) -> bool {
+            (has_previous && content_identical)
+                || (has_previous
+                    && content_extends_previous
+                    && appended_starts_with_separator
+                    && incoming_is_runtime_context_append)
+                || (has_previous == false && incoming_is_runtime_context_append)
         }
 
         // Realtime-transcript region classification helpers (ported verbatim
@@ -838,6 +904,7 @@ machine! {
         disposition SystemContextPendingApplyItemResolved => local,
         disposition SystemContextSteerCleanupItemResolved => local,
         disposition SystemContextSnapshotRestoreAuthorized => local,
+        disposition SystemContextPersistAppendAdmissionResolved => local,
         disposition RealtimeTranscriptEventResolved => local,
         disposition RealtimeMaterializeCandidateResolved => local,
         disposition RealtimeTranscriptSnapshotRestoreAuthorized => local,
@@ -1293,6 +1360,61 @@ machine! {
             emit SystemContextAppendResolved {
                 decision: SystemContextAppendDecision::Staged,
                 active_turn_scoped: active_turn_scoped
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // ResolveSystemContextPersistAppendAdmission — persist-time
+        // append-admission continuity verdict for the session-store atomic
+        // append-only save guard. The shell extracts the structural prefix
+        // observations plus the typed runtime-context-append provenance; this
+        // machine owns the Admit/Reject verdict via persist_append_is_admissible.
+        // ---------------------------------------------------------------
+        transition ResolveSystemContextPersistAppendAdmissionAdmit {
+            on input ResolveSystemContextPersistAppendAdmission {
+                has_previous,
+                content_identical,
+                content_extends_previous,
+                appended_starts_with_separator,
+                incoming_is_runtime_context_append
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && persist_append_is_admissible(
+                    has_previous,
+                    content_identical,
+                    content_extends_previous,
+                    appended_starts_with_separator,
+                    incoming_is_runtime_context_append)
+            }
+            update {}
+            to Ready
+            emit SystemContextPersistAppendAdmissionResolved {
+                admission: SystemContextPersistAppendAdmission::Admit
+            }
+        }
+
+        transition ResolveSystemContextPersistAppendAdmissionReject {
+            on input ResolveSystemContextPersistAppendAdmission {
+                has_previous,
+                content_identical,
+                content_extends_previous,
+                appended_starts_with_separator,
+                incoming_is_runtime_context_append
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && persist_append_is_admissible(
+                    has_previous,
+                    content_identical,
+                    content_extends_previous,
+                    appended_starts_with_separator,
+                    incoming_is_runtime_context_append) == false
+            }
+            update {}
+            to Ready
+            emit SystemContextPersistAppendAdmissionResolved {
+                admission: SystemContextPersistAppendAdmission::Reject
             }
         }
 

@@ -557,3 +557,48 @@ recoverable and fatal directions.
 
 Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; machine-schema ratchets
 (classifier + recoverability) pass; core+runtime+mob --all-features 3224 passed; seam 0 debt; version parity clean.
+
+## CONVERGENCE ROUND 8 (re-sweep + 2 blind reviews)
+alpha CLEAN; beta verdict CLEAN (1 LOW-possible note: persist-time system_context_is_append). sweep: 6
+(1 HIGH confirmation_evidence_for_policy + resolve_binding/require_state MEDIUM + 3 LOW). Folded the 3
+genuine; defended the config/projection LOWs.
+
+### FOLDED (HIGH) — confirmation_evidence_for_policy trusted-path admission -> WorkGraphLifecycle
+goal_confirm trusted path decided principal-match + evidence-kind admission over the machine-owned
+WorkCompletionPolicy in the shell (sibling of the public-confirmation + policy-mutation folds). ->
+WorkGraphLifecycle ClassifyConfirmationAdmission { completion_policy, supervisor_owner_key,
+requested_principal_owner_key/kind, supplied_evidence_kind } -> ConfirmationAdmissionClassified
+{ Admitted | DeniedPrincipalRequired/PrincipalKindMismatch/SupervisorMismatch/EvidenceKind/SelfAttestEmpty }.
+Shell extracts pure typed observations, mirrors each Denied to the exact InvalidInput message, stamps on Admit.
+
+### FOLDED (sibling) — persist-time system_context append admission -> SessionDocumentMachine
+session_store.rs system_context_is_append was a handwritten bool reducer duplicating the staging-path
+SessionDocumentMachine::ResolveSystemContextAppend. -> new SessionDocumentMachine
+ResolveSystemContextPersistAppendAdmission { has_previous, content_identical, content_extends_previous,
+appended_starts_with_separator, incoming_is_runtime_context_append } -> SystemContextPersistAppendAdmissionResolved
+{ Admit|Reject }. Shell extracts pure structural observations, drives the machine, mirrors Admit, fails closed.
+Handwritten reducer body replaced by the machine mirror.
+
+### FOLDED (RMAT anti-pattern) — require_state shell phase pre-check -> MobMachine
+require_state (if allowed.contains(state())) was the project-RMAT-forbidden phase pre-check evading the AST
+rule via state() instead of phase(). All 5 callers genuinely needed the gate (fail-fast before compensation/
+rollback, or peer-messaging with no follow-on transition) so dropping was unsafe. -> MobMachine
+ClassifyMemberOperationEligibility {} -> MemberOperationEligibilityResolved { Admitted | DeniedNotRunning }
+(reads machine-owned lifecycle_phase + destroy_admitted: Admitted iff Running and not destroy_admitted).
+require_state replaced by require_member_operation_eligible (drives the classifier read-only, mirrors
+DeniedNotRunning -> the identical InvalidTransition). All 5 callsites updated.
+
+### DEFENDED — sweep MEDIUM/LOW not flagged as VIOLATIONS by either blind reviewer (config-eval/projection/
+machine-owned-disposition):
+- resolve_binding (actor.rs:627): external-backend-requires-explicit-binding is a structural completeness rule
+  over typed backend-kind config (round-6 sweep cleared it as config-eval); the resulting RuntimeBinding flows
+  into the machine spawn-admission path.
+- is_peer_destroying_admission_rejection: tolerates a disposal-time notify-delivery failure (typed comms-delivery
+  outcome, not a machine-lifecycle verdict).
+- coalescing is_coalescing_eligible: the Supersede/Coalesce DISPOSITION is machine-owned (ResolveAdmissionPlan);
+  the SupersessionScope equality is a pure witness fed to the machine.
+- mob_runtime_bridge_authority plan_lifecycle_notice: deterministic fan-out over machine-supplied wired_peers +
+  presence observation (sweep self-cleared).
+
+Gates: drift 10/6; check --workspace --all-features --tests clean (no codegen-bootstrap stub remains);
+machine-codegen 94; classifier ratchet pass; core+workgraph+mob+session --all-features 2561 passed; seam 0 debt.

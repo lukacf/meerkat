@@ -48,6 +48,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyCreateStatusAdmission`(requested_status: WorkLifecycleState)
 - `ClassifyPublicConfirmationAdmission`(completion_policy: WorkCompletionPolicy)
 - `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy: WorkCompletionPolicy, requested_completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_completion_reviewer_quorum_threshold: Option<u64>)
+- `ClassifyConfirmationAdmission`(completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>, supplied_evidence_kind: WorkConfirmationEvidenceObservation)
 - `ClassifyReadiness`(now_utc_ms: u64)
 
 ## Signals
@@ -67,12 +68,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CreateStatusAdmissionClassified`(admission: WorkCreateStatusAdmissionKind)
 - `PublicConfirmationAdmissionClassified`(admission: WorkPublicConfirmationAdmissionKind)
 - `CompletionPolicyMutationAdmissionClassified`(admission: WorkCompletionPolicyMutationAdmissionKind)
+- `ConfirmationAdmissionClassified`(admission: WorkConfirmationAdmissionKind)
 - `WorkItemReadinessClassified`(ready: Bool)
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
 - `completion_policy_is_satisfied`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>, host_confirmation_count: u64, principal_confirmation_count: u64, supervisor_confirmation_owner_keys: Set<WorkOwnerKey>, reviewer_confirmation_owner_keys: Set<WorkOwnerKey>) -> `Bool`
 - `evidence_kind_owner_key_present`(evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>) -> `Bool`
+- `confirmation_denies_principal_required`(completion_policy: WorkCompletionPolicy, requested_principal_owner_key: Option<WorkOwnerKey>) -> `Bool`
+- `confirmation_denies_principal_kind_mismatch`(completion_policy: WorkCompletionPolicy, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>) -> `Bool`
+- `confirmation_denies_supervisor_mismatch`(completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_principal_owner_key: Option<WorkOwnerKey>) -> `Bool`
+- `confirmation_denies_self_attest_empty`(completion_policy: WorkCompletionPolicy, supplied_evidence_kind: WorkConfirmationEvidenceObservation) -> `Bool`
+- `confirmation_denies_evidence_kind`(completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>, supplied_evidence_kind: WorkConfirmationEvidenceObservation) -> `Bool`
+- `confirmation_admits`(completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>, supplied_evidence_kind: WorkConfirmationEvidenceObservation) -> `Bool`
 - `claim_time_window_eligible`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, now_utc_ms: u64) -> `Bool`
 
 ## Invariants
@@ -1592,6 +1600,342 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `completion_policy_changed`
 - Emits: `CompletionPolicyMutationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredAbsent`
+- From: `Absent`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredOpen`
+- From: `Open`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredInProgress`
+- From: `InProgress`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredBlocked`
+- From: `Blocked`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredCompleted`
+- From: `Completed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredCancelled`
+- From: `Cancelled`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyConfirmationAdmissionPrincipalRequiredFailed`
+- From: `Failed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_required`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchAbsent`
+- From: `Absent`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchOpen`
+- From: `Open`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchInProgress`
+- From: `InProgress`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchBlocked`
+- From: `Blocked`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchCompleted`
+- From: `Completed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchCancelled`
+- From: `Cancelled`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyConfirmationAdmissionPrincipalKindMismatchFailed`
+- From: `Failed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `principal_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchAbsent`
+- From: `Absent`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchOpen`
+- From: `Open`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchInProgress`
+- From: `InProgress`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchBlocked`
+- From: `Blocked`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchCompleted`
+- From: `Completed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchCancelled`
+- From: `Cancelled`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyConfirmationAdmissionSupervisorMismatchFailed`
+- From: `Failed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `supervisor_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyAbsent`
+- From: `Absent`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyOpen`
+- From: `Open`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyInProgress`
+- From: `InProgress`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyBlocked`
+- From: `Blocked`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyCompleted`
+- From: `Completed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyCancelled`
+- From: `Cancelled`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyConfirmationAdmissionSelfAttestEmptyFailed`
+- From: `Failed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `self_attest_empty`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyConfirmationAdmissionEvidenceKindAbsent`
+- From: `Absent`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyConfirmationAdmissionEvidenceKindOpen`
+- From: `Open`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyConfirmationAdmissionEvidenceKindInProgress`
+- From: `InProgress`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyConfirmationAdmissionEvidenceKindBlocked`
+- From: `Blocked`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyConfirmationAdmissionEvidenceKindCompleted`
+- From: `Completed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyConfirmationAdmissionEvidenceKindCancelled`
+- From: `Cancelled`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyConfirmationAdmissionEvidenceKindFailed`
+- From: `Failed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `evidence_kind_mismatch`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyConfirmationAdmissionAdmittedAbsent`
+- From: `Absent`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyConfirmationAdmissionAdmittedOpen`
+- From: `Open`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Open`
+
+### `ClassifyConfirmationAdmissionAdmittedInProgress`
+- From: `InProgress`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyConfirmationAdmissionAdmittedBlocked`
+- From: `Blocked`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyConfirmationAdmissionAdmittedCompleted`
+- From: `Completed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyConfirmationAdmissionAdmittedCancelled`
+- From: `Cancelled`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyConfirmationAdmissionAdmittedFailed`
+- From: `Failed`
+- On: `ClassifyConfirmationAdmission`(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+- Guards:
+  - `confirmation_admissible`
+- Emits: `ConfirmationAdmissionClassified`
 - To: `Failed`
 
 ## Coverage

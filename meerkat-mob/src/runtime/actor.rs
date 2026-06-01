@@ -4476,19 +4476,45 @@ impl MobActor {
         })
     }
 
-    /// Guard that the mob is in one of the `allowed` phases.
+    /// Machine-routed eligibility gate for within-mob member operations
+    /// (spawn finalization, peer messaging, respawn finalization) that require
+    /// the mob to be live and running.
     ///
-    /// Used by command handlers that operate *within* the current state
-    /// (retire, wire, external turn, etc.). The first allowed state is used
-    /// as the `to` hint in the error.
-    fn require_state(&self, allowed: &[MobState]) -> Result<(), MobError> {
-        if allowed.contains(&self.state()) {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: allowed[0],
-            })
+    /// The lifecycle-phase eligibility verdict over the machine-owned phase
+    /// (plus the `destroy_admitted` projection marker) is a MobMachine fact: it
+    /// is exactly the machine's `ClassifyMemberOperationEligibility` verdict
+    /// (`Admitted` iff `Running` and destruction not admitted, else
+    /// `DeniedNotRunning`). The shell extracts no fact — it drives the machine
+    /// classifier (read-only; the classifier self-loops and never mutates
+    /// state) and mirrors the emitted eligibility to the same
+    /// `InvalidTransition { from: self.state(), to: Running }` rejection it
+    /// previously produced from a handwritten phase pre-check. Fails closed.
+    fn require_member_operation_eligible(&self) -> Result<(), MobError> {
+        let prepared = self.prepare_dsl_input(
+            mob_dsl::MobMachineInput::ClassifyMemberOperationEligibility {},
+            "member_operation_eligibility",
+        )?;
+        let mut admission = None;
+        for effect in &prepared.effects {
+            if let mob_dsl::MobMachineEffect::MemberOperationEligibilityResolved {
+                admission: kind,
+            } = effect
+            {
+                if admission.replace(*kind).is_some() {
+                    return Err(MobError::Internal(
+                        "MobMachine emitted multiple member-operation eligibility verdicts".into(),
+                    ));
+                }
+            }
+        }
+        match admission {
+            Some(mob_dsl::MobMemberOperationEligibilityKind::Admitted) => Ok(()),
+            Some(mob_dsl::MobMemberOperationEligibilityKind::DeniedNotRunning) => {
+                Err(self.invalid_transition_to(MobState::Running))
+            }
+            None => Err(MobError::Internal(
+                "MobMachine emitted no member-operation eligibility verdict".into(),
+            )),
         }
     }
 
@@ -4918,7 +4944,7 @@ impl MobActor {
 
     fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
         let _ = agent_identity;
-        self.require_state(&[MobState::Running])
+        self.require_member_operation_eligible()
     }
 
     fn authorize_spawn_profile_material(
@@ -8179,7 +8205,7 @@ impl MobActor {
                         agent_identity.clone(),
                         self.provisioner.clone(),
                     );
-                    if let Err(error) = self.require_state(&[MobState::Running]) {
+                    if let Err(error) = self.require_member_operation_eligible() {
                         if let Err(retire_error) = provision.rollback().await {
                             Err(MobError::Internal(format!(
                                 "spawn completed while mob state changed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
@@ -8443,7 +8469,7 @@ impl MobActor {
                 agent_identity.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running]) {
+            if let Err(error) = self.require_member_operation_eligible() {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
                         "policy spawn completed while mob state changed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
@@ -10232,7 +10258,7 @@ impl MobActor {
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<PeerMessageDeliveryPlan, MobError> {
-        self.require_state(&[MobState::Running])?;
+        self.require_member_operation_eligible()?;
         if from == to {
             return Err(MobError::WiringError(format!(
                 "peer message requires distinct members (got '{from}')"
@@ -12836,7 +12862,7 @@ impl MobActor {
                 agent_identity.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running]) {
+            if let Err(error) = self.require_member_operation_eligible() {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(agent_identity.as_str()),

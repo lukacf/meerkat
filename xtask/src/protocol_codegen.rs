@@ -4814,6 +4814,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "SessionFirstTurnPhase",
         "SessionInitialPromptStageDecision",
         "SystemContextAppendDecision",
+        "SystemContextPersistAppendAdmission",
         "SystemContextSource",
         "RealtimeTranscriptRoleKind",
         "RealtimeTranscriptLaneKind",
@@ -4903,6 +4904,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "SessionFirstTurnPhase" => Ok("Inactive"),
         "SessionInitialPromptStageDecision" => Ok("Clear"),
         "SystemContextAppendDecision" => Ok("Staged"),
+        "SystemContextPersistAppendAdmission" => Ok("Reject"),
         "SystemContextSource" => Ok("Normal"),
         "RealtimeTranscriptRoleKind" => Ok("User"),
         "RealtimeTranscriptLaneKind" => Ok("Display"),
@@ -5719,6 +5721,7 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "SessionFirstTurnPhase"
             | "SessionInitialPromptStageDecision"
             | "SystemContextAppendDecision"
+            | "SystemContextPersistAppendAdmission"
             | "SystemContextSource"
             | "RealtimeTranscriptRoleKind"
             | "RealtimeTranscriptLaneKind"

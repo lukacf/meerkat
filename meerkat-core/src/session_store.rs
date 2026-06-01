@@ -419,7 +419,7 @@ fn messages_preserve_conversation_tail_with_system_context_append(
     let Some(incoming_system) = incoming_system else {
         return Ok(false);
     };
-    if !system_context_is_append(previous_system, incoming_system) {
+    if !system_context_is_append(previous_system, incoming_system)? {
         return Ok(false);
     }
     if incoming_tail.len() < previous_tail.len() {
@@ -445,28 +445,63 @@ fn split_single_leading_system(messages: &[Message]) -> (Option<&SystemMessage>,
 ///
 /// The structural part — identical content, or `incoming = previous +
 /// separator + suffix` — is a transcript-continuity proof (content equality of
-/// the retained prefix), not classification. The SEMANTIC fact that the
-/// divergence is a runtime context append is read from the incoming system
-/// message's typed [`SystemPromptMutationKind`] marker, not from a
-/// `[Runtime System Context]` content prefix.
-fn system_context_is_append(previous: Option<&SystemMessage>, incoming: &SystemMessage) -> bool {
-    match previous {
-        // Identical content is a no-op refresh (e.g. timestamp-only): admit it
-        // regardless of the typed marker.
-        Some(previous) if incoming.content == previous.content => true,
-        // A genuine append must (a) preserve the previous prompt as a prefix
-        // followed by the canonical separator, and (b) carry the typed
-        // runtime-context-append provenance.
-        Some(previous) if incoming.content.starts_with(&previous.content) => {
-            let appended = &incoming.content[previous.content.len()..];
-            appended.starts_with(SYSTEM_CONTEXT_SEPARATOR)
-                && incoming.mutation_kind.is_runtime_context_append()
-        }
-        Some(_) => false,
-        // No previous system message: the incoming prompt is itself a runtime
-        // context append iff its typed provenance says so.
-        None => incoming.mutation_kind.is_runtime_context_append(),
-    }
+/// the retained prefix), not classification. The SEMANTIC append-admission
+/// verdict ("is this incoming persisted prompt an admissible
+/// runtime-context-append continuation of the persisted one") is owned by the
+/// canonical [`SessionDocumentMachine`] — the same machine the staging path
+/// already drives for the four-way append disposition — not a handwritten shell
+/// reducer. This function extracts only the pure structural observations plus
+/// the typed [`SystemPromptMutationKind`] runtime-context-append marker, drives
+/// the machine's `ResolveSystemContextPersistAppendAdmission` input, and mirrors
+/// the emitted verdict (`Admit` -> `true`, `Reject` -> `false`). It fails closed
+/// if the machine refuses or emits no verdict.
+fn system_context_is_append(
+    previous: Option<&SystemMessage>,
+    incoming: &SystemMessage,
+) -> Result<bool, SessionStoreError> {
+    // Pure structural observations the shell computes; NO semantic decision.
+    let has_previous = previous.is_some();
+    let content_identical = previous.is_some_and(|previous| incoming.content == previous.content);
+    let content_extends_previous =
+        previous.is_some_and(|previous| incoming.content.starts_with(&previous.content));
+    let appended_starts_with_separator = previous.is_some_and(|previous| {
+        incoming
+            .content
+            .get(previous.content.len()..)
+            .is_some_and(|appended| appended.starts_with(SYSTEM_CONTEXT_SEPARATOR))
+    });
+    let incoming_is_runtime_context_append = incoming.mutation_kind.is_runtime_context_append();
+
+    let mut authority = crate::session_document::SessionDocumentMachineAuthority::new();
+    let effects = authority
+        .resolve_system_context_persist_append_admission(
+            has_previous,
+            content_identical,
+            content_extends_previous,
+            appended_starts_with_separator,
+            incoming_is_runtime_context_append,
+        )
+        .map_err(|err| {
+            SessionStoreError::Internal(format!(
+                "session document authority refused persist-time system-context append admission: {err}"
+            ))
+        })?;
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            crate::session_document::SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
+                admission,
+            } => Some(matches!(
+                admission,
+                crate::session_document::SystemContextPersistAppendAdmission::Admit
+            )),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            SessionStoreError::Internal(
+                "session document authority emitted no persist-time system-context append admission verdict".to_string(),
+            )
+        })
 }
 
 fn incoming_preserves_prefix_after_transient_notice_cleanup(
@@ -2529,5 +2564,116 @@ mod tests {
                 if reason.contains("drop retained transcript rewrite commits")
         ));
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // FOLD 2: the persist-time system-context append-admission decision routes
+    // through SessionDocumentMachine ResolveSystemContextPersistAppendAdmission
+    // (the SAME machine the staging path drives). These tests pin that the
+    // persist-time verdict matches a direct machine call for every shape, and
+    // that the four admission cases behave exactly as the retired shell reducer.
+    // ------------------------------------------------------------------
+
+    fn runtime_append_system(content: &str) -> SystemMessage {
+        let mut system = SystemMessage::new(content);
+        system.mutation_kind = crate::types::SystemPromptMutationKind::RuntimeContextAppend;
+        system
+    }
+
+    /// Direct machine call mirroring the persist-time observation extraction —
+    /// the persist-time path MUST agree with this for every input shape.
+    #[allow(clippy::expect_used)]
+    fn machine_persist_append_admits(
+        previous: Option<&SystemMessage>,
+        incoming: &SystemMessage,
+    ) -> bool {
+        let has_previous = previous.is_some();
+        let content_identical =
+            previous.is_some_and(|previous| incoming.content == previous.content);
+        let content_extends_previous =
+            previous.is_some_and(|previous| incoming.content.starts_with(&previous.content));
+        let appended_starts_with_separator = previous.is_some_and(|previous| {
+            incoming
+                .content
+                .get(previous.content.len()..)
+                .is_some_and(|appended| appended.starts_with(SYSTEM_CONTEXT_SEPARATOR))
+        });
+        let incoming_is_runtime_context_append = incoming.mutation_kind.is_runtime_context_append();
+        let mut authority = crate::session_document::SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .resolve_system_context_persist_append_admission(
+                has_previous,
+                content_identical,
+                content_extends_previous,
+                appended_starts_with_separator,
+                incoming_is_runtime_context_append,
+            )
+            .expect("machine resolves persist-append admission");
+        effects.into_iter().any(|effect| {
+            matches!(
+                effect,
+                crate::session_document::SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
+                    admission: crate::session_document::SystemContextPersistAppendAdmission::Admit,
+                }
+            )
+        })
+    }
+
+    #[allow(clippy::expect_used)]
+    fn assert_persist_append_matches_machine(
+        previous: Option<&SystemMessage>,
+        incoming: &SystemMessage,
+        expected: bool,
+    ) {
+        let verdict =
+            system_context_is_append(previous, incoming).expect("persist-time admission resolves");
+        assert_eq!(verdict, expected, "persist-time verdict mismatch");
+        assert_eq!(
+            verdict,
+            machine_persist_append_admits(previous, incoming),
+            "persist-time verdict diverges from direct machine call"
+        );
+    }
+
+    #[test]
+    fn persist_append_identical_content_admits() {
+        let previous = SystemMessage::new("base system");
+        let incoming = SystemMessage::new("base system");
+        assert_persist_append_matches_machine(Some(&previous), &incoming, true);
+    }
+
+    #[test]
+    fn persist_append_separator_append_with_marker_admits() {
+        let previous = SystemMessage::new("base system");
+        let incoming = runtime_append_system(&format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nextra"
+        ));
+        assert_persist_append_matches_machine(Some(&previous), &incoming, true);
+    }
+
+    #[test]
+    fn persist_append_shaped_without_marker_rejects() {
+        let previous = SystemMessage::new("base system");
+        // Append-shaped content but no runtime-context-append provenance marker.
+        let incoming = SystemMessage::new(format!(
+            "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nextra"
+        ));
+        assert_persist_append_matches_machine(Some(&previous), &incoming, false);
+    }
+
+    #[test]
+    fn persist_append_divergent_content_rejects() {
+        let previous = SystemMessage::new("base system");
+        let incoming = runtime_append_system("totally different");
+        assert_persist_append_matches_machine(Some(&previous), &incoming, false);
+    }
+
+    #[test]
+    fn persist_append_no_previous_admits_only_with_marker() {
+        let with_marker = runtime_append_system("brand new context");
+        assert_persist_append_matches_machine(None, &with_marker, true);
+
+        let without_marker = SystemMessage::new("brand new context");
+        assert_persist_append_matches_machine(None, &without_marker, false);
     }
 }

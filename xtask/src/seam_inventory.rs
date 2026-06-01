@@ -1266,6 +1266,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "MemberOperationEligibilityResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Within-mob member-operation eligibility (Admitted/DeniedNotRunning) for spawn finalization, peer messaging, and respawn finalization is decided by MobMachine from its own lifecycle phase plus the destroy_admitted marker; the actor mirrors it (DeniedNotRunning -> InvalidTransition to Running) instead of pre-checking the phase off self.state() itself",
+        ),
+        (
+            "MobMachine",
             "BridgeRejectionRecoveryClassified",
             SeamClassification::SurfaceResultAlignment,
             "Bridge-rejection recovery (RebindRecover/FatalBubbleUp) is decided by MobMachine from the raw wire rejection cause; the mob shell mirrors it (RebindRecover -> re-run BindMember; FatalBubbleUp -> bubble up) instead of reducing the cause into a recoverable-vs-fatal conclusion itself",
@@ -1702,6 +1708,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph completion-policy mutation admission verdict (Admitted/Denied) is decided by WorkGraphLifecycleMachine by comparing the requested completion policy in full against the machine-owned policy; the update shell mirrors it (Denied -> InvalidInput) instead of deciding the immutability invariant itself",
         ),
+        (
+            "WorkGraphLifecycleMachine",
+            "ConfirmationAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph trusted-path confirmation admission verdict (Admitted / DeniedPrincipalRequired / DeniedPrincipalKindMismatch / DeniedSupervisorMismatch / DeniedEvidenceKind / DeniedSelfAttestEmptyEvidenceKind) is decided by WorkGraphLifecycleMachine from the typed completion-policy, supervisor owner key, requested principal owner key + kind, and evidence-kind observations; the goal-confirm shell mirrors it (Admitted -> stamp evidence, each Denied* -> the same InvalidInput rejection) instead of deciding the per-policy principal/evidence eligibility itself",
+        ),
         //
         // =========================================================================
         // ApprovalLifecycleMachine
@@ -1786,6 +1798,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "SystemContextSnapshotRestoreAuthorized",
             SeamClassification::NoOwnerRealization,
             "Local system-context snapshot restore authorization consumed in-process by the session restore path",
+        ),
+        (
+            "SessionDocumentMachine",
+            "SystemContextPersistAppendAdmissionResolved",
+            SeamClassification::NoOwnerRealization,
+            "Local persist-time system-context append-admission verdict (Admit/Reject) mirrored onto the session-store atomic append-only save guard bool inside meerkat-core session_store (same machine as the staging-path append disposition; shell decides nothing)",
         ),
         (
             "SessionDocumentMachine",

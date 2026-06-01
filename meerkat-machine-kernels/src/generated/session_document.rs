@@ -1015,6 +1015,58 @@ impl std::fmt::Display for SystemContextAppendDecision {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SystemContextPersistAppendAdmission {
+    #[default]
+    #[serde(rename = "Reject")]
+    Reject,
+    #[serde(rename = "Admit")]
+    Admit,
+}
+impl SystemContextPersistAppendAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reject => "Reject",
+            Self::Admit => "Admit",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SystemContextPersistAppendAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Reject" => Ok(Self::Reject),
+            "Admit" => Ok(Self::Admit),
+            other => Err(format!(
+                "invalid SystemContextPersistAppendAdmission value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SystemContextPersistAppendAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SystemContextPersistAppendAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SystemContextSource {
     #[default]
     #[serde(rename = "Normal")]
@@ -1138,6 +1190,14 @@ pub mod inputs {
     pub struct RestoreSystemContextSnapshot {
         pub active_keys_have_known_pending_or_seen: bool,
         pub seen_keys_match_known_appends: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSystemContextPersistAppendAdmission {
+        pub has_previous: bool,
+        pub content_identical: bool,
+        pub content_extends_previous: bool,
+        pub appended_starts_with_separator: bool,
+        pub incoming_is_runtime_context_append: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRealtimeItemObserved {
@@ -1315,6 +1375,7 @@ pub enum Input {
     ResolveSystemContextPendingApplyItem(inputs::ResolveSystemContextPendingApplyItem),
     ResolveSystemContextSteerCleanupItem(inputs::ResolveSystemContextSteerCleanupItem),
     RestoreSystemContextSnapshot(inputs::RestoreSystemContextSnapshot),
+    ResolveSystemContextPersistAppendAdmission(inputs::ResolveSystemContextPersistAppendAdmission),
     ResolveRealtimeItemObserved(inputs::ResolveRealtimeItemObserved),
     ResolveRealtimeItemSkipped(inputs::ResolveRealtimeItemSkipped),
     ResolveRealtimeUserTranscriptFinal(inputs::ResolveRealtimeUserTranscriptFinal),
@@ -1352,6 +1413,9 @@ impl Input {
                 InputKind::ResolveSystemContextSteerCleanupItem
             }
             Self::RestoreSystemContextSnapshot(_) => InputKind::RestoreSystemContextSnapshot,
+            Self::ResolveSystemContextPersistAppendAdmission(_) => {
+                InputKind::ResolveSystemContextPersistAppendAdmission
+            }
             Self::ResolveRealtimeItemObserved(_) => InputKind::ResolveRealtimeItemObserved,
             Self::ResolveRealtimeItemSkipped(_) => InputKind::ResolveRealtimeItemSkipped,
             Self::ResolveRealtimeUserTranscriptFinal(_) => {
@@ -1396,6 +1460,7 @@ pub enum InputKind {
     ResolveSystemContextPendingApplyItem,
     ResolveSystemContextSteerCleanupItem,
     RestoreSystemContextSnapshot,
+    ResolveSystemContextPersistAppendAdmission,
     ResolveRealtimeItemObserved,
     ResolveRealtimeItemSkipped,
     ResolveRealtimeUserTranscriptFinal,
@@ -1458,6 +1523,10 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SystemContextSnapshotRestoreAuthorized {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SystemContextPersistAppendAdmissionResolved {
+        pub admission: SystemContextPersistAppendAdmission,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptEventResolved {
         pub observe_item: bool,
@@ -1522,6 +1591,9 @@ pub enum Effect {
     SystemContextPendingApplyItemResolved(effects::SystemContextPendingApplyItemResolved),
     SystemContextSteerCleanupItemResolved(effects::SystemContextSteerCleanupItemResolved),
     SystemContextSnapshotRestoreAuthorized(effects::SystemContextSnapshotRestoreAuthorized),
+    SystemContextPersistAppendAdmissionResolved(
+        effects::SystemContextPersistAppendAdmissionResolved,
+    ),
     RealtimeTranscriptEventResolved(effects::RealtimeTranscriptEventResolved),
     RealtimeMaterializeCandidateResolved(effects::RealtimeMaterializeCandidateResolved),
     RealtimeTranscriptSnapshotRestoreAuthorized(
@@ -1548,6 +1620,7 @@ pub enum EffectKind {
     SystemContextPendingApplyItemResolved,
     SystemContextSteerCleanupItemResolved,
     SystemContextSnapshotRestoreAuthorized,
+    SystemContextPersistAppendAdmissionResolved,
     RealtimeTranscriptEventResolved,
     RealtimeMaterializeCandidateResolved,
     RealtimeTranscriptSnapshotRestoreAuthorized,
@@ -1584,6 +1657,8 @@ pub enum TransitionId {
     ResolveSystemContextAppendConflict,
     ResolveSystemContextAppendDuplicate,
     ResolveSystemContextAppendNew,
+    ResolveSystemContextPersistAppendAdmissionAdmit,
+    ResolveSystemContextPersistAppendAdmissionReject,
     ResolveSystemContextPendingApplyItemRuntimeSteer,
     ResolveSystemContextPendingApplyItemNormal,
     ResolveSystemContextSteerCleanupItemRuntimeSteer,

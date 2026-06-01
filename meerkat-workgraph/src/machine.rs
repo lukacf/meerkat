@@ -431,6 +431,66 @@ impl WorkGraphMachine {
         })
     }
 
+    /// Resolve whether a trusted-path goal confirmation is admissible for a work
+    /// item's machine-owned completion policy.
+    ///
+    /// The eligibility "is this confirming principal + supplied evidence kind
+    /// admissible for this completion policy" is owned by the canonical
+    /// `WorkGraphLifecycleMachine`, not the goal-confirm shell. The shell
+    /// performs only pure typed extraction of the observations (the machine-owned
+    /// completion policy + its supervisor owner key, the requested confirming
+    /// principal owner key + kind, and the typed evidence-kind observation parsed
+    /// from the opaque `evidence.kind` string), drives the machine's
+    /// `ClassifyConfirmationAdmission` input, and mirrors the emitted
+    /// `ConfirmationAdmissionClassified` verdict. This function decides nothing
+    /// and fails closed if the machine refuses or emits no verdict.
+    pub fn classify_confirmation_admission(
+        completion_policy: &crate::types::WorkCompletionPolicy,
+        requested_principal: Option<&crate::types::WorkOwnerKey>,
+        supplied_evidence_kind: wg_dsl::WorkConfirmationEvidenceObservation,
+    ) -> Result<wg_dsl::WorkConfirmationAdmissionKind, WorkGraphError> {
+        let policy = completion_policy.to_machine();
+        let requested_principal_owner_key =
+            requested_principal.map(crate::types::work_owner_key_to_machine);
+        let requested_principal_kind = requested_principal
+            .map(|principal| crate::types::work_owner_kind_to_machine(principal.kind));
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyConfirmationAdmission {
+                completion_policy: policy,
+                completion_supervisor_owner_key: completion_policy.supervisor_owner_key(),
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle refused confirmation admission for {policy:?}: {error:?}"
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::ConfirmationAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkGraphLifecycle confirmation admission emitted multiple verdicts for {policy:?}"
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle confirmation admission emitted no verdict for {policy:?}"
+            ))
+        })
+    }
+
     /// Resolve whether a work item is terminal.
     ///
     /// The shell extracts no fact: it drives the canonical

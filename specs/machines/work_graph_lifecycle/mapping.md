@@ -590,6 +590,132 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyCompletionPolicyMutationAdmissionChangedFailed`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalRequiredFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionPrincipalKindMismatchFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSupervisorMismatchFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionSelfAttestEmptyFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionEvidenceKindFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyConfirmationAdmissionAdmittedFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
 
 ### Effects
 - `Created`
@@ -632,6 +758,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
 - `CompletionPolicyMutationAdmissionClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ConfirmationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
 - `WorkItemReadinessClassified`

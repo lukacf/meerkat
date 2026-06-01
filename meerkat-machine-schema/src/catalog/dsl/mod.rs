@@ -291,6 +291,10 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "SystemContextAppendDecision",
                 &["Staged", "Duplicate", "RejectEmpty", "RejectConflict"],
             ),
+            NamedTypeBinding::string_enum(
+                "SystemContextPersistAppendAdmission",
+                &["Reject", "Admit"],
+            ),
             NamedTypeBinding::string_enum("SystemContextSource", &["Normal", "RuntimeSteer"]),
             // Realtime-transcript region typed vocabulary (folded from the
             // retired SessionRealtimeTranscriptAuthorityMachine).
@@ -2044,6 +2048,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Denied", "Allowed"],
             ),
             NamedTypeBinding::string_enum(
+                "MobMemberOperationEligibilityKind",
+                &["DeniedNotRunning", "Admitted"],
+            ),
+            NamedTypeBinding::string_enum(
                 "MobBridgeRejectionCause",
                 &[
                     "NotBound",
@@ -2276,6 +2284,7 @@ runtime_internal_inputs!(
         ResolveCurrentMobAdmission,
         ResolveCreateMobAdmission,
         ResolveProfileMutationAdmission,
+        ClassifyMemberOperationEligibility,
         ClassifyBridgeRejectionRecovery,
         ClassifyPendingSupervisorAcceptance,
         CreateFrameSeed,
@@ -2677,6 +2686,28 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "WorkCompletionPolicyMutationAdmissionKind",
                 &["Denied", "Admitted"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkConfirmationEvidenceObservation",
+                &[
+                    "Empty",
+                    "Other",
+                    "HostConfirmation",
+                    "PrincipalConfirmation",
+                    "SupervisorConfirmation",
+                    "ReviewerConfirmation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkConfirmationAdmissionKind",
+                &[
+                    "DeniedPrincipalRequired",
+                    "DeniedPrincipalKindMismatch",
+                    "DeniedSupervisorMismatch",
+                    "DeniedEvidenceKind",
+                    "DeniedSelfAttestEmptyEvidenceKind",
+                    "Admitted",
+                ],
             ),
             NamedTypeBinding::type_path_struct(
                 "WorkOwnerKey",

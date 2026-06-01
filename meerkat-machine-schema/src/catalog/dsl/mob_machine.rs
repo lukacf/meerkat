@@ -499,6 +499,16 @@ macro_rules! mob_catalog_machine_dsl {
             // admission verdict, which the shell mirrors (Deny ->
             // access_denied).
             ResolveProfileMutationAdmission { can_mutate_profiles: bool },
+            // Within-mob member-operation eligibility classification. Spawn
+            // finalization, peer messaging, and respawn finalization require the
+            // mob to be live and running. MobMachine — not a handwritten shell
+            // phase pre-check off `self.state()` — owns that eligibility over
+            // its own lifecycle phase plus the `destroy_admitted` marker. The
+            // owning actor extracts no fact (the verdict is read entirely from
+            // machine-owned state); it drives this input and mirrors
+            // `DeniedNotRunning` to the same `InvalidTransition` rejection it
+            // previously produced. Pure classification across all phases.
+            ClassifyMemberOperationEligibility {},
             // Bridge-rejection recovery classification. When a mob sends a
             // bridge command that requires an already-bound supervisor (e.g.
             // `AuthorizeSupervisor`) and the member replies with a typed
@@ -771,6 +781,7 @@ macro_rules! mob_catalog_machine_dsl {
             // tool shell mirrors this (Denied -> access_denied; Allowed ->
             // proceed) instead of composing the admission itself.
             ProfileMutationAdmissionResolved { admission: Enum<MobProfileMutationAdmissionKind> },
+            MemberOperationEligibilityResolved { admission: Enum<MobMemberOperationEligibilityKind> },
             // Machine-owned bridge-rejection recovery verdict. The mob shell
             // mirrors this (RebindRecover -> re-run BindMember; FatalBubbleUp ->
             // bubble the rejection up) instead of reducing the raw wire cause
@@ -931,6 +942,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition CurrentMobAdmissionResolved => local,
         disposition CreateMobAdmissionResolved => local,
         disposition ProfileMutationAdmissionResolved => local,
+        disposition MemberOperationEligibilityResolved => local,
         disposition BridgeRejectionRecoveryClassified => local,
         disposition PendingSupervisorAcceptanceClassified => local,
         disposition FrameSeedConfirmed => local,
@@ -1543,6 +1555,42 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit ProfileMutationAdmissionResolved { admission: MobProfileMutationAdmissionKind::Denied }
+        }
+
+        // --- Within-mob member-operation eligibility classification ---
+        //
+        // Spawn finalization, peer messaging, and respawn finalization require
+        // the mob to be live and running. MobMachine owns that eligibility over
+        // its own lifecycle phase plus the `destroy_admitted` marker: `Admitted`
+        // iff `Running` and destruction has not been admitted, `DeniedNotRunning`
+        // otherwise. The owning actor mirrors `DeniedNotRunning` to the same
+        // `InvalidTransition { from: self.state(), to: Running }` rejection it
+        // previously produced from the handwritten `require_state` pre-check.
+
+        transition ClassifyMemberOperationEligibilityAdmitted {
+            per_phase [Running]
+            on input ClassifyMemberOperationEligibility {}
+            guard "running_and_not_destroying_is_eligible" { self.destroy_admitted == false }
+            update {}
+            to Running
+            emit MemberOperationEligibilityResolved { admission: MobMemberOperationEligibilityKind::Admitted }
+        }
+
+        transition ClassifyMemberOperationEligibilityRunningDestroyDenied {
+            per_phase [Running]
+            on input ClassifyMemberOperationEligibility {}
+            guard "running_but_destroying_is_denied" { self.destroy_admitted == true }
+            update {}
+            to Running
+            emit MemberOperationEligibilityResolved { admission: MobMemberOperationEligibilityKind::DeniedNotRunning }
+        }
+
+        transition ClassifyMemberOperationEligibilityNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input ClassifyMemberOperationEligibility {}
+            update {}
+            to Running
+            emit MemberOperationEligibilityResolved { admission: MobMemberOperationEligibilityKind::DeniedNotRunning }
         }
 
         // --- Bridge-rejection recovery classification ---
@@ -8601,6 +8649,21 @@ pub enum MobProfileMutationAdmissionKind {
     #[default]
     Denied,
     Allowed,
+}
+
+/// Machine-owned eligibility verdict for a within-mob member operation (spawn
+/// finalization, peer messaging, respawn finalization) that requires the mob to
+/// be live and running. MobMachine — not a handwritten shell phase pre-check —
+/// owns the eligibility over its own lifecycle phase plus the `destroy_admitted`
+/// projection marker: an operation is `Admitted` iff the machine is `Running`
+/// and destruction has not been admitted, and `DeniedNotRunning` otherwise. The
+/// owning actor mirrors `DeniedNotRunning` to the same `InvalidTransition`
+/// rejection it previously produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobMemberOperationEligibilityKind {
+    #[default]
+    DeniedNotRunning,
+    Admitted,
 }
 
 /// Pure wire-projection bridge rejection cause, mirroring every variant of the

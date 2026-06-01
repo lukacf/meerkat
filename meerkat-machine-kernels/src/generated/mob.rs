@@ -2244,6 +2244,58 @@ impl std::fmt::Display for MobLifecycleJournalKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MobMemberOperationEligibilityKind {
+    #[default]
+    #[serde(rename = "DeniedNotRunning")]
+    DeniedNotRunning,
+    #[serde(rename = "Admitted")]
+    Admitted,
+}
+impl MobMemberOperationEligibilityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DeniedNotRunning => "DeniedNotRunning",
+            Self::Admitted => "Admitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobMemberOperationEligibilityKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DeniedNotRunning" => Ok(Self::DeniedNotRunning),
+            "Admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "invalid MobMemberOperationEligibilityKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobMemberOperationEligibilityKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobMemberOperationEligibilityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MobMemberState {
     #[default]
     #[serde(rename = "Active")]
@@ -3975,6 +4027,8 @@ pub mod inputs {
         pub can_mutate_profiles: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyMemberOperationEligibility {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyBridgeRejectionRecovery {
         pub rejection_cause: MobBridgeRejectionCause,
     }
@@ -4381,6 +4435,7 @@ pub enum Input {
     ResolveCurrentMobAdmission(inputs::ResolveCurrentMobAdmission),
     ResolveCreateMobAdmission(inputs::ResolveCreateMobAdmission),
     ResolveProfileMutationAdmission(inputs::ResolveProfileMutationAdmission),
+    ClassifyMemberOperationEligibility(inputs::ClassifyMemberOperationEligibility),
     ClassifyBridgeRejectionRecovery(inputs::ClassifyBridgeRejectionRecovery),
     ClassifyPendingSupervisorAcceptance(inputs::ClassifyPendingSupervisorAcceptance),
     EnsureMember(inputs::EnsureMember),
@@ -4497,6 +4552,9 @@ impl Input {
             Self::ResolveCurrentMobAdmission(_) => InputKind::ResolveCurrentMobAdmission,
             Self::ResolveCreateMobAdmission(_) => InputKind::ResolveCreateMobAdmission,
             Self::ResolveProfileMutationAdmission(_) => InputKind::ResolveProfileMutationAdmission,
+            Self::ClassifyMemberOperationEligibility(_) => {
+                InputKind::ClassifyMemberOperationEligibility
+            }
             Self::ClassifyBridgeRejectionRecovery(_) => InputKind::ClassifyBridgeRejectionRecovery,
             Self::ClassifyPendingSupervisorAcceptance(_) => {
                 InputKind::ClassifyPendingSupervisorAcceptance
@@ -4628,6 +4686,7 @@ pub enum InputKind {
     ResolveCurrentMobAdmission,
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
+    ClassifyMemberOperationEligibility,
     ClassifyBridgeRejectionRecovery,
     ClassifyPendingSupervisorAcceptance,
     EnsureMember,
@@ -5281,6 +5340,10 @@ pub mod effects {
         pub admission: MobProfileMutationAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberOperationEligibilityResolved {
+        pub admission: MobMemberOperationEligibilityKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BridgeRejectionRecoveryClassified {
         pub rejection_cause: MobBridgeRejectionCause,
         pub recovery: MobBridgeRejectionRecovery,
@@ -5557,6 +5620,7 @@ pub enum Effect {
     CurrentMobAdmissionResolved(effects::CurrentMobAdmissionResolved),
     CreateMobAdmissionResolved(effects::CreateMobAdmissionResolved),
     ProfileMutationAdmissionResolved(effects::ProfileMutationAdmissionResolved),
+    MemberOperationEligibilityResolved(effects::MemberOperationEligibilityResolved),
     BridgeRejectionRecoveryClassified(effects::BridgeRejectionRecoveryClassified),
     PendingSupervisorAcceptanceClassified(effects::PendingSupervisorAcceptanceClassified),
     FrameSeedConfirmed(effects::FrameSeedConfirmed),
@@ -5640,6 +5704,7 @@ pub enum EffectKind {
     CurrentMobAdmissionResolved,
     CreateMobAdmissionResolved,
     ProfileMutationAdmissionResolved,
+    MemberOperationEligibilityResolved,
     BridgeRejectionRecoveryClassified,
     PendingSupervisorAcceptanceClassified,
     FrameSeedConfirmed,
@@ -5767,6 +5832,11 @@ pub enum TransitionId {
     ResolveProfileMutationAdmissionDeniedStopped,
     ResolveProfileMutationAdmissionDeniedCompleted,
     ResolveProfileMutationAdmissionDeniedDestroyed,
+    ClassifyMemberOperationEligibilityAdmittedRunning,
+    ClassifyMemberOperationEligibilityRunningDestroyDeniedRunning,
+    ClassifyMemberOperationEligibilityNotRunningStopped,
+    ClassifyMemberOperationEligibilityNotRunningCompleted,
+    ClassifyMemberOperationEligibilityNotRunningDestroyed,
     ClassifyBridgeRejectionRecoveryRebindRunning,
     ClassifyBridgeRejectionRecoveryRebindStopped,
     ClassifyBridgeRejectionRecoveryRebindCompleted,

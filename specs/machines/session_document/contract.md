@@ -24,6 +24,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveSystemContextPendingApplyItem`(source_kind: SystemContextSource)
 - `ResolveSystemContextSteerCleanupItem`(source_kind: SystemContextSource)
 - `RestoreSystemContextSnapshot`(active_keys_have_known_pending_or_seen: Bool, seen_keys_match_known_appends: Bool)
+- `ResolveSystemContextPersistAppendAdmission`(has_previous: Bool, content_identical: Bool, content_extends_previous: Bool, appended_starts_with_separator: Bool, incoming_is_runtime_context_append: Bool)
 - `ResolveRealtimeItemObserved`(role: RealtimeTranscriptRoleKind, response_discarded: Bool)
 - `ResolveRealtimeItemSkipped`
 - `ResolveRealtimeUserTranscriptFinal`(text_present: Bool, segment_empty: Bool, segment_matches: Bool)
@@ -53,6 +54,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SystemContextPendingApplyItemResolved`(promote_to_applied: Bool, mark_seen_applied: Bool, remove_seen: Bool)
 - `SystemContextSteerCleanupItemResolved`(discard: Bool)
 - `SystemContextSnapshotRestoreAuthorized`
+- `SystemContextPersistAppendAdmissionResolved`(admission: SystemContextPersistAppendAdmission)
 - `RealtimeTranscriptEventResolved`(observe_item: Bool, observe_skipped: Bool, write_user_segment: Bool, append_assistant_segment: Bool, replace_assistant_segment: Bool, promote_lane: Bool, mark_item_ready: Bool, record_delta_id: Bool, remove_completion: Bool, record_completion: Bool, discard_response: Bool, discard_response_by_lane: Bool, mark_response_ready: Bool, materialize_ready_items: Bool)
 - `RealtimeMaterializeCandidateResolved`(decision: RealtimeTranscriptMaterializeDecision, consume_usage: Bool)
 - `RealtimeTranscriptSnapshotRestoreAuthorized`
@@ -72,6 +74,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `append_is_conflict`(idempotency_key_present: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `append_is_duplicate`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `append_is_new`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
+- `persist_append_is_admissible`(has_previous: Bool, content_identical: Bool, content_extends_previous: Bool, appended_starts_with_separator: Bool, incoming_is_runtime_context_append: Bool) -> `Bool`
 - `realtime_delta_is_duplicate`(delta_id_present: Bool, delta_id_seen: Bool) -> `Bool`
 - `realtime_lane_accepts`(item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind) -> `Bool`
 - `realtime_should_mark_ready_after_write`(response_completed: Bool, text_after_write_present: Bool) -> `Bool`
@@ -248,6 +251,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SystemContextAppendResolved`
+- To: `Ready`
+
+### `ResolveSystemContextPersistAppendAdmissionAdmit`
+- From: `Ready`
+- On: `ResolveSystemContextPersistAppendAdmission`(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
+- Guards:
+  - ``
+- Emits: `SystemContextPersistAppendAdmissionResolved`
+- To: `Ready`
+
+### `ResolveSystemContextPersistAppendAdmissionReject`
+- From: `Ready`
+- On: `ResolveSystemContextPersistAppendAdmission`(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
+- Guards:
+  - ``
+- Emits: `SystemContextPersistAppendAdmissionResolved`
 - To: `Ready`
 
 ### `ResolveSystemContextPendingApplyItemRuntimeSteer`

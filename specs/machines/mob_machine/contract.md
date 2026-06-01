@@ -168,6 +168,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
 - `ResolveCreateMobAdmission`(can_create_mobs: Bool)
 - `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
+- `ClassifyMemberOperationEligibility`
 - `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
 - `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
@@ -348,6 +349,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CurrentMobAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
 - `CreateMobAdmissionResolved`(admission: MobCreateMobAdmissionKind)
 - `ProfileMutationAdmissionResolved`(admission: MobProfileMutationAdmissionKind)
+- `MemberOperationEligibilityResolved`(admission: MobMemberOperationEligibilityKind)
 - `BridgeRejectionRecoveryClassified`(rejection_cause: MobBridgeRejectionCause, recovery: MobBridgeRejectionRecovery)
 - `PendingSupervisorAcceptanceClassified`(rejection_cause: MobBridgeRejectionCause, verdict: MobPendingSupervisorAcceptanceKind)
 - `FrameSeedConfirmed`(frame_id: FrameId, disposition: MobFrameSeedDisposition)
@@ -1144,6 +1146,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_mutate_capability_denies`
 - Emits: `ProfileMutationAdmissionResolved`
+- To: `Destroyed`
+
+### `ClassifyMemberOperationEligibilityAdmittedRunning`
+- From: `Running`
+- On: `ClassifyMemberOperationEligibility`()
+- Guards:
+  - `running_and_not_destroying_is_eligible`
+- Emits: `MemberOperationEligibilityResolved`
+- To: `Running`
+
+### `ClassifyMemberOperationEligibilityRunningDestroyDeniedRunning`
+- From: `Running`
+- On: `ClassifyMemberOperationEligibility`()
+- Guards:
+  - `running_but_destroying_is_denied`
+- Emits: `MemberOperationEligibilityResolved`
+- To: `Running`
+
+### `ClassifyMemberOperationEligibilityNotRunningStopped`
+- From: `Stopped`
+- On: `ClassifyMemberOperationEligibility`()
+- Emits: `MemberOperationEligibilityResolved`
+- To: `Stopped`
+
+### `ClassifyMemberOperationEligibilityNotRunningCompleted`
+- From: `Completed`
+- On: `ClassifyMemberOperationEligibility`()
+- Emits: `MemberOperationEligibilityResolved`
+- To: `Completed`
+
+### `ClassifyMemberOperationEligibilityNotRunningDestroyed`
+- From: `Destroyed`
+- On: `ClassifyMemberOperationEligibility`()
+- Emits: `MemberOperationEligibilityResolved`
 - To: `Destroyed`
 
 ### `ClassifyBridgeRejectionRecoveryRebindRunning`

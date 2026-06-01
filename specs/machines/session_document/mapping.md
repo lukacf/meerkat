@@ -82,6 +82,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSystemContextAppendNew`
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_append_resolve`
+- `ResolveSystemContextPersistAppendAdmissionAdmit`
+  - anchors: `session_document_authority`
+  - scenarios: `session_system_context_append_resolve`, `session_system_context_apply_discard`
+- `ResolveSystemContextPersistAppendAdmissionReject`
+  - anchors: `session_document_authority`
+  - scenarios: `session_system_context_append_resolve`, `session_system_context_apply_discard`, `session_durable_config_authorize_restore`
 - `ResolveSystemContextPendingApplyItemRuntimeSteer`
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_apply_discard`
@@ -255,6 +261,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SystemContextSnapshotRestoreAuthorized`
   - anchors: `session_document_authority`
   - scenarios: `session_system_context_snapshot_restore`
+- `SystemContextPersistAppendAdmissionResolved`
+  - anchors: `session_document_authority`
+  - scenarios: `session_system_context_append_resolve`, `session_system_context_apply_discard`
 - `RealtimeTranscriptEventResolved`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`

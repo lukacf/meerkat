@@ -50,6 +50,13 @@ pub enum SystemContextAppendDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SystemContextPersistAppendAdmission {
+    #[default]
+    Reject,
+    Admit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SystemContextSource {
     #[default]
     Normal,
@@ -223,6 +230,13 @@ pub enum SessionDocumentInput {
     RestoreSystemContextSnapshot {
         active_keys_have_known_pending_or_seen: bool,
         seen_keys_match_known_appends: bool,
+    },
+    ResolveSystemContextPersistAppendAdmission {
+        has_previous: bool,
+        content_identical: bool,
+        content_extends_previous: bool,
+        appended_starts_with_separator: bool,
+        incoming_is_runtime_context_append: bool,
     },
     ResolveRealtimeItemObserved {
         role: RealtimeTranscriptRoleKind,
@@ -405,6 +419,9 @@ pub enum SessionDocumentEffect {
         discard: bool,
     },
     SystemContextSnapshotRestoreAuthorized,
+    SystemContextPersistAppendAdmissionResolved {
+        admission: SystemContextPersistAppendAdmission,
+    },
     RealtimeTranscriptEventResolved {
         observe_item: bool,
         observe_skipped: bool,
@@ -506,6 +523,8 @@ enum SessionDocumentTransition {
     ResolveSystemContextAppendConflict,
     ResolveSystemContextAppendDuplicate,
     ResolveSystemContextAppendNew,
+    ResolveSystemContextPersistAppendAdmissionAdmit,
+    ResolveSystemContextPersistAppendAdmissionReject,
     ResolveSystemContextPendingApplyItemRuntimeSteer,
     ResolveSystemContextPendingApplyItemNormal,
     ResolveSystemContextSteerCleanupItemRuntimeSteer,
@@ -1232,6 +1251,65 @@ impl SessionDocumentMachineAuthority {
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionDocumentError {
                         op: "RestoreSystemContextSnapshot_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveSystemContextPersistAppendAdmission {
+                has_previous,
+                content_identical,
+                content_extends_previous,
+                appended_starts_with_separator,
+                incoming_is_runtime_context_append,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (persist_append_is_admissible(
+                        has_previous,
+                        content_identical,
+                        content_extends_previous,
+                        appended_starts_with_separator,
+                        incoming_is_runtime_context_append,
+                    ))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionAdmit,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (persist_append_is_admissible(
+                        has_previous,
+                        content_identical,
+                        content_extends_previous,
+                        appended_starts_with_separator,
+                        incoming_is_runtime_context_append,
+                    ) == false)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionReject,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveSystemContextPersistAppendAdmission")?;
+                match transition {
+                    SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionAdmit => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
+                                admission: SystemContextPersistAppendAdmission::Admit,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionReject => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
+                                admission: SystemContextPersistAppendAdmission::Reject,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveSystemContextPersistAppendAdmission_transition",
                     }),
                 }
             }
@@ -2546,6 +2624,25 @@ impl SessionDocumentMachineAuthority {
         })
     }
 
+    pub fn resolve_system_context_persist_append_admission(
+        &mut self,
+        has_previous: bool,
+        content_identical: bool,
+        content_extends_previous: bool,
+        appended_starts_with_separator: bool,
+        incoming_is_runtime_context_append: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(
+            SessionDocumentInput::ResolveSystemContextPersistAppendAdmission {
+                has_previous,
+                content_identical,
+                content_extends_previous,
+                appended_starts_with_separator,
+                incoming_is_runtime_context_append,
+            },
+        )
+    }
+
     pub fn resolve_realtime_item_observed(
         &mut self,
         role: RealtimeTranscriptRoleKind,
@@ -2918,6 +3015,21 @@ fn append_is_new(
 ) -> bool {
     (idempotency_key_present == false)
         || ((existing_key_matches == false) && (existing_key_conflicts == false))
+}
+
+fn persist_append_is_admissible(
+    has_previous: bool,
+    content_identical: bool,
+    content_extends_previous: bool,
+    appended_starts_with_separator: bool,
+    incoming_is_runtime_context_append: bool,
+) -> bool {
+    ((has_previous) && (content_identical))
+        || ((has_previous)
+            && (content_extends_previous)
+            && (appended_starts_with_separator)
+            && (incoming_is_runtime_context_append))
+        || ((has_previous == false) && (incoming_is_runtime_context_append))
 }
 
 fn realtime_delta_is_duplicate(delta_id_present: bool, delta_id_seen: bool) -> bool {

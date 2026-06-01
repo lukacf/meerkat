@@ -313,6 +313,7 @@ pub enum MobMachineCatalogInput {
     ResolveCurrentMobAdmission,
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
+    ClassifyMemberOperationEligibility,
     ClassifyBridgeRejectionRecovery,
     ClassifyPendingSupervisorAcceptance,
     EnsureMember,
@@ -417,6 +418,7 @@ impl MobMachineCatalogInput {
         Self::ResolveCurrentMobAdmission,
         Self::ResolveCreateMobAdmission,
         Self::ResolveProfileMutationAdmission,
+        Self::ClassifyMemberOperationEligibility,
         Self::ClassifyBridgeRejectionRecovery,
         Self::ClassifyPendingSupervisorAcceptance,
         Self::EnsureMember,
@@ -535,6 +537,9 @@ impl MobMachineCatalogInput {
             Self::ResolveCreateMobAdmission => MobMachineInputVariant::ResolveCreateMobAdmission,
             Self::ResolveProfileMutationAdmission => {
                 MobMachineInputVariant::ResolveProfileMutationAdmission
+            }
+            Self::ClassifyMemberOperationEligibility => {
+                MobMachineInputVariant::ClassifyMemberOperationEligibility
             }
             Self::ClassifyBridgeRejectionRecovery => {
                 MobMachineInputVariant::ClassifyBridgeRejectionRecovery
@@ -706,6 +711,7 @@ impl MobMachineCatalogInput {
             Self::ResolveCurrentMobAdmission => "ResolveCurrentMobAdmission",
             Self::ResolveCreateMobAdmission => "ResolveCreateMobAdmission",
             Self::ResolveProfileMutationAdmission => "ResolveProfileMutationAdmission",
+            Self::ClassifyMemberOperationEligibility => "ClassifyMemberOperationEligibility",
             Self::ClassifyBridgeRejectionRecovery => "ClassifyBridgeRejectionRecovery",
             Self::ClassifyPendingSupervisorAcceptance => "ClassifyPendingSupervisorAcceptance",
             Self::EnsureMember => "EnsureMember",
@@ -1041,6 +1047,15 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // standalone surface command.
         input: MobMachineCatalogInput::ResolveProfileMutationAdmission,
         reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Within-mob member-operation eligibility (spawn finalization, peer
+        // messaging, respawn finalization) is decided by MobMachine from its
+        // own lifecycle phase plus the destroy_admitted marker — a
+        // runtime-internal eligibility classification authority driven by the
+        // actor, not a surface command.
+        input: MobMachineCatalogInput::ClassifyMemberOperationEligibility,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         // Bridge-rejection recovery class is decided by MobMachine from the

@@ -141,6 +141,142 @@ impl std::fmt::Display for WorkCompletionPolicyMutationAdmissionKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum WorkConfirmationAdmissionKind {
+    #[default]
+    #[serde(rename = "DeniedPrincipalRequired")]
+    DeniedPrincipalRequired,
+    #[serde(rename = "DeniedPrincipalKindMismatch")]
+    DeniedPrincipalKindMismatch,
+    #[serde(rename = "DeniedSupervisorMismatch")]
+    DeniedSupervisorMismatch,
+    #[serde(rename = "DeniedEvidenceKind")]
+    DeniedEvidenceKind,
+    #[serde(rename = "DeniedSelfAttestEmptyEvidenceKind")]
+    DeniedSelfAttestEmptyEvidenceKind,
+    #[serde(rename = "Admitted")]
+    Admitted,
+}
+impl WorkConfirmationAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DeniedPrincipalRequired => "DeniedPrincipalRequired",
+            Self::DeniedPrincipalKindMismatch => "DeniedPrincipalKindMismatch",
+            Self::DeniedSupervisorMismatch => "DeniedSupervisorMismatch",
+            Self::DeniedEvidenceKind => "DeniedEvidenceKind",
+            Self::DeniedSelfAttestEmptyEvidenceKind => "DeniedSelfAttestEmptyEvidenceKind",
+            Self::Admitted => "Admitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkConfirmationAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DeniedPrincipalRequired" => Ok(Self::DeniedPrincipalRequired),
+            "DeniedPrincipalKindMismatch" => Ok(Self::DeniedPrincipalKindMismatch),
+            "DeniedSupervisorMismatch" => Ok(Self::DeniedSupervisorMismatch),
+            "DeniedEvidenceKind" => Ok(Self::DeniedEvidenceKind),
+            "DeniedSelfAttestEmptyEvidenceKind" => Ok(Self::DeniedSelfAttestEmptyEvidenceKind),
+            "Admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "invalid WorkConfirmationAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkConfirmationAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkConfirmationAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkConfirmationEvidenceObservation {
+    #[default]
+    #[serde(rename = "Empty")]
+    Empty,
+    #[serde(rename = "Other")]
+    Other,
+    #[serde(rename = "HostConfirmation")]
+    HostConfirmation,
+    #[serde(rename = "PrincipalConfirmation")]
+    PrincipalConfirmation,
+    #[serde(rename = "SupervisorConfirmation")]
+    SupervisorConfirmation,
+    #[serde(rename = "ReviewerConfirmation")]
+    ReviewerConfirmation,
+}
+impl WorkConfirmationEvidenceObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::Other => "Other",
+            Self::HostConfirmation => "HostConfirmation",
+            Self::PrincipalConfirmation => "PrincipalConfirmation",
+            Self::SupervisorConfirmation => "SupervisorConfirmation",
+            Self::ReviewerConfirmation => "ReviewerConfirmation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkConfirmationEvidenceObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Empty" => Ok(Self::Empty),
+            "Other" => Ok(Self::Other),
+            "HostConfirmation" => Ok(Self::HostConfirmation),
+            "PrincipalConfirmation" => Ok(Self::PrincipalConfirmation),
+            "SupervisorConfirmation" => Ok(Self::SupervisorConfirmation),
+            "ReviewerConfirmation" => Ok(Self::ReviewerConfirmation),
+            other => Err(format!(
+                "invalid WorkConfirmationEvidenceObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkConfirmationEvidenceObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkConfirmationEvidenceObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum WorkCreateStatusAdmissionKind {
     #[default]
     #[serde(rename = "Denied")]
@@ -567,6 +703,68 @@ pub type WorkOwnerKey = meerkat_machine_schema::catalog::dsl::workgraph_lifecycl
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum WorkOwnerKind {
+    #[default]
+    #[serde(rename = "Principal")]
+    Principal,
+    #[serde(rename = "Agent")]
+    Agent,
+    #[serde(rename = "Session")]
+    Session,
+    #[serde(rename = "Mob")]
+    Mob,
+    #[serde(rename = "Label")]
+    Label,
+}
+impl WorkOwnerKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Principal => "Principal",
+            Self::Agent => "Agent",
+            Self::Session => "Session",
+            Self::Mob => "Mob",
+            Self::Label => "Label",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkOwnerKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Principal" => Ok(Self::Principal),
+            "Agent" => Ok(Self::Agent),
+            "Session" => Ok(Self::Session),
+            "Mob" => Ok(Self::Mob),
+            "Label" => Ok(Self::Label),
+            other => Err(format!("invalid WorkOwnerKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkOwnerKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkOwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum WorkPublicConfirmationAdmissionKind {
     #[default]
     #[serde(rename = "DeniedRequiresTrustedHost")]
@@ -761,6 +959,14 @@ pub mod inputs {
         pub requested_completion_reviewer_quorum_threshold: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyConfirmationAdmission {
+        pub completion_policy: WorkCompletionPolicy,
+        pub completion_supervisor_owner_key: Option<WorkOwnerKey>,
+        pub requested_principal_owner_key: Option<WorkOwnerKey>,
+        pub requested_principal_kind: Option<WorkOwnerKind>,
+        pub supplied_evidence_kind: WorkConfirmationEvidenceObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyReadiness {
         pub now_utc_ms: u64,
     }
@@ -786,6 +992,7 @@ pub enum Input {
     ClassifyCreateStatusAdmission(inputs::ClassifyCreateStatusAdmission),
     ClassifyPublicConfirmationAdmission(inputs::ClassifyPublicConfirmationAdmission),
     ClassifyCompletionPolicyMutationAdmission(inputs::ClassifyCompletionPolicyMutationAdmission),
+    ClassifyConfirmationAdmission(inputs::ClassifyConfirmationAdmission),
     ClassifyReadiness(inputs::ClassifyReadiness),
 }
 impl Input {
@@ -813,6 +1020,7 @@ impl Input {
             Self::ClassifyCompletionPolicyMutationAdmission(_) => {
                 InputKind::ClassifyCompletionPolicyMutationAdmission
             }
+            Self::ClassifyConfirmationAdmission(_) => InputKind::ClassifyConfirmationAdmission,
             Self::ClassifyReadiness(_) => InputKind::ClassifyReadiness,
         }
     }
@@ -837,6 +1045,7 @@ pub enum InputKind {
     ClassifyCreateStatusAdmission,
     ClassifyPublicConfirmationAdmission,
     ClassifyCompletionPolicyMutationAdmission,
+    ClassifyConfirmationAdmission,
     ClassifyReadiness,
 }
 
@@ -890,6 +1099,10 @@ pub mod effects {
         pub admission: WorkCompletionPolicyMutationAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConfirmationAdmissionClassified {
+        pub admission: WorkConfirmationAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WorkItemReadinessClassified {
         pub ready: bool,
     }
@@ -913,6 +1126,7 @@ pub enum Effect {
     CompletionPolicyMutationAdmissionClassified(
         effects::CompletionPolicyMutationAdmissionClassified,
     ),
+    ConfirmationAdmissionClassified(effects::ConfirmationAdmissionClassified),
     WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -931,6 +1145,7 @@ pub enum EffectKind {
     CreateStatusAdmissionClassified,
     PublicConfirmationAdmissionClassified,
     CompletionPolicyMutationAdmissionClassified,
+    ConfirmationAdmissionClassified,
     WorkItemReadinessClassified,
 }
 
@@ -1128,6 +1343,48 @@ pub enum TransitionId {
     ClassifyCompletionPolicyMutationAdmissionChangedCompleted,
     ClassifyCompletionPolicyMutationAdmissionChangedCancelled,
     ClassifyCompletionPolicyMutationAdmissionChangedFailed,
+    ClassifyConfirmationAdmissionPrincipalRequiredAbsent,
+    ClassifyConfirmationAdmissionPrincipalRequiredOpen,
+    ClassifyConfirmationAdmissionPrincipalRequiredInProgress,
+    ClassifyConfirmationAdmissionPrincipalRequiredBlocked,
+    ClassifyConfirmationAdmissionPrincipalRequiredCompleted,
+    ClassifyConfirmationAdmissionPrincipalRequiredCancelled,
+    ClassifyConfirmationAdmissionPrincipalRequiredFailed,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchAbsent,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchOpen,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchInProgress,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchBlocked,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchCompleted,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchCancelled,
+    ClassifyConfirmationAdmissionPrincipalKindMismatchFailed,
+    ClassifyConfirmationAdmissionSupervisorMismatchAbsent,
+    ClassifyConfirmationAdmissionSupervisorMismatchOpen,
+    ClassifyConfirmationAdmissionSupervisorMismatchInProgress,
+    ClassifyConfirmationAdmissionSupervisorMismatchBlocked,
+    ClassifyConfirmationAdmissionSupervisorMismatchCompleted,
+    ClassifyConfirmationAdmissionSupervisorMismatchCancelled,
+    ClassifyConfirmationAdmissionSupervisorMismatchFailed,
+    ClassifyConfirmationAdmissionSelfAttestEmptyAbsent,
+    ClassifyConfirmationAdmissionSelfAttestEmptyOpen,
+    ClassifyConfirmationAdmissionSelfAttestEmptyInProgress,
+    ClassifyConfirmationAdmissionSelfAttestEmptyBlocked,
+    ClassifyConfirmationAdmissionSelfAttestEmptyCompleted,
+    ClassifyConfirmationAdmissionSelfAttestEmptyCancelled,
+    ClassifyConfirmationAdmissionSelfAttestEmptyFailed,
+    ClassifyConfirmationAdmissionEvidenceKindAbsent,
+    ClassifyConfirmationAdmissionEvidenceKindOpen,
+    ClassifyConfirmationAdmissionEvidenceKindInProgress,
+    ClassifyConfirmationAdmissionEvidenceKindBlocked,
+    ClassifyConfirmationAdmissionEvidenceKindCompleted,
+    ClassifyConfirmationAdmissionEvidenceKindCancelled,
+    ClassifyConfirmationAdmissionEvidenceKindFailed,
+    ClassifyConfirmationAdmissionAdmittedAbsent,
+    ClassifyConfirmationAdmissionAdmittedOpen,
+    ClassifyConfirmationAdmissionAdmittedInProgress,
+    ClassifyConfirmationAdmissionAdmittedBlocked,
+    ClassifyConfirmationAdmissionAdmittedCompleted,
+    ClassifyConfirmationAdmissionAdmittedCancelled,
+    ClassifyConfirmationAdmissionAdmittedFailed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

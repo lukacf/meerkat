@@ -316,6 +316,77 @@ pub enum WorkCompletionPolicyMutationAdmissionKind {
     Admitted,
 }
 
+/// Typed observation the trusted goal-confirm shell extracts from the OPAQUE
+/// confirmation `evidence.kind` provenance string. This is a pure typed
+/// extraction (the recognized reserved confirmation literals map 1:1 onto a
+/// confirmation-evidence variant; an empty trimmed string is `Empty`; everything
+/// else is `Other`); the shell performs NO admission decision — the
+/// per-policy required-evidence-kind POLICY lives in the
+/// `ClassifyConfirmationAdmission` transitions, owned by this canonical machine.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkConfirmationEvidenceObservation {
+    #[default]
+    Empty,
+    Other,
+    HostConfirmation,
+    PrincipalConfirmation,
+    SupervisorConfirmation,
+    ReviewerConfirmation,
+}
+
+/// Machine-owned admission verdict for a TRUSTED-path goal confirmation over a
+/// work item's machine-owned `completion_policy`. This machine — not the
+/// goal-confirm shell — owns the eligibility "is this confirming principal +
+/// supplied evidence kind admissible for this completion policy". The
+/// goal-confirm shell extracts only pure typed observations (the machine-owned
+/// completion policy + its supervisor owner key, the requested confirming
+/// principal owner key + kind, and the typed evidence-kind observation), drives
+/// `ClassifyConfirmationAdmission`, and mirrors the verdict: `Admitted` ->
+/// proceed to stamp the canonicalized evidence; each `Denied*` -> the exact same
+/// `InvalidInput` rejection the shell previously produced. Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkConfirmationAdmissionKind {
+    /// A confirming principal is required by the policy but none was supplied.
+    #[default]
+    DeniedPrincipalRequired,
+    /// `PrincipalConfirmed` requires a principal-kind owner key.
+    DeniedPrincipalKindMismatch,
+    /// `Supervisor` requires confirmation from the policy's owner key.
+    DeniedSupervisorMismatch,
+    /// The supplied evidence kind does not match the policy's required kind.
+    DeniedEvidenceKind,
+    /// `SelfAttest` requires a non-empty evidence kind.
+    DeniedSelfAttestEmptyEvidenceKind,
+    /// The confirmation is admissible; the shell proceeds to stamp evidence.
+    Admitted,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -498,6 +569,26 @@ machine! {
                 requested_completion_supervisor_owner_key: Option<WorkOwnerKey>,
                 requested_completion_reviewer_quorum_threshold: Option<u64>,
             },
+            // Trusted-path confirmation admission classification. This machine
+            // owns the eligibility "is this confirming principal + supplied
+            // evidence kind admissible for this completion policy". The
+            // goal-confirm shell extracts only pure typed observations (the
+            // machine-owned completion policy + its supervisor owner key, the
+            // requested confirming principal owner key + kind, and the typed
+            // evidence-kind observation parsed from the opaque evidence.kind
+            // string) and drives this input; this machine decides admissibility
+            // and emits ConfirmationAdmissionClassified. The shell mirrors the
+            // verdict (Admitted -> stamp the canonicalized evidence, each
+            // Denied* -> the exact same InvalidInput rejection), failing closed.
+            // Phase-independent: self-loops over every phase so the
+            // classification is total regardless of the authority phase.
+            ClassifyConfirmationAdmission {
+                completion_policy: Enum<WorkCompletionPolicy>,
+                completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                requested_principal_owner_key: Option<WorkOwnerKey>,
+                requested_principal_kind: Option<Enum<WorkOwnerKind>>,
+                supplied_evidence_kind: Enum<WorkConfirmationEvidenceObservation>,
+            },
             // Readiness classification. An item is "ready" iff it is claimable
             // right now — exactly the condition the `Claim` transition guards
             // accept (`ClaimOpen` from Open, or `ClaimExpiredInProgress`
@@ -531,6 +622,9 @@ machine! {
             },
             CompletionPolicyMutationAdmissionClassified {
                 admission: Enum<WorkCompletionPolicyMutationAdmissionKind>,
+            },
+            ConfirmationAdmissionClassified {
+                admission: Enum<WorkConfirmationAdmissionKind>,
             },
             WorkItemReadinessClassified { ready: bool },
         }
@@ -630,6 +724,121 @@ machine! {
             }
         }
 
+        // --- Trusted-path confirmation-admission verdict helpers ---
+        //
+        // These encode the EXACT per-policy check precedence the retired
+        // `confirmation_evidence_for_policy` shell reducer applied:
+        //   SelfAttest         : Empty evidence -> empty-denial; else Admitted.
+        //   HostConfirmed      : evidence != HostConfirmation -> evidence-denial;
+        //                        else Admitted. (no principal check)
+        //   PrincipalConfirmed : principal absent -> principal-required;
+        //                        principal kind != Principal -> kind-mismatch;
+        //                        evidence != PrincipalConfirmation -> evidence;
+        //                        else Admitted.
+        //   Supervisor         : principal absent -> principal-required;
+        //                        principal != owner_key -> supervisor-mismatch;
+        //                        evidence != SupervisorConfirmation -> evidence;
+        //                        else Admitted.
+        //   ReviewerQuorum     : principal absent -> principal-required;
+        //                        evidence != ReviewerConfirmation -> evidence;
+        //                        else Admitted.
+        // Each helper returns true iff its verdict is the one that fires; the
+        // helpers are mutually exclusive and total.
+
+        // A confirming principal is required by the policy but none was supplied.
+        helper confirmation_denies_principal_required(
+            completion_policy: WorkCompletionPolicy,
+            requested_principal_owner_key: Option<WorkOwnerKey>
+        ) -> bool {
+            (completion_policy == WorkCompletionPolicy::PrincipalConfirmed
+                || completion_policy == WorkCompletionPolicy::Supervisor
+                || completion_policy == WorkCompletionPolicy::ReviewerQuorum)
+                && requested_principal_owner_key == None
+        }
+
+        // PrincipalConfirmed: principal present but its kind is not Principal.
+        helper confirmation_denies_principal_kind_mismatch(
+            completion_policy: WorkCompletionPolicy,
+            requested_principal_owner_key: Option<WorkOwnerKey>,
+            requested_principal_kind: Option<WorkOwnerKind>
+        ) -> bool {
+            completion_policy == WorkCompletionPolicy::PrincipalConfirmed
+                && requested_principal_owner_key != None
+                && (requested_principal_kind == None
+                    || requested_principal_kind.get("value") != WorkOwnerKind::Principal)
+        }
+
+        // Supervisor: principal present but does not equal the policy owner key.
+        helper confirmation_denies_supervisor_mismatch(
+            completion_policy: WorkCompletionPolicy,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_principal_owner_key: Option<WorkOwnerKey>
+        ) -> bool {
+            completion_policy == WorkCompletionPolicy::Supervisor
+                && requested_principal_owner_key != None
+                && (completion_supervisor_owner_key == None
+                    || requested_principal_owner_key.get("value")
+                        != completion_supervisor_owner_key.get("value"))
+        }
+
+        // SelfAttest: the evidence kind string is empty.
+        helper confirmation_denies_self_attest_empty(
+            completion_policy: WorkCompletionPolicy,
+            supplied_evidence_kind: WorkConfirmationEvidenceObservation
+        ) -> bool {
+            completion_policy == WorkCompletionPolicy::SelfAttest
+                && supplied_evidence_kind == WorkConfirmationEvidenceObservation::Empty
+        }
+
+        // The supplied evidence kind does not match the policy's required kind.
+        // Only reached for the policies that perform an evidence-kind check,
+        // AFTER the principal/kind/supervisor checks above have passed.
+        helper confirmation_denies_evidence_kind(
+            completion_policy: WorkCompletionPolicy,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_principal_owner_key: Option<WorkOwnerKey>,
+            requested_principal_kind: Option<WorkOwnerKind>,
+            supplied_evidence_kind: WorkConfirmationEvidenceObservation
+        ) -> bool {
+            if completion_policy == WorkCompletionPolicy::HostConfirmed {
+                supplied_evidence_kind != WorkConfirmationEvidenceObservation::HostConfirmation
+            } else {
+                if completion_policy == WorkCompletionPolicy::PrincipalConfirmed {
+                    confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                        && confirmation_denies_principal_kind_mismatch(completion_policy, requested_principal_owner_key, requested_principal_kind) == false
+                        && supplied_evidence_kind != WorkConfirmationEvidenceObservation::PrincipalConfirmation
+                } else {
+                    if completion_policy == WorkCompletionPolicy::Supervisor {
+                        confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                            && confirmation_denies_supervisor_mismatch(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key) == false
+                            && supplied_evidence_kind != WorkConfirmationEvidenceObservation::SupervisorConfirmation
+                    } else {
+                        if completion_policy == WorkCompletionPolicy::ReviewerQuorum {
+                            confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                                && supplied_evidence_kind != WorkConfirmationEvidenceObservation::ReviewerConfirmation
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+        }
+
+        // The confirmation is admissible: no denial helper fires.
+        helper confirmation_admits(
+            completion_policy: WorkCompletionPolicy,
+            completion_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_principal_owner_key: Option<WorkOwnerKey>,
+            requested_principal_kind: Option<WorkOwnerKind>,
+            supplied_evidence_kind: WorkConfirmationEvidenceObservation
+        ) -> bool {
+            confirmation_denies_principal_required(completion_policy, requested_principal_owner_key) == false
+                && confirmation_denies_principal_kind_mismatch(completion_policy, requested_principal_owner_key, requested_principal_kind) == false
+                && confirmation_denies_supervisor_mismatch(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key) == false
+                && confirmation_denies_self_attest_empty(completion_policy, supplied_evidence_kind) == false
+                && confirmation_denies_evidence_kind(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == false
+        }
+
         invariant supervisor_policy_has_owner {
             self.completion_policy != WorkCompletionPolicy::Supervisor
                 || self.completion_supervisor_owner_key != None
@@ -665,6 +874,7 @@ machine! {
         disposition CreateStatusAdmissionClassified => local,
         disposition PublicConfirmationAdmissionClassified => local,
         disposition CompletionPolicyMutationAdmissionClassified => local,
+        disposition ConfirmationAdmissionClassified => local,
         disposition WorkItemReadinessClassified => local,
 
         transition CreateOpen {
@@ -1596,6 +1806,120 @@ machine! {
             update {}
             to Absent
             emit CompletionPolicyMutationAdmissionClassified { admission: WorkCompletionPolicyMutationAdmissionKind::Denied }
+        }
+
+        // --- Trusted-path confirmation-admission classification ---
+        //
+        // This machine owns the eligibility "is this confirming principal +
+        // supplied evidence kind admissible for this completion policy". The
+        // goal-confirm shell extracts only pure typed observations and drives
+        // this input; this machine decides the verdict and emits
+        // ConfirmationAdmissionClassified. The shell mirrors the verdict
+        // (Admitted -> stamp evidence, each Denied* -> the exact same InvalidInput
+        // rejection), failing closed. The guards are mutually exclusive and total
+        // via the confirmation_* helpers (which encode the EXACT per-policy check
+        // precedence). Phase-independent: self-loops over every phase.
+
+        transition ClassifyConfirmationAdmissionPrincipalRequired {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "principal_required" {
+                confirmation_denies_principal_required(completion_policy, requested_principal_owner_key)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedPrincipalRequired }
+        }
+
+        transition ClassifyConfirmationAdmissionPrincipalKindMismatch {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "principal_kind_mismatch" {
+                confirmation_denies_principal_kind_mismatch(completion_policy, requested_principal_owner_key, requested_principal_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedPrincipalKindMismatch }
+        }
+
+        transition ClassifyConfirmationAdmissionSupervisorMismatch {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "supervisor_mismatch" {
+                confirmation_denies_supervisor_mismatch(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedSupervisorMismatch }
+        }
+
+        transition ClassifyConfirmationAdmissionSelfAttestEmpty {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "self_attest_empty" {
+                confirmation_denies_self_attest_empty(completion_policy, supplied_evidence_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedSelfAttestEmptyEvidenceKind }
+        }
+
+        transition ClassifyConfirmationAdmissionEvidenceKind {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "evidence_kind_mismatch" {
+                confirmation_denies_evidence_kind(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::DeniedEvidenceKind }
+        }
+
+        transition ClassifyConfirmationAdmissionAdmitted {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyConfirmationAdmission {
+                completion_policy,
+                completion_supervisor_owner_key,
+                requested_principal_owner_key,
+                requested_principal_kind,
+                supplied_evidence_kind
+            }
+            guard "confirmation_admissible" {
+                confirmation_admits(completion_policy, completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind)
+            }
+            update {}
+            to Absent
+            emit ConfirmationAdmissionClassified { admission: WorkConfirmationAdmissionKind::Admitted }
         }
     }
 }

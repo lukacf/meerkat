@@ -284,6 +284,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveProfileMutationAdmissionDeniedDestroyed`
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
+- `ClassifyMemberOperationEligibilityAdmittedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
+- `ClassifyMemberOperationEligibilityRunningDestroyDeniedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberOperationEligibilityNotRunningStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
+- `ClassifyMemberOperationEligibilityNotRunningCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `ClassifyMemberOperationEligibilityNotRunningDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ClassifyBridgeRejectionRecoveryRebindRunning`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
@@ -1926,6 +1941,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `operator-provenance-and-peer-input`
 - `ProfileMutationAdmissionResolved`
   - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `MemberOperationEligibilityResolved`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `BridgeRejectionRecoveryClassified`
   - anchors: `mob_owner_bridge_cleanup_authority`

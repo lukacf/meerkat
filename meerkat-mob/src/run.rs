@@ -373,6 +373,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberOperationEligibility
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
             | mob_dsl::MobMachineInput::ClassifyPendingSupervisorAcceptance { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
@@ -1524,6 +1525,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
+            | mob_dsl::MobMachineInput::ClassifyMemberOperationEligibility
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
             | mob_dsl::MobMachineInput::ClassifyPendingSupervisorAcceptance { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
@@ -5920,6 +5922,63 @@ mod tests {
         assert_eq!(
             mob_run_schema_version(),
             u32::try_from(machine_version).expect("test schema version fits u32")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // FOLD 3: within-mob member-operation eligibility is decided by
+    // MobMachine ClassifyMemberOperationEligibility over its own lifecycle
+    // phase + destroy_admitted marker (replacing the require_state shell
+    // phase pre-check). These tests pin the verdict for each phase.
+    // ------------------------------------------------------------------
+
+    fn classify_member_operation_eligibility(
+        authority: &mut mob_dsl::MobMachineAuthority,
+    ) -> mob_dsl::MobMemberOperationEligibilityKind {
+        let transition = mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::ClassifyMemberOperationEligibility {},
+        )
+        .expect("eligibility classification applies in every phase");
+        let mut verdict = None;
+        for effect in transition.effects() {
+            if let mob_dsl::MobMachineEffect::MemberOperationEligibilityResolved { admission } =
+                effect
+            {
+                assert!(
+                    verdict.replace(*admission).is_none(),
+                    "exactly one eligibility verdict per classification"
+                );
+            }
+        }
+        verdict.expect("eligibility classifier emits a verdict")
+    }
+
+    #[test]
+    fn member_operation_eligibility_admits_only_when_running() {
+        // Fresh authority is Running with destruction not admitted -> Admitted.
+        let mut running = mob_dsl::MobMachineAuthority::new();
+        assert_eq!(
+            classify_member_operation_eligibility(&mut running),
+            mob_dsl::MobMemberOperationEligibilityKind::Admitted
+        );
+
+        // Stopped -> DeniedNotRunning.
+        let mut stopped = mob_dsl::MobMachineAuthority::new();
+        mob_dsl::MobMachineMutator::apply(&mut stopped, mob_dsl::MobMachineInput::Stop)
+            .expect("stop from running");
+        assert_eq!(
+            classify_member_operation_eligibility(&mut stopped),
+            mob_dsl::MobMemberOperationEligibilityKind::DeniedNotRunning
+        );
+
+        // Destroyed -> DeniedNotRunning.
+        let mut destroyed = mob_dsl::MobMachineAuthority::new();
+        mob_dsl::MobMachineMutator::apply(&mut destroyed, mob_dsl::MobMachineInput::Destroy)
+            .expect("destroy from running");
+        assert_eq!(
+            classify_member_operation_eligibility(&mut destroyed),
+            mob_dsl::MobMemberOperationEligibilityKind::DeniedNotRunning
         );
     }
 

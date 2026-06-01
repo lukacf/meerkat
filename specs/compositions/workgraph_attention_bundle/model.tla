@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for workgraph_attention_bundle.
 
-CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues, WorkCompletionPolicyValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkPublicConfirmationAdmissionKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -2027,6 +2027,1602 @@ workgraph_ClassifyBlockerSatisfactionFailed(arg_blocker_present, arg_blocker_lif
        /\ model_step_count' = model_step_count + 1
 
 
+workgraph_ClassifyCreateStatusAdmissionOpenAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionOpenOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionOpenInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionOpenBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionOpenCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionOpenCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionOpenFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "Open")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedOpen"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionOpenFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionOpenFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionBlockedFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "Blocked")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "AdmittedBlocked"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionBlockedFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionBlockedFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedAbsentFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "Absent")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedAbsentFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedInProgressFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "InProgress")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedInProgressFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCompletedFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "Completed")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCompletedFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedCancelledFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "Cancelled")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedCancelledFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedAbsent(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedOpen(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedInProgress(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedBlocked(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedCompleted(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedCancelled(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyCreateStatusAdmissionDeniedFailedFailed(arg_requested_status) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyCreateStatusAdmission"
+       /\ packet.payload.requested_status = arg_requested_status
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.requested_status = "Failed")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "CreateStatusAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyCreateStatusAdmissionDeniedFailedFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyCreateStatusAdmissionDeniedFailedFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.completion_policy = "SelfAttest")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSelfAttestFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.completion_policy = "HostConfirmed")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionHostConfirmedFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.completion_policy = "PrincipalConfirmed")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.completion_policy = "Supervisor")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionSupervisorFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionSupervisorFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Absent"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "Absent"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Absent"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumOpen"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumOpen", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Completed"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "Completed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Cancelled"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "Cancelled"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Cancelled"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "ClassifyPublicConfirmationAdmission"
+       /\ packet.payload.completion_policy = arg_completion_policy
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Failed"
+       /\ (packet.payload.completion_policy = "ReviewerQuorum")
+       /\ workgraph_phase' = "Failed"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PublicConfirmationAdmissionClassified", payload |-> [admission |-> "DeniedRequiresTrustedHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumFailed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "ClassifyPublicConfirmationAdmissionReviewerQuorumFailed", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Failed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 workgraph_absent_has_zero_revision == ((workgraph_phase # "Absent") \/ (workgraph_revision = 0))
 workgraph_live_has_positive_revision == ((workgraph_phase = "Absent") \/ (workgraph_revision > 0))
 workgraph_topology_snapshot_is_stateless == ((workgraph_topology_item_keys = {}) \/ (workgraph_topology_edge_keys = {}) \/ (workgraph_phase = "Absent"))
@@ -2491,6 +4087,90 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "ClassifyBlockerSatisfied") /\ (workgraph_phase = "Completed")
     \/ /\ (packet.variant = "ClassifyBlockerSatisfied") /\ (workgraph_phase = "Cancelled")
     \/ /\ (packet.variant = "ClassifyBlockerSatisfied") /\ (workgraph_phase = "Failed")
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "Open"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "Blocked"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "Absent"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "InProgress"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "Completed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "Cancelled"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyCreateStatusAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.requested_status = "Failed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.completion_policy = "SelfAttest"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.completion_policy = "HostConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.completion_policy = "PrincipalConfirmed"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.completion_policy = "Supervisor"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Absent") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Open") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Blocked") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Completed") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
+    \/ /\ (packet.variant = "ClassifyPublicConfirmationAdmission") /\ (workgraph_phase = "Failed") /\ ((packet.payload.completion_policy = "ReviewerQuorum"))
 
 attention__entry_packet__attention_can_close_own_review_item(mode, delegated_authority) == (((mode = "Review") \/ (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
 
@@ -2662,6 +4342,90 @@ CoreNext ==
     \/ \E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionCompleted(arg_blocker_present, arg_blocker_lifecycle_phase)
     \/ \E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionCancelled(arg_blocker_present, arg_blocker_lifecycle_phase)
     \/ \E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionFailed(arg_blocker_present, arg_blocker_lifecycle_phase)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenFailed(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedFailed(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentFailed(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressFailed(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedFailed(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledFailed(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedAbsent(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedOpen(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedInProgress(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedBlocked(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedCompleted(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedCancelled(arg_requested_status)
+    \/ \E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedFailed(arg_requested_status)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms)
     \/ \E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision)
@@ -2800,6 +4564,98 @@ WitnessFairness_close_stops_attention_route_4 ==
     /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionCompleted(arg_blocker_present, arg_blocker_lifecycle_phase))
     /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionCancelled(arg_blocker_present, arg_blocker_lifecycle_phase))
     /\ WF_vars(\E arg_blocker_present \in BOOLEAN : \E arg_blocker_lifecycle_phase \in WorkLifecycleStateValues : workgraph_ClassifyBlockerSatisfactionFailed(arg_blocker_present, arg_blocker_lifecycle_phase))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenOpen(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenCompleted(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionOpenFailed(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedOpen(arg_requested_status))
+
+WitnessFairness_close_stops_attention_route_5 ==
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedCompleted(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionBlockedFailed(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentOpen(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCompleted(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedAbsentFailed(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressOpen(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCompleted(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedInProgressFailed(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedOpen(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCompleted(arg_requested_status))
+
+WitnessFairness_close_stops_attention_route_6 ==
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCompletedFailed(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledOpen(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCompleted(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedCancelledFailed(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedAbsent(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedOpen(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedInProgress(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedBlocked(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedCompleted(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedCancelled(arg_requested_status))
+    /\ WF_vars(\E arg_requested_status \in WorkLifecycleStateValues : workgraph_ClassifyCreateStatusAdmissionDeniedFailedFailed(arg_requested_status))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_policy))
+
+WitnessFairness_close_stops_attention_route_7 ==
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completion_policy))
+
+WitnessFairness_close_stops_attention_route_8 ==
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy))
+    /\ WF_vars(\E arg_completion_policy \in WorkCompletionPolicyValues : workgraph_ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PauseActive(arg_expected_revision, arg_until_utc_ms))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_until_utc_ms \in OptionU64Values : attention_PausePaused(arg_expected_revision, arg_until_utc_ms))
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : attention_ResumePaused(arg_expected_revision))
@@ -2809,8 +4665,6 @@ WitnessFairness_close_stops_attention_route_4 ==
     /\ WF_vars(\E arg_expected_revision \in {attention_revision} : \E arg_at_utc_ms \in 0..2 : attention_StopPaused(arg_expected_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityActive(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityPausedElapsed(arg_now_utc_ms))
-
-WitnessFairness_close_stops_attention_route_5 ==
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityPausedPending(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilitySuperseded(arg_now_utc_ms))
     /\ WF_vars(\E arg_now_utc_ms \in 0..2 : attention_ClassifyEligibilityStopped(arg_now_utc_ms))
@@ -2828,6 +4682,9 @@ WitnessSpec_close_stops_attention_route ==
     /\ WitnessFairness_close_stops_attention_route_3
     /\ WitnessFairness_close_stops_attention_route_4
     /\ WitnessFairness_close_stops_attention_route_5
+    /\ WitnessFairness_close_stops_attention_route_6
+    /\ WitnessFairness_close_stops_attention_route_7
+    /\ WitnessFairness_close_stops_attention_route_8
 
 WitnessRouteObserved_close_stops_attention_route_work_item_close_stops_attention == <> RouteObserved_work_item_close_stops_attention
 WitnessTransitionObserved_close_stops_attention_route_workgraph_CreateOpen == <> (\E packet \in observed_transitions : /\ packet.machine = "workgraph" /\ packet.transition = "CreateOpen")

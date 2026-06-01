@@ -230,6 +230,62 @@ pub enum WorkGraphPublicErrorClass {
     StoreError,
 }
 
+/// Machine-owned admission verdict for the requested INITIAL lifecycle status of
+/// a newly created work item. This machine — not the shell — owns the creation
+/// policy "a new work item may only start open or blocked". The shell extracts
+/// the requested status as a pure typed observation (a `WorkLifecycleState`),
+/// drives `ClassifyCreateStatusAdmission`, and mirrors the verdict:
+/// `AdmittedOpen` -> drive `CreateOpen`, `AdmittedBlocked` -> drive
+/// `CreateBlocked`, `Denied` -> reject with `InvalidTransition`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCreateStatusAdmissionKind {
+    #[default]
+    Denied,
+    AdmittedOpen,
+    AdmittedBlocked,
+}
+
+/// Machine-owned admission verdict for a PUBLIC (untrusted) goal-confirmation
+/// over a work item's machine-owned `completion_policy`. This machine — not the
+/// shell — owns the trust-scoped eligibility "only a self-attested completion
+/// policy may be confirmed by an untrusted public caller; every other policy
+/// requires trusted in-process host authority". The public-confirm surface
+/// extracts the typed `completion_policy` as a pure observation, drives
+/// `ClassifyPublicConfirmationAdmission`, and mirrors the verdict: `Admitted`
+/// -> proceed, `DeniedRequiresTrustedHost` -> reject with `InvalidInput`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPublicConfirmationAdmissionKind {
+    #[default]
+    DeniedRequiresTrustedHost,
+    Admitted,
+}
+
 machine! {
     machine WorkGraphLifecycleMachine {
         version: 1,
@@ -378,6 +434,24 @@ machine! {
                 blocker_present: bool,
                 blocker_lifecycle_phase: Enum<WorkLifecycleState>,
             },
+            // Create-status admission classification. This machine owns the
+            // creation policy "a new work item may only start open or blocked".
+            // The shell extracts the requested INITIAL status as a pure typed
+            // observation (a WorkLifecycleState) and feeds it here; this machine
+            // decides whether that status is an admissible creation state and
+            // emits CreateStatusAdmissionClassified. The shell mirrors the
+            // verdict (AdmittedOpen -> CreateOpen, AdmittedBlocked ->
+            // CreateBlocked, Denied -> InvalidTransition), failing closed.
+            ClassifyCreateStatusAdmission { requested_status: Enum<WorkLifecycleState> },
+            // Public-confirmation admission classification. This machine owns
+            // the trust-scoped eligibility "only a self-attested completion
+            // policy may be confirmed by an untrusted public caller". The
+            // public-confirm surface extracts the typed completion_policy as a
+            // pure observation and feeds it here; this machine decides
+            // admissibility and emits PublicConfirmationAdmissionClassified. The
+            // surface mirrors the verdict (Admitted -> proceed,
+            // DeniedRequiresTrustedHost -> InvalidInput), failing closed.
+            ClassifyPublicConfirmationAdmission { completion_policy: Enum<WorkCompletionPolicy> },
         }
 
         effect WorkGraphLifecycleEffect {
@@ -395,6 +469,10 @@ machine! {
             },
             WorkItemTerminalityClassified { terminal: bool },
             BlockerSatisfactionClassified { satisfied: bool },
+            CreateStatusAdmissionClassified { admission: Enum<WorkCreateStatusAdmissionKind> },
+            PublicConfirmationAdmissionClassified {
+                admission: Enum<WorkPublicConfirmationAdmissionKind>,
+            },
         }
 
         invariant absent_has_zero_revision {
@@ -524,6 +602,8 @@ machine! {
         disposition WorkGraphPublicErrorClassified => local,
         disposition WorkItemTerminalityClassified => local,
         disposition BlockerSatisfactionClassified => local,
+        disposition CreateStatusAdmissionClassified => local,
+        disposition PublicConfirmationAdmissionClassified => local,
 
         transition CreateOpen {
             on input CreateOpen { due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, unresolved_blocker_count }
@@ -1213,6 +1293,134 @@ machine! {
             emit BlockerSatisfactionClassified {
                 satisfied: blocker_present && blocker_lifecycle_phase == WorkLifecycleState::Completed
             }
+        }
+
+        // --- Create-status admission classification ---
+        //
+        // This machine owns the creation policy "a new work item may only start
+        // open or blocked". The shell extracts the requested INITIAL status as a
+        // pure typed WorkLifecycleState observation and drives this input over a
+        // fresh (Absent) authority; this machine decides admissibility and emits
+        // the verdict. Open -> AdmittedOpen, Blocked -> AdmittedBlocked, every
+        // other requested status (Absent / InProgress / terminal) -> Denied.
+        // Phase-independent: self-loops over every phase so the classification is
+        // total regardless of the authority's phase.
+        transition ClassifyCreateStatusAdmissionOpen {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_open" { requested_status == WorkLifecycleState::Open }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::AdmittedOpen }
+        }
+
+        transition ClassifyCreateStatusAdmissionBlocked {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_blocked" { requested_status == WorkLifecycleState::Blocked }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::AdmittedBlocked }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedAbsent {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_absent" { requested_status == WorkLifecycleState::Absent }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedInProgress {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_in_progress" { requested_status == WorkLifecycleState::InProgress }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedCompleted {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_completed" { requested_status == WorkLifecycleState::Completed }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedCancelled {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_cancelled" { requested_status == WorkLifecycleState::Cancelled }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        transition ClassifyCreateStatusAdmissionDeniedFailed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateStatusAdmission { requested_status }
+            guard "requested_failed" { requested_status == WorkLifecycleState::Failed }
+            update {}
+            to Absent
+            emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        // --- Public-confirmation admission classification ---
+        //
+        // This machine owns the trust-scoped eligibility "only a self-attested
+        // completion policy may be confirmed by an untrusted public caller; every
+        // other policy requires trusted in-process host authority". The
+        // public-confirm surface extracts the typed completion_policy as a pure
+        // observation and drives this input; this machine decides admissibility
+        // and emits the verdict. SelfAttest -> Admitted, every other policy ->
+        // DeniedRequiresTrustedHost. Phase-independent: self-loops over every
+        // phase so the classification is total regardless of the authority phase.
+        transition ClassifyPublicConfirmationAdmissionSelfAttest {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "self_attest_public_confirmable" { completion_policy == WorkCompletionPolicy::SelfAttest }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::Admitted }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionHostConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "host_confirmed_requires_trusted_host" { completion_policy == WorkCompletionPolicy::HostConfirmed }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionPrincipalConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "principal_confirmed_requires_trusted_host" { completion_policy == WorkCompletionPolicy::PrincipalConfirmed }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionSupervisor {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "supervisor_requires_trusted_host" { completion_policy == WorkCompletionPolicy::Supervisor }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
+        }
+
+        transition ClassifyPublicConfirmationAdmissionReviewerQuorum {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyPublicConfirmationAdmission { completion_policy }
+            guard "reviewer_quorum_requires_trusted_host" { completion_policy == WorkCompletionPolicy::ReviewerQuorum }
+            update {}
+            to Absent
+            emit PublicConfirmationAdmissionClassified { admission: WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost }
         }
     }
 }

@@ -166,6 +166,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
 - `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_present: Bool, privileged_args_present: Bool)
 - `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
+- `ResolveCreateMobAdmission`(can_create_mobs: Bool)
+- `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
 - `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
@@ -343,6 +345,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RemoteMemberRuntimeTerminalityClassified`(observed_state: MobRemoteMemberRuntimeObservedState, terminality: MobRemoteMemberRuntimeTerminality)
 - `SpawnMemberAdmissionResolved`(admission: MobSpawnMemberAdmissionKind)
 - `CurrentMobAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
+- `CreateMobAdmissionResolved`(admission: MobCreateMobAdmissionKind)
+- `ProfileMutationAdmissionResolved`(admission: MobProfileMutationAdmissionKind)
 - `BridgeRejectionRecoveryClassified`(rejection_cause: MobBridgeRejectionCause, recovery: MobBridgeRejectionRecovery)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
@@ -1009,6 +1013,134 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_manage_scope_denies`
 - Emits: `CurrentMobAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveCreateMobAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `create_capability_allows`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Running`
+
+### `ResolveCreateMobAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `create_capability_allows`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveCreateMobAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `create_capability_allows`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Completed`
+
+### `ResolveCreateMobAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `create_capability_allows`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveCreateMobAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `no_create_capability_denies`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Running`
+
+### `ResolveCreateMobAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `no_create_capability_denies`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveCreateMobAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `no_create_capability_denies`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Completed`
+
+### `ResolveCreateMobAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveCreateMobAdmission`(can_create_mobs)
+- Guards:
+  - `no_create_capability_denies`
+- Emits: `CreateMobAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveProfileMutationAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `mutate_capability_allows`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Running`
+
+### `ResolveProfileMutationAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `mutate_capability_allows`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveProfileMutationAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `mutate_capability_allows`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Completed`
+
+### `ResolveProfileMutationAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `mutate_capability_allows`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveProfileMutationAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `no_mutate_capability_denies`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Running`
+
+### `ResolveProfileMutationAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `no_mutate_capability_denies`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveProfileMutationAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `no_mutate_capability_denies`
+- Emits: `ProfileMutationAdmissionResolved`
+- To: `Completed`
+
+### `ResolveProfileMutationAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveProfileMutationAdmission`(can_mutate_profiles)
+- Guards:
+  - `no_mutate_capability_denies`
+- Emits: `ProfileMutationAdmissionResolved`
 - To: `Destroyed`
 
 ### `ClassifyBridgeRejectionRecoveryRebindRunning`
@@ -5411,6 +5543,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
 - `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
+- `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
@@ -5421,4 +5554,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
 - `owner-bridge-cleanup` — bind owner bridge session, owner bridge cleanup requires owner, implicit delegation requires owner, and recover owner bridge session authority for archive cleanup
-- `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs
+- `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, surface peer-exposed member inputs, and resolve operator create mob admission and profile mutation admission verdicts the tool surface mirrors

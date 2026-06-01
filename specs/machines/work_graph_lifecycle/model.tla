@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues
+CONSTANTS BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkCompletionPolicyValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkPublicConfirmationAdmissionKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -925,6 +925,678 @@ ClassifyBlockerSatisfactionFailed(blocker_present, blocker_lifecycle_phase) ==
     /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
 
 
+ClassifyCreateStatusAdmissionOpenAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "Open")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionOpenOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "Open")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionOpenInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "Open")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionOpenBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "Open")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionOpenCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "Open")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionOpenCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "Open")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionOpenFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "Open")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionBlockedFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "Blocked")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "Absent")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "Absent")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "Absent")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "Absent")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "Absent")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "Absent")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedAbsentFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "Absent")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedInProgressFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "InProgress")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "Completed")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "Completed")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "Completed")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "Completed")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "Completed")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "Completed")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCompletedFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "Completed")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedCancelledFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "Cancelled")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedAbsent(requested_status) ==
+    /\ phase = "Absent"
+    /\ (requested_status = "Failed")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedOpen(requested_status) ==
+    /\ phase = "Open"
+    /\ (requested_status = "Failed")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedInProgress(requested_status) ==
+    /\ phase = "InProgress"
+    /\ (requested_status = "Failed")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedBlocked(requested_status) ==
+    /\ phase = "Blocked"
+    /\ (requested_status = "Failed")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedCompleted(requested_status) ==
+    /\ phase = "Completed"
+    /\ (requested_status = "Failed")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedCancelled(requested_status) ==
+    /\ phase = "Cancelled"
+    /\ (requested_status = "Failed")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyCreateStatusAdmissionDeniedFailedFailed(requested_status) ==
+    /\ phase = "Failed"
+    /\ (requested_status = "Failed")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_policy) ==
+    /\ phase = "Absent"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_policy) ==
+    /\ phase = "Open"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion_policy) ==
+    /\ phase = "InProgress"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_policy) ==
+    /\ phase = "Blocked"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_policy) ==
+    /\ phase = "Completed"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_policy) ==
+    /\ phase = "Cancelled"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_policy) ==
+    /\ phase = "Failed"
+    /\ (arg_completion_policy = "SelfAttest")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_policy) ==
+    /\ phase = "Absent"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_policy) ==
+    /\ phase = "Open"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_completion_policy) ==
+    /\ phase = "InProgress"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion_policy) ==
+    /\ phase = "Blocked"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completion_policy) ==
+    /\ phase = "Completed"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completion_policy) ==
+    /\ phase = "Cancelled"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_policy) ==
+    /\ phase = "Failed"
+    /\ (arg_completion_policy = "HostConfirmed")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_completion_policy) ==
+    /\ phase = "Absent"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completion_policy) ==
+    /\ phase = "Open"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_completion_policy) ==
+    /\ phase = "InProgress"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_completion_policy) ==
+    /\ phase = "Blocked"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_completion_policy) ==
+    /\ phase = "Completed"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_completion_policy) ==
+    /\ phase = "Cancelled"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_completion_policy) ==
+    /\ phase = "Failed"
+    /\ (arg_completion_policy = "PrincipalConfirmed")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_policy) ==
+    /\ phase = "Absent"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_policy) ==
+    /\ phase = "Open"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion_policy) ==
+    /\ phase = "InProgress"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_policy) ==
+    /\ phase = "Blocked"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_policy) ==
+    /\ phase = "Completed"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_policy) ==
+    /\ phase = "Cancelled"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_policy) ==
+    /\ phase = "Failed"
+    /\ (arg_completion_policy = "Supervisor")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion_policy) ==
+    /\ phase = "Absent"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "Absent"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_policy) ==
+    /\ phase = "Open"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "Open"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_completion_policy) ==
+    /\ phase = "InProgress"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "InProgress"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completion_policy) ==
+    /\ phase = "Blocked"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "Blocked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy) ==
+    /\ phase = "Completed"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy) ==
+    /\ phase = "Cancelled"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
+ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy) ==
+    /\ phase = "Failed"
+    /\ (arg_completion_policy = "ReviewerQuorum")
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold, terminal_at_utc_ms, evidence_count, host_confirmation_count, principal_confirmation_count, supervisor_confirmation_owner_keys, reviewer_confirmation_owner_keys >>
+
+
 Next ==
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
@@ -1012,6 +1684,90 @@ Next ==
     \/ \E blocker_present \in BOOLEAN : \E blocker_lifecycle_phase \in WorkLifecycleStateValues : ClassifyBlockerSatisfactionCompleted(blocker_present, blocker_lifecycle_phase)
     \/ \E blocker_present \in BOOLEAN : \E blocker_lifecycle_phase \in WorkLifecycleStateValues : ClassifyBlockerSatisfactionCancelled(blocker_present, blocker_lifecycle_phase)
     \/ \E blocker_present \in BOOLEAN : \E blocker_lifecycle_phase \in WorkLifecycleStateValues : ClassifyBlockerSatisfactionFailed(blocker_present, blocker_lifecycle_phase)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionOpenFailed(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionBlockedFailed(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedAbsentFailed(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedInProgressFailed(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCompletedFailed(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedCancelledFailed(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedAbsent(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedOpen(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedInProgress(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedBlocked(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedCompleted(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedCancelled(requested_status)
+    \/ \E requested_status \in WorkLifecycleStateValues : ClassifyCreateStatusAdmissionDeniedFailedFailed(requested_status)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSelfAttestFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionHostConfirmedFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionSupervisorFailed(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumOpen(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled(arg_completion_policy)
+    \/ \E arg_completion_policy \in WorkCompletionPolicyValues : ClassifyPublicConfirmationAdmissionReviewerQuorumFailed(arg_completion_policy)
     \/ TerminalStutter
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))

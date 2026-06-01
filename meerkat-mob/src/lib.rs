@@ -112,10 +112,12 @@ pub mod machine_schema_exports {
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
-    FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,
-    LoopIterationLedgerEntry, LoopSnapshot, MobFlowRunPublicResultClass, MobRun, MobRunStatus,
-    StepLedgerEntry, StepRunStatus, mob_machine_run_public_result_class,
-    mob_machine_run_status_is_terminal, mob_machine_step_status_is_terminal,
+    CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot,
+    LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot, MobFlowRunPublicResultClass,
+    MobRun, MobRunStatus, ProfileMutationAdmission, StepLedgerEntry, StepRunStatus,
+    mob_machine_create_mob_admission, mob_machine_profile_mutation_admission,
+    mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
+    mob_machine_step_status_is_terminal,
 };
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};

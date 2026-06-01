@@ -319,17 +319,45 @@ impl AgentMobToolSurface {
     }
 
     async fn ensure_create_authority(&self, tool_name: &str) -> Result<(), ToolError> {
-        if self.authority_context_snapshot().can_create_mobs() {
-            return Ok(());
+        // Pure observation extracted from the machine-minted operator-authority
+        // projection (the create-mobs capability bit). MobMachine — not this
+        // surface — decides the Allow/Deny verdict; we mirror it (Denied ->
+        // access_denied). This operator-capability admission is not scoped to a
+        // live mob, so it is resolved by a stateless MobMachine classification.
+        // Fails closed.
+        let can_create_mobs = self.authority_context_snapshot().can_create_mobs();
+        let admission =
+            meerkat_mob::mob_machine_create_mob_admission(can_create_mobs).map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{tool_name}' create-mob admission failed: {error}"
+                ))
+            })?;
+        match admission {
+            meerkat_mob::CreateMobAdmission::Allowed => Ok(()),
+            meerkat_mob::CreateMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
-        Err(ToolError::access_denied(tool_name))
     }
 
     async fn ensure_profile_mutation_authority(&self, tool_name: &str) -> Result<(), ToolError> {
-        if self.authority_context_snapshot().can_mutate_profiles() {
-            return Ok(());
+        // Pure observation extracted from the machine-minted operator-authority
+        // projection (the mutate-profiles capability bit). MobMachine — not this
+        // surface — decides the Allow/Deny verdict; we mirror it (Denied ->
+        // access_denied). This operator-capability admission is not scoped to a
+        // live mob, so it is resolved by a stateless MobMachine classification.
+        // Fails closed.
+        let can_mutate_profiles = self.authority_context_snapshot().can_mutate_profiles();
+        let admission = meerkat_mob::mob_machine_profile_mutation_admission(can_mutate_profiles)
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{tool_name}' profile-mutation admission failed: {error}"
+                ))
+            })?;
+        match admission {
+            meerkat_mob::ProfileMutationAdmission::Allowed => Ok(()),
+            meerkat_mob::ProfileMutationAdmission::Denied => {
+                Err(ToolError::access_denied(tool_name))
+            }
         }
-        Err(ToolError::access_denied(tool_name))
     }
 
     async fn ensure_mob_scope_authority(

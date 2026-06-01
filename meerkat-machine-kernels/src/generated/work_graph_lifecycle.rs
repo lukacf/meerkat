@@ -75,6 +75,62 @@ impl std::fmt::Display for WorkCompletionPolicy {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkCreateStatusAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "AdmittedOpen")]
+    AdmittedOpen,
+    #[serde(rename = "AdmittedBlocked")]
+    AdmittedBlocked,
+}
+impl WorkCreateStatusAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::AdmittedOpen => "AdmittedOpen",
+            Self::AdmittedBlocked => "AdmittedBlocked",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkCreateStatusAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "AdmittedOpen" => Ok(Self::AdmittedOpen),
+            "AdmittedBlocked" => Ok(Self::AdmittedBlocked),
+            other => Err(format!(
+                "invalid WorkCreateStatusAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkCreateStatusAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkCreateStatusAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type WorkDependencyPathKey =
     meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkDependencyPathKey;
 pub type WorkEdgeKey = meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkEdgeKey;
@@ -445,6 +501,58 @@ impl std::fmt::Display for WorkLifecycleState {
     }
 }
 pub type WorkOwnerKey = meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkOwnerKey;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkPublicConfirmationAdmissionKind {
+    #[default]
+    #[serde(rename = "DeniedRequiresTrustedHost")]
+    DeniedRequiresTrustedHost,
+    #[serde(rename = "Admitted")]
+    Admitted,
+}
+impl WorkPublicConfirmationAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DeniedRequiresTrustedHost => "DeniedRequiresTrustedHost",
+            Self::Admitted => "Admitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkPublicConfirmationAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DeniedRequiresTrustedHost" => Ok(Self::DeniedRequiresTrustedHost),
+            "Admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "invalid WorkPublicConfirmationAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkPublicConfirmationAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkPublicConfirmationAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -586,6 +694,14 @@ pub mod inputs {
         pub blocker_present: bool,
         pub blocker_lifecycle_phase: WorkLifecycleState,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyCreateStatusAdmission {
+        pub requested_status: WorkLifecycleState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyPublicConfirmationAdmission {
+        pub completion_policy: WorkCompletionPolicy,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -605,6 +721,8 @@ pub enum Input {
     ClassifyWorkGraphPublicError(inputs::ClassifyWorkGraphPublicError),
     ClassifyTerminality(inputs::ClassifyTerminality),
     ClassifyBlockerSatisfied(inputs::ClassifyBlockerSatisfied),
+    ClassifyCreateStatusAdmission(inputs::ClassifyCreateStatusAdmission),
+    ClassifyPublicConfirmationAdmission(inputs::ClassifyPublicConfirmationAdmission),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -624,6 +742,10 @@ impl Input {
             Self::ClassifyWorkGraphPublicError(_) => InputKind::ClassifyWorkGraphPublicError,
             Self::ClassifyTerminality(_) => InputKind::ClassifyTerminality,
             Self::ClassifyBlockerSatisfied(_) => InputKind::ClassifyBlockerSatisfied,
+            Self::ClassifyCreateStatusAdmission(_) => InputKind::ClassifyCreateStatusAdmission,
+            Self::ClassifyPublicConfirmationAdmission(_) => {
+                InputKind::ClassifyPublicConfirmationAdmission
+            }
         }
     }
 }
@@ -644,6 +766,8 @@ pub enum InputKind {
     ClassifyWorkGraphPublicError,
     ClassifyTerminality,
     ClassifyBlockerSatisfied,
+    ClassifyCreateStatusAdmission,
+    ClassifyPublicConfirmationAdmission,
 }
 
 pub mod effects {
@@ -683,6 +807,14 @@ pub mod effects {
     pub struct BlockerSatisfactionClassified {
         pub satisfied: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CreateStatusAdmissionClassified {
+        pub admission: WorkCreateStatusAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublicConfirmationAdmissionClassified {
+        pub admission: WorkPublicConfirmationAdmissionKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -698,6 +830,8 @@ pub enum Effect {
     WorkGraphPublicErrorClassified(effects::WorkGraphPublicErrorClassified),
     WorkItemTerminalityClassified(effects::WorkItemTerminalityClassified),
     BlockerSatisfactionClassified(effects::BlockerSatisfactionClassified),
+    CreateStatusAdmissionClassified(effects::CreateStatusAdmissionClassified),
+    PublicConfirmationAdmissionClassified(effects::PublicConfirmationAdmissionClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -712,6 +846,8 @@ pub enum EffectKind {
     WorkGraphPublicErrorClassified,
     WorkItemTerminalityClassified,
     BlockerSatisfactionClassified,
+    CreateStatusAdmissionClassified,
+    PublicConfirmationAdmissionClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -803,6 +939,90 @@ pub enum TransitionId {
     ClassifyBlockerSatisfactionCompleted,
     ClassifyBlockerSatisfactionCancelled,
     ClassifyBlockerSatisfactionFailed,
+    ClassifyCreateStatusAdmissionOpenAbsent,
+    ClassifyCreateStatusAdmissionOpenOpen,
+    ClassifyCreateStatusAdmissionOpenInProgress,
+    ClassifyCreateStatusAdmissionOpenBlocked,
+    ClassifyCreateStatusAdmissionOpenCompleted,
+    ClassifyCreateStatusAdmissionOpenCancelled,
+    ClassifyCreateStatusAdmissionOpenFailed,
+    ClassifyCreateStatusAdmissionBlockedAbsent,
+    ClassifyCreateStatusAdmissionBlockedOpen,
+    ClassifyCreateStatusAdmissionBlockedInProgress,
+    ClassifyCreateStatusAdmissionBlockedBlocked,
+    ClassifyCreateStatusAdmissionBlockedCompleted,
+    ClassifyCreateStatusAdmissionBlockedCancelled,
+    ClassifyCreateStatusAdmissionBlockedFailed,
+    ClassifyCreateStatusAdmissionDeniedAbsentAbsent,
+    ClassifyCreateStatusAdmissionDeniedAbsentOpen,
+    ClassifyCreateStatusAdmissionDeniedAbsentInProgress,
+    ClassifyCreateStatusAdmissionDeniedAbsentBlocked,
+    ClassifyCreateStatusAdmissionDeniedAbsentCompleted,
+    ClassifyCreateStatusAdmissionDeniedAbsentCancelled,
+    ClassifyCreateStatusAdmissionDeniedAbsentFailed,
+    ClassifyCreateStatusAdmissionDeniedInProgressAbsent,
+    ClassifyCreateStatusAdmissionDeniedInProgressOpen,
+    ClassifyCreateStatusAdmissionDeniedInProgressInProgress,
+    ClassifyCreateStatusAdmissionDeniedInProgressBlocked,
+    ClassifyCreateStatusAdmissionDeniedInProgressCompleted,
+    ClassifyCreateStatusAdmissionDeniedInProgressCancelled,
+    ClassifyCreateStatusAdmissionDeniedInProgressFailed,
+    ClassifyCreateStatusAdmissionDeniedCompletedAbsent,
+    ClassifyCreateStatusAdmissionDeniedCompletedOpen,
+    ClassifyCreateStatusAdmissionDeniedCompletedInProgress,
+    ClassifyCreateStatusAdmissionDeniedCompletedBlocked,
+    ClassifyCreateStatusAdmissionDeniedCompletedCompleted,
+    ClassifyCreateStatusAdmissionDeniedCompletedCancelled,
+    ClassifyCreateStatusAdmissionDeniedCompletedFailed,
+    ClassifyCreateStatusAdmissionDeniedCancelledAbsent,
+    ClassifyCreateStatusAdmissionDeniedCancelledOpen,
+    ClassifyCreateStatusAdmissionDeniedCancelledInProgress,
+    ClassifyCreateStatusAdmissionDeniedCancelledBlocked,
+    ClassifyCreateStatusAdmissionDeniedCancelledCompleted,
+    ClassifyCreateStatusAdmissionDeniedCancelledCancelled,
+    ClassifyCreateStatusAdmissionDeniedCancelledFailed,
+    ClassifyCreateStatusAdmissionDeniedFailedAbsent,
+    ClassifyCreateStatusAdmissionDeniedFailedOpen,
+    ClassifyCreateStatusAdmissionDeniedFailedInProgress,
+    ClassifyCreateStatusAdmissionDeniedFailedBlocked,
+    ClassifyCreateStatusAdmissionDeniedFailedCompleted,
+    ClassifyCreateStatusAdmissionDeniedFailedCancelled,
+    ClassifyCreateStatusAdmissionDeniedFailedFailed,
+    ClassifyPublicConfirmationAdmissionSelfAttestAbsent,
+    ClassifyPublicConfirmationAdmissionSelfAttestOpen,
+    ClassifyPublicConfirmationAdmissionSelfAttestInProgress,
+    ClassifyPublicConfirmationAdmissionSelfAttestBlocked,
+    ClassifyPublicConfirmationAdmissionSelfAttestCompleted,
+    ClassifyPublicConfirmationAdmissionSelfAttestCancelled,
+    ClassifyPublicConfirmationAdmissionSelfAttestFailed,
+    ClassifyPublicConfirmationAdmissionHostConfirmedAbsent,
+    ClassifyPublicConfirmationAdmissionHostConfirmedOpen,
+    ClassifyPublicConfirmationAdmissionHostConfirmedInProgress,
+    ClassifyPublicConfirmationAdmissionHostConfirmedBlocked,
+    ClassifyPublicConfirmationAdmissionHostConfirmedCompleted,
+    ClassifyPublicConfirmationAdmissionHostConfirmedCancelled,
+    ClassifyPublicConfirmationAdmissionHostConfirmedFailed,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedAbsent,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedOpen,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedInProgress,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedBlocked,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedCompleted,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedCancelled,
+    ClassifyPublicConfirmationAdmissionPrincipalConfirmedFailed,
+    ClassifyPublicConfirmationAdmissionSupervisorAbsent,
+    ClassifyPublicConfirmationAdmissionSupervisorOpen,
+    ClassifyPublicConfirmationAdmissionSupervisorInProgress,
+    ClassifyPublicConfirmationAdmissionSupervisorBlocked,
+    ClassifyPublicConfirmationAdmissionSupervisorCompleted,
+    ClassifyPublicConfirmationAdmissionSupervisorCancelled,
+    ClassifyPublicConfirmationAdmissionSupervisorFailed,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumAbsent,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumOpen,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumInProgress,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumBlocked,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumCompleted,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumCancelled,
+    ClassifyPublicConfirmationAdmissionReviewerQuorumFailed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

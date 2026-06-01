@@ -2015,6 +2015,11 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("MobSpawnMemberAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum("MobCurrentMobAdmissionKind", &["Denied", "Allowed"]),
+            NamedTypeBinding::string_enum("MobCreateMobAdmissionKind", &["Denied", "Allowed"]),
+            NamedTypeBinding::string_enum(
+                "MobProfileMutationAdmissionKind",
+                &["Denied", "Allowed"],
+            ),
             NamedTypeBinding::string_enum(
                 "MobBridgeRejectionCause",
                 &[
@@ -2241,6 +2246,8 @@ runtime_internal_inputs!(
         ClassifyRemoteMemberRuntimeObservation,
         ResolveSpawnMemberAdmission,
         ResolveCurrentMobAdmission,
+        ResolveCreateMobAdmission,
+        ResolveProfileMutationAdmission,
         ClassifyBridgeRejectionRecovery,
         CreateFrameSeed,
         CreateLoopSeed,
@@ -2628,6 +2635,14 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "CapabilityUnavailable",
                     "StoreError",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkCreateStatusAdmissionKind",
+                &["Denied", "AdmittedOpen", "AdmittedBlocked"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkPublicConfirmationAdmissionKind",
+                &["DeniedRequiresTrustedHost", "Admitted"],
             ),
             NamedTypeBinding::type_path_struct(
                 "WorkOwnerKey",

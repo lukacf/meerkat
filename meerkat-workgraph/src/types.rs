@@ -880,7 +880,7 @@ fn legacy_workgraph_machine_state(wire: &WorkItemWire) -> WorkGraphMachineState 
     machine_state
 }
 
-fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
+pub(crate) fn work_lifecycle_state_from_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
     match status {
         WorkStatus::Open => wg_dsl::WorkLifecycleState::Open,
         WorkStatus::InProgress => wg_dsl::WorkLifecycleState::InProgress,

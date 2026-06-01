@@ -484,6 +484,21 @@ macro_rules! mob_catalog_machine_dsl {
             // the tool shell — decides the Allow/Deny admission verdict, which
             // the shell mirrors (Deny -> access_denied).
             ResolveCurrentMobAdmission { can_manage_mob: bool },
+            // Operator create-mob admission for the mob-creation tool surface.
+            // The tool shell extracts a single pure observation — whether the
+            // operator holds the create-mobs capability bit (a machine-minted
+            // operator-authority projection) — and feeds it here. MobMachine —
+            // not the tool shell — decides the Allow/Deny admission verdict,
+            // which the shell mirrors (Deny -> access_denied).
+            ResolveCreateMobAdmission { can_create_mobs: bool },
+            // Operator profile-mutation admission for realm-profile mutation
+            // tools. The tool shell extracts a single pure observation —
+            // whether the operator holds the mutate-profiles capability bit (a
+            // machine-minted operator-authority projection) — and feeds it
+            // here. MobMachine — not the tool shell — decides the Allow/Deny
+            // admission verdict, which the shell mirrors (Deny ->
+            // access_denied).
+            ResolveProfileMutationAdmission { can_mutate_profiles: bool },
             // Bridge-rejection recovery classification. When a mob sends a
             // bridge command that requires an already-bound supervisor (e.g.
             // `AuthorizeSupervisor`) and the member replies with a typed
@@ -736,6 +751,14 @@ macro_rules! mob_catalog_machine_dsl {
             // tools. The tool shell mirrors this (Denied -> access_denied;
             // Allowed -> proceed) instead of composing the admission itself.
             CurrentMobAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
+            // Machine-owned operator create-mob admission verdict. The tool
+            // shell mirrors this (Denied -> access_denied; Allowed -> proceed)
+            // instead of composing the admission itself.
+            CreateMobAdmissionResolved { admission: Enum<MobCreateMobAdmissionKind> },
+            // Machine-owned operator profile-mutation admission verdict. The
+            // tool shell mirrors this (Denied -> access_denied; Allowed ->
+            // proceed) instead of composing the admission itself.
+            ProfileMutationAdmissionResolved { admission: Enum<MobProfileMutationAdmissionKind> },
             // Machine-owned bridge-rejection recovery verdict. The mob shell
             // mirrors this (RebindRecover -> re-run BindMember; FatalBubbleUp ->
             // bubble the rejection up) instead of reducing the raw wire cause
@@ -881,6 +904,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RemoteMemberRuntimeTerminalityClassified => local,
         disposition SpawnMemberAdmissionResolved => local,
         disposition CurrentMobAdmissionResolved => local,
+        disposition CreateMobAdmissionResolved => local,
+        disposition ProfileMutationAdmissionResolved => local,
         disposition BridgeRejectionRecoveryClassified => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
@@ -1441,6 +1466,56 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit CurrentMobAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
+        }
+
+        // --- Operator create-mob admission ---
+        //
+        // The tool surface extracts a single raw observation (whether the
+        // operator holds the create-mobs capability bit) and feeds it here;
+        // MobMachine decides the Allow/Deny verdict. Pure classification across
+        // all phases.
+
+        transition ResolveCreateMobAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveCreateMobAdmission { can_create_mobs }
+            guard "create_capability_allows" { can_create_mobs == true }
+            update {}
+            to Running
+            emit CreateMobAdmissionResolved { admission: MobCreateMobAdmissionKind::Allowed }
+        }
+
+        transition ResolveCreateMobAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveCreateMobAdmission { can_create_mobs }
+            guard "no_create_capability_denies" { can_create_mobs == false }
+            update {}
+            to Running
+            emit CreateMobAdmissionResolved { admission: MobCreateMobAdmissionKind::Denied }
+        }
+
+        // --- Operator profile-mutation admission ---
+        //
+        // The tool surface extracts a single raw observation (whether the
+        // operator holds the mutate-profiles capability bit) and feeds it here;
+        // MobMachine decides the Allow/Deny verdict. Pure classification across
+        // all phases.
+
+        transition ResolveProfileMutationAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveProfileMutationAdmission { can_mutate_profiles }
+            guard "mutate_capability_allows" { can_mutate_profiles == true }
+            update {}
+            to Running
+            emit ProfileMutationAdmissionResolved { admission: MobProfileMutationAdmissionKind::Allowed }
+        }
+
+        transition ResolveProfileMutationAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveProfileMutationAdmission { can_mutate_profiles }
+            guard "no_mutate_capability_denies" { can_mutate_profiles == false }
+            update {}
+            to Running
+            emit ProfileMutationAdmissionResolved { admission: MobProfileMutationAdmissionKind::Denied }
         }
 
         // --- Bridge-rejection recovery classification ---
@@ -8406,6 +8481,26 @@ pub enum MobSpawnMemberAdmissionKind {
 /// -> proceed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MobCurrentMobAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+/// Machine-owned operator create-mob admission verdict for the mob-creation
+/// tool. The tool shell mirrors this: `Denied` -> `access_denied`, `Allowed`
+/// -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCreateMobAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+/// Machine-owned operator profile-mutation admission verdict for realm-profile
+/// mutation tools. The tool shell mirrors this: `Denied` -> `access_denied`,
+/// `Allowed` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobProfileMutationAdmissionKind {
     #[default]
     Denied,
     Allowed,

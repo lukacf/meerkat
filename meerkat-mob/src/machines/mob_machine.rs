@@ -687,6 +687,26 @@ pub enum MobCurrentMobAdmissionKind {
     Allowed,
 }
 
+/// Machine-owned operator create-mob admission verdict for the mob-creation
+/// tool. The tool shell mirrors this: `Denied` -> `access_denied`, `Allowed`
+/// -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobCreateMobAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+/// Machine-owned operator profile-mutation admission verdict for realm-profile
+/// mutation tools. The tool shell mirrors this: `Denied` -> `access_denied`,
+/// `Allowed` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobProfileMutationAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
 /// Pure wire-projection bridge rejection cause, mirroring every variant of the
 /// wire `BridgeRejectionCause`. The mob bridge consumer maps the typed wire
 /// cause onto this and feeds it to MobMachine for recovery classification.
@@ -1913,6 +1933,58 @@ mod tests {
                 admission,
                 Some(expected),
                 "for can_manage_mob={can_manage_mob}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_mob_admission_is_decided_by_machine() {
+        use MobCreateMobAdmissionKind as Admission;
+        // can_create_mobs -> expected verdict.
+        let cases = [(true, Admission::Allowed), (false, Admission::Denied)];
+        for (can_create_mobs, expected) in cases {
+            let mut authority = MobMachineAuthority::new();
+            let transition = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ResolveCreateMobAdmission { can_create_mobs },
+            )
+            .expect("create-mob admission should resolve a verdict");
+            let admission = transition.effects().iter().find_map(|effect| match effect {
+                MobMachineEffect::CreateMobAdmissionResolved { admission } => Some(*admission),
+                _ => None,
+            });
+            assert_eq!(
+                admission,
+                Some(expected),
+                "for can_create_mobs={can_create_mobs}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_mutation_admission_is_decided_by_machine() {
+        use MobProfileMutationAdmissionKind as Admission;
+        // can_mutate_profiles -> expected verdict.
+        let cases = [(true, Admission::Allowed), (false, Admission::Denied)];
+        for (can_mutate_profiles, expected) in cases {
+            let mut authority = MobMachineAuthority::new();
+            let transition = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ResolveProfileMutationAdmission {
+                    can_mutate_profiles,
+                },
+            )
+            .expect("profile-mutation admission should resolve a verdict");
+            let admission = transition.effects().iter().find_map(|effect| match effect {
+                MobMachineEffect::ProfileMutationAdmissionResolved { admission } => {
+                    Some(*admission)
+                }
+                _ => None,
+            });
+            assert_eq!(
+                admission,
+                Some(expected),
+                "for can_mutate_profiles={can_mutate_profiles}"
             );
         }
     }

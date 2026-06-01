@@ -1242,6 +1242,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "CreateMobAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Operator create-mob admission (Allowed/Denied) is decided by MobMachine from the raw create-mobs capability observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
+        ),
+        (
+            "MobMachine",
+            "ProfileMutationAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Operator profile-mutation admission (Allowed/Denied) is decided by MobMachine from the raw mutate-profiles capability observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",
+        ),
+        (
+            "MobMachine",
             "BridgeRejectionRecoveryClassified",
             SeamClassification::SurfaceResultAlignment,
             "Bridge-rejection recovery (RebindRecover/FatalBubbleUp) is decided by MobMachine from the raw wire rejection cause; the mob shell mirrors it (RebindRecover -> re-run BindMember; FatalBubbleUp -> bubble up) instead of reducing the cause into a recoverable-vs-fatal conclusion itself",
@@ -1635,6 +1647,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "BlockerSatisfactionClassified",
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph per-blocking-edge satisfaction verdict must align with canonical blocker lifecycle truth; the service mirrors it and mechanically fans-in the unresolved_blocker_count revalidated by the dependencies_satisfied guard",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "CreateStatusAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph create-status admission verdict (AdmittedOpen/AdmittedBlocked/Denied) is decided by WorkGraphLifecycleMachine from the requested initial status observation; the create shell mirrors it (AdmittedOpen -> CreateOpen, AdmittedBlocked -> CreateBlocked, Denied -> InvalidTransition) instead of deciding the only-open-or-blocked creation policy itself",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "PublicConfirmationAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph public-confirmation admission verdict (Admitted/DeniedRequiresTrustedHost) is decided by WorkGraphLifecycleMachine from the machine-owned completion_policy observation; the public-confirm surface mirrors it (DeniedRequiresTrustedHost -> InvalidInput) instead of deciding the trust-scoped eligibility itself",
         ),
         //
         // =========================================================================

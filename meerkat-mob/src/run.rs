@@ -371,6 +371,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
@@ -1519,6 +1521,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
@@ -4140,6 +4144,109 @@ pub fn mob_machine_run_public_result_class(
         MobError::Internal(format!(
             "MobMachine flow public-result classifier emitted no effect for run '{run_id}'"
         ))
+    })
+}
+
+/// Machine-decided operator create-mob admission verdict for the mob-creation
+/// tool, mirrored by tool surfaces. `Denied` maps to a tool `access_denied`
+/// error; `Allowed` proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateMobAdmission {
+    Allowed,
+    Denied,
+}
+
+/// Machine-decided operator profile-mutation admission verdict for realm-profile
+/// mutation tools, mirrored by tool surfaces. `Denied` maps to a tool
+/// `access_denied` error; `Allowed` proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileMutationAdmission {
+    Allowed,
+    Denied,
+}
+
+/// Resolve the operator create-mob admission verdict.
+///
+/// The tool surface extracts a single raw observation — whether the operator
+/// holds the create-mobs capability bit (a machine-minted operator-authority
+/// projection) — and feeds it here. MobMachine, not the tool surface, decides
+/// the Allow/Deny verdict; the surface mirrors the returned verdict
+/// (`CreateMobAdmission::Denied` -> `access_denied`). Fails closed if the
+/// machine emits no verdict. This operator-capability admission is not scoped
+/// to a live mob, so it is decided by a stateless MobMachine classification.
+pub fn mob_machine_create_mob_admission(
+    can_create_mobs: bool,
+) -> Result<CreateMobAdmission, MobError> {
+    let effects = classify_mob_machine_stateless(
+        mob_dsl::MobMachineInput::ResolveCreateMobAdmission { can_create_mobs },
+        "ResolveCreateMobAdmission",
+    )?;
+    let mut admission = None;
+    for effect in effects {
+        match effect {
+            mob_dsl::MobMachineEffect::CreateMobAdmissionResolved { admission: kind } => {
+                admission = Some(match kind {
+                    mob_dsl::MobCreateMobAdmissionKind::Allowed => CreateMobAdmission::Allowed,
+                    mob_dsl::MobCreateMobAdmissionKind::Denied => CreateMobAdmission::Denied,
+                });
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine create-mob admission classifier emitted unexpected effect: {other:?}"
+                )));
+            }
+        }
+    }
+    admission.ok_or_else(|| {
+        MobError::Internal(
+            "MobMachine accepted create-mob admission observation but emitted no verdict".into(),
+        )
+    })
+}
+
+/// Resolve the operator profile-mutation admission verdict.
+///
+/// The tool surface extracts a single raw observation — whether the operator
+/// holds the mutate-profiles capability bit (a machine-minted operator-authority
+/// projection) — and feeds it here. MobMachine, not the tool surface, decides
+/// the Allow/Deny verdict; the surface mirrors the returned verdict
+/// (`ProfileMutationAdmission::Denied` -> `access_denied`). Fails closed if the
+/// machine emits no verdict. This operator-capability admission is not scoped
+/// to a live mob, so it is decided by a stateless MobMachine classification.
+pub fn mob_machine_profile_mutation_admission(
+    can_mutate_profiles: bool,
+) -> Result<ProfileMutationAdmission, MobError> {
+    let effects = classify_mob_machine_stateless(
+        mob_dsl::MobMachineInput::ResolveProfileMutationAdmission {
+            can_mutate_profiles,
+        },
+        "ResolveProfileMutationAdmission",
+    )?;
+    let mut admission = None;
+    for effect in effects {
+        match effect {
+            mob_dsl::MobMachineEffect::ProfileMutationAdmissionResolved { admission: kind } => {
+                admission = Some(match kind {
+                    mob_dsl::MobProfileMutationAdmissionKind::Allowed => {
+                        ProfileMutationAdmission::Allowed
+                    }
+                    mob_dsl::MobProfileMutationAdmissionKind::Denied => {
+                        ProfileMutationAdmission::Denied
+                    }
+                });
+            }
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine profile-mutation admission classifier emitted unexpected effect: {other:?}"
+                )));
+            }
+        }
+    }
+    admission.ok_or_else(|| {
+        MobError::Internal(
+            "MobMachine accepted profile-mutation admission observation but emitted no verdict"
+                .into(),
+        )
     })
 }
 

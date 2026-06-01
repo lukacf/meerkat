@@ -378,11 +378,23 @@ impl WorkGraphService {
                 namespace: request.namespace.clone(),
             })
             .await?;
-        if current.item.completion_policy != WorkCompletionPolicy::SelfAttest {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "{} confirmation requires trusted in-process host authority",
-                completion_policy_name(&current.item.completion_policy)
-            )));
+        // The trust-scoped eligibility "only a self-attested completion policy
+        // may be confirmed by an untrusted public caller" is owned by
+        // WorkGraphLifecycleMachine, not this surface. We extract the
+        // machine-owned completion_policy as a pure typed observation, drive the
+        // machine's public-confirmation admission classifier, and mirror the
+        // verdict: DeniedRequiresTrustedHost -> the same InvalidInput rejection,
+        // Admitted -> proceed. Fails closed.
+        match WorkGraphMachine::classify_public_confirmation_admission(
+            &current.item.completion_policy,
+        )? {
+            crate::machine::WorkPublicConfirmationAdmissionKind::Admitted => {}
+            crate::machine::WorkPublicConfirmationAdmissionKind::DeniedRequiresTrustedHost => {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "{} confirmation requires trusted in-process host authority",
+                    completion_policy_name(&current.item.completion_policy)
+                )));
+            }
         }
         if is_reserved_confirmation_evidence_kind(&request.evidence.kind) {
             return Err(WorkGraphError::InvalidInput(format!(

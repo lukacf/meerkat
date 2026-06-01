@@ -410,3 +410,36 @@ marker_relation_for_tokens_and_snapshot: Matches->proceed else->stale-reject; no
 recoverable/fatal (sweep-acknowledged: MeerkatMachine RecoverableFailure transition fully revalidates via
 llm_failure_kind_recoverable + retries_remaining guards); oauth validate_oauth_login_target + session_runtime
 deferred-restore (LOW/possible, to re-confirm next round). Re-running convergence (round 4) for two-clean.
+
+## CONVERGENCE ROUND 4 — BOTH BLIND REVIEWS CLEAN (acceptance bar met); folded remaining sweep genuine
+review-alpha CLEAN (0); review-beta CLEAN (0) -> the "two blind dogma reviews both clean" bar is MET.
+The aggressive sweep still found 5; folded the 4 genuine (honesty over gaming the bar — these are real
+shell-enforced verdicts the reviewers happened not to land on):
+
+### FOLDED — mob-mcp operator-admission completeness gap (sweep HIGH x2) -> MobMachine
+Round 3 folded 2 of 4 sibling agent_tools.rs gates; the other 2 remained shell-deciding:
+- ensure_create_authority -> MobMachine ResolveCreateMobAdmission { can_create_mobs } ->
+  CreateMobAdmissionResolved { Allowed|Denied } via stateless mob_machine_create_mob_admission (operator-
+  capability scoped, no live mob actor; stateless classifier over the capability bit).
+- ensure_profile_mutation_authority -> ResolveProfileMutationAdmission { can_mutate_profiles } via
+  mob_machine_profile_mutation_admission. Both mirror Allowed->Ok / Denied->access_denied, fail closed.
+Now all 4 sibling operator-admission gates are machine-routed.
+
+### FOLDED — workgraph create-status admission (sweep MEDIUM) -> WorkGraphLifecycle
+create_item shell-decided "new work items may only start open or blocked" via if-matches + unreachable!.
+-> ClassifyCreateStatusAdmission { requested_status } -> CreateStatusAdmissionClassified
+{ Denied|AdmittedOpen|AdmittedBlocked }. Shell extracts the typed status, mirrors (AdmittedOpen->CreateOpen,
+AdmittedBlocked->CreateBlocked, Denied->same InvalidTransition message). if-matches + unreachable! DELETED.
+
+### FOLDED — workgraph public-confirm trust-scoped admission (sweep MEDIUM) -> WorkGraphLifecycle
+goal_confirm_public shell-decided `completion_policy != SelfAttest -> Err(requires trusted host)`.
+completion_policy IS machine-owned; "public-ness" is structural (which seam). -> ClassifyPublicConfirmationAdmission
+{ completion_policy } -> PublicConfirmationAdmissionClassified { Admitted|DeniedRequiresTrustedHost }.
+Shell mirrors DeniedRequiresTrustedHost->same InvalidInput message. (Reserved-evidence-kind guard left as-is.)
+
+### DEFENDED — error.rs is_recoverable / schedule_retry None-path (sweep LOW): the recoverable path drives
+MeerkatMachine RecoverableFailure which REVALIDATES via llm_failure_kind_recoverable + retries_remaining
+guards; the typed witness feeding it is sweep-acknowledged as mostly-machine-routed. Pure typed extraction.
+
+Gates: drift 10/6; check clean; machine-codegen 94 pass; mob+mob-mcp+workgraph 1238/1332 passed;
+classifier ratchet pass; seam 0 debt; no wire/schema change. Re-running round 5 to confirm two-clean holds.

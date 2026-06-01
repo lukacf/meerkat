@@ -12,6 +12,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_actor_authority`: `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
 - `mob_owner_bridge_cleanup_authority`: `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority`: `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
+- `mob_operator_admission_authority`: `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
@@ -22,7 +23,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
 - `owner-bridge-cleanup` — bind owner bridge session, owner bridge cleanup requires owner, implicit delegation requires owner, and recover owner bridge session authority for archive cleanup
-- `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs
+- `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, surface peer-exposed member inputs, and resolve operator create mob admission and profile mutation admission verdicts the tool surface mirrors
 
 ### Transitions
 - `ClassifyFlowRunTerminalityTerminalRunning`
@@ -105,40 +106,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ResolveFlowDelegationEdgeAdmissionAllowedRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionAllowedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionAllowedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionAllowedDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedStrictDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveFlowDelegationEdgeAdmissionDeniedAdvisoryDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ClassifyRemoteMemberRuntimeObservationTerminalRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`
@@ -165,76 +166,124 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `spawn-work-terminal`
 - `ResolveSpawnMemberAdmissionManageScopeRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionManageScopeStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionManageScopeCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionManageScopeDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionProfileScopeRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionProfileScopeStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionProfileScopeCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionProfileScopeDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionDeniedRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionDeniedStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionDeniedCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveSpawnMemberAdmissionDeniedDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedStopped`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionAllowedDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionDeniedRunning`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionDeniedStopped`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionDeniedCompleted`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCurrentMobAdmissionDeniedDestroyed`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionAllowedRunning`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionAllowedStopped`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionAllowedCompleted`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionAllowedDestroyed`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionDeniedRunning`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionDeniedStopped`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionDeniedCompleted`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveCreateMobAdmissionDeniedDestroyed`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionAllowedRunning`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionAllowedStopped`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionAllowedCompleted`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionAllowedDestroyed`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionDeniedRunning`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionDeniedStopped`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionDeniedCompleted`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveProfileMutationAdmissionDeniedDestroyed`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ClassifyBridgeRejectionRecoveryRebindRunning`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`, `owner-bridge-cleanup`
@@ -261,16 +310,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `owner-bridge-cleanup`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureProfileNotFoundStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureProfileNotFoundCompleted`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureProfileNotFoundDestroyed`
   - anchors: `mob_actor_authority`
-  - scenarios: `wiring-and-session-binding`
+  - scenarios: `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `ClassifySpawnManyFailureMemberNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`
@@ -689,7 +738,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
 - `AuthorizeSpawnProfileRunning`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
   - scenarios: `retire-respawn-destroy`
 - `EnsureMemberRunningExisting`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
@@ -846,7 +895,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `ResolveSubmitWorkRejectionMemberNotFound`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+  - scenarios: `spawn-work-terminal`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `ResolveSubmitWorkRejectionCurrentRuntimeNotLive`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `flow-and-run-lifecycle`
@@ -861,7 +910,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
   - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`
+  - scenarios: `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `RetireMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
@@ -951,7 +1000,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `flow-and-run-lifecycle`
 - `DestroyMob`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`, `orchestrator-coordinator-cleanup`
+  - scenarios: `retire-respawn-destroy`, `event-subscriptions-and-notices`, `orchestrator-coordinator-cleanup`, `operator-provenance-and-peer-input`
 - `ObserveRuntimeDestroyed`
   - anchors: `mob_actor_authority`
   - scenarios: `coordination-board-records-and-overlap`, `spawn-work-terminal`, `retire-respawn-destroy`
@@ -981,10 +1030,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `retire-respawn-destroy`
 - `ResolveSpawnPolicyAdmitted`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `ResolveSpawnPolicyNoMatch`
   - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
 - `BindOwnerBridgeSessionRunning`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
@@ -1634,7 +1683,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `flow-and-run-lifecycle`
 - `DestroyFromAny`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
   - scenarios: `retire-respawn-destroy`, `orchestrator-coordinator-cleanup`
 - `RespawnRunning`
   - anchors: `mob_actor_authority`
@@ -1702,8 +1751,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
 - `SpawnProfileAuthorized`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `RequestRuntimeIngress`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
@@ -1786,7 +1835,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `EmitProgressNote`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
   - scenarios: `event-subscriptions-and-notices`
 - `PersistKickoffUpdate`
   - anchors: `mob_actor_authority`, `mob_coordination_board_authority`
@@ -1804,7 +1853,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
 - `RespawnTopologyRestoreResolved`
-  - anchors: `mob_actor_authority`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
   - scenarios: `retire-respawn-destroy`
 - `SpawnManyFailureClassified`
   - anchors: `mob_actor_authority`
@@ -1813,17 +1862,23 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `FlowDelegationEdgeAdmissionResolved`
-  - anchors: `mob_actor_authority`
-  - scenarios: `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `owner-bridge-cleanup`, `operator-provenance-and-peer-input`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `RemoteMemberRuntimeTerminalityClassified`
   - anchors: `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `SpawnMemberAdmissionResolved`
-  - anchors: `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `CurrentMobAdmissionResolved`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`, `mob_owner_bridge_cleanup_authority`, `mob_coordination_board_authority`
-  - scenarios: `event-subscriptions-and-notices`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `CreateMobAdmissionResolved`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ProfileMutationAdmissionResolved`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `BridgeRejectionRecoveryClassified`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`

@@ -311,6 +311,8 @@ pub enum MobMachineCatalogInput {
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
     ResolveCurrentMobAdmission,
+    ResolveCreateMobAdmission,
+    ResolveProfileMutationAdmission,
     ClassifyBridgeRejectionRecovery,
     EnsureMember,
     Reconcile,
@@ -412,6 +414,8 @@ impl MobMachineCatalogInput {
         Self::ClassifyRemoteMemberRuntimeObservation,
         Self::ResolveSpawnMemberAdmission,
         Self::ResolveCurrentMobAdmission,
+        Self::ResolveCreateMobAdmission,
+        Self::ResolveProfileMutationAdmission,
         Self::ClassifyBridgeRejectionRecovery,
         Self::EnsureMember,
         Self::Reconcile,
@@ -526,6 +530,10 @@ impl MobMachineCatalogInput {
                 MobMachineInputVariant::ResolveSpawnMemberAdmission
             }
             Self::ResolveCurrentMobAdmission => MobMachineInputVariant::ResolveCurrentMobAdmission,
+            Self::ResolveCreateMobAdmission => MobMachineInputVariant::ResolveCreateMobAdmission,
+            Self::ResolveProfileMutationAdmission => {
+                MobMachineInputVariant::ResolveProfileMutationAdmission
+            }
             Self::ClassifyBridgeRejectionRecovery => {
                 MobMachineInputVariant::ClassifyBridgeRejectionRecovery
             }
@@ -691,6 +699,8 @@ impl MobMachineCatalogInput {
             }
             Self::ResolveSpawnMemberAdmission => "ResolveSpawnMemberAdmission",
             Self::ResolveCurrentMobAdmission => "ResolveCurrentMobAdmission",
+            Self::ResolveCreateMobAdmission => "ResolveCreateMobAdmission",
+            Self::ResolveProfileMutationAdmission => "ResolveProfileMutationAdmission",
             Self::ClassifyBridgeRejectionRecovery => "ClassifyBridgeRejectionRecovery",
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
@@ -1008,6 +1018,22 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // the tool surface drives this as an operator-scope admission input,
         // not a standalone surface command.
         input: MobMachineCatalogInput::ResolveCurrentMobAdmission,
+        reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Operator create-mob admission is decided by MobMachine from the tool
+        // surface's pure create-mobs capability observation; the tool surface
+        // drives this as an operator-scope admission input, not a standalone
+        // surface command.
+        input: MobMachineCatalogInput::ResolveCreateMobAdmission,
+        reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Operator profile-mutation admission is decided by MobMachine from the
+        // tool surface's pure mutate-profiles capability observation; the tool
+        // surface drives this as an operator-scope admission input, not a
+        // standalone surface command.
+        input: MobMachineCatalogInput::ResolveProfileMutationAdmission,
         reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {

@@ -1254,6 +1254,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MobMachine",
+            "SpawnToolAdmissionResolved",
+            SeamClassification::SurfaceResultAlignment,
+            "Coarse spawn-tool admission for the spawn-member tool surfaces (Allowed/Denied) is decided by MobMachine from the raw can-spawn-any-profile observation; the tool surface mirrors it (Denied -> access_denied) instead of reducing the scope projection itself — uniquely covering the empty-specs spawn_many_members case",
+        ),
+        (
+            "MobMachine",
             "CreateMobAdmissionResolved",
             SeamClassification::SurfaceResultAlignment,
             "Operator create-mob admission (Allowed/Denied) is decided by MobMachine from the raw create-mobs capability observation; the tool surface mirrors it (Denied -> access_denied) instead of composing+enforcing the verdict",

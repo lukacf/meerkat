@@ -311,6 +311,7 @@ pub enum MobMachineCatalogInput {
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
     ResolveCurrentMobAdmission,
+    ResolveSpawnToolAdmission,
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
     ClassifyMemberOperationEligibility,
@@ -416,6 +417,7 @@ impl MobMachineCatalogInput {
         Self::ClassifyRemoteMemberRuntimeObservation,
         Self::ResolveSpawnMemberAdmission,
         Self::ResolveCurrentMobAdmission,
+        Self::ResolveSpawnToolAdmission,
         Self::ResolveCreateMobAdmission,
         Self::ResolveProfileMutationAdmission,
         Self::ClassifyMemberOperationEligibility,
@@ -534,6 +536,7 @@ impl MobMachineCatalogInput {
                 MobMachineInputVariant::ResolveSpawnMemberAdmission
             }
             Self::ResolveCurrentMobAdmission => MobMachineInputVariant::ResolveCurrentMobAdmission,
+            Self::ResolveSpawnToolAdmission => MobMachineInputVariant::ResolveSpawnToolAdmission,
             Self::ResolveCreateMobAdmission => MobMachineInputVariant::ResolveCreateMobAdmission,
             Self::ResolveProfileMutationAdmission => {
                 MobMachineInputVariant::ResolveProfileMutationAdmission
@@ -709,6 +712,7 @@ impl MobMachineCatalogInput {
             }
             Self::ResolveSpawnMemberAdmission => "ResolveSpawnMemberAdmission",
             Self::ResolveCurrentMobAdmission => "ResolveCurrentMobAdmission",
+            Self::ResolveSpawnToolAdmission => "ResolveSpawnToolAdmission",
             Self::ResolveCreateMobAdmission => "ResolveCreateMobAdmission",
             Self::ResolveProfileMutationAdmission => "ResolveProfileMutationAdmission",
             Self::ClassifyMemberOperationEligibility => "ClassifyMemberOperationEligibility",
@@ -1030,6 +1034,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // the tool surface drives this as an operator-scope admission input,
         // not a standalone surface command.
         input: MobMachineCatalogInput::ResolveCurrentMobAdmission,
+        reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Coarse spawn-tool admission for the spawn-member tool surfaces is
+        // decided by MobMachine from the tool surface's pure
+        // can-spawn-any-profile observation; the tool surface drives this as an
+        // operator-scope admission input, not a standalone surface command.
+        input: MobMachineCatalogInput::ResolveSpawnToolAdmission,
         reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {

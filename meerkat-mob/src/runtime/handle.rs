@@ -55,6 +55,15 @@ pub enum CurrentMobAdmission {
     Denied,
 }
 
+/// Machine-decided coarse spawn-tool admission verdict for the spawn-member
+/// tool surfaces (`spawn_member` / `spawn_many_members`), mirrored by tool
+/// surfaces. `Denied` maps to a tool `access_denied` error; `Allowed` proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnToolAdmission {
+    Allowed,
+    Denied,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MobMemberSnapshot {
@@ -5298,6 +5307,47 @@ impl MobHandle {
         Ok(match admission {
             mob_dsl::MobCurrentMobAdmissionKind::Allowed => CurrentMobAdmission::Allowed,
             mob_dsl::MobCurrentMobAdmissionKind::Denied => CurrentMobAdmission::Denied,
+        })
+    }
+
+    /// Resolve the coarse spawn-tool admission verdict for the spawn-member
+    /// tool surfaces (`spawn_member` / `spawn_many_members`).
+    ///
+    /// The tool surface extracts a single raw observation — whether the
+    /// operator can spawn ANY profile in the current mob (a machine-owned
+    /// operator-scope set-non-empty projection) — and feeds it here. MobMachine,
+    /// not the tool surface, decides the Allow/Deny verdict; the surface mirrors
+    /// the returned verdict (`SpawnToolAdmission::Denied` -> `access_denied`).
+    /// This coarse gate uniquely covers the empty-specs `spawn_many_members`
+    /// case (where zero per-member iterations fire no per-member admission), so
+    /// it must be machine-routed rather than reduced in the shell. Fails closed
+    /// if the machine emits no verdict.
+    pub async fn resolve_spawn_tool_admission(
+        &self,
+        can_spawn_any_profile: bool,
+    ) -> Result<SpawnToolAdmission, MobError> {
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnToolAdmission {
+                can_spawn_any_profile,
+            })
+            .await?;
+        let admission = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::SpawnToolAdmissionResolved { admission } => {
+                    Some(admission)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted spawn-tool admission observation but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        Ok(match admission {
+            mob_dsl::MobSpawnToolAdmissionKind::Allowed => SpawnToolAdmission::Allowed,
+            mob_dsl::MobSpawnToolAdmissionKind::Denied => SpawnToolAdmission::Denied,
         })
     }
 

@@ -236,6 +236,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveCurrentMobAdmissionDeniedDestroyed`
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionAllowedRunning`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionAllowedStopped`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionAllowedCompleted`
+  - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionAllowedDestroyed`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionDeniedRunning`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionDeniedStopped`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionDeniedCompleted`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `ResolveSpawnToolAdmissionDeniedDestroyed`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
 - `ResolveCreateMobAdmissionAllowedRunning`
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
@@ -1934,6 +1958,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`, `mob_operator_admission_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
 - `CurrentMobAdmissionResolved`
+  - anchors: `mob_operator_admission_authority`
+  - scenarios: `operator-provenance-and-peer-input`
+- `SpawnToolAdmissionResolved`
   - anchors: `mob_operator_admission_authority`
   - scenarios: `operator-provenance-and-peer-input`
 - `CreateMobAdmissionResolved`

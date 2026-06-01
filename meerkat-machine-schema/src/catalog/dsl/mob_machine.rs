@@ -484,6 +484,17 @@ macro_rules! mob_catalog_machine_dsl {
             // the tool shell — decides the Allow/Deny admission verdict, which
             // the shell mirrors (Deny -> access_denied).
             ResolveCurrentMobAdmission { can_manage_mob: bool },
+            // Coarse spawn-tool admission for the spawn-member tool surfaces
+            // (`spawn_member` / `spawn_many_members`). The tool shell extracts a
+            // single pure observation — whether the operator can spawn ANY
+            // profile in the current mob (a machine-owned operator-scope
+            // set-non-empty projection) — and feeds it here. MobMachine — not
+            // the tool shell — decides the Allow/Deny admission verdict, which
+            // the shell mirrors (Deny -> access_denied). This coarse gate has
+            // unique coverage over the empty-specs `spawn_many_members` case
+            // (zero per-member iterations fire no per-member admission), so it
+            // must be machine-routed rather than reduced in the shell.
+            ResolveSpawnToolAdmission { can_spawn_any_profile: bool },
             // Operator create-mob admission for the mob-creation tool surface.
             // The tool shell extracts a single pure observation — whether the
             // operator holds the create-mobs capability bit (a machine-minted
@@ -773,6 +784,11 @@ macro_rules! mob_catalog_machine_dsl {
             // tools. The tool shell mirrors this (Denied -> access_denied;
             // Allowed -> proceed) instead of composing the admission itself.
             CurrentMobAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
+            // Machine-owned coarse spawn-tool admission verdict for the
+            // spawn-member tool surfaces. The tool shell mirrors this (Denied ->
+            // access_denied; Allowed -> proceed) instead of composing the
+            // admission itself.
+            SpawnToolAdmissionResolved { admission: Enum<MobSpawnToolAdmissionKind> },
             // Machine-owned operator create-mob admission verdict. The tool
             // shell mirrors this (Denied -> access_denied; Allowed -> proceed)
             // instead of composing the admission itself.
@@ -940,6 +956,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RemoteMemberRuntimeTerminalityClassified => local,
         disposition SpawnMemberAdmissionResolved => local,
         disposition CurrentMobAdmissionResolved => local,
+        disposition SpawnToolAdmissionResolved => local,
         disposition CreateMobAdmissionResolved => local,
         disposition ProfileMutationAdmissionResolved => local,
         disposition MemberOperationEligibilityResolved => local,
@@ -1505,6 +1522,33 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit CurrentMobAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
+        }
+
+        // --- Coarse spawn-tool admission ---
+        //
+        // The tool surface extracts a single raw observation (whether the
+        // operator can spawn ANY profile in the current mob) and feeds it here;
+        // MobMachine decides the Allow/Deny verdict. This coarse gate uniquely
+        // covers the empty-specs spawn_many_members case (no per-member
+        // admission fires when zero specs are submitted). Pure classification
+        // across all phases.
+
+        transition ResolveSpawnToolAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveSpawnToolAdmission { can_spawn_any_profile }
+            guard "spawn_any_profile_allows" { can_spawn_any_profile == true }
+            update {}
+            to Running
+            emit SpawnToolAdmissionResolved { admission: MobSpawnToolAdmissionKind::Allowed }
+        }
+
+        transition ResolveSpawnToolAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveSpawnToolAdmission { can_spawn_any_profile }
+            guard "no_spawn_any_profile_denies" { can_spawn_any_profile == false }
+            update {}
+            to Running
+            emit SpawnToolAdmissionResolved { admission: MobSpawnToolAdmissionKind::Denied }
         }
 
         // --- Operator create-mob admission ---
@@ -8626,6 +8670,16 @@ pub enum MobSpawnMemberAdmissionKind {
 /// -> proceed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MobCurrentMobAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
+/// Machine-owned coarse spawn-tool admission verdict for the spawn-member tool
+/// surfaces. The tool shell mirrors this: `Denied` -> `access_denied`,
+/// `Allowed` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnToolAdmissionKind {
     #[default]
     Denied,
     Allowed,

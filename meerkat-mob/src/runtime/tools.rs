@@ -604,6 +604,29 @@ impl MobOperatorToolDispatcher {
         self.authority_context.can_spawn_any_profile_in_mob(mob_id)
     }
 
+    /// Coarse spawn-tool admission for the spawn-member tool surfaces.
+    ///
+    /// Extracts a single pure observation — whether the operator can spawn ANY
+    /// profile in the current mob (a machine-owned operator-scope set-non-empty
+    /// projection) — and feeds it to MobMachine. MobMachine, not this shell,
+    /// decides the Allow/Deny verdict; we mirror it (Denied -> access_denied).
+    /// This coarse gate uniquely covers the empty-specs `spawn_many_members`
+    /// case (where the per-member loop runs zero iterations and fires no
+    /// per-member admission), so the deny must be machine-routed here rather
+    /// than reduced in the shell. Fails closed.
+    async fn ensure_spawn_tool_scope(&self, tool_name: &str) -> Result<(), ToolError> {
+        let can_spawn_any_profile = self.can_spawn_any_profile_in_current_mob();
+        let admission = self
+            .handle
+            .resolve_spawn_tool_admission(can_spawn_any_profile)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            SpawnToolAdmission::Allowed => Ok(()),
+            SpawnToolAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+        }
+    }
+
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
         ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
@@ -838,10 +861,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
         {
             self.ensure_current_mob_scope(call.name).await?;
-        } else if matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
-            && !self.can_spawn_any_profile_in_current_mob()
-        {
-            return Err(ToolError::access_denied(call.name));
+        } else if matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS) {
+            self.ensure_spawn_tool_scope(call.name).await?;
         }
         match call.name {
             TOOL_SPAWN_MEMBER => {

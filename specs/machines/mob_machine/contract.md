@@ -166,6 +166,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
 - `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_present: Bool, privileged_args_present: Bool)
 - `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
+- `ResolveSpawnToolAdmission`(can_spawn_any_profile: Bool)
 - `ResolveCreateMobAdmission`(can_create_mobs: Bool)
 - `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
 - `ClassifyMemberOperationEligibility`
@@ -347,6 +348,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RemoteMemberRuntimeTerminalityClassified`(observed_state: MobRemoteMemberRuntimeObservedState, terminality: MobRemoteMemberRuntimeTerminality)
 - `SpawnMemberAdmissionResolved`(admission: MobSpawnMemberAdmissionKind)
 - `CurrentMobAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
+- `SpawnToolAdmissionResolved`(admission: MobSpawnToolAdmissionKind)
 - `CreateMobAdmissionResolved`(admission: MobCreateMobAdmissionKind)
 - `ProfileMutationAdmissionResolved`(admission: MobProfileMutationAdmissionKind)
 - `MemberOperationEligibilityResolved`(admission: MobMemberOperationEligibilityKind)
@@ -1018,6 +1020,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_manage_scope_denies`
 - Emits: `CurrentMobAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSpawnToolAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `spawn_any_profile_allows`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Running`
+
+### `ResolveSpawnToolAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `spawn_any_profile_allows`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSpawnToolAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `spawn_any_profile_allows`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Completed`
+
+### `ResolveSpawnToolAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `spawn_any_profile_allows`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSpawnToolAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `no_spawn_any_profile_denies`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Running`
+
+### `ResolveSpawnToolAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `no_spawn_any_profile_denies`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSpawnToolAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `no_spawn_any_profile_denies`
+- Emits: `SpawnToolAdmissionResolved`
+- To: `Completed`
+
+### `ResolveSpawnToolAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveSpawnToolAdmission`(can_spawn_any_profile)
+- Guards:
+  - `no_spawn_any_profile_denies`
+- Emits: `SpawnToolAdmissionResolved`
 - To: `Destroyed`
 
 ### `ResolveCreateMobAdmissionAllowedRunning`

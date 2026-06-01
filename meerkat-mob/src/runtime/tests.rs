@@ -3405,6 +3405,24 @@ fn generated_mob_operator_authority_with_scope(
         .expect("generated mob authority should grant managed mob scope")
 }
 
+fn generated_mob_operator_authority_with_spawn_profile(
+    mob_id: &str,
+    profile: &str,
+) -> meerkat_core::service::MobToolAuthorityContext {
+    // Create-only authority with NO manage scope on the target mob, granted a
+    // single spawnable profile in that mob. This yields
+    // `can_spawn_any_profile_in_mob == true` (spawn scope non-empty) without
+    // `can_manage_mob`, so current-mob management tools stay denied while the
+    // coarse spawn-tool gate must admit.
+    let authority = meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+        .expect("generated create-only mob authority should be accepted");
+    let authority =
+        meerkat_runtime::mob_operator_authority::set_create_authority(&authority, false)
+            .expect("generated mob authority should disable create scope");
+    meerkat_runtime::mob_operator_authority::grant_spawn_profile_in_mob(&authority, mob_id, profile)
+        .expect("generated mob authority should grant a spawnable profile")
+}
+
 fn sample_definition_with_external_backend() -> MobDefinition {
     let mut def = sample_definition();
     def.backend.external = Some(crate::definition::ExternalBackendConfig {
@@ -11085,6 +11103,108 @@ async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_m
         .await
         .expect_err("out-of-scope operator call should be denied before args are parsed");
     assert!(matches!(error, ToolError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn test_coarse_spawn_tool_admission_is_machine_routed() {
+    // The coarse spawn-tool gate (spawn_member / spawn_many_members) is now
+    // decided by MobMachine (ResolveSpawnToolAdmission -> SpawnToolAdmissionResolved)
+    // from the operator's pure can-spawn-any-profile-in-current-mob observation.
+    // This test pins the verdict-driven behavior on both sides, including the
+    // unique-coverage empty-specs spawn_many_members case (where the per-member
+    // loop fires zero per-member admissions, so this coarse gate is the only
+    // thing that can deny).
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let mob_id = handle.definition().id.to_string();
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap();
+
+    // --- No spawnable profile in the current mob (manage scope is on a
+    // DIFFERENT mob): the machine must DENY every spawn-tool call, including
+    // empty-specs spawn_many_members. ---
+    let denied_dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(generated_mob_operator_authority_with_scope("different-mob")),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher should be visible when authority is injected");
+
+    let empty_specs = RawValue::from_string(serde_json::json!({ "specs": [] }).to_string())
+        .expect("empty specs args");
+    let empty_specs_denied = denied_dispatcher
+        .dispatch(ToolCallView {
+            id: "deny-empty-spawn-many",
+            name: "spawn_many_members",
+            args: &empty_specs,
+        })
+        .await
+        .expect_err(
+            "empty-specs spawn_many_members must be denied for an operator with no spawnable \
+             profile — the coarse machine-routed gate is the only thing that can deny it",
+        );
+    assert!(matches!(empty_specs_denied, ToolError::AccessDenied { .. }));
+
+    let spawn_member_args = RawValue::from_string(
+        serde_json::json!({ "profile": "worker", "member_id": "w-deny" }).to_string(),
+    )
+    .expect("spawn args");
+    let spawn_member_denied = denied_dispatcher
+        .dispatch(ToolCallView {
+            id: "deny-spawn-member",
+            name: "spawn_member",
+            args: &spawn_member_args,
+        })
+        .await
+        .expect_err("spawn_member must be denied for an operator with no spawnable profile");
+    assert!(matches!(
+        spawn_member_denied,
+        ToolError::AccessDenied { .. }
+    ));
+
+    // --- A spawnable profile IS granted in the current mob (no manage scope):
+    // the machine must ALLOW the coarse gate, so the call proceeds past it. An
+    // empty-specs spawn_many_members then admits and yields an empty batch. ---
+    let allowed_dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(generated_mob_operator_authority_with_spawn_profile(
+            mob_id.as_str(),
+            "worker",
+        )),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher should be visible when authority is injected");
+
+    let empty_specs_allowed = allowed_dispatcher
+        .dispatch(ToolCallView {
+            id: "allow-empty-spawn-many",
+            name: "spawn_many_members",
+            args: &empty_specs,
+        })
+        .await
+        .expect(
+            "empty-specs spawn_many_members must pass the coarse gate when the operator can \
+             spawn a profile, then admit and produce an empty batch",
+        );
+    let payload: serde_json::Value =
+        serde_json::from_str(&empty_specs_allowed.result.text_content()).expect("payload");
+    assert_eq!(
+        payload["results"].as_array().map(|entries| entries.len()),
+        Some(0),
+        "empty-specs spawn_many_members must yield zero result entries once admitted"
+    );
 }
 
 #[tokio::test]

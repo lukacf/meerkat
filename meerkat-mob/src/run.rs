@@ -371,6 +371,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveSpawnToolAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberOperationEligibility
@@ -1523,6 +1524,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveSpawnToolAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberOperationEligibility

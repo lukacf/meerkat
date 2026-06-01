@@ -2042,6 +2042,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum("MobSpawnMemberAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum("MobCurrentMobAdmissionKind", &["Denied", "Allowed"]),
+            NamedTypeBinding::string_enum("MobSpawnToolAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum("MobCreateMobAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum(
                 "MobProfileMutationAdmissionKind",
@@ -2282,6 +2283,7 @@ runtime_internal_inputs!(
         ClassifyRemoteMemberRuntimeObservation,
         ResolveSpawnMemberAdmission,
         ResolveCurrentMobAdmission,
+        ResolveSpawnToolAdmission,
         ResolveCreateMobAdmission,
         ResolveProfileMutationAdmission,
         ClassifyMemberOperationEligibility,

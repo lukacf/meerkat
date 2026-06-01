@@ -2988,6 +2988,56 @@ impl std::fmt::Display for MobSpawnMemberAdmissionKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobSpawnToolAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Allowed")]
+    Allowed,
+}
+impl MobSpawnToolAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::Allowed => "Allowed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobSpawnToolAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "Allowed" => Ok(Self::Allowed),
+            other => Err(format!("invalid MobSpawnToolAdmissionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobSpawnToolAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobSpawnToolAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 #[allow(non_camel_case_types)]
 #[derive(
@@ -4019,6 +4069,10 @@ pub mod inputs {
         pub can_manage_mob: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSpawnToolAdmission {
+        pub can_spawn_any_profile: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveCreateMobAdmission {
         pub can_create_mobs: bool,
     }
@@ -4433,6 +4487,7 @@ pub enum Input {
     ClassifyRemoteMemberRuntimeObservation(inputs::ClassifyRemoteMemberRuntimeObservation),
     ResolveSpawnMemberAdmission(inputs::ResolveSpawnMemberAdmission),
     ResolveCurrentMobAdmission(inputs::ResolveCurrentMobAdmission),
+    ResolveSpawnToolAdmission(inputs::ResolveSpawnToolAdmission),
     ResolveCreateMobAdmission(inputs::ResolveCreateMobAdmission),
     ResolveProfileMutationAdmission(inputs::ResolveProfileMutationAdmission),
     ClassifyMemberOperationEligibility(inputs::ClassifyMemberOperationEligibility),
@@ -4550,6 +4605,7 @@ impl Input {
             }
             Self::ResolveSpawnMemberAdmission(_) => InputKind::ResolveSpawnMemberAdmission,
             Self::ResolveCurrentMobAdmission(_) => InputKind::ResolveCurrentMobAdmission,
+            Self::ResolveSpawnToolAdmission(_) => InputKind::ResolveSpawnToolAdmission,
             Self::ResolveCreateMobAdmission(_) => InputKind::ResolveCreateMobAdmission,
             Self::ResolveProfileMutationAdmission(_) => InputKind::ResolveProfileMutationAdmission,
             Self::ClassifyMemberOperationEligibility(_) => {
@@ -4684,6 +4740,7 @@ pub enum InputKind {
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
     ResolveCurrentMobAdmission,
+    ResolveSpawnToolAdmission,
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
     ClassifyMemberOperationEligibility,
@@ -5332,6 +5389,10 @@ pub mod effects {
         pub admission: MobCurrentMobAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SpawnToolAdmissionResolved {
+        pub admission: MobSpawnToolAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CreateMobAdmissionResolved {
         pub admission: MobCreateMobAdmissionKind,
     }
@@ -5618,6 +5679,7 @@ pub enum Effect {
     RemoteMemberRuntimeTerminalityClassified(effects::RemoteMemberRuntimeTerminalityClassified),
     SpawnMemberAdmissionResolved(effects::SpawnMemberAdmissionResolved),
     CurrentMobAdmissionResolved(effects::CurrentMobAdmissionResolved),
+    SpawnToolAdmissionResolved(effects::SpawnToolAdmissionResolved),
     CreateMobAdmissionResolved(effects::CreateMobAdmissionResolved),
     ProfileMutationAdmissionResolved(effects::ProfileMutationAdmissionResolved),
     MemberOperationEligibilityResolved(effects::MemberOperationEligibilityResolved),
@@ -5702,6 +5764,7 @@ pub enum EffectKind {
     RemoteMemberRuntimeTerminalityClassified,
     SpawnMemberAdmissionResolved,
     CurrentMobAdmissionResolved,
+    SpawnToolAdmissionResolved,
     CreateMobAdmissionResolved,
     ProfileMutationAdmissionResolved,
     MemberOperationEligibilityResolved,
@@ -5816,6 +5879,14 @@ pub enum TransitionId {
     ResolveCurrentMobAdmissionDeniedStopped,
     ResolveCurrentMobAdmissionDeniedCompleted,
     ResolveCurrentMobAdmissionDeniedDestroyed,
+    ResolveSpawnToolAdmissionAllowedRunning,
+    ResolveSpawnToolAdmissionAllowedStopped,
+    ResolveSpawnToolAdmissionAllowedCompleted,
+    ResolveSpawnToolAdmissionAllowedDestroyed,
+    ResolveSpawnToolAdmissionDeniedRunning,
+    ResolveSpawnToolAdmissionDeniedStopped,
+    ResolveSpawnToolAdmissionDeniedCompleted,
+    ResolveSpawnToolAdmissionDeniedDestroyed,
     ResolveCreateMobAdmissionAllowedRunning,
     ResolveCreateMobAdmissionAllowedStopped,
     ResolveCreateMobAdmissionAllowedCompleted,

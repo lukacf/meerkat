@@ -635,3 +635,37 @@ is now the sole oauth-flow capacity authority.
 
 Gates: drift 10/6; check --workspace --all-features --tests clean; auth-core+runtime+rest+rpc --all-features 1923
 passed; machine-codegen 94; clippy --all-features -D warnings clean; seam 0 debt. Behavior preserved.
+
+## CONVERGENCE ROUND 10 (re-sweep + 2 blind reviews) — credential-use class fully drained + coarse spawn admission machine-routed
+alpha VIOLATIONS 1 (try_begin_refresh credential-use sibling); beta VIOLATIONS 1 (coarse spawn gate);
+sweep 3 (coarse spawn gate MEDIUM + should_publish LOW + is_recoverable LOW). Sweep coverage confirmed the
+whole tree clean across 14 domains. Folded the 2 genuine:
+
+### FOLDED — try_begin_refresh: last credential-use phase->disposition reducer -> AuthMachine (alpha)
+authorizers/mod.rs LeaseFreshnessObserver::try_begin_refresh hand-matched AuthLeasePhase into a refresh
+disposition (the round-5 sibling-check missed it; it lives in a different file). Now routes
+resolve_credential_use_admission(BeginRefresh) and mirrors CredentialUseDisposition -> LeaseRefreshStart
+(RefreshRequired/Authorized -> begin_refresh + Started(Refresh); AlreadyRefreshing -> WaitForInFlight;
+ReauthRequired -> Err(UserReauthRequired); LeaseAbsent -> Started(InitialAcquire)); handwritten match deleted.
+The credential-use phase->disposition class is now FULLY DRAINED across meerkat-auth-core (sibling-check:
+remaining phase reads are test fixtures or single-flight phase==Refreshing equality observations in
+already-machine-routed functions).
+
+### FOLDED — coarse spawn-tool admission -> MobMachine (beta + sweep)
+tools.rs MobOperatorToolDispatcher coarse gate `!can_spawn_any_profile -> access_denied` had UNIQUE coverage
+(NOT redundant): empty-specs spawn_many runs zero per-member iterations so the per-spawn machine admission
+never fires; the coarse gate is the only deny for an unauthorized operator. So it was MACHINE-ROUTED (not
+deleted): MobMachine ResolveSpawnToolAdmission { can_spawn_any_profile } -> SpawnToolAdmissionResolved
+{ Allowed|Denied } (mirrors the round-3 ResolveCurrentMobAdmission pattern). ensure_spawn_tool_scope extracts
+the pure scope-projection observation, drives the machine via MobHandle resolve_spawn_tool_admission, mirrors
+Denied -> access_denied, fails closed. Empty-specs spawn_many deny preserved + now machine-owned.
+
+### DEFENDED — round-10 LOWs (reviewer verdict-clean / sweep-self-classified):
+- should_publish_control_over_dsl (sweep LOW): read-side snapshot phase-reconciliation projection of two
+  machine-emitted phases for archive/spine DISPLAY; output is a read-API snapshot, mutates no lifecycle fact.
+- error.rs is_recoverable (sweep LOW): TELEMETRY-ONLY (sweep confirmed NOT a live enforced verdict) -- its sole
+  non-test consumer stamps metadata.retryable on terminal TurnErrorMetadata; the live recovery fork routes
+  through MeerkatMachine ClassifyLlmFailureRecovery.
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; classifier ratchet pass;
+mob+mob-mcp --all-features 1262/2385 passed; seam 0 debt; clippy --all-features -D warnings clean.

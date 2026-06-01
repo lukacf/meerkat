@@ -687,6 +687,16 @@ pub enum MobCurrentMobAdmissionKind {
     Allowed,
 }
 
+/// Machine-owned coarse spawn-tool admission verdict for the spawn-member tool
+/// surfaces. The tool shell mirrors this: `Denied` -> `access_denied`,
+/// `Allowed` -> proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobSpawnToolAdmissionKind {
+    #[default]
+    Denied,
+    Allowed,
+}
+
 /// Machine-owned operator create-mob admission verdict for the mob-creation
 /// tool. The tool shell mirrors this: `Denied` -> `access_denied`, `Allowed`
 /// -> proceed.
@@ -1967,6 +1977,32 @@ mod tests {
                 admission,
                 Some(expected),
                 "for can_manage_mob={can_manage_mob}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_tool_admission_is_decided_by_machine() {
+        use MobSpawnToolAdmissionKind as Admission;
+        // can_spawn_any_profile -> expected verdict.
+        let cases = [(true, Admission::Allowed), (false, Admission::Denied)];
+        for (can_spawn_any_profile, expected) in cases {
+            let mut authority = MobMachineAuthority::new();
+            let transition = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ResolveSpawnToolAdmission {
+                    can_spawn_any_profile,
+                },
+            )
+            .expect("spawn-tool admission should resolve a verdict");
+            let admission = transition.effects().iter().find_map(|effect| match effect {
+                MobMachineEffect::SpawnToolAdmissionResolved { admission } => Some(*admission),
+                _ => None,
+            });
+            assert_eq!(
+                admission,
+                Some(expected),
+                "for can_spawn_any_profile={can_spawn_any_profile}"
             );
         }
     }

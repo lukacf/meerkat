@@ -12,16 +12,19 @@
 
 use indexmap::IndexMap;
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
+use meerkat_core::HandlingMode;
+use meerkat_core::agent::CommsRuntime as _;
 use meerkat_mob::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowNodeSpec,
     FlowSpec, FlowStepSpec, FrameSpec, FrameStepSpec, LimitsSpec, OrchestratorConfig,
     RepeatUntilSpec, WiringRules,
 };
 use meerkat_mob::{
-    AgentIdentity, FlowId, LoopId, MobBuilder, MobDefinition, MobHandle, MobId, MobRun,
-    MobRunStatus, MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileBinding,
-    ProfileName, SpawnMemberSpec, StepId, ToolConfig,
+    AgentIdentity, FlowId, LoopId, MobBackendKind, MobBuilder, MobDefinition, MobHandle, MobId,
+    MobRun, MobRunStatus, MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileBinding,
+    ProfileName, RuntimeBinding, SpawnMemberSpec, StepId, ToolConfig,
 };
+use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
@@ -2546,6 +2549,148 @@ async fn setup_flow_mob(
     (handle, mob_service, temp)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct ProductionExternalTcpTarget {
+    binding: RuntimeBinding,
+    adapter: Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
+    session_id: meerkat_core::SessionId,
+    runtime: Arc<meerkat_comms::CommsRuntime>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ProductionExternalTcpTarget {
+    async fn active_input_count(&self) -> usize {
+        self.adapter
+            .list_active_inputs(&self.session_id)
+            .await
+            .expect("target runtime should list active inputs")
+            .len()
+    }
+
+    async fn shutdown(&self) {
+        self.adapter.abort_comms_drain(&self.session_id).await;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn unused_loopback_port() -> u16 {
+    std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("reserve loopback port")
+        .local_addr()
+        .expect("reserved listener local addr")
+        .port()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn external_tcp_smoke_definition(
+    mob_id: MobId,
+    bind_address: String,
+    advertised_address: String,
+) -> MobDefinition {
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        ProfileName::from("lead"),
+        ProfileBinding::Inline(Profile {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            skills: vec![],
+            tools: ToolConfig {
+                comms: true,
+                mob: true,
+                ..ToolConfig::default()
+            },
+            peer_description: "External TCP smoke target".to_string(),
+            external_addressable: true,
+            backend: Some(MobBackendKind::External),
+            runtime_mode: MobRuntimeMode::TurnDriven,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: None,
+        }),
+    );
+
+    let mut definition = MobDefinition::explicit(mob_id);
+    definition.orchestrator = Some(OrchestratorConfig {
+        profile: ProfileName::from("lead"),
+    });
+    definition.profiles = profiles;
+    definition.backend = BackendConfig {
+        default: MobBackendKind::External,
+        external: Some(meerkat_mob::definition::ExternalBackendConfig {
+            address_base: "tcp://127.0.0.1".to_string(),
+            supervisor_bridge: Some(meerkat_mob::definition::SupervisorBridgeEndpointConfig {
+                bind_address: Some(bind_address),
+                advertised_address: Some(advertised_address),
+            }),
+        }),
+    };
+    definition
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExternalTcpTarget {
+    let mut runtime =
+        meerkat_comms::CommsRuntime::inproc_only(peer_name).expect("create target comms runtime");
+    runtime
+        .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("configure target TCP listener");
+    runtime
+        .start_listeners()
+        .await
+        .expect("start target TCP listener");
+    let address = runtime.advertised_address();
+    let peer_id = runtime.public_key().to_peer_id().to_string();
+    let pubkey = *runtime.public_key().as_bytes();
+    let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
+    let runtime = Arc::new(runtime);
+    let session_id = meerkat_core::SessionId::new();
+    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+    dsl.apply_signal(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+        "external_tcp_smoke_target::initialize",
+    )
+    .expect("initialize target peer interaction authority");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                session_id.to_string(),
+            ),
+        },
+        "external_tcp_smoke_target::register",
+    )
+    .expect("register target peer interaction authority");
+    runtime.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::new(meerkat_runtime::handles::RuntimePeerInteractionHandle::new(
+                Arc::clone(&dsl),
+            )),
+            Arc::new(meerkat_runtime::handles::RuntimeInteractionStreamHandle::new(dsl)),
+        ),
+    );
+
+    let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
+    adapter.register_session(session_id.clone()).await;
+    let spawned = adapter
+        .maybe_spawn_comms_drain(
+            &session_id,
+            true,
+            Some(runtime.clone() as Arc<dyn meerkat_core::agent::CommsRuntime>),
+        )
+        .await;
+    assert!(spawned, "target must run production comms_drain");
+
+    ProductionExternalTcpTarget {
+        binding: RuntimeBinding::External {
+            peer_id,
+            address,
+            bootstrap_token: Some(bootstrap_token.into()),
+            pubkey: Some(pubkey),
+        },
+        adapter,
+        session_id,
+        runtime,
+    }
+}
+
 async fn wait_for_run_terminal(handle: &MobHandle, run_id: &meerkat_mob::RunId) -> MobRun {
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
@@ -2622,6 +2767,88 @@ fn assert_completed_without_failures(run: &MobRun, label: &str) {
         run.failure_ledger.is_empty(),
         "{label} should not record failures: {run:?}"
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = FlowSmokePaths::new(temp.path());
+    let mob_id = MobId::from(format!(
+        "external-tcp-production-drain-smoke-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let supervisor_port = unused_loopback_port();
+    let supervisor_advertised_address = format!("tcp://127.0.0.1:{supervisor_port}");
+    let definition = external_tcp_smoke_definition(
+        mob_id.clone(),
+        format!("0.0.0.0:{supervisor_port}"),
+        supervisor_advertised_address.clone(),
+    );
+    let session_service = persistent_service(&paths);
+    let mob_service: Arc<dyn MobSessionService> = session_service.clone();
+    let runtime_adapter = mob_service
+        .runtime_adapter()
+        .expect("persistent smoke service should expose a runtime adapter");
+    let storage =
+        MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(mob_service.clone())
+        .with_runtime_adapter(runtime_adapter)
+        .create()
+        .await
+        .expect("create external TCP smoke mob");
+
+    let target_peer_name = format!("{mob_id}/lead/l-production-tcp");
+    let target = spawn_production_external_tcp_target(&target_peer_name).await;
+    let target_address = match &target.binding {
+        RuntimeBinding::External { address, .. } => address.clone(),
+        RuntimeBinding::Session => panic!("target binding must be external"),
+    };
+    assert!(
+        target_address.starts_with("tcp://127.0.0.1:"),
+        "test must exercise a real TCP external member, got {target_address}"
+    );
+
+    let mut spec = SpawnMemberSpec::new("lead", AgentIdentity::from("l-production-tcp"));
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    spec.binding = Some(target.binding.clone());
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("BindMember should complete through production target comms_drain");
+
+    let trusted_peers = target.runtime.peers().await;
+    assert!(
+        trusted_peers
+            .iter()
+            .any(|peer| peer.address.to_string() == supervisor_advertised_address),
+        "target runtime must install the advertised supervisor bridge as sendable trust; peers={trusted_peers:?}"
+    );
+
+    handle
+        .member(&AgentIdentity::from("l-production-tcp"))
+        .await
+        .expect("member handle")
+        .send(
+            "production TCP external turn after bind",
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("peer turn should deliver over TCP and return a bridge response");
+
+    assert_eq!(
+        target.active_input_count().await,
+        1,
+        "production target runtime must accept the delivered peer turn"
+    );
+
+    target.shutdown().await;
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown external TCP smoke mob");
 }
 
 async fn run_smoke_flow_or_skip(test_name: &str, flow_id: &str, params: Value) -> Option<MobRun> {

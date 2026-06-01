@@ -1143,12 +1143,11 @@ impl MobActor {
             }
             return Err(Self::bridge_rejection_error(rejection));
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to decode authorize supervisor response: {error}"
-                ))
-            })?;
+        let _ack = super::bridge_protocol::decode_bridge_ack(
+            &command,
+            value,
+            "authorize supervisor response",
+        )?;
         Ok(peer.clone())
     }
 
@@ -1250,23 +1249,22 @@ impl MobActor {
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        serde_json::from_value(value).map_err(|error| {
+        let payload =
+            super::bridge_protocol::decode_bridge_success_payload(command, value, "command")?;
+        serde_json::from_value(payload).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
         })
     }
 
     fn bridge_ack_from_value(
-        protocol_version: super::bridge_protocol::BridgeProtocolVersion,
+        command: &super::bridge_protocol::BridgeCommand,
         value: serde_json::Value,
         context: &str,
     ) -> Result<(), MobError> {
-        if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
+        if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!("failed to decode {context} response: {error}"))
-            })?;
+        let _ack = super::bridge_protocol::decode_bridge_ack(command, value, context)?;
         Ok(())
     }
 
@@ -10254,16 +10252,13 @@ impl MobActor {
                                                             retry_rejection.reason()
                                                         ),
                                                     ))
-                                                } else if let Err(error) = serde_json::from_value::<
-                                                    super::bridge_protocol::BridgeAck,
-                                                >(
-                                                    value
-                                                ) {
-                                                    Some(MobError::Internal(format!(
-                                                        "failed to decode rotate supervisor response after bind fallback: {error}"
-                                                    )))
                                                 } else {
-                                                    None
+                                                    super::bridge_protocol::decode_bridge_ack(
+                                                        &retry_next_command,
+                                                        value,
+                                                        "rotate supervisor response after bind fallback",
+                                                    )
+                                                    .err()
                                                 }
                                             }
                                             Err(error) => Some(error),
@@ -10282,14 +10277,13 @@ impl MobActor {
                             } else {
                                 Some(Self::bridge_rejection_error(rejection))
                             }
-                        } else if let Err(error) =
-                            serde_json::from_value::<super::bridge_protocol::BridgeAck>(value)
-                        {
-                            Some(MobError::Internal(format!(
-                                "failed to decode rotate supervisor response: {error}"
-                            )))
                         } else {
-                            None
+                            super::bridge_protocol::decode_bridge_ack(
+                                &next_command,
+                                value,
+                                "rotate supervisor response",
+                            )
+                            .err()
                         }
                     }
                     Err(error) => Some(error),
@@ -10565,12 +10559,11 @@ impl MobActor {
                 Some(_) | None => Err(Self::bridge_rejection_error(rejection)),
             };
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to decode pending supervisor verification response: {error}"
-                ))
-            })?;
+        let _ack = super::bridge_protocol::decode_bridge_ack(
+            command,
+            value,
+            "pending supervisor verification response",
+        )?;
         Ok(true)
     }
 
@@ -10742,7 +10735,7 @@ impl MobActor {
                 .await
                 .and_then(|value| {
                     Self::bridge_ack_from_value(
-                        target_command.protocol_version(),
+                        &target_command,
                         value,
                         "supervisor reconciliation authorize",
                     )
@@ -10761,7 +10754,7 @@ impl MobActor {
                 .await
                 .and_then(|value| {
                     Self::bridge_ack_from_value(
-                        revoke_attempted_command.protocol_version(),
+                        &revoke_attempted_command,
                         value,
                         "supervisor reconciliation revoke",
                     )

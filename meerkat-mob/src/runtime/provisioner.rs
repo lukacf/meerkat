@@ -2165,6 +2165,11 @@ impl MultiBackendProvisioner {
             }
             return Err(Self::bridge_rejection_error(rejection));
         }
+        let _ack = super::bridge_protocol::decode_bridge_ack(
+            &command,
+            value,
+            "authorize supervisor response",
+        )?;
         Ok(peer.clone())
     }
 
@@ -2241,7 +2246,9 @@ impl MultiBackendProvisioner {
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
             return Err(Self::bridge_rejection_error(rejection));
         }
-        serde_json::from_value(value).map_err(|error| {
+        let payload =
+            super::bridge_protocol::decode_bridge_success_payload(command, value, "command")?;
+        serde_json::from_value(payload).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
         })
     }

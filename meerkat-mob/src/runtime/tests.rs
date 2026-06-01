@@ -3865,7 +3865,8 @@ async fn spawn_live_external_peer_with_transport(
                                                     });
                                                 }
                                                 serde_json::to_value(
-                                                    super::bridge_protocol::BridgeBindResponse {
+                                                    super::bridge_protocol::BridgeReply::BindMember(
+                                                        super::bridge_protocol::BridgeBindResponse {
                                                         peer_id: responder_bind_peer_id_override
                                                             .write()
                                                             .await
@@ -3889,7 +3890,8 @@ async fn spawn_live_external_peer_with_transport(
                                                                 unwire_member: true,
                                                                 ..super::bridge_protocol::BridgeCapabilities::default()
                                                         },
-                                                    },
+                                                        },
+                                                    ),
                                                 )
                                                 .expect("bind response")
                                             }
@@ -3994,7 +3996,9 @@ async fn spawn_live_external_peer_with_transport(
                                                     epoch: payload.epoch,
                                                 });
                                                 serde_json::to_value(
-                                                    super::bridge_protocol::BridgeAck { ok: true },
+                                                    super::bridge_protocol::BridgeReply::Ack(
+                                                        super::bridge_protocol::BridgeAck { ok: true },
+                                                    ),
                                                 )
                                                 .expect("authorize ack")
                                             }
@@ -4034,16 +4038,16 @@ async fn spawn_live_external_peer_with_transport(
                                     remove_supervisors_after_response
                                         .push(meerkat_comms::PubKey::new(supervisor_spec.pubkey));
                                     *responder_supervisor_state.write().await = None;
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("revoke ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
                                     responder_interrupt_count.fetch_add(1, Ordering::Relaxed);
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("interrupt ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::HardCancelMember(
@@ -4053,9 +4057,9 @@ async fn spawn_live_external_peer_with_transport(
                                         .write()
                                         .await
                                         .push(payload.reason);
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("hard-cancel ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::DeliverMemberInput(
@@ -4096,8 +4100,10 @@ async fn spawn_live_external_peer_with_transport(
                                     if let Some(existing) =
                                         responses.get(&payload.input_id).cloned()
                                     {
-                                        serde_json::to_value(existing)
-                                            .expect("existing delivery response")
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Delivery(existing),
+                                        )
+                                        .expect("existing delivery response")
                                     } else {
                                         let supervisor_spec =
                                             meerkat_core::comms::TrustedPeerDescriptor::try_from(
@@ -4126,7 +4132,10 @@ async fn spawn_live_external_peer_with_transport(
                                         };
                                         responses
                                             .insert(payload.input_id.clone(), response.clone());
-                                        serde_json::to_value(response).expect("delivery response")
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Delivery(response),
+                                        )
+                                        .expect("delivery response")
                                     }
                                     }
                                 }
@@ -4140,9 +4149,9 @@ async fn spawn_live_external_peer_with_transport(
                                         .add_trusted_peer(peer_spec)
                                         .await
                                         .expect("wire trust");
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("wire ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::UnwireMember(payload) => {
@@ -4154,19 +4163,21 @@ async fn spawn_live_external_peer_with_transport(
                                     let _ = responder_runtime
                                         .remove_trusted_peer(&peer_spec.peer_id.to_string())
                                         .await;
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("unwire ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::RetireMember(_) => {
                                     state =
                                         super::bridge_protocol::BridgeMemberRuntimeState::Retired;
                                     serde_json::to_value(
-                                        super::bridge_protocol::BridgeRetireResponse {
+                                        super::bridge_protocol::BridgeReply::Retire(
+                                            super::bridge_protocol::BridgeRetireResponse {
                                             inputs_abandoned: 0,
                                             inputs_pending_drain: 0,
-                                        },
+                                            },
+                                        ),
                                     )
                                     .expect("retire response")
                                 }
@@ -4174,15 +4185,18 @@ async fn spawn_live_external_peer_with_transport(
                                     state =
                                         super::bridge_protocol::BridgeMemberRuntimeState::Destroyed;
                                     serde_json::to_value(
-                                        super::bridge_protocol::BridgeDestroyResponse {
+                                        super::bridge_protocol::BridgeReply::Destroy(
+                                            super::bridge_protocol::BridgeDestroyResponse {
                                             inputs_abandoned: 0,
-                                        },
+                                            },
+                                        ),
                                     )
                                     .expect("destroy response")
                                 }
                                 super::bridge_protocol::BridgeCommand::ObserveMember(_) => {
                                     serde_json::to_value(
-                                        super::bridge_protocol::BridgeObservationResponse::new(
+                                        super::bridge_protocol::BridgeReply::Observation(
+                                            super::bridge_protocol::BridgeObservationResponse::new(
                                             state,
                                             Some(matches!(
                                                 state,
@@ -4196,6 +4210,7 @@ async fn spawn_live_external_peer_with_transport(
                                             ),
                                             None,
                                             Utc::now().to_rfc3339(),
+                                            ),
                                         ),
                                     )
                                     .expect("observe response")

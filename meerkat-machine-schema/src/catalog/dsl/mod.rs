@@ -2682,6 +2682,19 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 &["Denied", "AdmittedOpen", "AdmittedBlocked"],
             ),
             NamedTypeBinding::string_enum(
+                "WorkCreateCompletionPolicyAdmissionKind",
+                &["DeniedNonSelfAttest", "Admitted"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkCloseStatusAdmissionKind",
+                &[
+                    "DeniedNonTerminal",
+                    "AdmittedCompleted",
+                    "AdmittedCancelled",
+                    "AdmittedFailed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "WorkPublicConfirmationAdmissionKind",
                 &["DeniedRequiresTrustedHost", "Admitted"],
             ),

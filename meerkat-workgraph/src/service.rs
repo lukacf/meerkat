@@ -63,10 +63,21 @@ impl WorkGraphService {
     pub async fn create(&self, request: CreateWorkItemRequest) -> Result<WorkItem, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         validate_completion_policy(&request.completion_policy)?;
-        if request.completion_policy != WorkCompletionPolicy::SelfAttest {
-            return Err(WorkGraphError::InvalidInput(
-                "non-goal work items must use self_attest completion policy".to_string(),
-            ));
+        // The creation policy "non-goal work items must use the self-attest
+        // completion policy" is owned by WorkGraphLifecycleMachine, not this
+        // shell. We extract the requested completion policy as a pure typed
+        // observation, drive the machine's admission classifier, and mirror the
+        // verdict: Admitted -> proceed, DeniedNonSelfAttest -> the exact same
+        // InvalidInput rejection. Fails closed.
+        match WorkGraphMachine::classify_create_completion_policy_admission(
+            &request.completion_policy,
+        )? {
+            wg_dsl::WorkCreateCompletionPolicyAdmissionKind::Admitted => {}
+            wg_dsl::WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest => {
+                return Err(WorkGraphError::InvalidInput(
+                    "non-goal work items must use self_attest completion policy".to_string(),
+                ));
+            }
         }
         reject_reserved_confirmation_evidence_refs(&request.evidence_refs)?;
         let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
@@ -1694,6 +1705,42 @@ mod tests {
             .expect("close blocker");
         let ready = service.ready(Default::default()).await.expect("ready");
         assert!(ready.iter().any(|item| item.id == blocked.id));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_non_self_attest_completion_policy_with_preserved_message() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let owner_key = WorkOwnerKey::label("supervisor").expect("owner key");
+        let denied = [
+            crate::types::WorkCompletionPolicy::HostConfirmed,
+            crate::types::WorkCompletionPolicy::PrincipalConfirmed,
+            crate::types::WorkCompletionPolicy::Supervisor { owner_key },
+            crate::types::WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+        ];
+        for policy in denied {
+            let mut request = create_req("non-goal");
+            request.completion_policy = policy.clone();
+            let error = service
+                .create(request)
+                .await
+                .expect_err("non-self-attest create must be rejected by the machine");
+            match error {
+                crate::WorkGraphError::InvalidInput(message) => assert_eq!(
+                    message, "non-goal work items must use self_attest completion policy",
+                    "rejection message preserved for {policy:?}"
+                ),
+                other => panic!("expected InvalidInput for {policy:?}, got {other:?}"),
+            }
+        }
+        // Self-attest is admitted.
+        service
+            .create(create_req("self-attest"))
+            .await
+            .expect("self-attest create admitted");
     }
 
     #[tokio::test]

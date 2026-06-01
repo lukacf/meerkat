@@ -3303,467 +3303,262 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         protocol.name.as_str()
     )?;
     writeln!(&mut out)?;
-    writeln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
-    writeln!(&mut out, "pub(crate) struct DurableAuthLifecycleMarker {{")?;
-    writeln!(&mut out, "    pub token_key: TokenKey,")?;
-    writeln!(&mut out, "    pub phase: AuthLeasePhase,")?;
-    writeln!(&mut out, "    pub expires_at: u64,")?;
-    writeln!(&mut out, "    pub generation: u64,")?;
-    writeln!(&mut out, "    pub credential_published_at_millis: u64,")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
-    writeln!(&mut out, "pub enum AuthLeaseDurableMarkerRelation {{")?;
-    writeln!(&mut out, "    Matches,")?;
-    writeln!(&mut out, "    TokenNewer,")?;
-    writeln!(&mut out, "    TokenStale,")?;
-    writeln!(&mut out, "    Invalid,")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]")?;
-    writeln!(&mut out, "pub struct AuthLeaseDurableRestorePublication {{")?;
-    writeln!(&mut out, "    token_key: TokenKey,")?;
-    writeln!(&mut out, "    phase: AuthLeasePhase,")?;
-    writeln!(&mut out, "    expires_at: u64,")?;
-    writeln!(&mut out, "    generation: u64,")?;
-    writeln!(&mut out, "    credential_published_at_millis: u64,")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "impl AuthLeaseDurableRestorePublication {{")?;
-    writeln!(&mut out, "    pub fn token_key(&self) -> &TokenKey {{")?;
-    writeln!(&mut out, "        &self.token_key")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    pub fn phase(&self) -> AuthLeasePhase {{")?;
-    writeln!(&mut out, "        self.phase")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    pub fn expires_at(&self) -> u64 {{")?;
-    writeln!(&mut out, "        self.expires_at")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    pub fn generation(&self) -> u64 {{")?;
-    writeln!(&mut out, "        self.generation")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "    pub fn credential_published_at_millis(&self) -> u64 {{"
-    )?;
-    writeln!(&mut out, "        self.credential_published_at_millis")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "    #[cfg(not(target_arch = \"wasm32\"))]")?;
-    writeln!(&mut out, "    fn from_marker_contract(")?;
-    writeln!(&mut out, "        token_key: TokenKey,")?;
-    writeln!(&mut out, "        phase: AuthLeasePhase,")?;
-    writeln!(&mut out, "        expires_at: u64,")?;
-    writeln!(&mut out, "        generation: u64,")?;
-    writeln!(&mut out, "        credential_published_at_millis: u64,")?;
-    writeln!(&mut out, "    ) -> Self {{")?;
-    writeln!(&mut out, "        Self {{")?;
-    writeln!(&mut out, "            token_key,")?;
-    writeln!(&mut out, "            phase,")?;
-    writeln!(&mut out, "            expires_at,")?;
-    writeln!(&mut out, "            generation,")?;
-    writeln!(&mut out, "            credential_published_at_millis,")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "fn phase_to_wire(phase: AuthLeasePhase) -> &'static str {{"
-    )?;
-    writeln!(&mut out, "    match phase {{")?;
-    writeln!(&mut out, "        AuthLeasePhase::Valid => \"valid\",")?;
-    writeln!(
-        &mut out,
-        "        AuthLeasePhase::Expiring => \"expiring\","
-    )?;
-    writeln!(&mut out, "        AuthLeasePhase::Expired => \"expired\",")?;
-    writeln!(
-        &mut out,
-        "        AuthLeasePhase::Refreshing => \"refreshing\","
-    )?;
-    writeln!(
-        &mut out,
-        "        AuthLeasePhase::ReauthRequired => \"reauth_required\","
-    )?;
-    writeln!(
-        &mut out,
-        "        AuthLeasePhase::Released => \"released\","
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "fn phase_from_wire(value: &serde_json::Value) -> Option<AuthLeasePhase> {{"
-    )?;
-    writeln!(&mut out, "    match value.as_str()? {{")?;
-    writeln!(
-        &mut out,
-        "        \"valid\" => Some(AuthLeasePhase::Valid),"
-    )?;
-    writeln!(
-        &mut out,
-        "        \"expiring\" => Some(AuthLeasePhase::Expiring),"
-    )?;
-    writeln!(
-        &mut out,
-        "        \"expired\" => Some(AuthLeasePhase::Expired),"
-    )?;
-    writeln!(
-        &mut out,
-        "        \"refreshing\" => Some(AuthLeasePhase::Refreshing),"
-    )?;
-    writeln!(
-        &mut out,
-        "        \"reauth_required\" => Some(AuthLeasePhase::ReauthRequired),"
-    )?;
-    writeln!(
-        &mut out,
-        "        \"released\" => Some(AuthLeasePhase::Released),"
-    )?;
-    writeln!(&mut out, "        _ => None,")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub(crate) fn encode_marker_value(marker: DurableAuthLifecycleMarker) -> serde_json::Value {{"
-    )?;
-    writeln!(&mut out, "    let mut map = serde_json::Map::new();")?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_PUBLISHED.to_string(), serde_json::Value::Bool(true));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_VERSION.to_string(), serde_json::Value::from(SCHEMA_VERSION));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_AUTHORITY.to_string(), serde_json::Value::String(AUTHORITY.to_string()));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_PROTOCOL.to_string(), serde_json::Value::String(PROTOCOL.to_string()));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_REALM.to_string(), serde_json::Value::String(marker.token_key.realm.as_str().to_string()));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_BINDING.to_string(), serde_json::Value::String(marker.token_key.binding.as_str().to_string()));"
-    )?;
-    writeln!(
-        &mut out,
-        "    if let Some(profile) = marker.token_key.profile.as_ref() {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::String(profile.as_str().to_string()));"
-    )?;
-    writeln!(&mut out, "    }} else {{")?;
-    writeln!(
-        &mut out,
-        "        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::Null);"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_PHASE.to_string(), serde_json::Value::String(phase_to_wire(marker.phase).to_string()));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_GENERATION.to_string(), serde_json::Value::from(marker.generation));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_EXPIRES_AT.to_string(), serde_json::Value::from(marker.expires_at));"
-    )?;
-    writeln!(
-        &mut out,
-        "    map.insert(FIELD_CREDENTIAL_PUBLISHED_AT_MILLIS.to_string(), serde_json::Value::from(marker.credential_published_at_millis));"
-    )?;
-    writeln!(&mut out, "    serde_json::Value::Object(map)")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub(crate) fn decode_marker_value(value: &serde_json::Value) -> Option<DurableAuthLifecycleMarker> {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    (value.get(FIELD_PUBLISHED)?.as_bool()? == true).then_some(())?;"
-    )?;
-    writeln!(
-        &mut out,
-        "    (value.get(FIELD_VERSION)?.as_u64()? == SCHEMA_VERSION).then_some(())?;"
-    )?;
-    writeln!(
-        &mut out,
-        "    (value.get(FIELD_AUTHORITY)?.as_str()? == AUTHORITY).then_some(())?;"
-    )?;
-    writeln!(
-        &mut out,
-        "    (value.get(FIELD_PROTOCOL)?.as_str()? == PROTOCOL).then_some(())?;"
-    )?;
-    writeln!(
-        &mut out,
-        "    let token_key = TokenKey::parse_with_profile("
-    )?;
-    writeln!(&mut out, "        value.get(FIELD_REALM)?.as_str()?,")?;
-    writeln!(&mut out, "        value.get(FIELD_BINDING)?.as_str()?,")?;
-    writeln!(
-        &mut out,
-        "        value.get(FIELD_PROFILE).and_then(serde_json::Value::as_str),"
-    )?;
-    writeln!(&mut out, "    ).ok()?;")?;
-    writeln!(&mut out, "    Some(DurableAuthLifecycleMarker {{")?;
-    writeln!(&mut out, "        token_key,")?;
-    writeln!(
-        &mut out,
-        "        phase: phase_from_wire(value.get(FIELD_PHASE)?)?,"
-    )?;
-    writeln!(
-        &mut out,
-        "        expires_at: value.get(FIELD_EXPIRES_AT)?.as_u64()?,"
-    )?;
-    writeln!(
-        &mut out,
-        "        generation: value.get(FIELD_GENERATION)?.as_u64()?,"
-    )?;
-    writeln!(
-        &mut out,
-        "        credential_published_at_millis: value.get(FIELD_CREDENTIAL_PUBLISHED_AT_MILLIS)?.as_u64()?,"
-    )?;
-    writeln!(&mut out, "    }})")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub(crate) fn read_marker_from_metadata(metadata: &serde_json::Value) -> Option<DurableAuthLifecycleMarker> {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    decode_marker_value(metadata.get(METADATA_KEY)?)"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub(crate) fn metadata_has_valid_marker(metadata: &serde_json::Value) -> bool {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    read_marker_from_metadata(metadata).is_some()"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub(crate) fn metadata_with_marker(metadata: &serde_json::Value, marker: DurableAuthLifecycleMarker) -> serde_json::Value {{"
-    )?;
-    writeln!(&mut out, "    let marker = encode_marker_value(marker);")?;
-    writeln!(&mut out, "    match metadata {{")?;
-    writeln!(&mut out, "        serde_json::Value::Object(map) => {{")?;
-    writeln!(&mut out, "            let mut map = map.clone();")?;
-    writeln!(
-        &mut out,
-        "            map.insert(METADATA_KEY.to_string(), marker);"
-    )?;
-    writeln!(&mut out, "            serde_json::Value::Object(map)")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "        serde_json::Value::Null => {{")?;
-    writeln!(
-        &mut out,
-        "            let mut map = serde_json::Map::new();"
-    )?;
-    writeln!(
-        &mut out,
-        "            map.insert(METADATA_KEY.to_string(), marker);"
-    )?;
-    writeln!(&mut out, "            serde_json::Value::Object(map)")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "        other => {{")?;
-    writeln!(
-        &mut out,
-        "            let mut map = serde_json::Map::new();"
-    )?;
-    writeln!(
-        &mut out,
-        "            map.insert(METADATA_KEY.to_string(), marker);"
-    )?;
-    writeln!(
-        &mut out,
-        "            map.insert(PREVIOUS_METADATA_KEY.to_string(), other.clone());"
-    )?;
-    writeln!(&mut out, "            serde_json::Value::Object(map)")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(&mut out, "#[cfg(not(target_arch = \"wasm32\"))]")?;
-    writeln!(
-        &mut out,
-        "pub(crate) fn restore_publication_from_metadata(metadata: &serde_json::Value, expected_key: &TokenKey) -> Option<AuthLeaseDurableRestorePublication> {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    let marker = read_marker_from_metadata(metadata)?;"
-    )?;
-    writeln!(
-        &mut out,
-        "    (&marker.token_key == expected_key).then_some(())?;"
-    )?;
-    writeln!(
-        &mut out,
-        "    Some(AuthLeaseDurableRestorePublication::from_marker_contract("
-    )?;
-    writeln!(&mut out, "            marker.token_key,")?;
-    writeln!(&mut out, "            marker.phase,")?;
-    writeln!(&mut out, "            marker.expires_at,")?;
-    writeln!(&mut out, "            marker.generation,")?;
-    writeln!(
-        &mut out,
-        "            marker.credential_published_at_millis,"
-    )?;
-    writeln!(&mut out, "    ))")?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "pub fn marker_payload_valid_for_tokens(tokens: &PersistedTokens, expected_key: &TokenKey) -> bool {{"
-    )?;
-    writeln!(
-        &mut out,
-        "    let Some(marker) = read_marker_from_metadata(&tokens.metadata) else {{"
-    )?;
-    writeln!(&mut out, "        return false;")?;
-    writeln!(&mut out, "    }};")?;
-    writeln!(
-        &mut out,
-        "    marker.token_key == *expected_key && marker.expires_at == crate::persisted_token_expires_at_epoch_secs(tokens)"
-    )?;
-    writeln!(&mut out, "}}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "// Relation semantics are selected by the composition durable-marker contract."
-    )?;
-    writeln!(&mut out, "pub fn marker_relation_for_tokens_and_snapshot(")?;
-    writeln!(&mut out, "    tokens: &PersistedTokens,")?;
-    writeln!(&mut out, "    snapshot: &AuthLeaseSnapshot,")?;
-    writeln!(&mut out, "    expected_key: &TokenKey,")?;
-    writeln!(&mut out, ") -> AuthLeaseDurableMarkerRelation {{")?;
-    writeln!(
-        &mut out,
-        "    let Some(marker) = read_marker_from_metadata(&tokens.metadata) else {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        return AuthLeaseDurableMarkerRelation::Invalid;"
-    )?;
-    writeln!(&mut out, "    }};")?;
-    writeln!(&mut out, "    if marker.token_key != *expected_key {{")?;
-    writeln!(
-        &mut out,
-        "        return AuthLeaseDurableMarkerRelation::Invalid;"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(
-        &mut out,
-        "    let token_expires_at = crate::persisted_token_expires_at_epoch_secs(tokens);"
-    )?;
-    writeln!(&mut out, "    if marker.expires_at != token_expires_at {{")?;
-    writeln!(
-        &mut out,
-        "        return AuthLeaseDurableMarkerRelation::Invalid;"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "    if !snapshot.credential_present {{")?;
-    writeln!(
-        &mut out,
-        "        return AuthLeaseDurableMarkerRelation::TokenStale;"
-    )?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(
-        &mut out,
-        "    let generation_matches = marker.generation == snapshot.generation;"
-    )?;
-    writeln!(
-        &mut out,
-        "    let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);"
-    )?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "    if let Some(snapshot_published_at) = snapshot.credential_published_at_millis {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        return match marker.credential_published_at_millis.cmp(&snapshot_published_at) {{"
-    )?;
-    writeln!(
-        &mut out,
-        "            std::cmp::Ordering::Greater => AuthLeaseDurableMarkerRelation::TokenNewer,"
-    )?;
-    writeln!(
-        &mut out,
-        "            std::cmp::Ordering::Less => AuthLeaseDurableMarkerRelation::TokenStale,"
-    )?;
-    writeln!(&mut out, "            std::cmp::Ordering::Equal => {{")?;
-    writeln!(
-        &mut out,
-        "                if token_expires_at == snapshot_expires_at && generation_matches {{"
-    )?;
-    writeln!(
-        &mut out,
-        "                    AuthLeaseDurableMarkerRelation::Matches"
-    )?;
-    writeln!(&mut out, "                }} else {{")?;
-    writeln!(
-        &mut out,
-        "                    AuthLeaseDurableMarkerRelation::Invalid"
-    )?;
-    writeln!(&mut out, "                }}")?;
-    writeln!(&mut out, "            }}")?;
-    writeln!(&mut out, "        }};")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out)?;
-    writeln!(
-        &mut out,
-        "    match token_expires_at.cmp(&snapshot_expires_at) {{"
-    )?;
-    writeln!(
-        &mut out,
-        "        std::cmp::Ordering::Greater => AuthLeaseDurableMarkerRelation::TokenNewer,"
-    )?;
-    writeln!(
-        &mut out,
-        "        std::cmp::Ordering::Less => AuthLeaseDurableMarkerRelation::TokenStale,"
-    )?;
-    writeln!(&mut out, "        std::cmp::Ordering::Equal => {{")?;
-    writeln!(&mut out, "            if generation_matches {{")?;
-    writeln!(
-        &mut out,
-        "                AuthLeaseDurableMarkerRelation::Matches"
-    )?;
-    writeln!(&mut out, "            }} else {{")?;
-    writeln!(
-        &mut out,
-        "                AuthLeaseDurableMarkerRelation::Invalid"
-    )?;
-    writeln!(&mut out, "            }}")?;
-    writeln!(&mut out, "        }}")?;
-    writeln!(&mut out, "    }}")?;
-    writeln!(&mut out, "}}")?;
+    // (Fixed) The durable-marker mechanism: the marker struct, the relation
+    // enum, the restore-publication newtype, the phase <-> wire codec, the
+    // encode/decode/metadata helpers, and the marker comparison relation. None
+    // of these carry a per-contract DECISION — they are parameterised solely by
+    // the schema-derived constants emitted above (METADATA_KEY, AUTHORITY,
+    // PROTOCOL, SCHEMA_VERSION, and the FIELD_* keys). The comparison relation
+    // is the single, fixed `AuthLeaseCredentialPublication` ordering relation
+    // selected by the composition durable-marker contract (the only
+    // `DurableMarkerRelationProtocol` variant); it is a pure ordering/equality
+    // relation with no schema to walk, so it is emitted verbatim once rather
+    // than re-derived line by line. The exhaustive `match contract.relation`
+    // above is the compile-time guard: this verbatim mechanism is only valid
+    // for `AuthLeaseCredentialPublication`, and adding a second relation variant
+    // breaks compilation there, forcing this block to be revisited.
+    out.push_str(AUTH_LEASE_DURABLE_MARKER_MECHANISM);
     Ok(out)
 }
+
+/// Field-agnostic, fixed durable-marker mechanism appended verbatim by
+/// [`generate_auth_lease_durable_lifecycle_marker_contract`].
+///
+/// This is the analogue of [`SESSION_PERSISTENCE_MECHANISM`]: it carries no
+/// per-contract decision. Every contract-specific fact (the metadata keys, the
+/// authority/protocol identity, the schema version, and the marker field keys)
+/// is emitted as a schema-derived `const` ahead of this block; the code here
+/// only references those constants. The marker comparison relation is the
+/// single fixed `AuthLeaseCredentialPublication` ordering/equality relation —
+/// there is no schema to walk for it — so it is an honest hand-written pure
+/// relation rendered verbatim, not a reducer pretending to be schema-derived.
+const AUTH_LEASE_DURABLE_MARKER_MECHANISM: &str = r#"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DurableAuthLifecycleMarker {
+    pub token_key: TokenKey,
+    pub phase: AuthLeasePhase,
+    pub expires_at: u64,
+    pub generation: u64,
+    pub credential_published_at_millis: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthLeaseDurableMarkerRelation {
+    Matches,
+    TokenNewer,
+    TokenStale,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLeaseDurableRestorePublication {
+    token_key: TokenKey,
+    phase: AuthLeasePhase,
+    expires_at: u64,
+    generation: u64,
+    credential_published_at_millis: u64,
+}
+
+impl AuthLeaseDurableRestorePublication {
+    pub fn token_key(&self) -> &TokenKey {
+        &self.token_key
+    }
+
+    pub fn phase(&self) -> AuthLeasePhase {
+        self.phase
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn credential_published_at_millis(&self) -> u64 {
+        self.credential_published_at_millis
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_marker_contract(
+        token_key: TokenKey,
+        phase: AuthLeasePhase,
+        expires_at: u64,
+        generation: u64,
+        credential_published_at_millis: u64,
+    ) -> Self {
+        Self {
+            token_key,
+            phase,
+            expires_at,
+            generation,
+            credential_published_at_millis,
+        }
+    }
+}
+
+fn phase_to_wire(phase: AuthLeasePhase) -> &'static str {
+    match phase {
+        AuthLeasePhase::Valid => "valid",
+        AuthLeasePhase::Expiring => "expiring",
+        AuthLeasePhase::Expired => "expired",
+        AuthLeasePhase::Refreshing => "refreshing",
+        AuthLeasePhase::ReauthRequired => "reauth_required",
+        AuthLeasePhase::Released => "released",
+    }
+}
+
+fn phase_from_wire(value: &serde_json::Value) -> Option<AuthLeasePhase> {
+    match value.as_str()? {
+        "valid" => Some(AuthLeasePhase::Valid),
+        "expiring" => Some(AuthLeasePhase::Expiring),
+        "expired" => Some(AuthLeasePhase::Expired),
+        "refreshing" => Some(AuthLeasePhase::Refreshing),
+        "reauth_required" => Some(AuthLeasePhase::ReauthRequired),
+        "released" => Some(AuthLeasePhase::Released),
+        _ => None,
+    }
+}
+
+pub(crate) fn encode_marker_value(marker: DurableAuthLifecycleMarker) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert(FIELD_PUBLISHED.to_string(), serde_json::Value::Bool(true));
+    map.insert(FIELD_VERSION.to_string(), serde_json::Value::from(SCHEMA_VERSION));
+    map.insert(FIELD_AUTHORITY.to_string(), serde_json::Value::String(AUTHORITY.to_string()));
+    map.insert(FIELD_PROTOCOL.to_string(), serde_json::Value::String(PROTOCOL.to_string()));
+    map.insert(FIELD_REALM.to_string(), serde_json::Value::String(marker.token_key.realm.as_str().to_string()));
+    map.insert(FIELD_BINDING.to_string(), serde_json::Value::String(marker.token_key.binding.as_str().to_string()));
+    if let Some(profile) = marker.token_key.profile.as_ref() {
+        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::String(profile.as_str().to_string()));
+    } else {
+        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::Null);
+    }
+    map.insert(FIELD_PHASE.to_string(), serde_json::Value::String(phase_to_wire(marker.phase).to_string()));
+    map.insert(FIELD_GENERATION.to_string(), serde_json::Value::from(marker.generation));
+    map.insert(FIELD_EXPIRES_AT.to_string(), serde_json::Value::from(marker.expires_at));
+    map.insert(FIELD_CREDENTIAL_PUBLISHED_AT_MILLIS.to_string(), serde_json::Value::from(marker.credential_published_at_millis));
+    serde_json::Value::Object(map)
+}
+
+pub(crate) fn decode_marker_value(value: &serde_json::Value) -> Option<DurableAuthLifecycleMarker> {
+    (value.get(FIELD_PUBLISHED)?.as_bool()? == true).then_some(())?;
+    (value.get(FIELD_VERSION)?.as_u64()? == SCHEMA_VERSION).then_some(())?;
+    (value.get(FIELD_AUTHORITY)?.as_str()? == AUTHORITY).then_some(())?;
+    (value.get(FIELD_PROTOCOL)?.as_str()? == PROTOCOL).then_some(())?;
+    let token_key = TokenKey::parse_with_profile(
+        value.get(FIELD_REALM)?.as_str()?,
+        value.get(FIELD_BINDING)?.as_str()?,
+        value.get(FIELD_PROFILE).and_then(serde_json::Value::as_str),
+    ).ok()?;
+    Some(DurableAuthLifecycleMarker {
+        token_key,
+        phase: phase_from_wire(value.get(FIELD_PHASE)?)?,
+        expires_at: value.get(FIELD_EXPIRES_AT)?.as_u64()?,
+        generation: value.get(FIELD_GENERATION)?.as_u64()?,
+        credential_published_at_millis: value.get(FIELD_CREDENTIAL_PUBLISHED_AT_MILLIS)?.as_u64()?,
+    })
+}
+
+pub(crate) fn read_marker_from_metadata(metadata: &serde_json::Value) -> Option<DurableAuthLifecycleMarker> {
+    decode_marker_value(metadata.get(METADATA_KEY)?)
+}
+
+pub(crate) fn metadata_has_valid_marker(metadata: &serde_json::Value) -> bool {
+    read_marker_from_metadata(metadata).is_some()
+}
+
+pub(crate) fn metadata_with_marker(metadata: &serde_json::Value, marker: DurableAuthLifecycleMarker) -> serde_json::Value {
+    let marker = encode_marker_value(marker);
+    match metadata {
+        serde_json::Value::Object(map) => {
+            let mut map = map.clone();
+            map.insert(METADATA_KEY.to_string(), marker);
+            serde_json::Value::Object(map)
+        }
+        serde_json::Value::Null => {
+            let mut map = serde_json::Map::new();
+            map.insert(METADATA_KEY.to_string(), marker);
+            serde_json::Value::Object(map)
+        }
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert(METADATA_KEY.to_string(), marker);
+            map.insert(PREVIOUS_METADATA_KEY.to_string(), other.clone());
+            serde_json::Value::Object(map)
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn restore_publication_from_metadata(metadata: &serde_json::Value, expected_key: &TokenKey) -> Option<AuthLeaseDurableRestorePublication> {
+    let marker = read_marker_from_metadata(metadata)?;
+    (&marker.token_key == expected_key).then_some(())?;
+    Some(AuthLeaseDurableRestorePublication::from_marker_contract(
+            marker.token_key,
+            marker.phase,
+            marker.expires_at,
+            marker.generation,
+            marker.credential_published_at_millis,
+    ))
+}
+
+pub fn marker_payload_valid_for_tokens(tokens: &PersistedTokens, expected_key: &TokenKey) -> bool {
+    let Some(marker) = read_marker_from_metadata(&tokens.metadata) else {
+        return false;
+    };
+    marker.token_key == *expected_key && marker.expires_at == crate::persisted_token_expires_at_epoch_secs(tokens)
+}
+
+// Relation semantics are selected by the composition durable-marker contract.
+pub fn marker_relation_for_tokens_and_snapshot(
+    tokens: &PersistedTokens,
+    snapshot: &AuthLeaseSnapshot,
+    expected_key: &TokenKey,
+) -> AuthLeaseDurableMarkerRelation {
+    let Some(marker) = read_marker_from_metadata(&tokens.metadata) else {
+        return AuthLeaseDurableMarkerRelation::Invalid;
+    };
+    if marker.token_key != *expected_key {
+        return AuthLeaseDurableMarkerRelation::Invalid;
+    }
+    let token_expires_at = crate::persisted_token_expires_at_epoch_secs(tokens);
+    if marker.expires_at != token_expires_at {
+        return AuthLeaseDurableMarkerRelation::Invalid;
+    }
+    if !snapshot.credential_present {
+        return AuthLeaseDurableMarkerRelation::TokenStale;
+    }
+    let generation_matches = marker.generation == snapshot.generation;
+    let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
+
+    if let Some(snapshot_published_at) = snapshot.credential_published_at_millis {
+        return match marker.credential_published_at_millis.cmp(&snapshot_published_at) {
+            std::cmp::Ordering::Greater => AuthLeaseDurableMarkerRelation::TokenNewer,
+            std::cmp::Ordering::Less => AuthLeaseDurableMarkerRelation::TokenStale,
+            std::cmp::Ordering::Equal => {
+                if token_expires_at == snapshot_expires_at && generation_matches {
+                    AuthLeaseDurableMarkerRelation::Matches
+                } else {
+                    AuthLeaseDurableMarkerRelation::Invalid
+                }
+            }
+        };
+    }
+
+    match token_expires_at.cmp(&snapshot_expires_at) {
+        std::cmp::Ordering::Greater => AuthLeaseDurableMarkerRelation::TokenNewer,
+        std::cmp::Ordering::Less => AuthLeaseDurableMarkerRelation::TokenStale,
+        std::cmp::Ordering::Equal => {
+            if generation_matches {
+                AuthLeaseDurableMarkerRelation::Matches
+            } else {
+                AuthLeaseDurableMarkerRelation::Invalid
+            }
+        }
+    }
+}
+"#;
 
 pub fn render_auth_lease_durable_lifecycle_marker_contract(
     compositions: &[CompositionSchema],

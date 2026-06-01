@@ -371,6 +371,54 @@ impl WorkGraphMachine {
         })
     }
 
+    /// Resolve whether a requested completion policy is admissible at CREATE for
+    /// a non-goal work item.
+    ///
+    /// The creation policy "non-goal work items must use the self-attest
+    /// completion policy" is owned by the canonical `WorkGraphLifecycleMachine`,
+    /// not the create shell. The shell performs only a pure typed extraction of
+    /// the requested completion policy into the DSL observation, drives the
+    /// machine's `ClassifyCreateCompletionPolicyAdmission` input over a fresh
+    /// authority, and mirrors the emitted
+    /// `CreateCompletionPolicyAdmissionClassified` verdict. The shell decides
+    /// nothing and fails closed if the machine refuses or emits no verdict.
+    pub fn classify_create_completion_policy_admission(
+        completion_policy: &crate::types::WorkCompletionPolicy,
+    ) -> Result<wg_dsl::WorkCreateCompletionPolicyAdmissionKind, WorkGraphError> {
+        let policy = completion_policy.to_machine();
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::ClassifyCreateCompletionPolicyAdmission {
+                completion_policy: policy,
+            },
+        )
+        .map_err(|error| {
+            WorkGraphError::InvalidInput(format!(
+                "WorkGraphLifecycle refused create completion-policy admission for {policy:?}: {error:?}"
+            ))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::CreateCompletionPolicyAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "WorkGraphLifecycle create completion-policy admission emitted multiple verdicts for {policy:?}"
+                )));
+            }
+        }
+
+        admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "WorkGraphLifecycle create completion-policy admission emitted no verdict for {policy:?}"
+            ))
+        })
+    }
+
     /// Resolve whether a requested completion-policy mutation is admissible.
     ///
     /// The immutability invariant "a work item's completion policy is fixed at
@@ -851,20 +899,33 @@ impl WorkGraphMachine {
         request: CloseWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        let dsl_input = match request.status {
-            WorkStatus::Completed => wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Cancelled => wg_dsl::WorkGraphLifecycleInput::CloseCancelled {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Failed => wg_dsl::WorkGraphLifecycleInput::CloseFailed {
-                expected_revision: request.expected_revision,
-                at_utc_ms: datetime_to_millis(now),
-            },
-            WorkStatus::Open | WorkStatus::InProgress | WorkStatus::Blocked => {
+        // The lifecycle-class fact "close requires a terminal status" is owned
+        // by WorkGraphLifecycleMachine, not this shell. We extract the requested
+        // target status as a pure typed observation, drive the machine's
+        // admission classifier, and mirror the verdict: AdmittedCompleted ->
+        // CloseCompleted, AdmittedCancelled -> CloseCancelled, AdmittedFailed ->
+        // CloseFailed, DeniedNonTerminal -> the exact same InvalidTransition
+        // rejection. Fails closed.
+        let dsl_input = match classify_close_status_admission(request.status)? {
+            wg_dsl::WorkCloseStatusAdmissionKind::AdmittedCompleted => {
+                wg_dsl::WorkGraphLifecycleInput::CloseCompleted {
+                    expected_revision: request.expected_revision,
+                    at_utc_ms: datetime_to_millis(now),
+                }
+            }
+            wg_dsl::WorkCloseStatusAdmissionKind::AdmittedCancelled => {
+                wg_dsl::WorkGraphLifecycleInput::CloseCancelled {
+                    expected_revision: request.expected_revision,
+                    at_utc_ms: datetime_to_millis(now),
+                }
+            }
+            wg_dsl::WorkCloseStatusAdmissionKind::AdmittedFailed => {
+                wg_dsl::WorkGraphLifecycleInput::CloseFailed {
+                    expected_revision: request.expected_revision,
+                    at_utc_ms: datetime_to_millis(now),
+                }
+            }
+            wg_dsl::WorkCloseStatusAdmissionKind::DeniedNonTerminal => {
                 return Err(WorkGraphError::InvalidTransition(
                     "close requires a terminal status".to_string(),
                 ));
@@ -1109,6 +1170,51 @@ fn classify_create_status_admission(
     admission.ok_or_else(|| {
         WorkGraphError::Store(format!(
             "WorkGraphLifecycle create-status admission emitted no verdict for {requested_status:?}"
+        ))
+    })
+}
+
+/// Resolve whether a requested target lifecycle status is an admissible CLOSE
+/// target.
+///
+/// The shell performs only a pure typed extraction of the requested
+/// `WorkStatus` into the machine's `WorkLifecycleState` observation. The
+/// lifecycle-class fact "close requires a terminal status" is owned by the
+/// canonical `WorkGraphLifecycleMachine`: this drives its
+/// `ClassifyCloseStatusAdmission` input over a fresh authority and mirrors the
+/// emitted `CloseStatusAdmissionClassified` verdict. The shell decides nothing
+/// and fails closed if the machine refuses or emits no verdict.
+fn classify_close_status_admission(
+    status: WorkStatus,
+) -> Result<wg_dsl::WorkCloseStatusAdmissionKind, WorkGraphError> {
+    let requested_status = crate::types::work_lifecycle_state_from_status(status);
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+    let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+        &mut dsl_auth,
+        wg_dsl::WorkGraphLifecycleInput::ClassifyCloseStatusAdmission { requested_status },
+    )
+    .map_err(|error| {
+        WorkGraphError::InvalidTransition(format!(
+            "WorkGraphLifecycle refused close-status admission for {requested_status:?}: {error:?}"
+        ))
+    })?;
+
+    let mut admission = None;
+    for effect in transition.effects() {
+        if let wg_dsl::WorkGraphLifecycleEffect::CloseStatusAdmissionClassified {
+            admission: emitted,
+        } = effect
+            && admission.replace(*emitted).is_some()
+        {
+            return Err(WorkGraphError::Store(format!(
+                "WorkGraphLifecycle close-status admission emitted multiple verdicts for {requested_status:?}"
+            )));
+        }
+    }
+
+    admission.ok_or_else(|| {
+        WorkGraphError::Store(format!(
+            "WorkGraphLifecycle close-status admission emitted no verdict for {requested_status:?}"
         ))
     })
 }
@@ -1630,6 +1736,97 @@ mod tests {
                 Admission::DeniedRequiresTrustedHost,
                 "policy {policy:?} must require trusted host for public confirmation"
             );
+        }
+    }
+
+    #[test]
+    fn create_completion_policy_admission_is_decided_by_machine() {
+        use wg_dsl::WorkCreateCompletionPolicyAdmissionKind as Admission;
+        // The machine owns the "non-goal work items must use self_attest"
+        // creation policy.
+        assert_eq!(
+            WorkGraphMachine::classify_create_completion_policy_admission(
+                &WorkCompletionPolicy::SelfAttest
+            )
+            .expect("self-attest admission"),
+            Admission::Admitted
+        );
+        let owner_key = WorkOwnerKey::label("supervisor").expect("owner key");
+        let denied = [
+            WorkCompletionPolicy::HostConfirmed,
+            WorkCompletionPolicy::PrincipalConfirmed,
+            WorkCompletionPolicy::Supervisor { owner_key },
+            WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+        ];
+        for policy in denied {
+            assert_eq!(
+                WorkGraphMachine::classify_create_completion_policy_admission(&policy)
+                    .unwrap_or_else(|error| panic!("classify {policy:?}: {error:?}")),
+                Admission::DeniedNonSelfAttest,
+                "policy {policy:?} must be denied at create for a non-goal work item"
+            );
+        }
+    }
+
+    #[test]
+    fn close_status_admission_is_decided_by_machine() {
+        use wg_dsl::WorkCloseStatusAdmissionKind as Admission;
+        // The machine owns the "close requires a terminal status" lifecycle
+        // class fact.
+        assert_eq!(
+            classify_close_status_admission(WorkStatus::Completed).expect("classify completed"),
+            Admission::AdmittedCompleted
+        );
+        assert_eq!(
+            classify_close_status_admission(WorkStatus::Cancelled).expect("classify cancelled"),
+            Admission::AdmittedCancelled
+        );
+        assert_eq!(
+            classify_close_status_admission(WorkStatus::Failed).expect("classify failed"),
+            Admission::AdmittedFailed
+        );
+        for status in [
+            WorkStatus::Open,
+            WorkStatus::InProgress,
+            WorkStatus::Blocked,
+        ] {
+            assert_eq!(
+                classify_close_status_admission(status)
+                    .unwrap_or_else(|error| panic!("classify {status:?}: {error:?}")),
+                Admission::DeniedNonTerminal,
+                "requested close status {status:?} must be denied as a non-terminal target"
+            );
+        }
+    }
+
+    #[test]
+    fn close_item_rejects_non_terminal_status_with_preserved_message() {
+        let now = Utc::now();
+        for status in [
+            WorkStatus::Open,
+            WorkStatus::InProgress,
+            WorkStatus::Blocked,
+        ] {
+            let item = create("close-target", now);
+            let error = WorkGraphMachine::close_item(
+                item.clone(),
+                CloseWorkItemRequest {
+                    id: item.id.clone(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: item.revision,
+                    status,
+                },
+                now,
+            )
+            .expect_err("non-terminal close status must be rejected");
+            match error {
+                WorkGraphError::InvalidTransition(message) => assert_eq!(
+                    message, "close requires a terminal status",
+                    "rejection message preserved for {status:?}"
+                ),
+                other => panic!("expected InvalidTransition for {status:?}, got {other:?}"),
+            }
         }
     }
 

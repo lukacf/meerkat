@@ -1704,6 +1704,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "WorkGraphLifecycleMachine",
+            "CreateCompletionPolicyAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph create-time completion-policy admission verdict (Admitted/DeniedNonSelfAttest) is decided by WorkGraphLifecycleMachine from the requested completion_policy observation; the create shell mirrors it (DeniedNonSelfAttest -> InvalidInput) instead of deciding the non-goal-must-be-self-attest creation policy itself",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "CloseStatusAdmissionClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "WorkGraph close-status admission verdict (AdmittedCompleted/AdmittedCancelled/AdmittedFailed/DeniedNonTerminal) is decided by WorkGraphLifecycleMachine from the requested close-target status observation; the close shell mirrors it (AdmittedCompleted -> CloseCompleted, AdmittedCancelled -> CloseCancelled, AdmittedFailed -> CloseFailed, DeniedNonTerminal -> InvalidTransition) instead of deciding the close-requires-terminal lifecycle-class fact itself",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
             "PublicConfirmationAdmissionClassified",
             SeamClassification::SurfaceResultAlignment,
             "WorkGraph public-confirmation admission verdict (Admitted/DeniedRequiresTrustedHost) is decided by WorkGraphLifecycleMachine from the machine-owned completion_policy observation; the public-confirm surface mirrors it (DeniedRequiresTrustedHost -> InvalidInput) instead of deciding the trust-scoped eligibility itself",

@@ -46,6 +46,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyTerminality`
 - `ClassifyBlockerSatisfied`(blocker_present: Bool, blocker_lifecycle_phase: WorkLifecycleState)
 - `ClassifyCreateStatusAdmission`(requested_status: WorkLifecycleState)
+- `ClassifyCreateCompletionPolicyAdmission`(completion_policy: WorkCompletionPolicy)
+- `ClassifyCloseStatusAdmission`(requested_status: WorkLifecycleState)
 - `ClassifyPublicConfirmationAdmission`(completion_policy: WorkCompletionPolicy)
 - `ClassifyCompletionPolicyMutationAdmission`(requested_completion_policy: WorkCompletionPolicy, requested_completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_completion_reviewer_quorum_threshold: Option<u64>)
 - `ClassifyConfirmationAdmission`(completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>, supplied_evidence_kind: WorkConfirmationEvidenceObservation)
@@ -66,6 +68,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WorkItemTerminalityClassified`(terminal: Bool)
 - `BlockerSatisfactionClassified`(satisfied: Bool)
 - `CreateStatusAdmissionClassified`(admission: WorkCreateStatusAdmissionKind)
+- `CreateCompletionPolicyAdmissionClassified`(admission: WorkCreateCompletionPolicyAdmissionKind)
+- `CloseStatusAdmissionClassified`(admission: WorkCloseStatusAdmissionKind)
 - `PublicConfirmationAdmissionClassified`(admission: WorkPublicConfirmationAdmissionKind)
 - `CompletionPolicyMutationAdmissionClassified`(admission: WorkCompletionPolicyMutationAdmissionKind)
 - `ConfirmationAdmissionClassified`(admission: WorkConfirmationAdmissionKind)
@@ -1208,6 +1212,678 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `requested_failed`
 - Emits: `CreateStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestAbsent`
+- From: `Absent`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestOpen`
+- From: `Open`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestInProgress`
+- From: `InProgress`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestBlocked`
+- From: `Blocked`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestCompleted`
+- From: `Completed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestCancelled`
+- From: `Cancelled`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCreateCompletionPolicyAdmissionSelfAttestFailed`
+- From: `Failed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `self_attest_admissible_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedAbsent`
+- From: `Absent`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedOpen`
+- From: `Open`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedInProgress`
+- From: `InProgress`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedBlocked`
+- From: `Blocked`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedCompleted`
+- From: `Completed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCreateCompletionPolicyAdmissionHostConfirmedFailed`
+- From: `Failed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `host_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedAbsent`
+- From: `Absent`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedOpen`
+- From: `Open`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedInProgress`
+- From: `InProgress`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedBlocked`
+- From: `Blocked`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCompleted`
+- From: `Completed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedFailed`
+- From: `Failed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `principal_confirmed_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorAbsent`
+- From: `Absent`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorOpen`
+- From: `Open`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorInProgress`
+- From: `InProgress`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorBlocked`
+- From: `Blocked`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorCompleted`
+- From: `Completed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorCancelled`
+- From: `Cancelled`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCreateCompletionPolicyAdmissionSupervisorFailed`
+- From: `Failed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `supervisor_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumAbsent`
+- From: `Absent`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumOpen`
+- From: `Open`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumInProgress`
+- From: `InProgress`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumBlocked`
+- From: `Blocked`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCompleted`
+- From: `Completed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCancelled`
+- From: `Cancelled`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumFailed`
+- From: `Failed`
+- On: `ClassifyCreateCompletionPolicyAdmission`(completion_policy)
+- Guards:
+  - `reviewer_quorum_denied_at_create`
+- Emits: `CreateCompletionPolicyAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionCompletedAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionCompletedOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionCompletedInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionCompletedBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionCompletedCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionCompletedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionCompletedFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_completed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionCancelledAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionCancelledOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionCancelledInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionCancelledBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionCancelledCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionCancelledCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionCancelledFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_cancelled`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionFailedAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionFailedOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionFailedInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionFailedBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionFailedCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionFailedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionFailedFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_failed`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionDeniedAbsentFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_absent`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionDeniedOpenFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_open`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionDeniedInProgressFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_in_progress`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Failed`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedAbsent`
+- From: `Absent`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Absent`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedOpen`
+- From: `Open`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Open`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedInProgress`
+- From: `InProgress`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `InProgress`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedBlocked`
+- From: `Blocked`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Blocked`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedCompleted`
+- From: `Completed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Completed`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedCancelled`
+- From: `Cancelled`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
+- To: `Cancelled`
+
+### `ClassifyCloseStatusAdmissionDeniedBlockedFailed`
+- From: `Failed`
+- On: `ClassifyCloseStatusAdmission`(requested_status)
+- Guards:
+  - `requested_blocked`
+- Emits: `CloseStatusAdmissionClassified`
 - To: `Failed`
 
 ### `ClassifyPublicConfirmationAdmissionSelfAttestAbsent`

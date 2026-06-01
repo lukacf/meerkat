@@ -443,6 +443,258 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyCreateStatusAdmissionDeniedFailedFailed`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSelfAttestFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionHostConfirmedFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmedFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionSupervisorFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCreateCompletionPolicyAdmissionReviewerQuorumFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCompletedFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionCancelledFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionFailedFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedAbsentFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedOpenFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedInProgressFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedAbsent`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedOpen`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedInProgress`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedBlocked`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedCompleted`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedCancelled`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `ClassifyCloseStatusAdmissionDeniedBlockedFailed`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
 - `ClassifyPublicConfirmationAdmissionSelfAttestAbsent`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`
@@ -754,6 +1006,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CreateStatusAdmissionClassified`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
+- `CreateCompletionPolicyAdmissionClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
+- `CloseStatusAdmissionClassified`
+  - anchors: `workgraph_lifecycle`
+  - scenarios: `workgraph_block_close_evidence`
 - `PublicConfirmationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_block_close_evidence`

@@ -669,3 +669,47 @@ Denied -> access_denied, fails closed. Empty-specs spawn_many deny preserved + n
 
 Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; classifier ratchet pass;
 mob+mob-mcp --all-features 1262/2385 passed; seam 0 debt; clippy --all-features -D warnings clean.
+
+## CONVERGENCE ROUND 11 — workgraph completion-policy/status class fully drained + emitter theater resolved
+sweep: 2 LOW-possible borderline, NO confirmed violations (STRONG compliance, 15 domains clean). alpha
+VIOLATIONS 1 (auth_lease marker emitter fold-theater MEDIUM). beta VIOLATIONS 2 (create completion-policy
+MEDIUM-certain + close_item status LOW). All 3 are SIBLINGS of folded classes; folded + comprehensive
+sibling-check drained both classes whole:
+
+### FOLDED — create completion-policy admission -> WorkGraphLifecycle (beta MEDIUM)
+service.rs create decided `completion_policy != SelfAttest -> Err(non-goal items must use self_attest)` in
+shell. -> WorkGraphLifecycle ClassifyCreateCompletionPolicyAdmission { completion_policy } ->
+{ Admitted | DeniedNonSelfAttest }; shell mirrors DeniedNonSelfAttest -> exact InvalidInput message.
+create_goal unaffected (calls create_item directly; goals legitimately use non-self-attest).
+
+### FOLDED — close_item status admission -> WorkGraphLifecycle (beta LOW)
+machine.rs close_item rejected non-terminal close targets in shell (Open|InProgress|Blocked -> "close requires
+a terminal status"). -> ClassifyCloseStatusAdmission { requested_status } -> { DeniedNonTerminal |
+AdmittedCompleted|Cancelled|Failed } (twin of ClassifyCreateStatusAdmission); shell mirrors, exact message.
+
+### FIXED — auth_lease durable-marker emitter de-theming (alpha MEDIUM fold-theater)
+xtask emitter hand-baked the ~459-line marker mechanism as inline writeln! pretending schema-derivation. The
+marker is a pure ordering/equality relation (single protocol variant, no schema to walk). Made it an HONEST
+hand witness: extracted to a verbatim const AUTH_LEASE_DURABLE_MARKER_MECHANISM (mirroring SESSION_PERSISTENCE_
+MECHANISM), honestly framed as field-agnostic-mechanism parameterized by schema-derived consts. Generated output
+BYTE-IDENTICAL to HEAD; auth_lease_durable_marker_witness purity ratchet still passes; audit-generated-headers honest.
+
+### COMPREHENSIVE SIBLING-CHECK (both classes fully drained):
+- Workgraph policy/status admissions: per-site dispositioned every service.rs+machine.rs InvalidTransition/policy
+  site. The 2 genuine (create-policy, close-status) FOLDED. All others are (ii) MIRRORS of already-folded
+  classifiers (create-status Denied arm, terminality/eligibility, public-confirm, policy-mutation, confirmation
+  admission) or (iii) defensive reserved-namespace + structural validate_completion_policy. No genuine unfolded
+  sibling remains (no update/other-path completion-policy/status admission left shell-decided).
+- Emitter theater: NO other emitter hand-bakes a semantic reducer. terminal_surface_mapping schema-walks (queries
+  machine guards); session_document/turn_admission/approval render from machine AST; comms_trust forwards to the
+  machine verdict. auth_lease was the sole theater sibling; now fixed.
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; classifier + auth_lease
+marker-purity ratchets pass; workgraph+core+auth-core --all-features 1391 passed; seam 0 debt;
+audit-generated-headers 37 paths all honest.
+
+### DEFENDED — round-11 sweep LOW-possible (NO confirmed violations per sweep coverage):
+- oauth device-flow Missing/expired TTL bookkeeping (transient pre-credential handshake registry; sweep itself
+  judged likely-out-of-canonical-machine-scope).
+- ensure_supervisor_authorized None-cause arm `None => false` (fail-closed no-rebind for an absent typed cause;
+  the typed-cause path is machine-routed via ClassifyBridgeRejectionRecovery).

@@ -258,6 +258,65 @@ pub enum WorkCreateStatusAdmissionKind {
     AdmittedBlocked,
 }
 
+/// Machine-owned admission verdict for the requested `completion_policy` of a
+/// newly created NON-GOAL work item. This machine — not the shell — owns the
+/// creation policy "non-goal work items must use the self-attest completion
+/// policy". The shell extracts the requested completion policy as a pure typed
+/// observation (a `WorkCompletionPolicy`), drives
+/// `ClassifyCreateCompletionPolicyAdmission`, and mirrors the verdict:
+/// `Admitted` -> proceed, `DeniedNonSelfAttest` -> reject with the same
+/// `InvalidInput` rejection. Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCreateCompletionPolicyAdmissionKind {
+    #[default]
+    DeniedNonSelfAttest,
+    Admitted,
+}
+
+/// Machine-owned admission verdict for the requested target lifecycle status of
+/// a `close` operation. This machine — not the shell — owns the lifecycle-class
+/// fact "close requires a terminal status". The shell extracts the requested
+/// target status as a pure typed observation (a `WorkLifecycleState`), drives
+/// `ClassifyCloseStatusAdmission`, and mirrors the verdict:
+/// `AdmittedCompleted` -> drive `CloseCompleted`, `AdmittedCancelled` -> drive
+/// `CloseCancelled`, `AdmittedFailed` -> drive `CloseFailed`,
+/// `DeniedNonTerminal` -> reject with the same `InvalidTransition` rejection.
+/// Fails closed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCloseStatusAdmissionKind {
+    #[default]
+    DeniedNonTerminal,
+    AdmittedCompleted,
+    AdmittedCancelled,
+    AdmittedFailed,
+}
+
 /// Machine-owned admission verdict for a PUBLIC (untrusted) goal-confirmation
 /// over a work item's machine-owned `completion_policy`. This machine — not the
 /// shell — owns the trust-scoped eligibility "only a self-attested completion
@@ -544,6 +603,29 @@ machine! {
             // verdict (AdmittedOpen -> CreateOpen, AdmittedBlocked ->
             // CreateBlocked, Denied -> InvalidTransition), failing closed.
             ClassifyCreateStatusAdmission { requested_status: Enum<WorkLifecycleState> },
+            // Create-time completion-policy admission classification. This
+            // machine owns the creation policy "non-goal work items must use the
+            // self-attest completion policy". The shell extracts the requested
+            // completion policy as a pure typed observation (a
+            // WorkCompletionPolicy) and feeds it here; this machine decides
+            // whether that policy is admissible at create and emits
+            // CreateCompletionPolicyAdmissionClassified. The shell mirrors the
+            // verdict (Admitted -> proceed, DeniedNonSelfAttest -> InvalidInput),
+            // failing closed. Phase-independent: self-loops over every phase so
+            // the classification is total regardless of the authority phase.
+            ClassifyCreateCompletionPolicyAdmission { completion_policy: Enum<WorkCompletionPolicy> },
+            // Close-status admission classification. This machine owns the
+            // lifecycle-class fact "close requires a terminal status" — i.e.
+            // which statuses are admissible as a CLOSE target. The shell extracts
+            // the requested target status as a pure typed observation (a
+            // WorkLifecycleState) and feeds it here; this machine decides
+            // admissibility and emits CloseStatusAdmissionClassified. The shell
+            // mirrors the verdict (AdmittedCompleted -> CloseCompleted,
+            // AdmittedCancelled -> CloseCancelled, AdmittedFailed -> CloseFailed,
+            // DeniedNonTerminal -> InvalidTransition), failing closed.
+            // Phase-independent: self-loops over every phase so the
+            // classification is total regardless of the authority phase.
+            ClassifyCloseStatusAdmission { requested_status: Enum<WorkLifecycleState> },
             // Public-confirmation admission classification. This machine owns
             // the trust-scoped eligibility "only a self-attested completion
             // policy may be confirmed by an untrusted public caller". The
@@ -617,6 +699,10 @@ machine! {
             WorkItemTerminalityClassified { terminal: bool },
             BlockerSatisfactionClassified { satisfied: bool },
             CreateStatusAdmissionClassified { admission: Enum<WorkCreateStatusAdmissionKind> },
+            CreateCompletionPolicyAdmissionClassified {
+                admission: Enum<WorkCreateCompletionPolicyAdmissionKind>,
+            },
+            CloseStatusAdmissionClassified { admission: Enum<WorkCloseStatusAdmissionKind> },
             PublicConfirmationAdmissionClassified {
                 admission: Enum<WorkPublicConfirmationAdmissionKind>,
             },
@@ -872,6 +958,8 @@ machine! {
         disposition WorkItemTerminalityClassified => local,
         disposition BlockerSatisfactionClassified => local,
         disposition CreateStatusAdmissionClassified => local,
+        disposition CreateCompletionPolicyAdmissionClassified => local,
+        disposition CloseStatusAdmissionClassified => local,
         disposition PublicConfirmationAdmissionClassified => local,
         disposition CompletionPolicyMutationAdmissionClassified => local,
         disposition ConfirmationAdmissionClassified => local,
@@ -1703,6 +1791,134 @@ machine! {
             update {}
             to Absent
             emit CreateStatusAdmissionClassified { admission: WorkCreateStatusAdmissionKind::Denied }
+        }
+
+        // --- Create-time completion-policy admission classification ---
+        //
+        // This machine owns the creation policy "non-goal work items must use the
+        // self-attest completion policy". The shell extracts the requested
+        // completion policy as a pure typed WorkCompletionPolicy observation and
+        // drives this input; this machine decides admissibility and emits the
+        // verdict. SelfAttest -> Admitted, every other policy ->
+        // DeniedNonSelfAttest. Phase-independent: self-loops over every phase so
+        // the classification is total regardless of the authority phase.
+        transition ClassifyCreateCompletionPolicyAdmissionSelfAttest {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "self_attest_admissible_at_create" { completion_policy == WorkCompletionPolicy::SelfAttest }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::Admitted }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionHostConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "host_confirmed_denied_at_create" { completion_policy == WorkCompletionPolicy::HostConfirmed }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionPrincipalConfirmed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "principal_confirmed_denied_at_create" { completion_policy == WorkCompletionPolicy::PrincipalConfirmed }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionSupervisor {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "supervisor_denied_at_create" { completion_policy == WorkCompletionPolicy::Supervisor }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        transition ClassifyCreateCompletionPolicyAdmissionReviewerQuorum {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCreateCompletionPolicyAdmission { completion_policy }
+            guard "reviewer_quorum_denied_at_create" { completion_policy == WorkCompletionPolicy::ReviewerQuorum }
+            update {}
+            to Absent
+            emit CreateCompletionPolicyAdmissionClassified { admission: WorkCreateCompletionPolicyAdmissionKind::DeniedNonSelfAttest }
+        }
+
+        // --- Close-status admission classification ---
+        //
+        // This machine owns the lifecycle-class fact "close requires a terminal
+        // status". The shell extracts the requested target status as a pure typed
+        // WorkLifecycleState observation and drives this input; this machine
+        // decides which statuses are admissible as a CLOSE target and emits the
+        // verdict. Completed -> AdmittedCompleted, Cancelled -> AdmittedCancelled,
+        // Failed -> AdmittedFailed, every non-terminal status (Absent / Open /
+        // InProgress / Blocked) -> DeniedNonTerminal. Phase-independent:
+        // self-loops over every phase so the classification is total regardless
+        // of the authority's phase.
+        transition ClassifyCloseStatusAdmissionCompleted {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_completed" { requested_status == WorkLifecycleState::Completed }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::AdmittedCompleted }
+        }
+
+        transition ClassifyCloseStatusAdmissionCancelled {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_cancelled" { requested_status == WorkLifecycleState::Cancelled }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::AdmittedCancelled }
+        }
+
+        transition ClassifyCloseStatusAdmissionFailed {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_failed" { requested_status == WorkLifecycleState::Failed }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::AdmittedFailed }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedAbsent {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_absent" { requested_status == WorkLifecycleState::Absent }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedOpen {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_open" { requested_status == WorkLifecycleState::Open }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedInProgress {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_in_progress" { requested_status == WorkLifecycleState::InProgress }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
+        }
+
+        transition ClassifyCloseStatusAdmissionDeniedBlocked {
+            per_phase [Absent, Open, InProgress, Blocked, Completed, Cancelled, Failed]
+            on input ClassifyCloseStatusAdmission { requested_status }
+            guard "requested_blocked" { requested_status == WorkLifecycleState::Blocked }
+            update {}
+            to Absent
+            emit CloseStatusAdmissionClassified { admission: WorkCloseStatusAdmissionKind::DeniedNonTerminal }
         }
 
         // --- Public-confirmation admission classification ---

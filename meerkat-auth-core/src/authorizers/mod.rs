@@ -16,8 +16,8 @@ use meerkat_core::AuthError;
 use meerkat_core::RefreshFailureObservation;
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::handles::{
-    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, DslTransitionError,
-    GeneratedAuthLeaseHandle, LeaseKey,
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, CredentialUseDisposition,
+    CredentialUseIntent, DslTransitionError, GeneratedAuthLeaseHandle, LeaseKey,
 };
 
 /// Shared closure type for env-variable lookup. Used by authorizers that
@@ -165,6 +165,8 @@ impl LeaseFreshnessObserver {
 
     fn try_begin_refresh(&self, authorizer_label: &str) -> Result<LeaseRefreshStart, AuthError> {
         let now = Utc::now();
+        // Drive the machine's freshness classification first so the
+        // credential-use admission below reads the up-to-date phase.
         self.handle
             .observe_credential_freshness(
                 &self.lease_key,
@@ -172,16 +174,31 @@ impl LeaseFreshnessObserver {
                 AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
             )
             .map_err(|err| self.observer_error(authorizer_label, "observe_freshness", err))?;
-        match self.handle.snapshot(&self.lease_key).phase {
-            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring | AuthLeasePhase::Expired) => {
+        // The begin-refresh disposition is owned by the per-binding AuthMachine:
+        // we feed only the typed `BeginRefresh` intent and mirror the verdict.
+        // No handwritten `phase -> disposition` fork lives here.
+        let disposition = self
+            .handle
+            .resolve_credential_use_admission(&self.lease_key, CredentialUseIntent::BeginRefresh)
+            .map_err(|err| {
+                self.observer_error(authorizer_label, "resolve_credential_use_admission", err)
+            })?;
+        match disposition {
+            // A live credential exists in valid/expiring/expired: begin the
+            // refresh and report it started (preserving the prior `Valid`/
+            // `Expiring`/`Expired` -> begin_refresh + Started(Refresh) path).
+            // The machine never emits `Authorized` for the BeginRefresh intent;
+            // we mirror it identically to `RefreshRequired` to fail closed onto
+            // the refresh path the `Valid` case historically took.
+            CredentialUseDisposition::RefreshRequired | CredentialUseDisposition::Authorized => {
                 self.handle
                     .begin_refresh(&self.lease_key)
                     .map_err(|err| self.observer_error(authorizer_label, "begin_refresh", err))?;
                 Ok(LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh))
             }
-            Some(AuthLeasePhase::ReauthRequired) => Err(AuthError::UserReauthRequired),
-            Some(AuthLeasePhase::Refreshing) => Ok(LeaseRefreshStart::WaitForInFlight),
-            Some(AuthLeasePhase::Released) | None => Ok(LeaseRefreshStart::Started(
+            CredentialUseDisposition::ReauthRequired => Err(AuthError::UserReauthRequired),
+            CredentialUseDisposition::AlreadyRefreshing => Ok(LeaseRefreshStart::WaitForInFlight),
+            CredentialUseDisposition::LeaseAbsent => Ok(LeaseRefreshStart::Started(
                 LeaseRefreshLifecycle::InitialAcquire,
             )),
         }
@@ -336,6 +353,135 @@ mod tests {
             .unwrap();
 
         assert_eq!(generation, 2);
+    }
+
+    /// FOLD 1: `try_begin_refresh` mirrors the AuthMachine's machine-routed
+    /// `ResolveCredentialUseAdmission { intent: BeginRefresh }` disposition for
+    /// every reachable phase. No handwritten `phase -> disposition` fork lives
+    /// in the observer; the per-binding AuthMachine owns the verdict and the
+    /// observer only mirrors it onto `LeaseRefreshStart` / the reauth error.
+    #[test]
+    fn try_begin_refresh_mirrors_authmachine_disposition_for_every_phase() {
+        // No registered lease (None phase) -> machine reports LeaseAbsent ->
+        // InitialAcquire.
+        {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                lease_key(),
+            );
+            assert_eq!(
+                observer.try_begin_refresh("absent").unwrap(),
+                LeaseRefreshStart::Started(LeaseRefreshLifecycle::InitialAcquire),
+                "absent lease must InitialAcquire via the machine's LeaseAbsent disposition"
+            );
+        }
+
+        // Valid + credential present -> RefreshRequired -> begin_refresh +
+        // Started(Refresh). Far-future expiry keeps the lease Valid through the
+        // freshness observation.
+        {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = lease_key();
+            handle.acquire_lease(&key, u64::MAX).unwrap();
+            assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Valid));
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key.clone(),
+            );
+            assert_eq!(
+                observer.try_begin_refresh("valid").unwrap(),
+                LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh),
+                "valid lease must begin refresh via the machine's RefreshRequired disposition"
+            );
+            assert_eq!(
+                handle.snapshot(&key).phase,
+                Some(AuthLeasePhase::Refreshing),
+                "begin_refresh side effect must move the machine to Refreshing"
+            );
+        }
+
+        // Expiring + credential present -> RefreshRequired -> Started(Refresh).
+        {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = lease_key();
+            handle.acquire_lease(&key, u64::MAX).unwrap();
+            handle.mark_expiring(&key).unwrap();
+            assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Expiring));
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key,
+            );
+            assert_eq!(
+                observer.try_begin_refresh("expiring").unwrap(),
+                LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh),
+            );
+        }
+
+        // Expired + credential present -> RefreshRequired -> Started(Refresh).
+        // A near-past expiry plus a freshness observation in the future drives
+        // the machine into Expired.
+        {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = lease_key();
+            handle.acquire_lease(&key, 1_000).unwrap();
+            handle
+                .observe_credential_freshness(&key, 1_000_000, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
+                .unwrap();
+            assert_eq!(handle.snapshot(&key).phase, Some(AuthLeasePhase::Expired));
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key,
+            );
+            assert_eq!(
+                observer.try_begin_refresh("expired").unwrap(),
+                LeaseRefreshStart::Started(LeaseRefreshLifecycle::Refresh),
+            );
+        }
+
+        // Refreshing -> AlreadyRefreshing -> WaitForInFlight (no double-begin).
+        {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = lease_key();
+            handle.acquire_lease(&key, u64::MAX).unwrap();
+            handle.begin_refresh(&key).unwrap();
+            assert_eq!(
+                handle.snapshot(&key).phase,
+                Some(AuthLeasePhase::Refreshing)
+            );
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key,
+            );
+            assert_eq!(
+                observer.try_begin_refresh("refreshing").unwrap(),
+                LeaseRefreshStart::WaitForInFlight,
+                "in-flight refresh must wait via the machine's AlreadyRefreshing disposition"
+            );
+        }
+
+        // ReauthRequired -> ReauthRequired -> Err(UserReauthRequired).
+        {
+            let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+            let key = lease_key();
+            handle.acquire_lease(&key, u64::MAX).unwrap();
+            handle.mark_reauth_required(&key).unwrap();
+            assert_eq!(
+                handle.snapshot(&key).phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+            let observer = LeaseFreshnessObserver::new(
+                generated_auth_lease_handle_for_test(Arc::clone(&handle)),
+                key,
+            );
+            assert!(
+                matches!(
+                    observer.try_begin_refresh("reauth"),
+                    Err(AuthError::UserReauthRequired)
+                ),
+                "reauth-required lease must surface UserReauthRequired via the machine's ReauthRequired disposition"
+            );
+        }
     }
 }
 

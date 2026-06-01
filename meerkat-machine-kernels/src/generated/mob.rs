@@ -2086,6 +2086,56 @@ impl std::fmt::Display for MobFlowDelegationEdgeRuleVerdictKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobFrameSeedDisposition {
+    #[default]
+    #[serde(rename = "Seeded")]
+    Seeded,
+    #[serde(rename = "AlreadySeeded")]
+    AlreadySeeded,
+}
+impl MobFrameSeedDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Seeded => "Seeded",
+            Self::AlreadySeeded => "AlreadySeeded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobFrameSeedDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Seeded" => Ok(Self::Seeded),
+            "AlreadySeeded" => Ok(Self::AlreadySeeded),
+            other => Err(format!("invalid MobFrameSeedDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobFrameSeedDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobFrameSeedDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -2226,6 +2276,62 @@ impl std::convert::TryFrom<String> for MobMemberState {
     }
 }
 impl std::fmt::Display for MobMemberState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MobPendingSupervisorAcceptanceKind {
+    #[default]
+    #[serde(rename = "Fatal")]
+    Fatal,
+    #[serde(rename = "NotConfirmedReattempt")]
+    NotConfirmedReattempt,
+    #[serde(rename = "StalePendingAuthority")]
+    StalePendingAuthority,
+}
+impl MobPendingSupervisorAcceptanceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fatal => "Fatal",
+            Self::NotConfirmedReattempt => "NotConfirmedReattempt",
+            Self::StalePendingAuthority => "StalePendingAuthority",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MobPendingSupervisorAcceptanceKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Fatal" => Ok(Self::Fatal),
+            "NotConfirmedReattempt" => Ok(Self::NotConfirmedReattempt),
+            "StalePendingAuthority" => Ok(Self::StalePendingAuthority),
+            other => Err(format!(
+                "invalid MobPendingSupervisorAcceptanceKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobPendingSupervisorAcceptanceKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MobPendingSupervisorAcceptanceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3873,6 +3979,10 @@ pub mod inputs {
         pub rejection_cause: MobBridgeRejectionCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyPendingSupervisorAcceptance {
+        pub rejection_cause: MobBridgeRejectionCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureMember {
         pub agent_identity: AgentIdentity,
     }
@@ -4272,6 +4382,7 @@ pub enum Input {
     ResolveCreateMobAdmission(inputs::ResolveCreateMobAdmission),
     ResolveProfileMutationAdmission(inputs::ResolveProfileMutationAdmission),
     ClassifyBridgeRejectionRecovery(inputs::ClassifyBridgeRejectionRecovery),
+    ClassifyPendingSupervisorAcceptance(inputs::ClassifyPendingSupervisorAcceptance),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
     Retire(inputs::Retire),
@@ -4387,6 +4498,9 @@ impl Input {
             Self::ResolveCreateMobAdmission(_) => InputKind::ResolveCreateMobAdmission,
             Self::ResolveProfileMutationAdmission(_) => InputKind::ResolveProfileMutationAdmission,
             Self::ClassifyBridgeRejectionRecovery(_) => InputKind::ClassifyBridgeRejectionRecovery,
+            Self::ClassifyPendingSupervisorAcceptance(_) => {
+                InputKind::ClassifyPendingSupervisorAcceptance
+            }
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
             Self::Retire(_) => InputKind::Retire,
@@ -4515,6 +4629,7 @@ pub enum InputKind {
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
     ClassifyBridgeRejectionRecovery,
+    ClassifyPendingSupervisorAcceptance,
     EnsureMember,
     Reconcile,
     Retire,
@@ -5171,6 +5286,16 @@ pub mod effects {
         pub recovery: MobBridgeRejectionRecovery,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PendingSupervisorAcceptanceClassified {
+        pub rejection_cause: MobBridgeRejectionCause,
+        pub verdict: MobPendingSupervisorAcceptanceKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FrameSeedConfirmed {
+        pub frame_id: FrameId,
+        pub disposition: MobFrameSeedDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WiringGraphChanged {
         pub epoch: u64,
     }
@@ -5433,6 +5558,8 @@ pub enum Effect {
     CreateMobAdmissionResolved(effects::CreateMobAdmissionResolved),
     ProfileMutationAdmissionResolved(effects::ProfileMutationAdmissionResolved),
     BridgeRejectionRecoveryClassified(effects::BridgeRejectionRecoveryClassified),
+    PendingSupervisorAcceptanceClassified(effects::PendingSupervisorAcceptanceClassified),
+    FrameSeedConfirmed(effects::FrameSeedConfirmed),
     WiringGraphChanged(effects::WiringGraphChanged),
     MemberSessionBindingChanged(effects::MemberSessionBindingChanged),
     SessionProvisionOperationOwnerAuthorized(effects::SessionProvisionOperationOwnerAuthorized),
@@ -5514,6 +5641,8 @@ pub enum EffectKind {
     CreateMobAdmissionResolved,
     ProfileMutationAdmissionResolved,
     BridgeRejectionRecoveryClassified,
+    PendingSupervisorAcceptanceClassified,
+    FrameSeedConfirmed,
     WiringGraphChanged,
     MemberSessionBindingChanged,
     SessionProvisionOperationOwnerAuthorized,
@@ -5646,6 +5775,18 @@ pub enum TransitionId {
     ClassifyBridgeRejectionRecoveryFatalStopped,
     ClassifyBridgeRejectionRecoveryFatalCompleted,
     ClassifyBridgeRejectionRecoveryFatalDestroyed,
+    ClassifyPendingSupervisorAcceptanceNotConfirmedRunning,
+    ClassifyPendingSupervisorAcceptanceNotConfirmedStopped,
+    ClassifyPendingSupervisorAcceptanceNotConfirmedCompleted,
+    ClassifyPendingSupervisorAcceptanceNotConfirmedDestroyed,
+    ClassifyPendingSupervisorAcceptanceStaleRunning,
+    ClassifyPendingSupervisorAcceptanceStaleStopped,
+    ClassifyPendingSupervisorAcceptanceStaleCompleted,
+    ClassifyPendingSupervisorAcceptanceStaleDestroyed,
+    ClassifyPendingSupervisorAcceptanceFatalRunning,
+    ClassifyPendingSupervisorAcceptanceFatalStopped,
+    ClassifyPendingSupervisorAcceptanceFatalCompleted,
+    ClassifyPendingSupervisorAcceptanceFatalDestroyed,
     ClassifySpawnManyFailureProfileNotFoundRunning,
     ClassifySpawnManyFailureProfileNotFoundStopped,
     ClassifySpawnManyFailureProfileNotFoundCompleted,
@@ -6030,6 +6171,10 @@ pub enum TransitionId {
     RunFlowRunning,
     CreateRunSeedRunning,
     CreateFrameSeedRunning,
+    CreateFrameSeedAlreadySeededRunning,
+    CreateFrameSeedAlreadySeededStopped,
+    CreateFrameSeedAlreadySeededCompleted,
+    CreateFrameSeedAlreadySeededDestroyed,
     CreateLoopSeedRunning,
     RecordLoopBodyFrameCompletedRunning,
     RecordLoopUntilConditionMetRunning,

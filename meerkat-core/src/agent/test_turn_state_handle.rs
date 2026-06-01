@@ -28,9 +28,9 @@ use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
 use crate::retry::{LlmRetryFailureKind, LlmRetrySchedule};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnFailureReason, TurnFailureSource,
-    TurnFailureSourceKind, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
-    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
+    TurnFailureReason, TurnFailureSource, TurnFailureSourceKind, TurnPhase, TurnPrimitiveKind,
+    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
 fn field_id(slug: &str) -> FieldId {
@@ -76,6 +76,11 @@ fn option_value(value: KernelValue) -> KernelValue {
         KernelValue::String("value".to_string()),
         value,
     )]))
+}
+
+/// Absent `Option` value: the kernel's dedicated `None` representation.
+fn none_value() -> KernelValue {
+    KernelValue::None
 }
 
 fn input(
@@ -511,6 +516,21 @@ fn map_generated_effect(
         }
     } else if effect.variant == effect_id("TurnCheckCompaction") {
         TurnExecutionEffect::CheckCompaction
+    } else if effect.variant == effect_id("LlmFailureRecoveryClassified") {
+        let recovery = effect_enum_variant(&effect, "recovery", "LlmFailureRecoveryKind", context)?;
+        TurnExecutionEffect::LlmFailureRecoveryClassified {
+            recovery: match recovery.as_str() {
+                "Recover" => LlmFailureRecoveryKind::Recover,
+                "Exhausted" => LlmFailureRecoveryKind::Exhausted,
+                "Fatal" => LlmFailureRecoveryKind::Fatal,
+                other => {
+                    return Err(generated_projection_error(
+                        context,
+                        format!("unknown LlmFailureRecoveryKind variant `{other}`"),
+                    ));
+                }
+            },
+        }
     } else {
         return Ok(None);
     }))
@@ -805,6 +825,27 @@ impl TurnStateHandle for TestTurnStateHandle {
                 [
                     ("run_id", run_id_value(&run_id)),
                     ("retry_attempt", KernelValue::U64(u64::from(retry_attempt))),
+                ],
+            ),
+            TurnExecutionInput::ClassifyLlmFailureRecovery {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+            } => input(
+                "ClassifyLlmFailureRecovery",
+                [
+                    (
+                        "failure_kind",
+                        match failure_kind {
+                            Some(kind) => option_value(enum_value(
+                                "LlmRetryFailureKind",
+                                retry_failure_variant(kind),
+                            )),
+                            None => none_value(),
+                        },
+                    ),
+                    ("retry_attempt", KernelValue::U64(u64::from(retry_attempt))),
+                    ("max_retries", KernelValue::U64(u64::from(max_retries))),
                 ],
             ),
             TurnExecutionInput::CancelNow { run_id } => {

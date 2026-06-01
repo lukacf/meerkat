@@ -10,9 +10,9 @@ use meerkat_core::retry::LlmRetrySchedule;
 #[cfg(test)]
 use meerkat_core::turn_execution_authority::TurnFailureSourceKind;
 use meerkat_core::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnFailureReason, TurnFailureSource,
-    TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
-    terminal_outcome_for_budget_exceeded,
+    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
+    TurnFailureReason, TurnFailureSource, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
+    TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
 };
 
 use super::HandleDslAuthority;
@@ -102,6 +102,15 @@ fn map_generated_turn_effect(
             }
         }
         mm_dsl::MeerkatMachineEffect::TurnCheckCompaction => TurnExecutionEffect::CheckCompaction,
+        mm_dsl::MeerkatMachineEffect::LlmFailureRecoveryClassified { recovery } => {
+            TurnExecutionEffect::LlmFailureRecoveryClassified {
+                recovery: match recovery {
+                    mm_dsl::LlmFailureRecoveryKind::Recover => LlmFailureRecoveryKind::Recover,
+                    mm_dsl::LlmFailureRecoveryKind::Exhausted => LlmFailureRecoveryKind::Exhausted,
+                    mm_dsl::LlmFailureRecoveryKind::Fatal => LlmFailureRecoveryKind::Fatal,
+                },
+            }
+        }
         _ => return Ok(None),
     }))
 }
@@ -217,6 +226,15 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             } => mm_dsl::MeerkatMachineInput::RetryRequested {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
                 retry_attempt: u64::from(retry_attempt),
+            },
+            TurnExecutionInput::ClassifyLlmFailureRecovery {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+            } => mm_dsl::MeerkatMachineInput::ClassifyLlmFailureRecovery {
+                failure_kind: failure_kind.map(Into::into),
+                retry_attempt: u64::from(retry_attempt),
+                max_retries: u64::from(max_retries),
             },
             TurnExecutionInput::CancelNow { run_id } => mm_dsl::MeerkatMachineInput::CancelNow {
                 run_id: mm_dsl::RunId::from_domain(&run_id),

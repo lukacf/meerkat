@@ -16410,6 +16410,71 @@ fn live_open_admission_is_machine_owned() {
     );
 }
 
+/// P0 Dogma Invariant 1 (LUC-524): the recoverable-vs-fatal AND exhaustion
+/// verdict for an LLM call failure is a MeerkatMachine-owned conclusion, not a
+/// unilateral shell decision. The agent loop drives `ClassifyLlmFailureRecovery`
+/// with the extracted typed `failure_kind` (absent when the error yields no
+/// recoverable kind) and the one-based `retry_attempt` / `max_retries`, then
+/// mirrors the emitted `LlmFailureRecoveryClassified` verdict. This pins the
+/// three verdict classes: a recoverable kind with retries remaining ->
+/// `Recover`; a recoverable kind at/over exhaustion -> `Exhausted`; an absent
+/// or non-recoverable kind -> `Fatal`.
+#[test]
+fn llm_failure_recovery_is_machine_owned() {
+    fn classify(
+        failure_kind: Option<mm_dsl::LlmRetryFailureKind>,
+        retry_attempt: u64,
+        max_retries: u64,
+    ) -> mm_dsl::LlmFailureRecoveryKind {
+        let mut authority = registered_dsl_authority_for_visibility_tests();
+        let transition = mm_dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            mm_dsl::MeerkatMachineInput::ClassifyLlmFailureRecovery {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+            },
+        )
+        .expect("machine authority should classify LLM failure recovery");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::LlmFailureRecoveryClassified { recovery } => {
+                    Some(*recovery)
+                }
+                _ => None,
+            })
+            .expect("ClassifyLlmFailureRecovery must emit a recovery verdict")
+    }
+
+    // Recoverable kind with retries remaining -> Recover.
+    assert_eq!(
+        classify(Some(mm_dsl::LlmRetryFailureKind::RateLimited), 1, 3),
+        mm_dsl::LlmFailureRecoveryKind::Recover,
+        "recoverable kind under the retry cap must Recover"
+    );
+    assert_eq!(
+        classify(Some(mm_dsl::LlmRetryFailureKind::NetworkTimeout), 3, 3),
+        mm_dsl::LlmFailureRecoveryKind::Recover,
+        "recoverable kind exactly at the one-based cap must still Recover"
+    );
+
+    // Recoverable kind past exhaustion -> Exhausted.
+    assert_eq!(
+        classify(Some(mm_dsl::LlmRetryFailureKind::CallTimeout), 4, 3),
+        mm_dsl::LlmFailureRecoveryKind::Exhausted,
+        "recoverable kind past max_retries must classify Exhausted"
+    );
+
+    // Absent failure kind (no recoverable kind extracted) -> Fatal.
+    assert_eq!(
+        classify(None, 1, 3),
+        mm_dsl::LlmFailureRecoveryKind::Fatal,
+        "an absent recoverable kind must classify Fatal regardless of attempt"
+    );
+}
+
 #[test]
 fn live_refresh_queued_result_is_machine_owned() {
     let mut authority = registered_dsl_authority_for_visibility_tests();

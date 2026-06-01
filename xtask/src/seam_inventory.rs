@@ -458,6 +458,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "LlmFailureRecoveryClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "LLM-failure recovery verdict (Recover/Exhausted/Fatal) is decided by MeerkatMachine ClassifyLlmFailureRecovery from the shell's extracted typed failure_kind + one-based retry_attempt/max_retries; the agent loop mirrors it (Recover -> schedule retry; Exhausted/Fatal -> return Err) instead of unilaterally deciding fatal via schedule_retry returning None",
+        ),
+        (
+            "MeerkatMachine",
             "RuntimeLifecycleStateClassified",
             SeamClassification::SurfaceResultAlignment,
             "Runtime lifecycle classification must align with canonical runtime lifecycle state",
@@ -1263,6 +1269,18 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "BridgeRejectionRecoveryClassified",
             SeamClassification::SurfaceResultAlignment,
             "Bridge-rejection recovery (RebindRecover/FatalBubbleUp) is decided by MobMachine from the raw wire rejection cause; the mob shell mirrors it (RebindRecover -> re-run BindMember; FatalBubbleUp -> bubble up) instead of reducing the cause into a recoverable-vs-fatal conclusion itself",
+        ),
+        (
+            "MobMachine",
+            "PendingSupervisorAcceptanceClassified",
+            SeamClassification::SurfaceResultAlignment,
+            "Pending-supervisor-acceptance recovery (NotConfirmedReattempt/StalePendingAuthority/Fatal) is decided by MobMachine from the raw wire rejection cause while re-verifying an already-accepted remote peer during supervisor rotation; the actor mirrors it (NotConfirmedReattempt -> drop+re-attempt; StalePendingAuthority -> stale-pending error; Fatal -> bubble up) instead of reducing the cause into an acceptance/recovery conclusion itself",
+        ),
+        (
+            "MobMachine",
+            "FrameSeedConfirmed",
+            SeamClassification::SurfaceResultAlignment,
+            "Frame-seed idempotency disposition (Seeded/AlreadySeeded) is decided by MobMachine's idempotent CreateFrameSeed; the flow shell mirrors it (AlreadySeeded -> idempotent Ok short-circuit; Seeded -> validate snapshot) instead of reinterpreting a guard rejection by literal-matching the frame_seed_is_new guard name",
         ),
         (
             "MobMachine",

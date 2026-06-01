@@ -169,6 +169,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveCreateMobAdmission`(can_create_mobs: Bool)
 - `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
 - `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
+- `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
 - `EnsureMember`(agent_identity: AgentIdentity)
 - `Reconcile`(desired: Set<AgentIdentity>, retire_stale: Bool)
 - `Retire`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>)
@@ -348,6 +349,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CreateMobAdmissionResolved`(admission: MobCreateMobAdmissionKind)
 - `ProfileMutationAdmissionResolved`(admission: MobProfileMutationAdmissionKind)
 - `BridgeRejectionRecoveryClassified`(rejection_cause: MobBridgeRejectionCause, recovery: MobBridgeRejectionRecovery)
+- `PendingSupervisorAcceptanceClassified`(rejection_cause: MobBridgeRejectionCause, verdict: MobPendingSupervisorAcceptanceKind)
+- `FrameSeedConfirmed`(frame_id: FrameId, disposition: MobFrameSeedDisposition)
 - `WiringGraphChanged`(epoch: u64)
 - `MemberSessionBindingChanged`(epoch: u64, agent_identity: AgentIdentity, old_session_id: Option<SessionId>, new_session_id: Option<SessionId>)
 - `SessionProvisionOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
@@ -1205,6 +1208,102 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `rejection_fatal`
 - Emits: `BridgeRejectionRecoveryClassified`
+- To: `Destroyed`
+
+### `ClassifyPendingSupervisorAcceptanceNotConfirmedRunning`
+- From: `Running`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_not_confirmed_reattempt`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Running`
+
+### `ClassifyPendingSupervisorAcceptanceNotConfirmedStopped`
+- From: `Stopped`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_not_confirmed_reattempt`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Stopped`
+
+### `ClassifyPendingSupervisorAcceptanceNotConfirmedCompleted`
+- From: `Completed`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_not_confirmed_reattempt`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Completed`
+
+### `ClassifyPendingSupervisorAcceptanceNotConfirmedDestroyed`
+- From: `Destroyed`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_not_confirmed_reattempt`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Destroyed`
+
+### `ClassifyPendingSupervisorAcceptanceStaleRunning`
+- From: `Running`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_stale_authority`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Running`
+
+### `ClassifyPendingSupervisorAcceptanceStaleStopped`
+- From: `Stopped`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_stale_authority`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Stopped`
+
+### `ClassifyPendingSupervisorAcceptanceStaleCompleted`
+- From: `Completed`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_stale_authority`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Completed`
+
+### `ClassifyPendingSupervisorAcceptanceStaleDestroyed`
+- From: `Destroyed`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_stale_authority`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Destroyed`
+
+### `ClassifyPendingSupervisorAcceptanceFatalRunning`
+- From: `Running`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_fatal`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Running`
+
+### `ClassifyPendingSupervisorAcceptanceFatalStopped`
+- From: `Stopped`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_fatal`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Stopped`
+
+### `ClassifyPendingSupervisorAcceptanceFatalCompleted`
+- From: `Completed`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_fatal`
+- Emits: `PendingSupervisorAcceptanceClassified`
+- To: `Completed`
+
+### `ClassifyPendingSupervisorAcceptanceFatalDestroyed`
+- From: `Destroyed`
+- On: `ClassifyPendingSupervisorAcceptance`(rejection_cause)
+- Guards:
+  - `pending_acceptance_fatal`
+- Emits: `PendingSupervisorAcceptanceClassified`
 - To: `Destroyed`
 
 ### `ClassifySpawnManyFailureProfileNotFoundRunning`
@@ -4471,8 +4570,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `frame_seed_loop_nodes_have_exact_loop_ids`
   - `frame_seed_step_id_keys_are_tracked_steps`
   - `frame_seed_loop_id_keys_are_tracked_loops`
-- Emits: `EmitRunLifecycleNotice`
+- Emits: `EmitRunLifecycleNotice`, `FrameSeedConfirmed`
 - To: `Running`
+
+### `CreateFrameSeedAlreadySeededRunning`
+- From: `Running`
+- On: `CreateFrameSeed`(run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue, output_recorded, node_condition_results, last_admitted_node)
+- Guards:
+  - `frame_seed_already_tracked`
+- Emits: `FrameSeedConfirmed`
+- To: `Running`
+
+### `CreateFrameSeedAlreadySeededStopped`
+- From: `Stopped`
+- On: `CreateFrameSeed`(run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue, output_recorded, node_condition_results, last_admitted_node)
+- Guards:
+  - `frame_seed_already_tracked`
+- Emits: `FrameSeedConfirmed`
+- To: `Stopped`
+
+### `CreateFrameSeedAlreadySeededCompleted`
+- From: `Completed`
+- On: `CreateFrameSeed`(run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue, output_recorded, node_condition_results, last_admitted_node)
+- Guards:
+  - `frame_seed_already_tracked`
+- Emits: `FrameSeedConfirmed`
+- To: `Completed`
+
+### `CreateFrameSeedAlreadySeededDestroyed`
+- From: `Destroyed`
+- On: `CreateFrameSeed`(run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue, output_recorded, node_condition_results, last_admitted_node)
+- Guards:
+  - `frame_seed_already_tracked`
+- Emits: `FrameSeedConfirmed`
+- To: `Destroyed`
 
 ### `CreateLoopSeedRunning`
 - From: `Running`

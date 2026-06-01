@@ -308,6 +308,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyBridgeRejectionRecoveryFatalDestroyed`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
+- `ClassifyPendingSupervisorAcceptanceNotConfirmedRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceNotConfirmedStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceNotConfirmedCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceNotConfirmedDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceStaleRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceStaleStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceStaleCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceStaleDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceFatalRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceFatalStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceFatalCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `coordination-board-records-and-overlap`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `orchestrator-coordinator-cleanup`
+- `ClassifyPendingSupervisorAcceptanceFatalDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
 - `ClassifySpawnManyFailureProfileNotFoundRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `operator-provenance-and-peer-input`
@@ -1460,6 +1496,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CreateFrameSeedRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
+- `CreateFrameSeedAlreadySeededRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `CreateFrameSeedAlreadySeededStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `CreateFrameSeedAlreadySeededCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
+- `CreateFrameSeedAlreadySeededDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `CreateLoopSeedRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -1882,6 +1930,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BridgeRejectionRecoveryClassified`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
+- `PendingSupervisorAcceptanceClassified`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `orchestrator-coordinator-cleanup`
+- `FrameSeedConfirmed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `flow-and-run-lifecycle`
 - `WiringGraphChanged`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`

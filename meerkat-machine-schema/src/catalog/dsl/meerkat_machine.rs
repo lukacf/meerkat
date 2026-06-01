@@ -808,6 +808,22 @@ pub enum SurfaceResultClass {
     MissingTerminal,
 }
 
+/// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict. The agent
+/// loop EXTRACTS the typed `LlmRetryFailureKind` (or its absence) and the
+/// one-based `retry_attempt` / `max_retries`, then drives
+/// `ClassifyLlmFailureRecovery`; MeerkatMachine — not the shell `RetryPolicy` —
+/// owns whether the failure may `Recover` (recoverable kind with retries
+/// remaining), is `Exhausted` (recoverable kind past `max_retries`), or is
+/// `Fatal` (no recoverable kind). `Exhausted` and `Fatal` both drive the
+/// existing terminal/return-Err path; the split records the distinct cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LlmFailureRecoveryKind {
+    #[default]
+    Fatal,
+    Recover,
+    Exhausted,
+}
+
 /// Raw failure source fact carried by runtime run-failure handoff. The shell
 /// reports the source that observed the error; MeerkatMachine maps it to
 /// terminal outcome/cause instead of accepting shell-supplied terminal facts.
@@ -3354,6 +3370,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             // the recovered machine state and mirrors the emitted
             // TurnTerminalityClassified.terminal, failing closed.
             ClassifyTurnTerminality {},
+            // P0 Dogma Invariant 1: LLM-failure recovery classification. The
+            // recoverable-vs-fatal AND exhaustion verdict for an LLM call
+            // failure is a machine-owned conclusion, not a unilateral shell
+            // decision. The agent loop EXTRACTS a typed `failure_kind` from the
+            // `AgentError` (absent when the error yields no recoverable kind)
+            // and the one-based `retry_attempt` / `max_retries`, then drives
+            // this input. The machine owns whether the failure may `Recover`
+            // (recoverable kind with retries remaining), is `Exhausted`
+            // (recoverable kind past `max_retries`), or is `Fatal` (no
+            // recoverable kind). The loop mirrors the verdict: `Recover` drives
+            // the existing RecoverableFailure/RetryRequested path; `Exhausted`
+            // and `Fatal` take the existing FatalFailure + return-Err path. The
+            // backoff DELAY mechanics remain shell policy. Fails closed to
+            // `Fatal`.
+            ClassifyLlmFailureRecovery {
+                failure_kind: Option<Enum<LlmRetryFailureKind>>,
+                retry_attempt: u64,
+                max_retries: u64,
+            },
             ResolveTurnSurfaceResult {
                 outcome: Enum<TurnTerminalOutcome>,
                 cause_class: Enum<TerminalCauseClass>,
@@ -4131,6 +4166,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cause_class: Enum<TerminalCauseClass>,
             },
             TurnTerminalityClassified { terminal: bool },
+            // P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict.
+            // The agent loop mirrors this: `Recover` drives the existing
+            // RecoverableFailure/RetryRequested path; `Exhausted` / `Fatal`
+            // take the existing FatalFailure + return-Err path.
+            LlmFailureRecoveryClassified { recovery: Enum<LlmFailureRecoveryKind> },
             TurnSurfaceResultResolved {
                 outcome: Enum<TurnTerminalOutcome>,
                 cause_class: Enum<TerminalCauseClass>,
@@ -4553,6 +4593,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputPublicTerminalOutcomeResolved => local,
         disposition InputBehavioralTerminalityResolved => local,
         disposition TurnTerminalCauseClassResolved => local,
+        disposition LlmFailureRecoveryClassified => local,
         disposition TurnTerminalityClassified => local,
         disposition TurnSurfaceResultResolved => local,
         disposition StoredInputStateSeedAuthorized => local,
@@ -19193,6 +19234,56 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit TurnTerminalityClassified { terminal: false }
+        }
+
+        // P0 Dogma Invariant 1: ClassifyLlmFailureRecovery — MeerkatMachine owns
+        // the recoverable-vs-fatal AND exhaustion verdict for an LLM failure.
+        // The shell extracts the typed `failure_kind` (absent when the
+        // `AgentError` yields no recoverable kind) and the one-based
+        // `retry_attempt` / `max_retries`, then mirrors the emitted verdict.
+        // Reproduces the former shell decision EXACTLY: a recoverable
+        // `failure_kind` with `retry_attempt <= max_retries` -> `Recover`
+        // (the `should_retry` + `from_agent_error` Some path); a recoverable
+        // kind past `max_retries` -> `Exhausted`; an absent or non-recoverable
+        // kind -> `Fatal`. The recoverability set is the single
+        // `llm_failure_kind_recoverable` authority shared with the
+        // `RecoverableFailure` guard. Idle self-loops: pure classification.
+        transition ClassifyLlmFailureRecoveryRecover {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyLlmFailureRecovery { failure_kind, retry_attempt, max_retries }
+            guard "failure_kind_recoverable_with_retries" {
+                failure_kind != None
+                && llm_failure_kind_recoverable(failure_kind.get("value"))
+                && retry_attempt <= max_retries
+            }
+            update {}
+            to Idle
+            emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Recover }
+        }
+
+        transition ClassifyLlmFailureRecoveryExhausted {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyLlmFailureRecovery { failure_kind, retry_attempt, max_retries }
+            guard "failure_kind_recoverable_retries_exhausted" {
+                failure_kind != None
+                && llm_failure_kind_recoverable(failure_kind.get("value"))
+                && retry_attempt > max_retries
+            }
+            update {}
+            to Idle
+            emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Exhausted }
+        }
+
+        transition ClassifyLlmFailureRecoveryFatal {
+            per_phase [Idle, Attached, Running]
+            on input ClassifyLlmFailureRecovery { failure_kind, retry_attempt, max_retries }
+            guard "failure_kind_not_recoverable" {
+                failure_kind == None
+                || llm_failure_kind_recoverable(failure_kind.get("value")) == false
+            }
+            update {}
+            to Idle
+            emit LlmFailureRecoveryClassified { recovery: LlmFailureRecoveryKind::Fatal }
         }
 
         // ResolveTurnSurfaceResult: generated surface-result classification

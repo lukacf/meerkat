@@ -2891,6 +2891,53 @@ impl MobActor {
         ))
     }
 
+    /// Mirror MobMachine's pending-supervisor-acceptance verdict for a typed
+    /// wire rejection cause.
+    ///
+    /// When an already-accepted remote peer is re-verified during supervisor
+    /// rotation (the `AuthorizeSupervisor` command is replayed under the pending
+    /// authority) and the member replies with a rejection, the actor extracts
+    /// the pure wire rejection cause; MobMachine — not this shell — owns whether
+    /// that cause means the prior acceptance is NOT confirmed and the peer must
+    /// be re-attempted (`NotConfirmedReattempt`), the pending authority is stale
+    /// (`StalePendingAuthority`), or the rejection is hard fatal (`Fatal`). The
+    /// classification is stateless, so we drive it on a prepared authority
+    /// (discarded) to keep this an immutable observation. Fails closed (returns
+    /// `Fatal`'s caller-side error) if the machine emits no verdict.
+    fn classify_pending_supervisor_acceptance(
+        &self,
+        cause: super::bridge_protocol::BridgeRejectionCause,
+    ) -> Result<mob_dsl::MobPendingSupervisorAcceptanceKind, MobError> {
+        let rejection_cause = mob_bridge_rejection_cause(cause);
+        let prepared = self.prepare_dsl_input_transition(
+            mob_dsl::MobMachineInput::ClassifyPendingSupervisorAcceptance { rejection_cause },
+            "classify_pending_supervisor_acceptance",
+        )?;
+        let (effect_cause, verdict) = prepared
+            .transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::PendingSupervisorAcceptanceClassified {
+                    rejection_cause,
+                    verdict,
+                } => Some((*rejection_cause, *verdict)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted pending supervisor acceptance cause but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        if effect_cause != rejection_cause {
+            return Err(MobError::Internal(format!(
+                "MobMachine pending-supervisor-acceptance drift: input={rejection_cause:?}, effect={effect_cause:?}"
+            )));
+        }
+        Ok(verdict)
+    }
+
     /// Issue a strictly increasing fence token.
     fn issue_fence_token(&self) -> crate::ids::FenceToken {
         let val = self
@@ -15101,12 +15148,17 @@ impl MobActor {
             )
             .await?;
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
-            return match rejection.typed_cause() {
-                Some(
-                    super::bridge_protocol::BridgeRejectionCause::NotBound
-                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
-                ) => Ok(false),
-                Some(super::bridge_protocol::BridgeRejectionCause::StaleSupervisor) => {
+            // The shell extracts the pure typed wire cause; MobMachine owns the
+            // acceptance/recovery verdict. A reply with no typed cause is failed
+            // closed as `Fatal` (the historical `None` arm), bubbling the raw
+            // rejection up without consulting the machine.
+            let verdict = match rejection.typed_cause() {
+                Some(cause) => self.classify_pending_supervisor_acceptance(cause)?,
+                None => mob_dsl::MobPendingSupervisorAcceptanceKind::Fatal,
+            };
+            return match verdict {
+                mob_dsl::MobPendingSupervisorAcceptanceKind::NotConfirmedReattempt => Ok(false),
+                mob_dsl::MobPendingSupervisorAcceptanceKind::StalePendingAuthority => {
                     Err(Self::bridge_rejection_error_with_reason(
                         &rejection,
                         format!(
@@ -15116,7 +15168,9 @@ impl MobActor {
                         ),
                     ))
                 }
-                Some(_) | None => Err(Self::bridge_rejection_error(rejection)),
+                mob_dsl::MobPendingSupervisorAcceptanceKind::Fatal => {
+                    Err(Self::bridge_rejection_error(rejection))
+                }
             };
         }
         let _ack: super::bridge_protocol::BridgeAck =

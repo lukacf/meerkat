@@ -1729,6 +1729,18 @@ pub enum SurfaceResultClass {
     MissingTerminal,
 }
 
+/// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict emitted by
+/// `ClassifyLlmFailureRecovery`. The DSL owns this typed mirror so the
+/// classifier transitions can carry it; the agent loop mirrors the verdict
+/// instead of unilaterally deciding fatal/exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LlmFailureRecoveryKind {
+    #[default]
+    Fatal,
+    Recover,
+    Exhausted,
+}
+
 /// Raw failure source fact carried by runtime run-failure handoff.
 /// MeerkatMachine maps this to terminal outcome/cause before public
 /// projection.

@@ -351,6 +351,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyTurnTerminalCauseClass`(cause_kind: Option<TurnTerminalCauseKind>)
 - `ClassifyTurnTerminality`
+- `ClassifyLlmFailureRecovery`(failure_kind: Option<LlmRetryFailureKind>, retry_attempt: u64, max_retries: u64)
 - `ResolveTurnSurfaceResult`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass)
 - `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
@@ -603,6 +604,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputBehavioralTerminalityResolved`(input_id: String, terminal: Bool)
 - `TurnTerminalCauseClassResolved`(cause_kind: Option<TurnTerminalCauseKind>, cause_class: TerminalCauseClass)
 - `TurnTerminalityClassified`(terminal: Bool)
+- `LlmFailureRecoveryClassified`(recovery: LlmFailureRecoveryKind)
 - `TurnSurfaceResultResolved`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass, surface_class: SurfaceResultClass)
 - `StoredInputStateSeedAuthorized`(input_id: String)
 - `RuntimeLifecycleStateClassified`(state: RuntimeLifecycleObservedState, terminality: RuntimeLifecycleTerminality, input_admission: RuntimeInputAdmission, queue_admission: RuntimeQueueAdmission, prepare_admission: RuntimePrepareAdmission, ingress_admission: RuntimeIngressAdmission)
@@ -15717,6 +15719,78 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_phase_non_terminal`
 - Emits: `TurnTerminalityClassified`
+- To: `Running`
+
+### `ClassifyLlmFailureRecoveryRecoverIdle`
+- From: `Idle`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_recoverable_with_retries`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Idle`
+
+### `ClassifyLlmFailureRecoveryRecoverAttached`
+- From: `Attached`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_recoverable_with_retries`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Attached`
+
+### `ClassifyLlmFailureRecoveryRecoverRunning`
+- From: `Running`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_recoverable_with_retries`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Running`
+
+### `ClassifyLlmFailureRecoveryExhaustedIdle`
+- From: `Idle`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_recoverable_retries_exhausted`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Idle`
+
+### `ClassifyLlmFailureRecoveryExhaustedAttached`
+- From: `Attached`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_recoverable_retries_exhausted`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Attached`
+
+### `ClassifyLlmFailureRecoveryExhaustedRunning`
+- From: `Running`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_recoverable_retries_exhausted`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Running`
+
+### `ClassifyLlmFailureRecoveryFatalIdle`
+- From: `Idle`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_not_recoverable`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Idle`
+
+### `ClassifyLlmFailureRecoveryFatalAttached`
+- From: `Attached`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_not_recoverable`
+- Emits: `LlmFailureRecoveryClassified`
+- To: `Attached`
+
+### `ClassifyLlmFailureRecoveryFatalRunning`
+- From: `Running`
+- On: `ClassifyLlmFailureRecovery`(failure_kind, retry_attempt, max_retries)
+- Guards:
+  - `failure_kind_not_recoverable`
+- Emits: `LlmFailureRecoveryClassified`
 - To: `Running`
 
 ### `ResolveTurnSurfaceResultNoneMissingTerminalIdle`

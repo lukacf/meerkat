@@ -523,3 +523,37 @@ resolve_binding (config-eval-feeding-machine; external-requires-explicit-binding
 
 Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; machine-schema parity
 119; broad nextest --all-features 3868 passed; clippy --all-features -D warnings clean; seam 0 debt.
+
+## CONVERGENCE ROUND 7 (re-sweep + 2 blind reviews) — sibling-class completeness drain
+sweep: 1 (retry recoverable/fatal MEDIUM). alpha: 1 HIGH (pending_supervisor_acceptance_confirmed). beta:
+1 HIGH (mob_machine_seed_already_confirmed string folklore). All three are SIBLINGS of already-folded
+classes (the whole-crate-sweep lesson). Sweep coverage confirmed ALL prior folds CLEAN + classified the
+whole tree (machine-routed-mirror / pure-projection / config-eval / pure-witness / out-of-scope-non-machine).
+Folded all 3 + comprehensive sibling-check (no further siblings remain):
+
+### FOLDED — pending_supervisor_acceptance_confirmed (alpha HIGH) -> MobMachine (sibling of Site 3)
+actor.rs match over raw BridgeRejectionCause -> acceptance verdict (NotBound|SenderMismatch=>Ok(false);
+StaleSupervisor=>Err; _=>Err). -> MobMachine ClassifyPendingSupervisorAcceptance { rejection_cause } ->
+PendingSupervisorAcceptanceClassified { NotConfirmedReattempt|StalePendingAuthority|Fatal } (reuses Site-3
+MobBridgeRejectionCause mirror). Shell extracts typed_cause, mirrors, fails closed; exact messages preserved.
+Sibling-check: Site-3 + this are the only BridgeRejectionCause verdict reducers; rest are producers/labels/tests.
+
+### FOLDED — mob_machine_seed_already_confirmed (beta HIGH) -> machine idempotency (sibling string folklore)
+flow_frame_engine error.to_string().contains("frame_seed_is_new") matched the MobMachine guard NAME to treat
+a CreateFrameSeed rejection as idempotent success. -> made CreateFrameSeed idempotent at MobMachine: new
+CreateFrameSeedAlreadySeeded transition + FrameSeedConfirmed { disposition: Seeded|AlreadySeeded } effect; shell
+mirrors AlreadySeeded->Ok(()), fails closed. Deleted mob_machine_seed_already_confirmed string reducer.
+Sibling-check: CreateLoopSeed/CreateRunSeed propagate via ? (no folklore); run.rs to_string().contains hits are
+all #[cfg(test)] assertions. frame_seed was the sole production string-folklore site.
+
+### FOLDED — retry recoverable/fatal unilateral shell-fatal (sweep MEDIUM) -> MeerkatMachine
+retry.rs from_agent_error `_ => None` decided fatal UNILATERALLY; the machine only revalidated the recoverable
+path (never saw shell-decided-fatal failures). -> MeerkatMachine ClassifyLlmFailureRecovery { failure_kind,
+retry_attempt, max_retries } -> LlmFailureRecoveryClassified { Recover|Exhausted|Fatal } (reuses machine-owned
+llm_failure_kind_recoverable helper). Agent loop mirrors via TurnExecutionInput::ClassifyLlmFailureRecovery,
+fails closed to Fatal; from_agent_error stays pure typed extraction; backoff-delay mechanics stay shell policy.
+Declared runtime-internal in BOTH parity lists (FailureRecoveryLifecycle region). Now the machine owns BOTH
+recoverable and fatal directions.
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; machine-schema ratchets
+(classifier + recoverability) pass; core+runtime+mob --all-features 3224 passed; seam 0 debt; version parity clean.

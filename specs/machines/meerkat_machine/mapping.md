@@ -4745,6 +4745,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTurnTerminalityNonTerminalRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ClassifyLlmFailureRecoveryRecoverIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryRecoverAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryRecoverRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryExhaustedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryExhaustedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryExhaustedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryFatalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryFatalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyLlmFailureRecoveryFatalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ResolveTurnSurfaceResultNoneMissingTerminalIdle`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
@@ -4913,6 +4940,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`, `product_turn_streaming`
 - `TurnTerminalityClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `LlmFailureRecoveryClassified`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `TurnSurfaceResultResolved`

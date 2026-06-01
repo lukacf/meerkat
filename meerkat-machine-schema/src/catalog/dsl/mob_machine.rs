@@ -509,6 +509,18 @@ macro_rules! mob_catalog_machine_dsl {
             // resume builder) mirrors the emitted recovery verdict to gate the
             // real rebind control flow.
             ClassifyBridgeRejectionRecovery { rejection_cause: Enum<MobBridgeRejectionCause> },
+            // Pending-supervisor-acceptance classification. When a supervisor
+            // rotation has already-accepted remote peers and the actor
+            // re-verifies a pending peer's acceptance by replaying the
+            // `AuthorizeSupervisor` command under the pending authority, the
+            // member may reply with a typed wire rejection cause (a pure wire
+            // projection). MobMachine — not a handwritten shell reducer — owns
+            // whether that cause means the peer is NOT confirmed and must be
+            // re-attempted (`NotConfirmedReattempt`: the peer rebound to current
+            // authority), the pending authority is stale (`StalePendingAuthority`),
+            // or it is a hard fatal rejection (`Fatal`). The actor mirrors the
+            // emitted verdict to gate re-attempt-vs-error control flow.
+            ClassifyPendingSupervisorAcceptance { rejection_cause: Enum<MobBridgeRejectionCause> },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
@@ -764,6 +776,19 @@ macro_rules! mob_catalog_machine_dsl {
             // bubble the rejection up) instead of reducing the raw wire cause
             // into a recoverable-vs-fatal conclusion itself.
             BridgeRejectionRecoveryClassified { rejection_cause: Enum<MobBridgeRejectionCause>, recovery: Enum<MobBridgeRejectionRecovery> },
+            // Machine-owned pending-supervisor-acceptance verdict. The actor
+            // mirrors this (NotConfirmedReattempt -> drop the accepted peer and
+            // re-attempt; StalePendingAuthority -> error with the stale-pending
+            // message; Fatal -> bubble the rejection) instead of reducing the
+            // raw wire cause into an acceptance/recovery conclusion itself.
+            PendingSupervisorAcceptanceClassified { rejection_cause: Enum<MobBridgeRejectionCause>, verdict: Enum<MobPendingSupervisorAcceptanceKind> },
+            // Machine-owned frame-seed disposition. `CreateFrameSeed` is
+            // idempotent: a fresh seed emits `Seeded`, while re-seeding an
+            // already-tracked frame emits `AlreadySeeded` (a no-op) instead of
+            // a guard rejection the shell would have to reinterpret. The flow
+            // shell mirrors both as success — `AlreadySeeded` short-circuits
+            // (idempotent re-confirm), `Seeded` proceeds to snapshot validation.
+            FrameSeedConfirmed { frame_id: FrameId, disposition: Enum<MobFrameSeedDisposition> },
             // Track-B (R5): canonical topology-change signals consumed by
             // the `RecomputeMobPeerOverlay` composition driver.
             //
@@ -907,6 +932,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition CreateMobAdmissionResolved => local,
         disposition ProfileMutationAdmissionResolved => local,
         disposition BridgeRejectionRecoveryClassified => local,
+        disposition PendingSupervisorAcceptanceClassified => local,
+        disposition FrameSeedConfirmed => local,
         disposition WiringGraphChanged => external,
         disposition MemberSessionBindingChanged => external,
         disposition SessionProvisionOperationOwnerAuthorized => local,
@@ -1558,6 +1585,61 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit BridgeRejectionRecoveryClassified { rejection_cause: rejection_cause, recovery: MobBridgeRejectionRecovery::FatalBubbleUp }
+        }
+
+        // --- Pending-supervisor-acceptance classification ---
+        //
+        // When a supervisor rotation already has accepted remote peers, the
+        // actor re-verifies a pending peer's acceptance by replaying the
+        // `AuthorizeSupervisor` command under the pending authority. The member
+        // may reply with a typed wire rejection cause (a pure wire projection);
+        // MobMachine — not a handwritten shell reducer — owns the acceptance /
+        // recovery verdict. Pure classification across all lifecycle phases,
+        // like ClassifyBridgeRejectionRecovery. NotBound / SenderMismatch mean
+        // the peer rebound to current authority so its prior acceptance is NOT
+        // confirmed and the rotation must re-attempt it. StaleSupervisor means
+        // the pending authority itself is stale. Every other cause is a hard
+        // fatal rejection.
+
+        transition ClassifyPendingSupervisorAcceptanceNotConfirmed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyPendingSupervisorAcceptance { rejection_cause }
+            guard "pending_acceptance_not_confirmed_reattempt" {
+                rejection_cause == MobBridgeRejectionCause::NotBound
+                || rejection_cause == MobBridgeRejectionCause::SenderMismatch
+            }
+            update {}
+            to Running
+            emit PendingSupervisorAcceptanceClassified { rejection_cause: rejection_cause, verdict: MobPendingSupervisorAcceptanceKind::NotConfirmedReattempt }
+        }
+
+        transition ClassifyPendingSupervisorAcceptanceStale {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyPendingSupervisorAcceptance { rejection_cause }
+            guard "pending_acceptance_stale_authority" {
+                rejection_cause == MobBridgeRejectionCause::StaleSupervisor
+            }
+            update {}
+            to Running
+            emit PendingSupervisorAcceptanceClassified { rejection_cause: rejection_cause, verdict: MobPendingSupervisorAcceptanceKind::StalePendingAuthority }
+        }
+
+        transition ClassifyPendingSupervisorAcceptanceFatal {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ClassifyPendingSupervisorAcceptance { rejection_cause }
+            guard "pending_acceptance_fatal" {
+                rejection_cause == MobBridgeRejectionCause::AlreadyBound
+                || rejection_cause == MobBridgeRejectionCause::InvalidBootstrapToken
+                || rejection_cause == MobBridgeRejectionCause::UnsupportedProtocolVersion
+                || rejection_cause == MobBridgeRejectionCause::InvalidSupervisorSpec
+                || rejection_cause == MobBridgeRejectionCause::InvalidPeerSpec
+                || rejection_cause == MobBridgeRejectionCause::AddressMismatch
+                || rejection_cause == MobBridgeRejectionCause::Unsupported
+                || rejection_cause == MobBridgeRejectionCause::Internal
+            }
+            update {}
+            to Running
+            emit PendingSupervisorAcceptanceClassified { rejection_cause: rejection_cause, verdict: MobPendingSupervisorAcceptanceKind::Fatal }
         }
 
         transition ClassifySpawnManyFailureProfileNotFound {
@@ -5409,6 +5491,21 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit EmitRunLifecycleNotice
+            emit FrameSeedConfirmed { frame_id: frame_id, disposition: MobFrameSeedDisposition::Seeded }
+        }
+
+        // Idempotent re-seed: when the frame is already tracked, `CreateFrameSeed`
+        // is a no-op that emits `AlreadySeeded` instead of being rejected by the
+        // `frame_seed_is_new` guard. This is the machine-owned idempotency
+        // disposition the flow shell mirrors (replacing the former
+        // `error.to_string().contains("frame_seed_is_new")` string folklore).
+        transition CreateFrameSeedAlreadySeeded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input CreateFrameSeed { run_id, frame_id, frame_scope, loop_instance_id, iteration, tracked_nodes, ordered_nodes, node_kind, node_dependencies, node_dependency_modes, node_branches, node_step_ids, node_loop_ids, node_status, ready_queue, output_recorded, node_condition_results, last_admitted_node }
+            guard "frame_seed_already_tracked" { self.frame_phase.contains_key(frame_id) == true }
+            update {}
+            to Running
+            emit FrameSeedConfirmed { frame_id: frame_id, disposition: MobFrameSeedDisposition::AlreadySeeded }
         }
 
         transition CreateLoopSeedRunning {
@@ -8532,6 +8629,30 @@ pub enum MobBridgeRejectionRecovery {
     #[default]
     FatalBubbleUp,
     RebindRecover,
+}
+
+/// Machine-owned pending-supervisor-acceptance verdict for a re-verified
+/// already-accepted remote peer during supervisor rotation. The actor mirrors
+/// this: `NotConfirmedReattempt` drops the accepted peer and re-attempts the
+/// rotation against it; `StalePendingAuthority` errors with the stale-pending
+/// message; `Fatal` bubbles the rejection up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobPendingSupervisorAcceptanceKind {
+    #[default]
+    Fatal,
+    NotConfirmedReattempt,
+    StalePendingAuthority,
+}
+
+/// Machine-owned frame-seed idempotency disposition. `CreateFrameSeed` emits
+/// `Seeded` for a fresh seed and `AlreadySeeded` (a no-op) when re-seeding an
+/// already-tracked frame. The flow shell mirrors both as success — replacing
+/// the former guard-name string match (`frame_seed_is_new`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFrameSeedDisposition {
+    #[default]
+    Seeded,
+    AlreadySeeded,
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the

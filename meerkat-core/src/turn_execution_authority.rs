@@ -9,8 +9,21 @@ use crate::error::AgentError;
 use crate::event::AgentErrorClass;
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId};
-use crate::retry::LlmRetrySchedule;
+use crate::retry::{LlmRetryFailureKind, LlmRetrySchedule};
 use serde::{Deserialize, Serialize};
+
+/// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict, mirrored
+/// across the turn-execution boundary. The agent loop drives
+/// `TurnExecutionInput::ClassifyLlmFailureRecovery` and mirrors this verdict
+/// emitted by MeerkatMachine's `ClassifyLlmFailureRecovery` classifier: the
+/// machine — not the shell `RetryPolicy` — owns whether an LLM failure may
+/// `Recover`, is `Exhausted`, or is `Fatal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmFailureRecoveryKind {
+    Recover,
+    Exhausted,
+    Fatal,
+}
 
 /// Canonical phases for turn execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +415,17 @@ pub enum TurnExecutionInput {
         run_id: RunId,
         retry_attempt: u32,
     },
+    /// P0 Dogma Invariant 1: drive MeerkatMachine's LLM-failure recovery
+    /// classifier. The agent loop extracts the typed `failure_kind` (absent
+    /// when the `AgentError` yields no recoverable kind) and the one-based
+    /// `retry_attempt` / `max_retries`, then mirrors the emitted
+    /// `LlmFailureRecoveryClassified` verdict. Pure classification — no turn
+    /// state mutation.
+    ClassifyLlmFailureRecovery {
+        failure_kind: Option<LlmRetryFailureKind>,
+        retry_attempt: u32,
+        max_retries: u32,
+    },
     CancelNow {
         run_id: RunId,
     },
@@ -469,6 +493,12 @@ pub enum TurnExecutionEffect {
         run_id: RunId,
     },
     CheckCompaction,
+    /// P0 Dogma Invariant 1: machine-owned LLM-failure recovery verdict. The
+    /// agent loop mirrors this verdict instead of deciding fatal/exhaustion
+    /// itself.
+    LlmFailureRecoveryClassified {
+        recovery: LlmFailureRecoveryKind,
+    },
 }
 
 /// Successful transition outcome for turn execution.

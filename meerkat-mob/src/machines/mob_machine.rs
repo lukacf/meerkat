@@ -735,6 +735,30 @@ pub enum MobBridgeRejectionRecovery {
     RebindRecover,
 }
 
+/// Machine-owned pending-supervisor-acceptance verdict for a re-verified
+/// already-accepted remote peer during supervisor rotation. The actor mirrors
+/// this: `NotConfirmedReattempt` drops the accepted peer and re-attempts the
+/// rotation against it; `StalePendingAuthority` errors with the stale-pending
+/// message; `Fatal` bubbles the rejection up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobPendingSupervisorAcceptanceKind {
+    #[default]
+    Fatal,
+    NotConfirmedReattempt,
+    StalePendingAuthority,
+}
+
+/// Machine-owned frame-seed idempotency disposition. `CreateFrameSeed` emits
+/// `Seeded` for a fresh seed and `AlreadySeeded` (a no-op) when re-seeding an
+/// already-tracked frame. The flow shell mirrors both as success — replacing
+/// the former guard-name string match (`frame_seed_is_new`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobFrameSeedDisposition {
+    #[default]
+    Seeded,
+    AlreadySeeded,
+}
+
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SubmitWorkRejectReasonKind {
@@ -2046,6 +2070,99 @@ mod tests {
         }
     }
 
+    /// Ratchets the pending-supervisor-acceptance partition, sourced from
+    /// MobMachine instead of the former handwritten
+    /// `pending_supervisor_acceptance_confirmed` shell reducer over the raw
+    /// wire cause. Every one of the eleven wire causes must resolve to exactly
+    /// one acceptance verdict, and the partition must match the historical
+    /// shell mapping exactly: NotBound / SenderMismatch ->
+    /// NotConfirmedReattempt; StaleSupervisor -> StalePendingAuthority; every
+    /// other cause -> Fatal.
+    #[test]
+    fn pending_supervisor_acceptance_is_decided_by_machine() {
+        use MobBridgeRejectionCause as Cause;
+        use MobPendingSupervisorAcceptanceKind as Verdict;
+        let not_confirmed = [Cause::NotBound, Cause::SenderMismatch];
+        let stale = [Cause::StaleSupervisor];
+        let fatal = [
+            Cause::AlreadyBound,
+            Cause::InvalidBootstrapToken,
+            Cause::UnsupportedProtocolVersion,
+            Cause::InvalidSupervisorSpec,
+            Cause::InvalidPeerSpec,
+            Cause::AddressMismatch,
+            Cause::Unsupported,
+            Cause::Internal,
+        ];
+        // Defensive completeness: the three partitions must cover all eleven
+        // causes with no overlap, so a forgotten future variant fails to
+        // enumerate here.
+        assert_eq!(
+            not_confirmed.len() + stale.len() + fatal.len(),
+            11,
+            "every MobBridgeRejectionCause variant must be partitioned"
+        );
+        for (causes, expected) in [
+            (not_confirmed.as_slice(), Verdict::NotConfirmedReattempt),
+            (stale.as_slice(), Verdict::StalePendingAuthority),
+            (fatal.as_slice(), Verdict::Fatal),
+        ] {
+            for cause in causes {
+                let mut authority = MobMachineAuthority::new();
+                let transition = MobMachineMutator::apply(
+                    &mut authority,
+                    MobMachineInput::ClassifyPendingSupervisorAcceptance {
+                        rejection_cause: *cause,
+                    },
+                )
+                .expect("pending supervisor acceptance cause should resolve a verdict");
+                let verdict = transition.effects().iter().find_map(|effect| match effect {
+                    MobMachineEffect::PendingSupervisorAcceptanceClassified {
+                        rejection_cause,
+                        verdict,
+                    } => Some((*rejection_cause, *verdict)),
+                    _ => None,
+                });
+                assert_eq!(verdict, Some((*cause, expected)), "for {cause:?}");
+            }
+        }
+    }
+
+    fn root_frame_seed_input(
+        run_id: &RunId,
+        frame_id: &FrameId,
+        node_id: &FlowNodeId,
+    ) -> MobMachineInput {
+        MobMachineInput::CreateFrameSeed {
+            run_id: run_id.clone(),
+            frame_id: frame_id.clone(),
+            frame_scope: FrameScope::Root,
+            loop_instance_id: None,
+            iteration: 0,
+            tracked_nodes: [node_id.clone()].into_iter().collect(),
+            ordered_nodes: vec![node_id.clone()],
+            node_kind: [(node_id.clone(), FlowNodeKind::Loop)]
+                .into_iter()
+                .collect(),
+            node_dependencies: [(node_id.clone(), Vec::new())].into_iter().collect(),
+            node_dependency_modes: [(node_id.clone(), DependencyMode::All)]
+                .into_iter()
+                .collect(),
+            node_branches: [(node_id.clone(), None)].into_iter().collect(),
+            node_step_ids: Default::default(),
+            node_loop_ids: [(node_id.clone(), LoopId::from("repeat"))]
+                .into_iter()
+                .collect(),
+            node_status: [(node_id.clone(), NodeRunStatus::Ready)]
+                .into_iter()
+                .collect(),
+            ready_queue: vec![node_id.clone()],
+            output_recorded: [(node_id.clone(), false)].into_iter().collect(),
+            node_condition_results: [(node_id.clone(), None)].into_iter().collect(),
+            last_admitted_node: None,
+        }
+    }
+
     fn seed_root_frame(
         authority: &mut MobMachineAuthority,
         run_id: &RunId,
@@ -2053,38 +2170,52 @@ mod tests {
         node_id: &FlowNodeId,
     ) {
         seed_run(authority, run_id);
-        MobMachineMutator::apply(
-            authority,
-            MobMachineInput::CreateFrameSeed {
-                run_id: run_id.clone(),
-                frame_id: frame_id.clone(),
-                frame_scope: FrameScope::Root,
-                loop_instance_id: None,
-                iteration: 0,
-                tracked_nodes: [node_id.clone()].into_iter().collect(),
-                ordered_nodes: vec![node_id.clone()],
-                node_kind: [(node_id.clone(), FlowNodeKind::Loop)]
-                    .into_iter()
-                    .collect(),
-                node_dependencies: [(node_id.clone(), Vec::new())].into_iter().collect(),
-                node_dependency_modes: [(node_id.clone(), DependencyMode::All)]
-                    .into_iter()
-                    .collect(),
-                node_branches: [(node_id.clone(), None)].into_iter().collect(),
-                node_step_ids: Default::default(),
-                node_loop_ids: [(node_id.clone(), LoopId::from("repeat"))]
-                    .into_iter()
-                    .collect(),
-                node_status: [(node_id.clone(), NodeRunStatus::Ready)]
-                    .into_iter()
-                    .collect(),
-                ready_queue: vec![node_id.clone()],
-                output_recorded: [(node_id.clone(), false)].into_iter().collect(),
-                node_condition_results: [(node_id.clone(), None)].into_iter().collect(),
-                last_admitted_node: None,
-            },
-        )
-        .expect("CreateFrameSeed should be accepted before child loop seed");
+        MobMachineMutator::apply(authority, root_frame_seed_input(run_id, frame_id, node_id))
+            .expect("CreateFrameSeed should be accepted before child loop seed");
+    }
+
+    /// Ratchets the machine-owned frame-seed idempotency disposition, replacing
+    /// the former `error.to_string().contains("frame_seed_is_new")` shell string
+    /// folklore. A fresh `CreateFrameSeed` emits `Seeded`; re-applying the same
+    /// seed for an already-tracked frame is a no-op that emits `AlreadySeeded`
+    /// (NOT a guard rejection) — detected purely from the typed effect.
+    #[test]
+    fn create_frame_seed_idempotency_is_decided_by_machine() {
+        let run_id = RunId::from("run-frame-seed");
+        let frame_id = FrameId::from("frame-root");
+        let node_id = FlowNodeId::from("node-a");
+
+        let mut authority = MobMachineAuthority::new();
+        seed_run(&mut authority, &run_id);
+        let seed = root_frame_seed_input(&run_id, &frame_id, &node_id);
+
+        // First application: fresh seed.
+        let first = MobMachineMutator::apply(&mut authority, seed.clone())
+            .expect("fresh CreateFrameSeed should be accepted");
+        let first_disposition = first.effects().iter().find_map(|effect| match effect {
+            MobMachineEffect::FrameSeedConfirmed { disposition, .. } => Some(*disposition),
+            _ => None,
+        });
+        assert_eq!(
+            first_disposition,
+            Some(MobFrameSeedDisposition::Seeded),
+            "fresh seed must emit the Seeded disposition"
+        );
+
+        // Second application of the identical seed: idempotent no-op, NOT a
+        // rejection. The disposition is read from the typed effect, never from
+        // an error string.
+        let second = MobMachineMutator::apply(&mut authority, seed)
+            .expect("re-seeding an already-tracked frame must be accepted as a no-op");
+        let second_disposition = second.effects().iter().find_map(|effect| match effect {
+            MobMachineEffect::FrameSeedConfirmed { disposition, .. } => Some(*disposition),
+            _ => None,
+        });
+        assert_eq!(
+            second_disposition,
+            Some(MobFrameSeedDisposition::AlreadySeeded),
+            "re-seed must emit the AlreadySeeded disposition without rejecting"
+        );
     }
 
     fn external_peer_edge_for_test(local: &str, name: &str) -> ExternalPeerEdge {

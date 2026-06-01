@@ -389,13 +389,6 @@ impl FlowFrameKernel {
         }
     }
 
-    async fn project_mob_machine_input(
-        &self,
-        input: mob_dsl::MobMachineInput,
-    ) -> Result<mob_dsl::MobMachineState, MobError> {
-        self.projector.project_machine_input(input).await
-    }
-
     async fn preview_mob_machine_input(
         &self,
         input: mob_dsl::MobMachineInput,
@@ -508,9 +501,40 @@ impl FlowFrameKernel {
                 return Ok(());
             }
         }
-        match self.project_mob_machine_input(seed_input).await {
-            Ok(machine_state) => {
+        // `CreateFrameSeed` is idempotent at the machine: MobMachine — not this
+        // shell — owns whether the input freshly seeded the frame (`Seeded`) or
+        // was a no-op re-confirm of an already-tracked frame (`AlreadySeeded`).
+        // We mirror the typed disposition rather than reinterpreting a guard
+        // rejection by literal-matching its guard name. Fails closed (returns
+        // the machine's error) if no disposition is emitted.
+        let effects = self
+            .projector
+            .apply_machine_input_effects(seed_input)
+            .await?;
+        let disposition = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::FrameSeedConfirmed { disposition, .. } => {
+                    Some(*disposition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted CreateFrameSeed but emitted no frame-seed disposition"
+                        .into(),
+                )
+            })?;
+        match disposition {
+            // Idempotent no-op: the frame was already seeded. Mirror as success
+            // without re-validating against the local snapshot, exactly as the
+            // former `frame_seed_is_new` already-confirmed path did.
+            mob_dsl::MobFrameSeedDisposition::AlreadySeeded => Ok(()),
+            // Fresh seed: validate the committed machine state against the local
+            // snapshot when one is present, as before.
+            mob_dsl::MobFrameSeedDisposition::Seeded => {
                 if let Some(existing) = existing {
+                    let machine_state = self.current_mob_machine_state().await?;
                     validate_seed_confirmation_matches_snapshot(
                         frame_id,
                         existing,
@@ -519,8 +543,6 @@ impl FlowFrameKernel {
                 }
                 Ok(())
             }
-            Err(error) if mob_machine_seed_already_confirmed(&error) => Ok(()),
-            Err(error) => Err(error),
         }
     }
 
@@ -2656,10 +2678,6 @@ impl FlowFrameEngine {
             machine_state,
         ))
     }
-}
-
-fn mob_machine_seed_already_confirmed(error: &MobError) -> bool {
-    error.to_string().contains("frame_seed_is_new")
 }
 
 fn machine_frame_scope(scope: flow_frame::FrameScope) -> crate::machines::mob_machine::FrameScope {

@@ -374,6 +374,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
+            | mob_dsl::MobMachineInput::ClassifyPendingSupervisorAcceptance { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }
@@ -1524,6 +1525,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyBridgeRejectionRecovery { .. }
+            | mob_dsl::MobMachineInput::ClassifyPendingSupervisorAcceptance { .. }
             | mob_dsl::MobMachineInput::EnsureMember { .. }
             | mob_dsl::MobMachineInput::Reconcile { .. }
             | mob_dsl::MobMachineInput::Retire { .. }

@@ -314,6 +314,7 @@ pub enum MobMachineCatalogInput {
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
     ClassifyBridgeRejectionRecovery,
+    ClassifyPendingSupervisorAcceptance,
     EnsureMember,
     Reconcile,
     Retire,
@@ -417,6 +418,7 @@ impl MobMachineCatalogInput {
         Self::ResolveCreateMobAdmission,
         Self::ResolveProfileMutationAdmission,
         Self::ClassifyBridgeRejectionRecovery,
+        Self::ClassifyPendingSupervisorAcceptance,
         Self::EnsureMember,
         Self::Reconcile,
         Self::Retire,
@@ -536,6 +538,9 @@ impl MobMachineCatalogInput {
             }
             Self::ClassifyBridgeRejectionRecovery => {
                 MobMachineInputVariant::ClassifyBridgeRejectionRecovery
+            }
+            Self::ClassifyPendingSupervisorAcceptance => {
+                MobMachineInputVariant::ClassifyPendingSupervisorAcceptance
             }
             Self::EnsureMember => MobMachineInputVariant::EnsureMember,
             Self::Reconcile => MobMachineInputVariant::Reconcile,
@@ -702,6 +707,7 @@ impl MobMachineCatalogInput {
             Self::ResolveCreateMobAdmission => "ResolveCreateMobAdmission",
             Self::ResolveProfileMutationAdmission => "ResolveProfileMutationAdmission",
             Self::ClassifyBridgeRejectionRecovery => "ClassifyBridgeRejectionRecovery",
+            Self::ClassifyPendingSupervisorAcceptance => "ClassifyPendingSupervisorAcceptance",
             Self::EnsureMember => "EnsureMember",
             Self::Reconcile => "Reconcile",
             Self::Retire => "Retire",
@@ -1042,6 +1048,15 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // supervisor (re)authorization — a runtime-internal observation
         // classification authority, not a surface command.
         input: MobMachineCatalogInput::ClassifyBridgeRejectionRecovery,
+        reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Pending-supervisor-acceptance class is decided by MobMachine from the
+        // actor's pure wire rejection-cause observation while re-verifying an
+        // already-accepted remote peer during supervisor rotation — a
+        // runtime-internal observation classification authority, not a surface
+        // command.
+        input: MobMachineCatalogInput::ClassifyPendingSupervisorAcceptance,
         reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {

@@ -23,8 +23,9 @@ use crate::session::TranscriptRewriteReason;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
-    TurnFailureSource, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+    ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect, TurnExecutionInput,
+    TurnExecutionTransition, TurnFailureSource, TurnPhase, TurnPrimitiveKind,
+    TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
     BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
@@ -534,11 +535,26 @@ where
                             return Ok(result);
                         }
                         let error = AgentError::llm_empty_response(self.client.provider());
-                        if let Some(retry_schedule) = self.retry_policy.schedule_retry(
+                        // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
+                        // owns the recoverable-vs-fatal/exhaustion verdict. Only
+                        // a machine `Recover` verdict drives the retry path;
+                        // `Exhausted`/`Fatal` bubble the error up.
+                        let recovery = self.classify_llm_failure_recovery(
                             &error,
                             attempt,
-                            self.budget.remaining_duration(),
-                        ) {
+                            self.retry_policy.max_retries,
+                        )?;
+                        if let LlmFailureRecoveryKind::Recover = recovery {
+                            let retry_schedule = self
+                                .retry_policy
+                                .schedule_retry(&error, attempt, self.budget.remaining_duration())
+                                .ok_or_else(|| {
+                                    AgentError::InternalError(
+                                        "MeerkatMachine classified LLM failure as Recover but the \
+                                         retry policy produced no schedule"
+                                            .to_string(),
+                                    )
+                                })?;
                             tracing::warn!(
                                 "LLM completed without visible/actionable output (attempt {}), retrying in {}ms",
                                 retry_schedule.plan.attempt,
@@ -582,11 +598,26 @@ where
                     return Ok(result);
                 }
                 Err(e) => {
-                    if let Some(retry_schedule) = self.retry_policy.schedule_retry(
+                    // P0 Dogma Invariant 1: MeerkatMachine — not the shell —
+                    // owns the recoverable-vs-fatal/exhaustion verdict. Only a
+                    // machine `Recover` verdict drives the retry path;
+                    // `Exhausted`/`Fatal` bubble the error up.
+                    let recovery = self.classify_llm_failure_recovery(
                         &e,
                         attempt,
-                        self.budget.remaining_duration(),
-                    ) {
+                        self.retry_policy.max_retries,
+                    )?;
+                    if let LlmFailureRecoveryKind::Recover = recovery {
+                        let retry_schedule = self
+                            .retry_policy
+                            .schedule_retry(&e, attempt, self.budget.remaining_duration())
+                            .ok_or_else(|| {
+                                AgentError::InternalError(
+                                    "MeerkatMachine classified LLM failure as Recover but the \
+                                     retry policy produced no schedule"
+                                        .to_string(),
+                                )
+                            })?;
                         tracing::warn!(
                             "LLM call failed (attempt {}), retrying in {}ms: {}",
                             retry_schedule.plan.attempt,
@@ -695,6 +726,47 @@ where
         })
     }
 
+    /// P0 Dogma Invariant 1: mirror MeerkatMachine's LLM-failure recovery
+    /// verdict.
+    ///
+    /// The agent loop EXTRACTS the typed recoverable failure kind from the
+    /// `AgentError` (absent when the error yields no recoverable kind) plus the
+    /// one-based `retry_attempt` and `max_retries`, then drives the machine's
+    /// `ClassifyLlmFailureRecovery` classifier. MeerkatMachine — not this shell
+    /// — owns whether the failure may `Recover`, is `Exhausted`, or is `Fatal`.
+    /// This is a pure stateless classification (no turn-phase mutation); we
+    /// mirror the emitted verdict and fail closed (returns an error) if the
+    /// machine emits none.
+    fn classify_llm_failure_recovery(
+        &self,
+        error: &AgentError,
+        attempt_index: u32,
+        max_retries: u32,
+    ) -> Result<LlmFailureRecoveryKind, AgentError> {
+        let failure_kind = crate::retry::LlmRetryFailure::from_agent_error(error).map(|f| f.kind);
+        let retry_attempt = attempt_index.saturating_add(1);
+        let effects = self.apply_turn_input_via_runtime_handle(
+            &TurnExecutionInput::ClassifyLlmFailureRecovery {
+                failure_kind,
+                retry_attempt,
+                max_retries,
+            },
+        )?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                TurnExecutionEffect::LlmFailureRecoveryClassified { recovery } => Some(recovery),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "MeerkatMachine accepted ClassifyLlmFailureRecovery but emitted no recovery \
+                     verdict"
+                        .to_string(),
+                )
+            })
+    }
+
     fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
@@ -786,7 +858,10 @@ where
                 }
                 TurnExecutionEffect::RunStarted { .. }
                 | TurnExecutionEffect::BoundaryApplied { .. }
-                | TurnExecutionEffect::CheckCompaction => {}
+                | TurnExecutionEffect::CheckCompaction
+                // Mirrored directly by `classify_llm_failure_recovery`; never
+                // routed through turn-effect execution.
+                | TurnExecutionEffect::LlmFailureRecoveryClassified { .. } => {}
             }
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let current_boundary_index = self.compaction_cadence.session_boundary_index;

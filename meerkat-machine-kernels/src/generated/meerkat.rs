@@ -3088,6 +3088,60 @@ impl std::fmt::Display for LiveWebsocketTokenAdmissionRejection {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LlmFailureRecoveryKind {
+    #[default]
+    #[serde(rename = "Fatal")]
+    Fatal,
+    #[serde(rename = "Recover")]
+    Recover,
+    #[serde(rename = "Exhausted")]
+    Exhausted,
+}
+impl LlmFailureRecoveryKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fatal => "Fatal",
+            Self::Recover => "Recover",
+            Self::Exhausted => "Exhausted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LlmFailureRecoveryKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Fatal" => Ok(Self::Fatal),
+            "Recover" => Ok(Self::Recover),
+            "Exhausted" => Ok(Self::Exhausted),
+            other => Err(format!("invalid LlmFailureRecoveryKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LlmFailureRecoveryKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LlmFailureRecoveryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LlmRetryFailureKind {
     #[default]
     #[serde(rename = "RateLimited")]
@@ -10549,6 +10603,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyTurnTerminality {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyLlmFailureRecovery {
+        pub failure_kind: Option<LlmRetryFailureKind>,
+        pub retry_attempt: u64,
+        pub max_retries: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveTurnSurfaceResult {
         pub outcome: TurnTerminalOutcome,
         pub cause_class: TerminalCauseClass,
@@ -11595,6 +11655,7 @@ pub enum Input {
     ClassifyInputTerminality(inputs::ClassifyInputTerminality),
     ClassifyTurnTerminalCauseClass(inputs::ClassifyTurnTerminalCauseClass),
     ClassifyTurnTerminality(inputs::ClassifyTurnTerminality),
+    ClassifyLlmFailureRecovery(inputs::ClassifyLlmFailureRecovery),
     ResolveTurnSurfaceResult(inputs::ResolveTurnSurfaceResult),
     AuthorizeStoredInputStateSeed(inputs::AuthorizeStoredInputStateSeed),
     ClassifyRuntimeLifecycleState(inputs::ClassifyRuntimeLifecycleState),
@@ -11894,6 +11955,7 @@ impl Input {
             Self::ClassifyInputTerminality(_) => InputKind::ClassifyInputTerminality,
             Self::ClassifyTurnTerminalCauseClass(_) => InputKind::ClassifyTurnTerminalCauseClass,
             Self::ClassifyTurnTerminality(_) => InputKind::ClassifyTurnTerminality,
+            Self::ClassifyLlmFailureRecovery(_) => InputKind::ClassifyLlmFailureRecovery,
             Self::ResolveTurnSurfaceResult(_) => InputKind::ResolveTurnSurfaceResult,
             Self::AuthorizeStoredInputStateSeed(_) => InputKind::AuthorizeStoredInputStateSeed,
             Self::ClassifyRuntimeLifecycleState(_) => InputKind::ClassifyRuntimeLifecycleState,
@@ -12206,6 +12268,7 @@ pub enum InputKind {
     ClassifyInputTerminality,
     ClassifyTurnTerminalCauseClass,
     ClassifyTurnTerminality,
+    ClassifyLlmFailureRecovery,
     ResolveTurnSurfaceResult,
     AuthorizeStoredInputStateSeed,
     ClassifyRuntimeLifecycleState,
@@ -12705,6 +12768,10 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnTerminalityClassified {
         pub terminal: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LlmFailureRecoveryClassified {
+        pub recovery: LlmFailureRecoveryKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnSurfaceResultResolved {
@@ -13299,6 +13366,7 @@ pub enum Effect {
     InputBehavioralTerminalityResolved(effects::InputBehavioralTerminalityResolved),
     TurnTerminalCauseClassResolved(effects::TurnTerminalCauseClassResolved),
     TurnTerminalityClassified(effects::TurnTerminalityClassified),
+    LlmFailureRecoveryClassified(effects::LlmFailureRecoveryClassified),
     TurnSurfaceResultResolved(effects::TurnSurfaceResultResolved),
     StoredInputStateSeedAuthorized(effects::StoredInputStateSeedAuthorized),
     RuntimeLifecycleStateClassified(effects::RuntimeLifecycleStateClassified),
@@ -13452,6 +13520,7 @@ pub enum EffectKind {
     InputBehavioralTerminalityResolved,
     TurnTerminalCauseClassResolved,
     TurnTerminalityClassified,
+    LlmFailureRecoveryClassified,
     TurnSurfaceResultResolved,
     StoredInputStateSeedAuthorized,
     RuntimeLifecycleStateClassified,
@@ -15132,6 +15201,15 @@ pub enum TransitionId {
     ClassifyTurnTerminalityNonTerminalIdle,
     ClassifyTurnTerminalityNonTerminalAttached,
     ClassifyTurnTerminalityNonTerminalRunning,
+    ClassifyLlmFailureRecoveryRecoverIdle,
+    ClassifyLlmFailureRecoveryRecoverAttached,
+    ClassifyLlmFailureRecoveryRecoverRunning,
+    ClassifyLlmFailureRecoveryExhaustedIdle,
+    ClassifyLlmFailureRecoveryExhaustedAttached,
+    ClassifyLlmFailureRecoveryExhaustedRunning,
+    ClassifyLlmFailureRecoveryFatalIdle,
+    ClassifyLlmFailureRecoveryFatalAttached,
+    ClassifyLlmFailureRecoveryFatalRunning,
     ResolveTurnSurfaceResultNoneMissingTerminalIdle,
     ResolveTurnSurfaceResultCompletedSuccessIdle,
     ResolveTurnSurfaceResultCompletedFailureIdle,

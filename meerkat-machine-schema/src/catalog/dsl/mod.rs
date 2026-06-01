@@ -1527,6 +1527,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "SurfaceResultClass",
                 &["Success", "HardFailure", "Cancelled", "MissingTerminal"],
             ),
+            NamedTypeBinding::string_enum(
+                "LlmFailureRecoveryKind",
+                &["Fatal", "Recover", "Exhausted"],
+            ),
             NamedTypeBinding::u64("TurnNumber"),
             NamedTypeBinding::string("WaitRequestId"),
             NamedTypeBinding::string("WorkId"),
@@ -1721,6 +1725,7 @@ runtime_internal_inputs!(
         ClassifyOperationTerminality,
         ClassifyOperationPublicResult,
         ClassifyOperationTransitionIdempotence,
+        ClassifyLlmFailureRecovery,
         ClassifyOperationCompletionFeed,
         ClassifyOperationCompletionWake,
         ClassifyOperationDurability,
@@ -2059,6 +2064,11 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["FatalBubbleUp", "RebindRecover"],
             ),
             NamedTypeBinding::string_enum(
+                "MobPendingSupervisorAcceptanceKind",
+                &["Fatal", "NotConfirmedReattempt", "StalePendingAuthority"],
+            ),
+            NamedTypeBinding::string_enum("MobFrameSeedDisposition", &["Seeded", "AlreadySeeded"]),
+            NamedTypeBinding::string_enum(
                 "MobSpawnManyFailureObservationKind",
                 &[
                     "ProfileNotFound",
@@ -2267,6 +2277,7 @@ runtime_internal_inputs!(
         ResolveCreateMobAdmission,
         ResolveProfileMutationAdmission,
         ClassifyBridgeRejectionRecovery,
+        ClassifyPendingSupervisorAcceptance,
         CreateFrameSeed,
         CreateLoopSeed,
         CreateRunSeed,

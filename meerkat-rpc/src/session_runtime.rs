@@ -11531,11 +11531,12 @@ mod tests {
             self.fail_after_saves
                 .store(usize::MAX, AtomicOrdering::Release);
         }
-    }
 
-    #[async_trait]
-    impl meerkat::SessionStore for ToggleFailSaveStore {
-        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+        // Shared injection check so the runtime-backed projection write
+        // (`save_authoritative_projection_if_current_revision`) honors the same
+        // forced/countdown failures as `save`. Each durable projection write
+        // consumes one countdown tick regardless of which path performs it.
+        fn check_injected_failure(&self) -> Result<(), meerkat_store::SessionStoreError> {
             if self.fail_save.load(AtomicOrdering::Acquire) {
                 return Err(meerkat_store::SessionStoreError::Internal(
                     "forced save failure".to_string(),
@@ -11564,7 +11565,29 @@ mod tests {
                     break;
                 }
             }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl meerkat::SessionStore for ToggleFailSaveStore {
+        async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            self.check_injected_failure()?;
             self.inner.save(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), meerkat_store::SessionStoreError> {
+            self.check_injected_failure()?;
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
         }
 
         async fn load(

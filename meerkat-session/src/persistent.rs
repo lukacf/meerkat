@@ -3556,17 +3556,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await;
         }
         if let Some(runtime_store) = self.runtime_store.as_ref() {
-            if let Err(error) = verify_authoritative_projection_persisted_continuity(
-                self.store.as_ref(),
-                self.blob_store.as_ref(),
-                &session,
-            )
-            .await
-            {
-                return Err(self
-                    .fail_closed_runtime_projection_preflight(session.id(), error)
-                    .await);
-            }
+            // The preflight validates continuity against the durable projection
+            // head using the rewrite-aware `run_boundary_snapshot_save_guard`, so
+            // a core-owned shrink (e.g. compaction) whose `TranscriptRewriteCommit`
+            // anchors to that head is accepted here. Capture the validated CAS
+            // token: once the runtime authority commits below, the durable row is
+            // an explicitly rebuildable projection, so the projection write must
+            // be a CAS-guarded authoritative-projection save keyed on that token
+            // — not a plain append-guarded `store.save`, whose rewrite-blind
+            // `append_only_save_guard` would reject the very shrink the preflight
+            // just proved legal (the source of the archive-time
+            // `MonotonicityViolation` that strands compacted singletons).
+            let expected_current_revision =
+                match verify_authoritative_projection_persisted_continuity(
+                    self.store.as_ref(),
+                    self.blob_store.as_ref(),
+                    &session,
+                )
+                .await
+                {
+                    Ok(expected_current_revision) => expected_current_revision,
+                    Err(error) => {
+                        return Err(self
+                            .fail_closed_runtime_projection_preflight(session.id(), error)
+                            .await);
+                    }
+                };
             let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                     "failed to serialize session snapshot for runtime persistence: {err}"
@@ -3585,12 +3600,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "runtime snapshot persistence failed: {err}"
                     )))
                 })?;
-            if let Err(error) = save_session_projection_with_storage_normalization_bridge(
-                self.store.as_ref(),
-                self.blob_store.as_ref(),
-                &session,
-            )
-            .await
+            if let Err(error) = self
+                .store
+                .save_authoritative_projection_if_current_revision(
+                    &session,
+                    expected_current_revision,
+                )
+                .await
             {
                 return Err(self
                     .fail_closed_runtime_projection_update(
@@ -6352,6 +6368,27 @@ mod tests {
                 ));
             }
             self.inner.save(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), SessionStoreError> {
+            // Runtime-backed projection writes flow through this CAS path, so it
+            // honors the same injected failure as `save` to keep modelling a
+            // projection-write failure for the discards-live-state tests.
+            if self.fail_save.load(Ordering::Acquire) {
+                return Err(SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
+            }
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
         }
 
         async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
@@ -11136,6 +11173,250 @@ mod tests {
                 .await
                 .expect("live-session status should succeed"),
             "archive() should discard the stale live session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compacted_session_persists_when_durable_projection_lagged_across_compaction() {
+        // Regression: a long-lived runtime-backed singleton whose durable
+        // `SessionStore` projection lagged behind the `runtime_store` across a
+        // compaction boundary must still persist (and therefore archive)
+        // without a `MonotonicityViolation`.
+        //
+        // The divergence reproduced here: the durable store is stuck at the
+        // pre-compaction ("parent") revision while the runtime_store already
+        // holds the compacted revision, whose `TranscriptRewriteCommit` anchors
+        // to the parent head. `save_normalized_session` loads `previous` from
+        // the runtime_store (== incoming), so the rewrite chain is empty and it
+        // falls to the runtime-store projection branch. The preflight accepts
+        // the shrink via the rewrite-aware `run_boundary_snapshot_save_guard`
+        // against the lagged durable head, but a plain `store.save` then rejects
+        // the same snapshot via the rewrite-blind `append_only_save_guard`.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(Arc::clone(&runtime_store)),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+
+        // Build the pre-compaction "parent" transcript and pin it as the lagged
+        // durable head.
+        let seed = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .unwrap_or_else(|| Session::with_id(created.session_id.clone()));
+        let mut parent = seed.clone();
+        for turn in 0..2 {
+            parent.push(Message::User(UserMessage::text(format!(
+                "turn-{turn} question"
+            ))));
+            parent.push(Message::Assistant(meerkat_core::AssistantMessage {
+                content: format!("turn-{turn} answer"),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }));
+        }
+        let parent_revision = parent.transcript_revision().expect("parent revision");
+        store
+            .save(&parent)
+            .await
+            .expect("durable store should accept the pre-compaction append");
+
+        // Compact the parent transcript, recording a compaction rewrite commit
+        // that anchors to the parent head.
+        let mut compacted = parent.clone();
+        let replacement = vec![
+            parent.messages()[0].clone(),
+            Message::User(UserMessage::text(
+                "[Context compacted] singleton summary".to_string(),
+            )),
+        ];
+        compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: parent.messages().len(),
+                },
+                replacement,
+                TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .expect("compaction rewrite should commit");
+        let compacted_revision = compacted.transcript_revision().expect("compacted revision");
+        assert!(
+            compacted.messages().len() < parent.messages().len(),
+            "compaction must shrink the transcript to exercise the monotonicity guard"
+        );
+
+        // Advance only the runtime_store to the compacted revision so the
+        // durable projection lags behind it across the compaction boundary.
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&compacted)
+                        .expect("serialize compacted runtime snapshot"),
+                },
+            )
+            .await
+            .expect("seed runtime_store at the compacted revision");
+
+        // Persist the compacted snapshot. Before the fix this fails with a
+        // MonotonicityViolation because the durable projection catch-up is not
+        // rewrite-aware.
+        service
+            .save_normalized_session(compacted)
+            .await
+            .expect("compacted snapshot must persist even when the durable projection lagged");
+
+        let saved = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("compacted projection should exist");
+        assert_eq!(
+            saved.transcript_revision().expect("saved revision"),
+            compacted_revision,
+            "durable projection must catch up to the compacted revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archive_succeeds_for_compacted_session_with_lagging_durable_projection() {
+        // End-to-end regression for the reported symptom: archiving a compacted
+        // runtime-backed singleton whose durable projection lagged across the
+        // compaction boundary must succeed (it previously failed at
+        // DisposalStep::ArchiveSession with a MonotonicityViolation, stranding
+        // the member). Drives the full `archive_with_machine_protocol` path with
+        // the durable store stuck at the pre-compaction revision and the runtime
+        // authority holding the compacted revision.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(Arc::clone(&runtime_store)),
+            memory_blob_store(),
+        );
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+
+        let seed = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .unwrap_or_else(|| Session::with_id(created.session_id.clone()));
+        let mut parent = seed.clone();
+        for turn in 0..2 {
+            parent.push(Message::User(UserMessage::text(format!(
+                "turn-{turn} question"
+            ))));
+            parent.push(Message::Assistant(meerkat_core::AssistantMessage {
+                content: format!("turn-{turn} answer"),
+                tool_calls: Vec::new(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }));
+        }
+        let parent_revision = parent.transcript_revision().expect("parent revision");
+        store
+            .save(&parent)
+            .await
+            .expect("durable store should accept the pre-compaction append");
+
+        let mut compacted = parent.clone();
+        let replacement = vec![
+            parent.messages()[0].clone(),
+            Message::User(UserMessage::text(
+                "[Context compacted] singleton summary".to_string(),
+            )),
+        ];
+        compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: parent.messages().len(),
+                },
+                replacement,
+                TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .expect("compaction rewrite should commit");
+        let compacted_revision = compacted.transcript_revision().expect("compacted revision");
+
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&compacted)
+                        .expect("serialize compacted runtime snapshot"),
+                },
+            )
+            .await
+            .expect("seed runtime_store at the compacted revision");
+
+        // Drop the live handle so the archive snapshot is sourced from runtime
+        // authority (the compacted revision), exercising the lagged-projection
+        // catch-up rather than the still-seeded live transcript.
+        match service.discard_live_session(&created.session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => panic!("discard_live_session should succeed: {error}"),
+        }
+
+        service
+            .archive_with_machine_protocol(
+                &created.session_id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect(
+                "archive must succeed for a compacted session with a lagged durable projection",
+            );
+
+        let archived = service
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("archive authority should load")
+            .expect("archive should persist the durable snapshot");
+        assert_eq!(
+            archived.transcript_revision().expect("archived revision"),
+            compacted_revision,
+            "archive must persist the compacted revision as durable truth"
+        );
+        assert!(
+            metadata_marks_archived(archived.metadata()),
+            "archive should mirror the retired lifecycle into the projection"
+        );
+        assert_eq!(
+            runtime_store
+                .load_runtime_state(&runtime_id)
+                .await
+                .expect("runtime state load should succeed"),
+            Some(RuntimeState::Retired),
+            "archive must persist machine-owned retired lifecycle"
         );
     }
 

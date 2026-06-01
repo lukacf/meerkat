@@ -8683,9 +8683,12 @@ impl MobActor {
                     }
                 }
                 crate::RuntimeBinding::Session => {
-                    return Err(MobRespawnError::PreviousMemberCleanupAmbiguous {
-                        report: cleanup_report,
-                    });
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %agent_identity,
+                        retire_error = %error,
+                        "respawn proceeding after session-bound retire removed the stale roster anchor"
+                    );
                 }
             }
         }
@@ -9014,20 +9017,21 @@ impl MobActor {
                 Some((DisposalStep::ArchiveSession, _))
             );
 
-        // Finally: edge-lock cleanup is unconditional, but roster removal is
-        // gated on critical archive success so retry has a concrete member
-        // anchor to operate on.
+        // Finally: edge-lock cleanup and roster removal are unconditional for
+        // normal disposal. ArchiveSession errors are still returned to the
+        // caller, but retaining a session-backed member after archive failure
+        // would leave the roster pointing at a runtime that retire already
+        // terminally drained — an unreachable ghost that blocks respawn/reset.
         self.dispose_prune_edge_locks(ctx).await;
         if archive_failed {
             tracing::warn!(
                 mob_id = %self.definition.id,
                 agent_identity = %ctx.agent_identity,
-                "retaining retiring roster entry after ArchiveSession failure for retry"
+                "removing retiring roster entry after ArchiveSession failure to avoid a dead runtime anchor"
             );
-        } else {
-            self.dispose_remove_from_roster(ctx).await;
-            report.roster_removed = true;
         }
+        self.dispose_remove_from_roster(ctx).await;
+        report.roster_removed = true;
         report
     }
 
@@ -11053,6 +11057,19 @@ impl MobActor {
         for id in ids {
             let result = self.retire_one(id).await;
             if let Err((id, error)) = result {
+                let roster_still_contains_member = {
+                    let roster = self.roster.read().await;
+                    roster.get(&id).is_some()
+                };
+                if !roster_still_contains_member {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %id,
+                        error = %error,
+                        "{context}: retire reported cleanup failure after removing member; continuing"
+                    );
+                    continue;
+                }
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     agent_identity = %id,

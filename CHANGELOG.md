@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.29] - 2026-06-01
+
+Meerkat 0.6.29 fixes remote external mob binding so TCP-backed members can
+reply through a routable supervisor bridge.
+
+### Fixed
+
+- **Remote external bind routing** (#744) — gives mob supervisor bridge
+  runtimes a signed TCP listener while preserving in-process descriptors for
+  local members, and uses recipient-aware supervisor descriptors so TCP
+  external members bind and reply through a routable supervisor address.
+- **External TCP bind regression coverage** (#744) — adds coverage for a TCP
+  external bind followed by a peer turn on the remote runtime.
+
 ## [0.6.28] - 2026-05-31
 
 Meerkat 0.6.28 updates the Anthropic default catalog target to Claude Opus

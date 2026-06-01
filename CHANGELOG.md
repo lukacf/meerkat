@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.30] - 2026-06-01
+
+Meerkat 0.6.30 fixes production external TCP bridge replies and compacted
+singleton retire/archive recovery.
+
+### Fixed
+
+- **External bridge reply routing** (#746) — repairs target-runtime trust
+  projection before idempotent `BindMember` acknowledgements, and decodes the
+  canonical `BridgeReply` envelope emitted by production `comms_drain` so
+  external TCP member binds can complete the supervisor round trip.
+- **Compacted singleton retire stranding** (#747) — lets runtime-backed session
+  projections persist after a legitimate compaction when the durable store lags
+  across the compaction boundary, avoiding `MonotonicityViolation` during
+  archive.
+- **Mob disposal hardening** (#747) — removes dead roster anchors even when
+  `ArchiveSession` fails, so respawn/reset can recover without requiring a
+  process restart.
+
 ## [0.6.29] - 2026-06-01
 
 Meerkat 0.6.29 fixes remote external mob binding so TCP-backed members can

@@ -180,6 +180,22 @@ pub enum ResumeSelfHostedSelection {
     Retain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveSessionAuthorityKind {
+    #[default]
+    LiveAuthoritative,
+    DurableAuthoritative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveSessionAuthorityReason {
+    #[default]
+    StoredArchived,
+    LiveUncommittedTranscript,
+    RuntimeSystemContextDiverged,
+    StoredTranscriptRevisionDiverged,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionDocumentInput {
     MarkSessionInitialTurnPending {
@@ -383,6 +399,12 @@ pub enum SessionDocumentInput {
         has_build_only_overrides: bool,
         first_turn_phase: SessionFirstTurnPhase,
     },
+    ClassifyLiveSessionAuthority {
+        stored_transcript_diverged: bool,
+        live_has_uncommitted_transcript: bool,
+        runtime_system_context_diverged: bool,
+        stored_is_archived: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -460,6 +482,10 @@ pub enum SessionDocumentEffect {
     },
     SessionResumeOverridesRejected {
         reason: ResumeOverrideRejection,
+    },
+    LiveSessionAuthorityClassified {
+        authority: LiveSessionAuthorityKind,
+        reason: LiveSessionAuthorityReason,
     },
 }
 
@@ -572,6 +598,11 @@ enum SessionDocumentTransition {
     AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
     AuthorizeSessionResumeOverridesAcceptUseOverride,
     AuthorizeSessionResumeOverridesAcceptRetainStored,
+    ClassifyLiveSessionAuthorityLive,
+    ClassifyLiveSessionAuthorityDurableArchived,
+    ClassifyLiveSessionAuthorityDurableUncommitted,
+    ClassifyLiveSessionAuthorityDurableSystemContext,
+    ClassifyLiveSessionAuthorityDurableRevision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2497,6 +2528,108 @@ impl SessionDocumentMachineAuthority {
                     #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "AuthorizeSessionResumeOverrides_transition" }),
                 }
             }
+            SessionDocumentInput::ClassifyLiveSessionAuthority {
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((stored_transcript_diverged == false)
+                        && (live_has_uncommitted_transcript == false)
+                        && (runtime_system_context_diverged == false)
+                        && (stored_is_archived == false))
+                {
+                    matches.push(SessionDocumentTransition::ClassifyLiveSessionAuthorityLive);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (stored_is_archived == true)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableArchived,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((stored_is_archived == false) && (live_has_uncommitted_transcript == true))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableUncommitted,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((stored_is_archived == false)
+                        && (live_has_uncommitted_transcript == false)
+                        && (runtime_system_context_diverged == true))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableSystemContext,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((stored_is_archived == false)
+                        && (live_has_uncommitted_transcript == false)
+                        && (runtime_system_context_diverged == false)
+                        && (stored_transcript_diverged == true))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableRevision,
+                    );
+                }
+                let transition = Self::single_transition(matches, "ClassifyLiveSessionAuthority")?;
+                match transition {
+                    SessionDocumentTransition::ClassifyLiveSessionAuthorityLive => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveSessionAuthorityClassified {
+                                authority: LiveSessionAuthorityKind::LiveAuthoritative,
+                                reason: LiveSessionAuthorityReason::StoredArchived,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableArchived => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveSessionAuthorityClassified {
+                                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                                reason: LiveSessionAuthorityReason::StoredArchived,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableUncommitted => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveSessionAuthorityClassified {
+                                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                                reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableSystemContext => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveSessionAuthorityClassified {
+                                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                                reason: LiveSessionAuthorityReason::RuntimeSystemContextDiverged,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableRevision => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveSessionAuthorityClassified {
+                                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                                reason:
+                                    LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ClassifyLiveSessionAuthority_transition",
+                    }),
+                }
+            }
         }
     }
 
@@ -2980,6 +3113,21 @@ impl SessionDocumentMachineAuthority {
             auth_binding_override_present,
             has_build_only_overrides,
             first_turn_phase,
+        })
+    }
+
+    pub fn classify_live_session_authority(
+        &mut self,
+        stored_transcript_diverged: bool,
+        live_has_uncommitted_transcript: bool,
+        runtime_system_context_diverged: bool,
+        stored_is_archived: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ClassifyLiveSessionAuthority {
+            stored_transcript_diverged,
+            live_has_uncommitted_transcript,
+            runtime_system_context_diverged,
+            stored_is_archived,
         })
     }
 }

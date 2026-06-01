@@ -40,6 +40,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSystemPromptMutation`(source: SessionSystemPromptSource, prompt_present: Bool, prompt_byte_count: u64, replacing_existing: Bool)
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, clear_provider_params: Bool, provider_params_override_present: Bool, clear_auth_binding: Bool, auth_binding_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
+- `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
 
 ## Signals
 
@@ -66,6 +67,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PendingContinuationPublicTerminalResolved`(terminal: PendingContinuationPublicTerminal)
 - `SessionResumeOverridesAuthorized`(provider_selection: ResumeProviderSelection, self_hosted_selection: ResumeSelfHostedSelection, provider_overridden: Bool)
 - `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
+- `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
 
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
@@ -639,6 +641,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SessionResumeOverridesAuthorized`
+- To: `Ready`
+
+### `ClassifyLiveSessionAuthorityLive`
+- From: `Ready`
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- Guards:
+  - ``
+- Emits: `LiveSessionAuthorityClassified`
+- To: `Ready`
+
+### `ClassifyLiveSessionAuthorityDurableArchived`
+- From: `Ready`
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- Guards:
+  - ``
+- Emits: `LiveSessionAuthorityClassified`
+- To: `Ready`
+
+### `ClassifyLiveSessionAuthorityDurableUncommitted`
+- From: `Ready`
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- Guards:
+  - ``
+- Emits: `LiveSessionAuthorityClassified`
+- To: `Ready`
+
+### `ClassifyLiveSessionAuthorityDurableSystemContext`
+- From: `Ready`
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- Guards:
+  - ``
+- Emits: `LiveSessionAuthorityClassified`
+- To: `Ready`
+
+### `ClassifyLiveSessionAuthorityDurableRevision`
+- From: `Ready`
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- Guards:
+  - ``
+- Emits: `LiveSessionAuthorityClassified`
 - To: `Ready`
 
 ## Coverage

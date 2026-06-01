@@ -316,6 +316,39 @@ pub enum ResumeSelfHostedSelection {
     Retain,
 }
 
+/// Machine-decided live-vs-durable session-document authority verdict. The
+/// session-store shell extracts four pure boolean observations of session-
+/// document divergence and mirrors this verdict: `LiveAuthoritative` keeps the
+/// live (runtime) session document; `DurableAuthoritative` supersedes it with
+/// the stored durable document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveSessionAuthorityKind {
+    /// The live (runtime) session document remains authoritative.
+    #[default]
+    LiveAuthoritative,
+    /// The durable (stored) session document supersedes the live one.
+    DurableAuthoritative,
+}
+
+/// Typed reason the durable session document superseded the live one. The
+/// machine — not the shell — encodes the precedence (archived > uncommitted
+/// transcript > runtime system-context divergence > stored transcript-revision
+/// divergence) and mints this typed reason, replacing the prior `&'static str`
+/// folklore. The shell mirrors the reason and branches on
+/// `RuntimeSystemContextDiverged` for its runtime-context-only sync path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveSessionAuthorityReason {
+    /// The stored session document is archived.
+    #[default]
+    StoredArchived,
+    /// The live transcript carries uncommitted (ahead-of-durable) messages.
+    LiveUncommittedTranscript,
+    /// The runtime system-context state diverged from durable truth.
+    RuntimeSystemContextDiverged,
+    /// The stored transcript revision diverged from the live revision.
+    StoredTranscriptRevisionDiverged,
+}
+
 machine! {
     machine SessionDocumentMachine {
         version: 1,
@@ -602,6 +635,26 @@ machine! {
                 has_build_only_overrides: bool,
                 first_turn_phase: Enum<SessionFirstTurnPhase>,
             },
+
+            // -----------------------------------------------------------
+            // Live-vs-durable session-document authority reconciliation. The
+            // session-store shell extracts FOUR pure boolean observations of
+            // session-document divergence (stored transcript revision diverged,
+            // live transcript carries uncommitted messages, runtime
+            // system-context diverged, stored document archived). It carries NO
+            // pre-decided verdict and NO string reason. THIS machine — not a
+            // handwritten boolean reducer — owns the LiveAuthoritative-vs-
+            // DurableAuthoritative verdict AND the precedence (archived >
+            // uncommitted transcript > runtime system-context > revision) AND
+            // the typed reason. The shell mirrors the verdict + typed reason and
+            // decides nothing.
+            // -----------------------------------------------------------
+            ClassifyLiveSessionAuthority {
+                stored_transcript_diverged: bool,
+                live_has_uncommitted_transcript: bool,
+                runtime_system_context_diverged: bool,
+                stored_is_archived: bool,
+            },
         }
 
         effect SessionDocumentEffect {
@@ -700,6 +753,16 @@ machine! {
                 provider_overridden: bool,
             },
             SessionResumeOverridesRejected { reason: Enum<ResumeOverrideRejection> },
+
+            // Live-vs-durable session-document authority verdict. The shell
+            // mirrors `authority`: LiveAuthoritative keeps the live document;
+            // DurableAuthoritative supersedes it with the stored document and
+            // carries the typed precedence `reason`. On LiveAuthoritative the
+            // emitted `reason` is a placeholder the shell must ignore.
+            LiveSessionAuthorityClassified {
+                authority: Enum<LiveSessionAuthorityKind>,
+                reason: Enum<LiveSessionAuthorityReason>,
+            },
         }
 
         helper phase_allows_initial_turn_overrides(phase: Enum<SessionFirstTurnPhase>) -> bool {
@@ -916,6 +979,7 @@ machine! {
         disposition PendingContinuationPublicTerminalResolved => local,
         disposition SessionResumeOverridesAuthorized => local,
         disposition SessionResumeOverridesRejected => local,
+        disposition LiveSessionAuthorityClassified => local,
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2832,6 +2896,126 @@ machine! {
                 provider_selection: ResumeProviderSelection::UseStored,
                 self_hosted_selection: ResumeSelfHostedSelection::Retain,
                 provider_overridden: false
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // ClassifyLiveSessionAuthority — live-vs-durable session-document
+        // authority reconciliation. The session-store shell extracts four pure
+        // boolean divergence observations; THIS machine owns the verdict, the
+        // precedence (archived > uncommitted transcript > runtime system-context
+        // > stored transcript-revision), and the typed reason.
+        //
+        //   all four false                       -> LiveAuthoritative
+        //   stored_is_archived                   -> Durable / StoredArchived
+        //   live_has_uncommitted_transcript      -> Durable / LiveUncommittedTranscript
+        //   runtime_system_context_diverged      -> Durable / RuntimeSystemContextDiverged
+        //   else (stored_transcript_diverged)    -> Durable / StoredTranscriptRevisionDiverged
+        //
+        // The four Durable guards are mutually exclusive and, with the Live
+        // guard, total over the boolean cube. Stateless self-loop in Ready.
+        // ---------------------------------------------------------------
+        transition ClassifyLiveSessionAuthorityLive {
+            on input ClassifyLiveSessionAuthority {
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && stored_transcript_diverged == false
+                && live_has_uncommitted_transcript == false
+                && runtime_system_context_diverged == false
+                && stored_is_archived == false
+            }
+            update {}
+            to Ready
+            emit LiveSessionAuthorityClassified {
+                authority: LiveSessionAuthorityKind::LiveAuthoritative,
+                reason: LiveSessionAuthorityReason::StoredArchived
+            }
+        }
+
+        transition ClassifyLiveSessionAuthorityDurableArchived {
+            on input ClassifyLiveSessionAuthority {
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && stored_is_archived == true
+            }
+            update {}
+            to Ready
+            emit LiveSessionAuthorityClassified {
+                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                reason: LiveSessionAuthorityReason::StoredArchived
+            }
+        }
+
+        transition ClassifyLiveSessionAuthorityDurableUncommitted {
+            on input ClassifyLiveSessionAuthority {
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && stored_is_archived == false
+                && live_has_uncommitted_transcript == true
+            }
+            update {}
+            to Ready
+            emit LiveSessionAuthorityClassified {
+                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                reason: LiveSessionAuthorityReason::LiveUncommittedTranscript
+            }
+        }
+
+        transition ClassifyLiveSessionAuthorityDurableSystemContext {
+            on input ClassifyLiveSessionAuthority {
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && stored_is_archived == false
+                && live_has_uncommitted_transcript == false
+                && runtime_system_context_diverged == true
+            }
+            update {}
+            to Ready
+            emit LiveSessionAuthorityClassified {
+                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                reason: LiveSessionAuthorityReason::RuntimeSystemContextDiverged
+            }
+        }
+
+        transition ClassifyLiveSessionAuthorityDurableRevision {
+            on input ClassifyLiveSessionAuthority {
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && stored_is_archived == false
+                && live_has_uncommitted_transcript == false
+                && runtime_system_context_diverged == false
+                && stored_transcript_diverged == true
+            }
+            update {}
+            to Ready
+            emit LiveSessionAuthorityClassified {
+                authority: LiveSessionAuthorityKind::DurableAuthoritative,
+                reason: LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged
             }
         }
     }

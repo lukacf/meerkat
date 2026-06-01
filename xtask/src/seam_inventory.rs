@@ -1889,6 +1889,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::NoOwnerRealization,
             "Local resume-override rejection reason mapped in-process by the meerkat-core session_recovery shell to its typed SurfaceSessionRecoveryError; never crosses a shell boundary",
         ),
+        (
+            "SessionDocumentMachine",
+            "LiveSessionAuthorityClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local live-vs-durable session-document authority verdict + typed precedence reason mirrored in-process by the meerkat-session persistent shell (live_session_authority); the shell branches its sync path on the typed reason and never crosses a shell boundary",
+        ),
         //
         // =========================================================================
         // SessionTurnAdmissionMachine — ephemeral turn-admission gate

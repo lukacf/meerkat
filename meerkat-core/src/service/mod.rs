@@ -570,14 +570,6 @@ impl MobToolAuthorityContext {
         self.managed_mob_scope().contains(mob_id)
     }
 
-    pub fn can_spawn_profile_in_mob(&self, mob_id: &str, profile: &str) -> bool {
-        self.can_manage_mob(mob_id)
-            || self
-                .spawn_profile_scope()
-                .get(mob_id)
-                .is_some_and(|profiles| profiles.contains(profile))
-    }
-
     /// Raw, atomic observation: whether the operator holds a non-empty
     /// spawn-profile scope for `mob_id`. This is one of the two pure facts the
     /// spawn-tool shell feeds to MobMachine's `ResolveSpawnToolAdmission`
@@ -588,6 +580,21 @@ impl MobToolAuthorityContext {
         self.spawn_profile_scope()
             .get(mob_id)
             .is_some_and(|profiles| !profiles.is_empty())
+    }
+
+    /// Raw, atomic observation: whether the operator's spawn-profile scope SET
+    /// for `mob_id` CONTAINS `profile`. This is a pure per-profile
+    /// set-membership fact — it does NOT OR in [`Self::can_manage_mob`]. The
+    /// spawn-member shell feeds this raw fact (alongside the separate
+    /// `manage_scope_present` observation) to MobMachine's
+    /// `ResolveSpawnMemberAdmission`; the machine — not the shell — composes the
+    /// `manage_scope_present || profile_scope_contains` disjunction into the
+    /// Allow/Deny verdict. This is a RAW per-profile set-membership fact, NOT a
+    /// pre-reduced admission conclusion (it does not OR in manage scope).
+    pub fn spawn_profile_scope_contains(&self, mob_id: &str, profile: &str) -> bool {
+        self.spawn_profile_scope()
+            .get(mob_id)
+            .is_some_and(|profiles| profiles.contains(profile))
     }
 }
 
@@ -1896,8 +1903,8 @@ mod tests {
         );
 
         assert!(ctx.spawn_profile_scope_present("mob-1"));
-        assert!(ctx.can_spawn_profile_in_mob("mob-1", "investigator"));
-        assert!(!ctx.can_spawn_profile_in_mob("mob-1", "writer"));
+        assert!(ctx.spawn_profile_scope_contains("mob-1", "investigator"));
+        assert!(!ctx.spawn_profile_scope_contains("mob-1", "writer"));
         assert!(!ctx.can_manage_mob("mob-1"));
     }
 

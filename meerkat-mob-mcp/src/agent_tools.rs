@@ -396,28 +396,33 @@ impl AgentMobToolSurface {
         mob_id: &MobId,
         args: &SpawnMemberArgs,
     ) -> Result<(), ToolError> {
-        // Pure observations extracted from the machine-owned operator-scope
-        // projection and the typed spawn args. MobMachine — not this surface —
-        // composes the Allow/Deny admission verdict; we mirror it.
+        // RAW, atomic observations extracted from the machine-owned
+        // operator-scope projection and the typed spawn args, fed WITHOUT
+        // pre-composing them. MobMachine — not this surface — owns the
+        // privileged-argument SET membership policy (which args are privileged)
+        // and the `manage_scope || profile_scope_contains` disjunction, and
+        // composes the Allow/Deny admission verdict; we mirror it. We extract
+        // each arg's pure `.is_some()` presence and the raw per-profile scope
+        // set membership; args this surface's spawn tool does not accept stay
+        // `false`.
         let authority = self.authority_context_snapshot();
-        let manage_scope_present = authority.can_manage_mob(mob_id.as_str());
-        let profile_scope_present =
-            authority.can_spawn_profile_in_mob(mob_id.as_str(), &args.profile);
-        let privileged_args_present = args.runtime_mode.is_some()
-            || args.backend.is_some()
-            || args.tooling.is_some()
-            || args.auth_binding.is_some();
+        let observations = meerkat_mob::SpawnMemberAdmissionObservations {
+            manage_scope_present: authority.can_manage_mob(mob_id.as_str()),
+            profile_scope_contains: authority
+                .spawn_profile_scope_contains(mob_id.as_str(), &args.profile),
+            runtime_mode_present: args.runtime_mode.is_some(),
+            backend_present: args.backend.is_some(),
+            tooling_present: args.tooling.is_some(),
+            auth_binding_present: args.auth_binding.is_some(),
+            ..meerkat_mob::SpawnMemberAdmissionObservations::default()
+        };
         let handle = self.state.handle_for(mob_id).await.map_err(|error| {
             ToolError::execution_failed(format!(
                 "tool '{tool_name}' spawn-member admission failed: {error}"
             ))
         })?;
         let admission = handle
-            .resolve_spawn_member_admission(
-                manage_scope_present,
-                profile_scope_present,
-                privileged_args_present,
-            )
+            .resolve_spawn_member_admission(observations)
             .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(

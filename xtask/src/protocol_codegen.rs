@@ -4625,6 +4625,8 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "ResumeOverrideRejection",
         "ResumeProviderSelection",
         "ResumeSelfHostedSelection",
+        "LiveSessionAuthorityKind",
+        "LiveSessionAuthorityReason",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -4715,6 +4717,8 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "ResumeOverrideRejection" => Ok("ProviderRequiresModel"),
         "ResumeProviderSelection" => Ok("RecomputeFromModel"),
         "ResumeSelfHostedSelection" => Ok("Clear"),
+        "LiveSessionAuthorityKind" => Ok("LiveAuthoritative"),
+        "LiveSessionAuthorityReason" => Ok("StoredArchived"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -5604,6 +5608,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "PendingContinuationPublicTerminalResolved",
         "SessionResumeOverridesAuthorized",
         "SessionResumeOverridesRejected",
+        "LiveSessionAuthorityClassified",
     ] {
         machine
             .effects
@@ -5629,6 +5634,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResumeOverrideRejection",
         "ResumeProviderSelection",
         "ResumeSelfHostedSelection",
+        "LiveSessionAuthorityKind",
+        "LiveSessionAuthorityReason",
     ] {
         let binding = machine
             .named_types

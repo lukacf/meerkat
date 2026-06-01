@@ -27,6 +27,116 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveSessionAuthorityKind {
+    #[default]
+    #[serde(rename = "LiveAuthoritative")]
+    LiveAuthoritative,
+    #[serde(rename = "DurableAuthoritative")]
+    DurableAuthoritative,
+}
+impl LiveSessionAuthorityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LiveAuthoritative => "LiveAuthoritative",
+            Self::DurableAuthoritative => "DurableAuthoritative",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveSessionAuthorityKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "LiveAuthoritative" => Ok(Self::LiveAuthoritative),
+            "DurableAuthoritative" => Ok(Self::DurableAuthoritative),
+            other => Err(format!("invalid LiveSessionAuthorityKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveSessionAuthorityKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveSessionAuthorityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveSessionAuthorityReason {
+    #[default]
+    #[serde(rename = "StoredArchived")]
+    StoredArchived,
+    #[serde(rename = "LiveUncommittedTranscript")]
+    LiveUncommittedTranscript,
+    #[serde(rename = "RuntimeSystemContextDiverged")]
+    RuntimeSystemContextDiverged,
+    #[serde(rename = "StoredTranscriptRevisionDiverged")]
+    StoredTranscriptRevisionDiverged,
+}
+impl LiveSessionAuthorityReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StoredArchived => "StoredArchived",
+            Self::LiveUncommittedTranscript => "LiveUncommittedTranscript",
+            Self::RuntimeSystemContextDiverged => "RuntimeSystemContextDiverged",
+            Self::StoredTranscriptRevisionDiverged => "StoredTranscriptRevisionDiverged",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveSessionAuthorityReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StoredArchived" => Ok(Self::StoredArchived),
+            "LiveUncommittedTranscript" => Ok(Self::LiveUncommittedTranscript),
+            "RuntimeSystemContextDiverged" => Ok(Self::RuntimeSystemContextDiverged),
+            "StoredTranscriptRevisionDiverged" => Ok(Self::StoredTranscriptRevisionDiverged),
+            other => Err(format!(
+                "invalid LiveSessionAuthorityReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveSessionAuthorityReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveSessionAuthorityReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ObservedSessionTailKind {
     #[default]
     #[serde(rename = "Empty")]
@@ -1359,6 +1469,13 @@ pub mod inputs {
         pub has_build_only_overrides: bool,
         pub first_turn_phase: SessionFirstTurnPhase,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyLiveSessionAuthority {
+        pub stored_transcript_diverged: bool,
+        pub live_has_uncommitted_transcript: bool,
+        pub runtime_system_context_diverged: bool,
+        pub stored_is_archived: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1391,6 +1508,7 @@ pub enum Input {
     AuthorizeSystemPromptMutation(inputs::AuthorizeSystemPromptMutation),
     ResolvePendingContinuation(inputs::ResolvePendingContinuation),
     AuthorizeSessionResumeOverrides(inputs::AuthorizeSessionResumeOverrides),
+    ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1443,6 +1561,7 @@ impl Input {
             Self::AuthorizeSystemPromptMutation(_) => InputKind::AuthorizeSystemPromptMutation,
             Self::ResolvePendingContinuation(_) => InputKind::ResolvePendingContinuation,
             Self::AuthorizeSessionResumeOverrides(_) => InputKind::AuthorizeSessionResumeOverrides,
+            Self::ClassifyLiveSessionAuthority(_) => InputKind::ClassifyLiveSessionAuthority,
         }
     }
 }
@@ -1476,6 +1595,7 @@ pub enum InputKind {
     AuthorizeSystemPromptMutation,
     ResolvePendingContinuation,
     AuthorizeSessionResumeOverrides,
+    ClassifyLiveSessionAuthority,
 }
 
 pub mod effects {
@@ -1577,6 +1697,11 @@ pub mod effects {
     pub struct SessionResumeOverridesRejected {
         pub reason: ResumeOverrideRejection,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveSessionAuthorityClassified {
+        pub authority: LiveSessionAuthorityKind,
+        pub reason: LiveSessionAuthorityReason,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1607,6 +1732,7 @@ pub enum Effect {
     PendingContinuationPublicTerminalResolved(effects::PendingContinuationPublicTerminalResolved),
     SessionResumeOverridesAuthorized(effects::SessionResumeOverridesAuthorized),
     SessionResumeOverridesRejected(effects::SessionResumeOverridesRejected),
+    LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -1632,6 +1758,7 @@ pub enum EffectKind {
     PendingContinuationPublicTerminalResolved,
     SessionResumeOverridesAuthorized,
     SessionResumeOverridesRejected,
+    LiveSessionAuthorityClassified,
 }
 
 #[allow(non_camel_case_types)]
@@ -1706,6 +1833,11 @@ pub enum TransitionId {
     AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
     AuthorizeSessionResumeOverridesAcceptUseOverride,
     AuthorizeSessionResumeOverridesAcceptRetainStored,
+    ClassifyLiveSessionAuthorityLive,
+    ClassifyLiveSessionAuthorityDurableArchived,
+    ClassifyLiveSessionAuthorityDurableUncommitted,
+    ClassifyLiveSessionAuthorityDurableSystemContext,
+    ClassifyLiveSessionAuthorityDurableRevision,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

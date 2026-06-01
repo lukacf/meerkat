@@ -1922,39 +1922,176 @@ mod tests {
         }
     }
 
+    /// FOLD B: the machine — not the shell — owns the privileged-argument SET
+    /// membership policy (OR-ing each per-argument presence fact) and the
+    /// `manage_scope_present || profile_scope_contains` disjunction. The shell
+    /// feeds RAW per-argument presence bools and a raw per-profile set-membership
+    /// fact; the machine composes the verdict.
     #[test]
     fn spawn_member_admission_is_decided_by_machine() {
         use MobSpawnMemberAdmissionKind as Admission;
-        // (manage_scope, profile_scope, privileged_args) -> expected verdict.
-        let cases = [
-            (true, false, false, Admission::Allowed),
-            (true, true, true, Admission::Allowed),
-            (false, false, true, Admission::Denied),
-            (false, true, true, Admission::Denied),
-            (false, true, false, Admission::Allowed),
-            (false, false, false, Admission::Denied),
-        ];
-        for (manage, profile, privileged, expected) in cases {
+
+        // Helper: build the input with all-false privileged args except the
+        // selected ones, set by a mutator closure.
+        fn input(
+            manage: bool,
+            profile_contains: bool,
+            set_privileged: impl FnOnce(&mut MobMachineInput),
+        ) -> MobMachineInput {
+            let mut input = MobMachineInput::ResolveSpawnMemberAdmission {
+                manage_scope_present: manage,
+                profile_scope_contains: profile_contains,
+                privileged_resume_bridge_session_present: false,
+                privileged_resume_session_present: false,
+                privileged_backend_present: false,
+                privileged_runtime_mode_present: false,
+                privileged_launch_mode_present: false,
+                privileged_tool_access_policy_present: false,
+                privileged_budget_split_policy_present: false,
+                privileged_tooling_present: false,
+                privileged_auth_binding_present: false,
+            };
+            set_privileged(&mut input);
+            input
+        }
+
+        fn resolve(input: MobMachineInput) -> Option<MobSpawnMemberAdmissionKind> {
             let mut authority = MobMachineAuthority::new();
-            let transition = MobMachineMutator::apply(
-                &mut authority,
-                MobMachineInput::ResolveSpawnMemberAdmission {
-                    manage_scope_present: manage,
-                    profile_scope_present: profile,
-                    privileged_args_present: privileged,
-                },
-            )
-            .expect("spawn-member admission should resolve a verdict");
-            let admission = transition.effects().iter().find_map(|effect| match effect {
+            let transition = MobMachineMutator::apply(&mut authority, input)
+                .expect("spawn-member admission should resolve a verdict");
+            transition.effects().iter().find_map(|effect| match effect {
                 MobMachineEffect::SpawnMemberAdmissionResolved { admission } => Some(*admission),
                 _ => None,
-            });
+            })
+        }
+
+        // manage scope present -> Allowed regardless of profile/privileged.
+        assert_eq!(
+            resolve(input(true, false, |_| {})),
+            Some(Admission::Allowed),
+            "manage scope allows"
+        );
+        assert_eq!(
+            resolve(input(true, true, |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_backend_present,
+                    ..
+                } = i
+                {
+                    *privileged_backend_present = true;
+                }
+            })),
+            Some(Admission::Allowed),
+            "manage scope allows even with privileged args"
+        );
+
+        // No manage scope + ANY privileged arg present -> Denied. Exercise EACH
+        // privileged field independently to prove the machine ORs the full SET.
+        let privileged_setters: [(&str, fn(&mut MobMachineInput)); 9] = [
+            ("resume_bridge_session", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_resume_bridge_session_present,
+                    ..
+                } = i
+                {
+                    *privileged_resume_bridge_session_present = true;
+                }
+            }),
+            ("resume_session", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_resume_session_present,
+                    ..
+                } = i
+                {
+                    *privileged_resume_session_present = true;
+                }
+            }),
+            ("backend", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_backend_present,
+                    ..
+                } = i
+                {
+                    *privileged_backend_present = true;
+                }
+            }),
+            ("runtime_mode", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_runtime_mode_present,
+                    ..
+                } = i
+                {
+                    *privileged_runtime_mode_present = true;
+                }
+            }),
+            ("launch_mode", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_launch_mode_present,
+                    ..
+                } = i
+                {
+                    *privileged_launch_mode_present = true;
+                }
+            }),
+            ("tool_access_policy", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_tool_access_policy_present,
+                    ..
+                } = i
+                {
+                    *privileged_tool_access_policy_present = true;
+                }
+            }),
+            ("budget_split_policy", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_budget_split_policy_present,
+                    ..
+                } = i
+                {
+                    *privileged_budget_split_policy_present = true;
+                }
+            }),
+            ("tooling", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_tooling_present,
+                    ..
+                } = i
+                {
+                    *privileged_tooling_present = true;
+                }
+            }),
+            ("auth_binding", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_auth_binding_present,
+                    ..
+                } = i
+                {
+                    *privileged_auth_binding_present = true;
+                }
+            }),
+        ];
+        for (label, setter) in privileged_setters {
+            // Even with profile scope, a privileged arg without manage scope denies.
             assert_eq!(
-                admission,
-                Some(expected),
-                "for manage={manage} profile={profile} privileged={privileged}"
+                resolve(input(false, true, setter)),
+                Some(Admission::Denied),
+                "privileged arg {label} without manage scope must deny"
             );
         }
+
+        // No manage scope, no privileged args, profile scope contains -> Allowed.
+        assert_eq!(
+            resolve(input(false, true, |_| {})),
+            Some(Admission::Allowed),
+            "profile scope allows when no privileged args and no manage scope"
+        );
+
+        // No manage scope, no privileged args, no profile scope -> Denied.
+        assert_eq!(
+            resolve(input(false, false, |_| {})),
+            Some(Admission::Denied),
+            "no scope denies"
+        );
     }
 
     #[test]

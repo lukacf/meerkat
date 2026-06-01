@@ -377,6 +377,19 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &["RecomputeFromModel", "UseOverride", "UseStored"],
             ),
             NamedTypeBinding::string_enum("ResumeSelfHostedSelection", &["Clear", "Retain"]),
+            NamedTypeBinding::string_enum(
+                "LiveSessionAuthorityKind",
+                &["LiveAuthoritative", "DurableAuthoritative"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveSessionAuthorityReason",
+                &[
+                    "StoredArchived",
+                    "LiveUncommittedTranscript",
+                    "RuntimeSystemContextDiverged",
+                    "StoredTranscriptRevisionDiverged",
+                ],
+            ),
         ],
         Vec::new(),
     )

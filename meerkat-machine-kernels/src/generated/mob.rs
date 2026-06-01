@@ -4061,8 +4061,16 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSpawnMemberAdmission {
         pub manage_scope_present: bool,
-        pub profile_scope_present: bool,
-        pub privileged_args_present: bool,
+        pub profile_scope_contains: bool,
+        pub privileged_resume_bridge_session_present: bool,
+        pub privileged_resume_session_present: bool,
+        pub privileged_backend_present: bool,
+        pub privileged_runtime_mode_present: bool,
+        pub privileged_launch_mode_present: bool,
+        pub privileged_tool_access_policy_present: bool,
+        pub privileged_budget_split_policy_present: bool,
+        pub privileged_tooling_present: bool,
+        pub privileged_auth_binding_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveCurrentMobAdmission {

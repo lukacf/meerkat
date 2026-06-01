@@ -1388,6 +1388,107 @@ mod tests {
         SystemNoticeKind, SystemNoticeMessage, Usage, UserMessage,
     };
 
+    /// FOLD C: the canonical SessionDocumentMachine — not a handwritten shell
+    /// boolean reducer — owns the live-vs-durable session-document authority
+    /// verdict, the precedence (archived > uncommitted transcript > runtime
+    /// system-context > stored transcript-revision), and the typed reason. This
+    /// drives the classifier directly and asserts every authority/reason outcome
+    /// and the precedence ordering.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn classify_live_session_authority_is_decided_by_machine() {
+        use crate::session_document::{
+            LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionDocumentEffect,
+            SessionDocumentMachineAuthority,
+        };
+
+        fn classify(
+            stored_transcript_diverged: bool,
+            live_has_uncommitted_transcript: bool,
+            runtime_system_context_diverged: bool,
+            stored_is_archived: bool,
+        ) -> (LiveSessionAuthorityKind, LiveSessionAuthorityReason) {
+            let mut authority = SessionDocumentMachineAuthority::new();
+            let effects = authority
+                .classify_live_session_authority(
+                    stored_transcript_diverged,
+                    live_has_uncommitted_transcript,
+                    runtime_system_context_diverged,
+                    stored_is_archived,
+                )
+                .expect("classifier must resolve a verdict");
+            effects
+                .iter()
+                .find_map(|effect| match effect {
+                    SessionDocumentEffect::LiveSessionAuthorityClassified { authority, reason } => {
+                        Some((*authority, *reason))
+                    }
+                    _ => None,
+                })
+                .expect("classifier must emit a verdict")
+        }
+
+        // All four false -> LiveAuthoritative.
+        let (kind, _) = classify(false, false, false, false);
+        assert_eq!(kind, LiveSessionAuthorityKind::LiveAuthoritative);
+
+        // Each divergence (in isolation) -> DurableAuthoritative with its reason.
+        assert_eq!(
+            classify(true, false, false, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged
+            ),
+        );
+        assert_eq!(
+            classify(false, true, false, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::LiveUncommittedTranscript
+            ),
+        );
+        assert_eq!(
+            classify(false, false, true, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::RuntimeSystemContextDiverged
+            ),
+        );
+        assert_eq!(
+            classify(false, false, false, true),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::StoredArchived
+            ),
+        );
+
+        // Precedence: archived > uncommitted > system-context > revision.
+        // When ALL four diverge, archived wins.
+        assert_eq!(
+            classify(true, true, true, true),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::StoredArchived
+            ),
+        );
+        // Not archived, but uncommitted + system-context + revision -> uncommitted.
+        assert_eq!(
+            classify(true, true, true, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::LiveUncommittedTranscript
+            ),
+        );
+        // Not archived, not uncommitted, but system-context + revision -> system-context.
+        assert_eq!(
+            classify(true, false, true, false),
+            (
+                LiveSessionAuthorityKind::DurableAuthoritative,
+                LiveSessionAuthorityReason::RuntimeSystemContextDiverged
+            ),
+        );
+    }
+
     #[test]
     fn append_only_guard_rejects_leading_system_message_replacement() {
         let mut previous = Session::new();

@@ -908,8 +908,8 @@ mod tests {
             .mob_tool_authority_context
             .as_ref()
             .expect("mob profile should receive generated authority");
-        assert!(authority.can_spawn_profile_in_mob("test-mob", "lead"));
-        assert!(authority.can_spawn_profile_in_mob("test-mob", "worker"));
+        assert!(authority.spawn_profile_scope_contains("test-mob", "lead"));
+        assert!(authority.spawn_profile_scope_contains("test-mob", "worker"));
         assert!(!authority.can_manage_mob("test-mob"));
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = def.profiles[&ProfileName::from("worker")]

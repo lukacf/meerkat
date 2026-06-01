@@ -563,28 +563,32 @@ impl MobOperatorToolDispatcher {
         tool_name: &str,
         args: &SpawnMemberArgs,
     ) -> Result<(), ToolError> {
-        // Pure observations extracted from the machine-owned operator-scope
-        // projection and the typed spawn args. MobMachine — not this shell —
-        // composes the Allow/Deny admission verdict.
+        // RAW, atomic observations extracted from the machine-owned
+        // operator-scope projection and the typed spawn args, fed WITHOUT
+        // pre-composing them. MobMachine — not this shell — owns the
+        // privileged-argument SET membership policy (which args are privileged)
+        // and the `manage_scope || profile_scope_contains` disjunction, and
+        // composes the Allow/Deny admission verdict. We extract each arg's pure
+        // `.is_some()` presence and the raw per-profile scope set membership;
+        // args this surface's spawn tool does not accept stay `false`.
         let mob_id = self.handle.definition().id.as_str();
-        let manage_scope_present = self.authority_context.can_manage_mob(mob_id);
-        let profile_scope_present = self
-            .authority_context
-            .can_spawn_profile_in_mob(mob_id, &args.profile);
-        let privileged_args_present = args.resume_bridge_session_id.is_some()
-            || args.resume_session_id.is_some()
-            || args.backend.is_some()
-            || args.runtime_mode.is_some()
-            || args.launch_mode.is_some()
-            || args.tool_access_policy.is_some()
-            || args.budget_split_policy.is_some();
+        let observations = SpawnMemberAdmissionObservations {
+            manage_scope_present: self.authority_context.can_manage_mob(mob_id),
+            profile_scope_contains: self
+                .authority_context
+                .spawn_profile_scope_contains(mob_id, &args.profile),
+            resume_bridge_session_present: args.resume_bridge_session_id.is_some(),
+            resume_session_present: args.resume_session_id.is_some(),
+            backend_present: args.backend.is_some(),
+            runtime_mode_present: args.runtime_mode.is_some(),
+            launch_mode_present: args.launch_mode.is_some(),
+            tool_access_policy_present: args.tool_access_policy.is_some(),
+            budget_split_policy_present: args.budget_split_policy.is_some(),
+            ..SpawnMemberAdmissionObservations::default()
+        };
         let admission = self
             .handle
-            .resolve_spawn_member_admission(
-                manage_scope_present,
-                profile_scope_present,
-                privileged_args_present,
-            )
+            .resolve_spawn_member_admission(observations)
             .await
             .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
         match admission {

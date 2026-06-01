@@ -46,6 +46,48 @@ pub enum SpawnMemberAdmission {
     Denied,
 }
 
+/// Raw, atomic spawn-member admission observations a tool surface extracts and
+/// feeds to MobMachine WITHOUT pre-composing them.
+///
+/// Each `privileged_*_present` field is a pure per-argument presence
+/// observation (the surface fills only the arguments its own spawn-member tool
+/// accepts; absent fields default to `false`). MobMachine — not the tool
+/// surface — owns the privileged-argument SET membership policy (which
+/// arguments are privileged) by OR-ing these facts, and composes the
+/// `manage_scope_present || profile_scope_contains` profile-scope disjunction.
+/// The surface must NOT pre-reduce these into a single "any privileged arg" or
+/// "can spawn this profile" bool: the SET and the disjunction are POLICY owned
+/// by the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpawnMemberAdmissionObservations {
+    /// Whether the operator holds manage scope over the target mob (a
+    /// machine-owned operator-scope membership projection).
+    pub manage_scope_present: bool,
+    /// Whether the operator's spawn-profile scope set for the target mob
+    /// CONTAINS the requested profile (a RAW per-profile set-membership
+    /// projection — NOT OR'd with manage scope; the machine composes the
+    /// disjunction).
+    pub profile_scope_contains: bool,
+    /// Presence of `resume_bridge_session_id` on the spawn request.
+    pub resume_bridge_session_present: bool,
+    /// Presence of `resume_session_id` on the spawn request.
+    pub resume_session_present: bool,
+    /// Presence of an explicit `backend` on the spawn request.
+    pub backend_present: bool,
+    /// Presence of an explicit `runtime_mode` on the spawn request.
+    pub runtime_mode_present: bool,
+    /// Presence of an explicit `launch_mode` on the spawn request.
+    pub launch_mode_present: bool,
+    /// Presence of an explicit `tool_access_policy` on the spawn request.
+    pub tool_access_policy_present: bool,
+    /// Presence of an explicit `budget_split_policy` on the spawn request.
+    pub budget_split_policy_present: bool,
+    /// Presence of an explicit `tooling` selection on the spawn request.
+    pub tooling_present: bool,
+    /// Presence of an explicit `auth_binding` on the spawn request.
+    pub auth_binding_present: bool,
+}
+
 /// Machine-decided per-mob operator admission verdict for current-mob-scoped
 /// tools, mirrored by tool surfaces. `Denied` maps to a tool `access_denied`
 /// error; `Allowed` proceeds.
@@ -5231,25 +5273,45 @@ impl MobHandle {
 
     /// Resolve the composite spawn-member operator admission verdict.
     ///
-    /// The tool surface extracts three raw observations — whether the operator
-    /// holds manage scope over the target mob, whether it holds spawn-profile
-    /// scope for the requested profile (both machine-owned operator-scope
-    /// projections), and whether the spawn request carries privileged args (a
-    /// pure typed argument observation) — and feeds them here. MobMachine, not
-    /// the tool surface, composes the Allow/Deny verdict; the surface mirrors
-    /// the returned verdict (`SpawnMemberAdmission::Denied` -> `access_denied`).
+    /// The tool surface extracts RAW, atomic observations — manage scope over
+    /// the target mob, raw per-profile spawn-scope set membership, and the
+    /// per-argument presence of every privileged spawn argument — and feeds
+    /// them here WITHOUT pre-composing them. MobMachine, not the tool surface,
+    /// owns the privileged-argument SET membership policy (OR-ing the presence
+    /// facts) and the `manage_scope_present || profile_scope_contains`
+    /// disjunction, composing the Allow/Deny verdict; the surface mirrors the
+    /// returned verdict (`SpawnMemberAdmission::Denied` -> `access_denied`).
     /// Fails closed if the machine emits no verdict.
     pub async fn resolve_spawn_member_admission(
         &self,
-        manage_scope_present: bool,
-        profile_scope_present: bool,
-        privileged_args_present: bool,
+        observations: SpawnMemberAdmissionObservations,
     ) -> Result<SpawnMemberAdmission, MobError> {
+        let SpawnMemberAdmissionObservations {
+            manage_scope_present,
+            profile_scope_contains,
+            resume_bridge_session_present,
+            resume_session_present,
+            backend_present,
+            runtime_mode_present,
+            launch_mode_present,
+            tool_access_policy_present,
+            budget_split_policy_present,
+            tooling_present,
+            auth_binding_present,
+        } = observations;
         let effects = self
             .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission {
                 manage_scope_present,
-                profile_scope_present,
-                privileged_args_present,
+                profile_scope_contains,
+                privileged_resume_bridge_session_present: resume_bridge_session_present,
+                privileged_resume_session_present: resume_session_present,
+                privileged_backend_present: backend_present,
+                privileged_runtime_mode_present: runtime_mode_present,
+                privileged_launch_mode_present: launch_mode_present,
+                privileged_tool_access_policy_present: tool_access_policy_present,
+                privileged_budget_split_policy_present: budget_split_policy_present,
+                privileged_tooling_present: tooling_present,
+                privileged_auth_binding_present: auth_binding_present,
             })
             .await?;
         let admission = effects

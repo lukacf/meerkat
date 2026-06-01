@@ -469,14 +469,33 @@ macro_rules! mob_catalog_machine_dsl {
             // force-destroy.
             ClassifyRemoteMemberRuntimeObservation { observed_state: Enum<MobRemoteMemberRuntimeObservedState> },
             // Composite spawn-member operator admission. The tool shell extracts
-            // three raw observations: whether the operator holds manage scope
-            // over the target mob, whether the operator holds spawn-profile scope
-            // for the requested profile (both machine-owned operator-scope
-            // projections), and whether the request carries privileged args
-            // (a pure typed argument observation). MobMachine — not the tool
-            // shell — composes these into the Allow/Deny admission verdict, which
-            // the shell mirrors (Deny -> access_denied).
-            ResolveSpawnMemberAdmission { manage_scope_present: bool, profile_scope_present: bool, privileged_args_present: bool },
+            // RAW, atomic observations and feeds them here WITHOUT pre-composing
+            // them: whether the operator holds manage scope over the target mob
+            // (`manage_scope_present`), whether the operator's spawn-profile
+            // scope SET for the target mob CONTAINS the requested profile
+            // (`profile_scope_contains`, a raw per-profile set-membership fact —
+            // NOT OR'd with manage scope), and the per-argument presence of every
+            // privileged spawn argument (`privileged_*_present`, one pure
+            // `.is_some()` observation per argument; a surface fills only the
+            // arguments its own tool accepts and leaves the rest `false`).
+            // MobMachine — not the tool shell — owns the privileged-argument SET
+            // membership POLICY (which arguments are privileged) by OR-ing the
+            // presence facts, and composes the `manage_scope_present ||
+            // profile_scope_contains` profile-scope disjunction, deciding the
+            // Allow/Deny verdict the shell mirrors (Deny -> access_denied).
+            ResolveSpawnMemberAdmission {
+                manage_scope_present: bool,
+                profile_scope_contains: bool,
+                privileged_resume_bridge_session_present: bool,
+                privileged_resume_session_present: bool,
+                privileged_backend_present: bool,
+                privileged_runtime_mode_present: bool,
+                privileged_launch_mode_present: bool,
+                privileged_tool_access_policy_present: bool,
+                privileged_budget_split_policy_present: bool,
+                privileged_tooling_present: bool,
+                privileged_auth_binding_present: bool,
+            },
             // Per-mob operator admission for current-mob-scoped tools. The tool
             // shell extracts a single pure observation — whether the operator
             // holds manage scope over the current mob (a machine-owned
@@ -1456,13 +1475,36 @@ macro_rules! mob_catalog_machine_dsl {
 
         // --- Spawn-member operator admission ---
         //
-        // The tool surface extracts three raw observations (manage scope,
-        // profile scope, privileged-arg presence) and feeds them here; MobMachine
-        // composes the Allow/Deny verdict. Pure classification across all phases.
+        // The tool surface extracts RAW, atomic observations (manage scope, raw
+        // per-profile spawn-scope set membership, and the per-argument presence
+        // of every privileged spawn argument) and feeds them here WITHOUT
+        // pre-composing them; MobMachine owns the privileged-argument SET
+        // membership policy (OR-ing the presence facts) and the
+        // `manage_scope_present || profile_scope_contains` profile-scope
+        // disjunction, composing the Allow/Deny verdict. Pure classification
+        // across all phases.
+        //
+        // Verdict policy (composed entirely here):
+        //   manage_scope_present                              -> Allowed
+        //   !manage && any-privileged-arg                     -> Denied
+        //   !manage && !privileged && profile_scope_contains  -> Allowed
+        //   !manage && !privileged && !profile_scope_contains -> Denied
 
         transition ResolveSpawnMemberAdmissionManageScope {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            on input ResolveSpawnMemberAdmission {
+                manage_scope_present,
+                profile_scope_contains,
+                privileged_resume_bridge_session_present,
+                privileged_resume_session_present,
+                privileged_backend_present,
+                privileged_runtime_mode_present,
+                privileged_launch_mode_present,
+                privileged_tool_access_policy_present,
+                privileged_budget_split_policy_present,
+                privileged_tooling_present,
+                privileged_auth_binding_present
+            }
             guard "manage_scope_allows" { manage_scope_present == true }
             update {}
             to Running
@@ -1471,10 +1513,32 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResolveSpawnMemberAdmissionPrivilegedArgsDenied {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            on input ResolveSpawnMemberAdmission {
+                manage_scope_present,
+                profile_scope_contains,
+                privileged_resume_bridge_session_present,
+                privileged_resume_session_present,
+                privileged_backend_present,
+                privileged_runtime_mode_present,
+                privileged_launch_mode_present,
+                privileged_tool_access_policy_present,
+                privileged_budget_split_policy_present,
+                privileged_tooling_present,
+                privileged_auth_binding_present
+            }
             guard "privileged_args_without_manage_scope" {
                 manage_scope_present == false
-                && privileged_args_present == true
+                && (
+                    privileged_resume_bridge_session_present == true
+                    || privileged_resume_session_present == true
+                    || privileged_backend_present == true
+                    || privileged_runtime_mode_present == true
+                    || privileged_launch_mode_present == true
+                    || privileged_tool_access_policy_present == true
+                    || privileged_budget_split_policy_present == true
+                    || privileged_tooling_present == true
+                    || privileged_auth_binding_present == true
+                )
             }
             update {}
             to Running
@@ -1483,11 +1547,31 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResolveSpawnMemberAdmissionProfileScope {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            on input ResolveSpawnMemberAdmission {
+                manage_scope_present,
+                profile_scope_contains,
+                privileged_resume_bridge_session_present,
+                privileged_resume_session_present,
+                privileged_backend_present,
+                privileged_runtime_mode_present,
+                privileged_launch_mode_present,
+                privileged_tool_access_policy_present,
+                privileged_budget_split_policy_present,
+                privileged_tooling_present,
+                privileged_auth_binding_present
+            }
             guard "profile_scope_allows" {
                 manage_scope_present == false
-                && privileged_args_present == false
-                && profile_scope_present == true
+                && privileged_resume_bridge_session_present == false
+                && privileged_resume_session_present == false
+                && privileged_backend_present == false
+                && privileged_runtime_mode_present == false
+                && privileged_launch_mode_present == false
+                && privileged_tool_access_policy_present == false
+                && privileged_budget_split_policy_present == false
+                && privileged_tooling_present == false
+                && privileged_auth_binding_present == false
+                && profile_scope_contains == true
             }
             update {}
             to Running
@@ -1496,11 +1580,31 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResolveSpawnMemberAdmissionDenied {
             per_phase [Running, Stopped, Completed, Destroyed]
-            on input ResolveSpawnMemberAdmission { manage_scope_present, profile_scope_present, privileged_args_present }
+            on input ResolveSpawnMemberAdmission {
+                manage_scope_present,
+                profile_scope_contains,
+                privileged_resume_bridge_session_present,
+                privileged_resume_session_present,
+                privileged_backend_present,
+                privileged_runtime_mode_present,
+                privileged_launch_mode_present,
+                privileged_tool_access_policy_present,
+                privileged_budget_split_policy_present,
+                privileged_tooling_present,
+                privileged_auth_binding_present
+            }
             guard "no_scope_denies" {
                 manage_scope_present == false
-                && privileged_args_present == false
-                && profile_scope_present == false
+                && privileged_resume_bridge_session_present == false
+                && privileged_resume_session_present == false
+                && privileged_backend_present == false
+                && privileged_runtime_mode_present == false
+                && privileged_launch_mode_present == false
+                && privileged_tool_access_policy_present == false
+                && privileged_budget_split_policy_present == false
+                && privileged_tooling_present == false
+                && privileged_auth_binding_present == false
+                && profile_scope_contains == false
             }
             update {}
             to Running

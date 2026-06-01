@@ -744,3 +744,40 @@ core+comms+runtime+mob+mob-mcp --all-features 3796 passed; seam 0 debt; clippy -
 - live_adapter LiveAdapterStatus is_terminal/accepts_commands (sweep LOW): non-canonical transport-adapter
   connection-state projection (meerkat-live); the machine-owned live CHANNEL lifecycle routes through MeerkatMachine
   LiveTopologyReconfiguration + the generated LiveChannelCloseCommitAuthority bridge token.
+
+## CONVERGENCE ROUND 13 — credential-use class FULLY drained + pre-composed inputs raw-ified + live-session authority folded
+sweep: 2 LOW (spawn-member profile_scope_present pre-composed [folded via FOLD B]; is_recoverable telemetry
+[defended]); NO confirmed canonical-domain violations. beta HIGH (cached_token_is_fresh); alpha 2 MEDIUM
+(privileged_args_present + live_session_authority). Folded all 3 genuine with comprehensive per-class sibling-checks:
+
+### FOLDED — cached_token_is_fresh credential-use reducer -> AuthMachine (beta HIGH)
+authorizers/mod.rs cached_token_is_fresh hand-matched snapshot.phase into a usability/reauth disposition in
+the cloud-authorizer path (wrongly skipped round 10). Now routes resolve_credential_use_admission(UseCredential):
+Authorized -> proceed to pure cache-coherence equality checks (KEPT); ReauthRequired -> Err(UserReauthRequired);
+else -> Ok(false). COMPREHENSIVE per-site table proves the credential-use class is FULLY DRAINED across
+meerkat-auth-core (all remaining phase reads are test fixtures or single-flight phase==Refreshing equality
+observations in machine-routed fns; the durable-marker coherence gate is a ratcheted pure witness).
+
+### FOLDED (de-theater) — pre-composed spawn-admission inputs -> raw facts (alpha MEDIUM + sweep LOW)
+ResolveSpawnMemberAdmission was fed PRE-REDUCED facts: privileged_args_present (shell OR over a hand-picked
+7-arg SET = policy) + profile_scope_present (= can_manage_mob || scope.contains, a disjunction). Now takes a raw
+SpawnMemberAdmissionObservations struct (manage_scope_present + profile_scope_contains + 9 per-arg presence bools);
+the MACHINE owns the privileged-arg SET policy (ORs the presence facts) and the profile-scope disjunction. Both
+surfaces (tools.rs + agent_tools.rs) feed raw atomics. Deleted can_spawn_profile_in_mob disjunction helper. Class
+fully drained (all mob/mob-mcp machine-admission inputs now raw atomic facts; sibling table confirms).
+
+### FOLDED — live_session_authority reconciliation -> SessionDocumentMachine (alpha MEDIUM string-folklore)
+persistent.rs live_session_authority composed LiveAuthoritative-vs-DurableAuthoritative + a STRING reason in a
+handwritten boolean reducer. -> SessionDocumentMachine ClassifyLiveSessionAuthority { 4 pure bool observations }
+-> LiveSessionAuthorityClassified { authority: LiveAuthoritative|DurableAuthoritative, reason:
+LiveSessionAuthorityReason (typed enum: StoredArchived|LiveUncommittedTranscript|RuntimeSystemContextDiverged|
+StoredTranscriptRevisionDiverged) }. Precedence (archived>uncommitted>system-context>revision) encoded in the DSL.
+Shell mirrors verdict + typed reason; consumers match the typed reason (string folklore eliminated). The orthogonal
+transcript-rewrite sync path uses a typed LiveSessionSyncCause; its label feeds only tracing (derived projection).
+
+Gates: drift 10/6; check --workspace --all-features --tests clean; machine-codegen 94; classifier + auth_lease
+marker-purity ratchets pass; auth-core+runtime+mob+mob-mcp+session+core --all-features 3742/3836 passed; seam 0
+debt; clippy --all-features -D warnings clean. Behavior preserved (exact verdicts; typed reason replaces string).
+
+### DEFENDED — is_recoverable (sweep LOW): telemetry-only non-branching event metadata; live recovery fork is
+machine-routed via ClassifyLlmFailureRecovery.

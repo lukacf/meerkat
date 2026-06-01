@@ -52,6 +52,10 @@ use meerkat_core::service::{
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsRequest,
     StageToolResultsResult, StartTurnRequest,
 };
+use meerkat_core::session_document::{
+    LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionDocumentEffect,
+    SessionDocumentMachineAuthority,
+};
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState};
 use meerkat_core::{InputId, RunId};
@@ -1269,8 +1273,45 @@ enum LiveSessionAuthority {
     LiveAuthoritative,
     DurableAuthoritative {
         session: Box<Session>,
-        reason: &'static str,
+        reason: LiveSessionAuthorityReason,
     },
+}
+
+/// Typed diagnostic cause for synchronizing a live session from durable truth.
+/// Carried purely as a `tracing` label by the shared sync helpers — it is NOT a
+/// verdict. The live-vs-durable authority verdict + its precedence reason are
+/// owned by SessionDocumentMachine (`LiveSessionAuthorityReason`); this enum
+/// additionally distinguishes the orthogonal post-transcript-rewrite
+/// convergence trigger, which is not an authority-reconciliation reason.
+#[derive(Debug, Clone, Copy)]
+enum LiveSessionSyncCause {
+    /// Synchronization driven by the SessionDocumentMachine authority verdict.
+    Authority(LiveSessionAuthorityReason),
+    /// Synchronization driven by post-transcript-rewrite live convergence.
+    TranscriptRewriteCommitted,
+}
+
+impl LiveSessionSyncCause {
+    /// Stable diagnostic label for tracing. Reads the typed authority reason
+    /// (machine-owned) for the authority path and a fixed label for the
+    /// orthogonal transcript-rewrite convergence path.
+    fn trace_label(self) -> &'static str {
+        match self {
+            LiveSessionSyncCause::Authority(LiveSessionAuthorityReason::StoredArchived) => {
+                "stored_archived"
+            }
+            LiveSessionSyncCause::Authority(
+                LiveSessionAuthorityReason::LiveUncommittedTranscript,
+            ) => "live_uncommitted_transcript",
+            LiveSessionSyncCause::Authority(
+                LiveSessionAuthorityReason::RuntimeSystemContextDiverged,
+            ) => "runtime_system_context_diverged",
+            LiveSessionSyncCause::Authority(
+                LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged,
+            ) => "stored_transcript_revision_diverged",
+            LiveSessionSyncCause::TranscriptRewriteCommitted => "transcript_rewrite_committed",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2098,28 +2139,53 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // live transcript ahead of the durable runtime snapshot is an
         // uncommitted mutation and must fail closed so commit errors cannot
         // become visible session truth.
-        if !stored_transcript_diverged
-            && !stored_is_archived
-            && !live_has_uncommitted_transcript
-            && !runtime_system_context_diverged
-        {
-            return Ok(LiveSessionAuthority::LiveAuthoritative);
+        //
+        // The LiveAuthoritative-vs-DurableAuthoritative verdict, the precedence
+        // (archived > uncommitted transcript > runtime system-context > stored
+        // transcript-revision), and the typed reason are owned by the canonical
+        // SessionDocumentMachine. This shell extracts only the four pure boolean
+        // divergence observations above and mirrors the machine's verdict +
+        // typed reason; it decides nothing and mints no string reason. Fails
+        // closed if the machine emits no verdict.
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .classify_live_session_authority(
+                stored_transcript_diverged,
+                live_has_uncommitted_transcript,
+                runtime_system_context_diverged,
+                stored_is_archived,
+            )
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected live-session authority \
+                     classification for session {id}: {err}"
+                )))
+            })?;
+        let (kind, reason) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::LiveSessionAuthorityClassified { authority, reason } => {
+                    Some((*authority, *reason))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no live-session authority \
+                     verdict for session {id}"
+                )))
+            })?;
+        match kind {
+            LiveSessionAuthorityKind::LiveAuthoritative => {
+                Ok(LiveSessionAuthority::LiveAuthoritative)
+            }
+            LiveSessionAuthorityKind::DurableAuthoritative => {
+                Ok(LiveSessionAuthority::DurableAuthoritative {
+                    session: Box::new(stored),
+                    reason,
+                })
+            }
         }
-
-        let reason = if stored_is_archived {
-            "stored_archived"
-        } else if live_has_uncommitted_transcript {
-            "live_uncommitted_transcript"
-        } else if runtime_system_context_diverged {
-            "runtime_system_context_diverged"
-        } else {
-            "stored_transcript_revision_diverged"
-        };
-
-        Ok(LiveSessionAuthority::DurableAuthoritative {
-            session: Box::new(stored),
-            reason,
-        })
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -2151,7 +2217,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             stored_updated_at = ?session.updated_at(),
             live_message_count = live.messages().len(),
             stored_message_count = session.messages().len(),
-            reason,
+            reason = ?reason,
             "discarding stale live session in favor of newer durable session-store snapshot"
         );
         self.discard_live_session(id).await?;
@@ -2162,7 +2228,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         durable: &Session,
-        reason: &'static str,
+        reason: LiveSessionSyncCause,
     ) -> Result<(), SessionError> {
         if self.runtime_store.is_none() {
             return Ok(());
@@ -2187,7 +2253,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             self.inner.sync_system_context_state(id).await?;
             tracing::debug!(
                 session_id = %id,
-                reason,
+                reason = reason.trace_label(),
                 "synchronized live runtime-system-context state from durable realtime authority"
             );
         }
@@ -2199,14 +2265,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         durable: &Session,
-        reason: &'static str,
+        reason: LiveSessionSyncCause,
     ) -> Result<(), SessionError> {
         self.inner
             .sync_session_from_durable_snapshot(id, durable.clone())
             .await?;
         tracing::debug!(
             session_id = %id,
-            reason,
+            reason = reason.trace_label(),
             "synchronized live session snapshot from durable realtime authority"
         );
         Ok(())
@@ -2216,18 +2282,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         durable: &Session,
-        reason: &'static str,
+        reason: LiveSessionAuthorityReason,
     ) -> Result<bool, SessionError> {
         if self.session_archived_by_authority(id, durable).await? {
             return Ok(false);
         }
 
-        if self.runtime_store.is_some() && reason == "runtime_system_context_diverged" {
-            self.synchronize_live_runtime_context_state_from_durable(id, durable, reason)
-                .await?;
+        if self.runtime_store.is_some()
+            && reason == LiveSessionAuthorityReason::RuntimeSystemContextDiverged
+        {
+            self.synchronize_live_runtime_context_state_from_durable(
+                id,
+                durable,
+                LiveSessionSyncCause::Authority(reason),
+            )
+            .await?;
         } else {
             match self
-                .synchronize_live_session_from_durable(id, durable, reason)
+                .synchronize_live_session_from_durable(
+                    id,
+                    durable,
+                    LiveSessionSyncCause::Authority(reason),
+                )
                 .await
             {
                 Ok(()) => {}
@@ -2819,7 +2895,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .synchronize_live_session_from_durable(
                 session.id(),
                 session,
-                "transcript_rewrite_committed",
+                LiveSessionSyncCause::TranscriptRewriteCommitted,
             )
             .await
         {
@@ -2857,20 +2933,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     return Err(SessionError::NotFound { id: id.clone() });
                 }
-                if reason == "runtime_system_context_diverged" {
+                if reason == LiveSessionAuthorityReason::RuntimeSystemContextDiverged {
                     self.synchronize_live_runtime_context_state_from_durable(
                         id,
                         session.as_ref(),
-                        reason,
+                        LiveSessionSyncCause::Authority(reason),
                     )
                     .await?;
                 } else {
-                    self.synchronize_live_session_from_durable(id, session.as_ref(), reason)
-                        .await?;
+                    self.synchronize_live_session_from_durable(
+                        id,
+                        session.as_ref(),
+                        LiveSessionSyncCause::Authority(reason),
+                    )
+                    .await?;
                 }
                 tracing::debug!(
                     session_id = %id,
-                    reason,
+                    reason = ?reason,
                     "using durable session authority for realtime open snapshot"
                 );
                 Ok(*session)
@@ -4102,7 +4182,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let guard = recovery_gate.lock_owned().await;
         match self.live_session_authority(id).await? {
             LiveSessionAuthority::DurableAuthoritative { session, reason }
-                if reason == "runtime_system_context_diverged" =>
+                if reason == LiveSessionAuthorityReason::RuntimeSystemContextDiverged =>
             {
                 if self
                     .session_archived_by_authority(id, session.as_ref())
@@ -4113,7 +4193,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 self.synchronize_live_runtime_context_state_from_durable(
                     id,
                     session.as_ref(),
-                    reason,
+                    LiveSessionSyncCause::Authority(reason),
                 )
                 .await?;
             }
@@ -4124,8 +4204,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     return Err(SessionError::NotFound { id: id.clone() });
                 }
-                self.synchronize_live_session_from_durable(id, session.as_ref(), reason)
-                    .await?;
+                self.synchronize_live_session_from_durable(
+                    id,
+                    session.as_ref(),
+                    LiveSessionSyncCause::Authority(reason),
+                )
+                .await?;
             }
             LiveSessionAuthority::NoLive => {
                 tracing::debug!(

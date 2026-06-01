@@ -164,7 +164,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyMemberWait`(agent_identity: AgentIdentity)
 - `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
-- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_present: Bool, privileged_args_present: Bool)
+- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_budget_split_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
 - `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
 - `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
 - `ResolveCreateMobAdmission`(can_create_mobs: Bool)
@@ -832,7 +832,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -840,7 +840,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -848,7 +848,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -856,7 +856,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -864,7 +864,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -872,7 +872,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -880,7 +880,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -888,7 +888,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -896,7 +896,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -904,7 +904,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -912,7 +912,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -920,7 +920,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -928,7 +928,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -936,7 +936,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -944,7 +944,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -952,7 +952,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_present, privileged_args_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_budget_split_policy_present, privileged_tooling_present, privileged_auth_binding_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`

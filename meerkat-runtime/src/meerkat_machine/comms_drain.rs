@@ -658,6 +658,22 @@ impl MeerkatMachine {
         }
     }
 
+    pub(crate) async fn direct_peer_endpoint_contains(
+        &self,
+        session_id: &SessionId,
+        endpoint: &crate::meerkat_machine::dsl::PeerEndpoint,
+    ) -> bool {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return false;
+        };
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        authority.state.direct_peer_endpoints.contains(endpoint)
+    }
+
     /// Stage a DSL `BindSupervisor` input (Wave 3 D Row 21).
     ///
     /// Returns the classified result from the DSL mutator so callers can

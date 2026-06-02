@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.31] - 2026-06-02
+
+Meerkat 0.6.31 fixes supervisor bridge response routing, compaction retry
+cadence, and OpenAI streaming completion fallback behavior.
+
+### Fixed
+
+- **Supervisor bridge response routing** (#748) — installs an authenticated
+  supervisor response route before authorized bridge replies, preferring
+  private trusted-peer registration so supervisor routing does not leak through
+  public peer discovery.
+- **Compaction retry cadence** (#749) — persists failed compaction attempt
+  boundaries and feeds them into the compaction cadence guard so sessions over
+  threshold do not immediately retry the same failing compaction path.
+- **OpenAI stream done fallback** (#749) — treats `data: [DONE]` as a terminal
+  fallback only after streamed output, tool, or reasoning content has actually
+  been observed.
+
 ## [0.6.30] - 2026-06-01
 
 Meerkat 0.6.30 fixes production external TCP bridge replies and compacted

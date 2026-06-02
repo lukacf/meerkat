@@ -32332,6 +32332,10 @@ async fn test_external_tcp_fixed_supervisor_bridge_pending_rotation_retry_reuses
     let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
+        // External peer-only members are owned by the MobMachine owner bridge
+        // session; resume restore (restore_generated_member_operation_bindings)
+        // re-establishes their ops-owner binding from this canonical authority.
+        .with_owner_bridge_session_create_authority(SessionId::new(), false, false)
         .create()
         .await
         .expect("create mob");

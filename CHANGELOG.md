@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.32] - 2026-06-02
+
+Meerkat 0.6.32 fixes external supervisor bridge responses for remote mob
+members after bind and wire trust changes.
+
+### Fixed
+
+- **External supervisor bridge response routing** (#750) — installs a scoped
+  response route from the supervisor descriptor carried in bridge payloads,
+  preserves existing supervisor trust after replies, routes bind-validation
+  failures back to verified requesters, and keeps wire/unwire acknowledgements
+  reliable across idempotent trust-projection races.
+
 ## [0.6.31] - 2026-06-02
 
 Meerkat 0.6.31 fixes supervisor bridge response routing, compaction retry

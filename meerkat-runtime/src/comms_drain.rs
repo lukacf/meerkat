@@ -928,14 +928,6 @@ async fn resolve_peer_route(
         .map(|entry| PeerRoute::with_display_name(entry.peer_id, entry.name.clone()))
 }
 
-async fn bridge_peer_is_trusted(comms_runtime: &Arc<dyn CommsRuntime>, peer_id: PeerId) -> bool {
-    comms_runtime
-        .peers()
-        .await
-        .iter()
-        .any(|peer| peer.peer_id == peer_id)
-}
-
 fn record_bridge_inbound_peer_request(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
@@ -1031,7 +1023,14 @@ async fn require_authorized_supervisor_with_response_route(
     context: &str,
 ) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
     let supervisor = require_authorized_supervisor(sender, payload, current)?;
-    ensure_bridge_response_route_for_supervisor(comms_runtime, &supervisor, context).await?;
+    let binding = BoundSupervisorState::from_binding(current).ok_or_else(|| {
+        (
+            BridgeRejectionCause::Internal,
+            format!("{context}: missing bound supervisor response state"),
+        )
+    })?;
+    let response_peer = bound_supervisor_response_descriptor(sender, &binding, context)?;
+    ensure_bridge_response_route_for_descriptor(comms_runtime, response_peer, context).await?;
     Ok(supervisor)
 }
 
@@ -1088,17 +1087,36 @@ async fn send_bridge_response_with_temporary_supervisor_route(
     context: &str,
 ) {
     let removal_key = response_peer.peer_id.as_str();
-    let had_existing_route = comms_runtime
-        .peers()
+    let add_result = match comms_runtime
+        .add_private_trusted_peer(response_peer.clone())
         .await
-        .iter()
-        .any(|peer| peer.peer_id == response_peer.peer_id);
-    match ensure_bridge_response_route_for_descriptor(comms_runtime, response_peer, context).await {
-        Ok(()) => {
+    {
+        Ok(()) => Ok(true),
+        Err(SendError::Unsupported(_)) => comms_runtime
+            .add_trusted_peer(response_peer)
+            .await
+            .map(|()| false)
+            .map_err(|error| {
+                (
+                    BridgeRejectionCause::Internal,
+                    format!("{context}: failed to install supervisor response route: {error}"),
+                )
+            }),
+        Err(error) => Err((
+            BridgeRejectionCause::Internal,
+            format!("{context}: failed to install supervisor response route: {error}"),
+        )),
+    };
+    match add_result {
+        Ok(used_private_route) => {
             send_bridge_response(comms_runtime, candidate, status, reply).await;
-            if !had_existing_route
-                && let Err(error) = comms_runtime.remove_trusted_peer(&removal_key).await
-            {
+            if let Err(error) = if used_private_route {
+                comms_runtime
+                    .remove_private_trusted_peer(&removal_key)
+                    .await
+            } else {
+                comms_runtime.remove_trusted_peer(&removal_key).await
+            } {
                 tracing::warn!(
                     error = %error,
                     peer_id = %removal_key,
@@ -1116,32 +1134,6 @@ async fn send_bridge_response_with_temporary_supervisor_route(
             comms_runtime.mark_interaction_complete(&candidate.interaction.id);
         }
     }
-}
-
-async fn send_bind_failure_with_response_route(
-    comms_runtime: &Arc<dyn CommsRuntime>,
-    candidate: &PeerInputCandidate,
-    sender: &PeerIngressFact,
-    payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
-    cause: BridgeRejectionCause,
-    reason: String,
-) {
-    let supervisor = match bridge_peer_identity(&payload.supervisor, "bind member failed") {
-        Ok(supervisor) if sender_matches_bridge_peer(sender, &supervisor) => supervisor,
-        _ => {
-            send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-            return;
-        }
-    };
-    send_bridge_response_with_temporary_supervisor_route(
-        comms_runtime,
-        candidate,
-        meerkat_core::interaction::ResponseStatus::Failed,
-        BridgeReply::Rejected { cause, reason },
-        supervisor.into_trusted_peer_descriptor(),
-        "bind member failed",
-    )
-    .await;
 }
 
 /// Try to handle a supervisor bridge command from an incoming comms request.
@@ -1302,15 +1294,7 @@ async fn try_handle_supervisor_bridge_command(
                 match validate_bind_request(comms_runtime, sender, &payload) {
                     Ok(binding) => binding,
                     Err((cause, reason)) => {
-                        send_bind_failure_with_response_route(
-                            comms_runtime,
-                            candidate,
-                            sender,
-                            &payload,
-                            cause,
-                            reason,
-                        )
-                        .await;
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                         return true;
                     }
                 };
@@ -1964,7 +1948,7 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            let authorized_supervisor = match require_authorized_supervisor_with_response_route(
+            match require_authorized_supervisor_with_response_route(
                 comms_runtime,
                 sender,
                 &sup_payload,
@@ -1973,13 +1957,12 @@ async fn try_handle_supervisor_bridge_command(
             )
             .await
             {
-                Ok(supervisor) => supervisor,
+                Ok(_) => {}
                 Err((cause, reason)) => {
                     send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                     return true;
                 }
-            };
-            let supervisor_response_peer = authorized_supervisor.into_trusted_peer_descriptor();
+            }
             // D-track-b: route WireMember through the DSL authority's
             // peer-projection state. The stager helper applies
             // `AddDirectPeerEndpoint`, emits
@@ -2007,35 +1990,15 @@ async fn try_handle_supervisor_bridge_command(
                 .await
             {
                 Ok(()) => {
-                    send_bridge_response_with_temporary_supervisor_route(
+                    send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
                         BridgeReply::Ack(BridgeAck { ok: true }),
-                        supervisor_response_peer.clone(),
-                        "wire member failed",
                     )
                     .await;
                 }
                 Err(error) => {
-                    if bridge_peer_is_trusted(comms_runtime, peer_spec.peer_id).await {
-                        tracing::debug!(
-                            %session_id,
-                            peer_id = %peer_spec.peer_id,
-                            error = %error,
-                            "wire member peer projection rejected after trust was already present; treating as idempotent ack"
-                        );
-                        send_bridge_response_with_temporary_supervisor_route(
-                            comms_runtime,
-                            candidate,
-                            meerkat_core::interaction::ResponseStatus::Completed,
-                            BridgeReply::Ack(BridgeAck { ok: true }),
-                            supervisor_response_peer,
-                            "wire member idempotent ack failed",
-                        )
-                        .await;
-                        return true;
-                    }
                     send_bridge_failure(
                         comms_runtime,
                         candidate,
@@ -2053,7 +2016,7 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            let authorized_supervisor = match require_authorized_supervisor_with_response_route(
+            match require_authorized_supervisor_with_response_route(
                 comms_runtime,
                 sender,
                 &sup_payload,
@@ -2062,13 +2025,12 @@ async fn try_handle_supervisor_bridge_command(
             )
             .await
             {
-                Ok(supervisor) => supervisor,
+                Ok(_) => {}
                 Err((cause, reason)) => {
                     send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                     return true;
                 }
-            };
-            let supervisor_response_peer = authorized_supervisor.into_trusted_peer_descriptor();
+            }
             // D-track-b: mirror of WireMember — route UnwireMember
             // through `RemoveDirectPeerEndpoint`. The DSL authority's
             // peer-projection state is the source of truth; the trust
@@ -2093,35 +2055,15 @@ async fn try_handle_supervisor_bridge_command(
                 .await
             {
                 Ok(()) => {
-                    send_bridge_response_with_temporary_supervisor_route(
+                    send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
                         BridgeReply::Ack(BridgeAck { ok: true }),
-                        supervisor_response_peer.clone(),
-                        "unwire member failed",
                     )
                     .await;
                 }
                 Err(error) => {
-                    if !bridge_peer_is_trusted(comms_runtime, peer_spec.peer_id).await {
-                        tracing::debug!(
-                            %session_id,
-                            peer_id = %peer_spec.peer_id,
-                            error = %error,
-                            "unwire member peer projection rejected after trust was already absent; treating as idempotent ack"
-                        );
-                        send_bridge_response_with_temporary_supervisor_route(
-                            comms_runtime,
-                            candidate,
-                            meerkat_core::interaction::ResponseStatus::Completed,
-                            BridgeReply::Ack(BridgeAck { ok: true }),
-                            supervisor_response_peer,
-                            "unwire member idempotent ack failed",
-                        )
-                        .await;
-                        return true;
-                    }
                     send_bridge_failure(
                         comms_runtime,
                         candidate,
@@ -3302,135 +3244,6 @@ mod tests {
         assert_eq!(
             bind_response.address,
             canonicalize_bridge_address(&member_spec.address.to_string())
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test]
-    async fn bind_member_validation_failure_routes_tcp_rejection_before_trust_is_bound() {
-        let suffix = Uuid::new_v4().simple().to_string();
-        let member_name = format!("tcp-bind-reject-member-{suffix}");
-        let supervisor_name = format!("tcp-bind-reject-supervisor-{suffix}");
-
-        let mut member_runtime =
-            meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member runtime");
-        member_runtime
-            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("configure member TCP listener");
-        member_runtime
-            .start_listeners()
-            .await
-            .expect("start member TCP listener");
-        let member_runtime = Arc::new(member_runtime);
-        let member_peer_handle = Arc::new(CountingPeerInteractionHandle::default());
-        install_test_peer_request_response_authority(&member_runtime, member_peer_handle.clone());
-
-        let mut supervisor_runtime =
-            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor runtime");
-        supervisor_runtime
-            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("configure supervisor TCP listener");
-        supervisor_runtime
-            .start_listeners()
-            .await
-            .expect("start supervisor TCP listener");
-        let supervisor_runtime = Arc::new(supervisor_runtime);
-        install_test_peer_request_response_authority(
-            &supervisor_runtime,
-            Arc::new(CountingPeerInteractionHandle::default()),
-        );
-
-        let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
-        supervisor_runtime
-            .add_trusted_peer(member_spec.clone())
-            .await
-            .expect("supervisor trusts member target");
-        let supervisor_spec =
-            trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
-
-        let adapter = Arc::new(MeerkatMachine::ephemeral());
-        let session_id = SessionId::new();
-        adapter.register_session(session_id.clone()).await;
-        assert!(
-            member_runtime.peers().await.is_empty(),
-            "fixture starts before bind, so the target must not already trust the supervisor"
-        );
-
-        let command = BridgeCommand::BindMember(
-            meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
-                supervisor: BridgePeerSpec::from(supervisor_spec.clone()),
-                epoch: 1,
-                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-                expected_peer_id: member_spec.peer_id.as_str(),
-                expected_address: "tcp://127.0.0.1:1".to_string(),
-                bootstrap_token: member_runtime.bridge_bootstrap_token().to_owned().into(),
-            },
-        );
-        let request_receipt = supervisor_runtime
-            .send(CommsCommand::PeerRequest {
-                to: PeerRoute::with_display_name(member_spec.peer_id, member_spec.name.clone()),
-                intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
-                params: serde_json::to_value(&command).expect("serialize bridge command"),
-                blocks: None,
-                handling_mode: HandlingMode::Queue,
-                stream: meerkat_core::comms::InputStreamMode::None,
-            })
-            .await
-            .expect("supervisor sends BindMember over TCP");
-        let meerkat_core::SendReceipt::PeerRequestSent { interaction_id, .. } = request_receipt
-        else {
-            panic!("expected PeerRequestSent receipt, got {request_receipt:?}");
-        };
-
-        let candidate = drain_one_candidate(&member_runtime, "member BindMember request").await;
-        assert_eq!(
-            candidate.interaction.id, interaction_id,
-            "member must receive the correlated bridge request"
-        );
-        assert!(
-            try_handle_supervisor_bridge_command(
-                &adapter,
-                &session_id,
-                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
-                &candidate,
-            )
-            .await,
-            "bridge handler must own BindMember"
-        );
-
-        let response =
-            drain_one_candidate(&supervisor_runtime, "supervisor BindMember rejection").await;
-        assert_eq!(
-            member_peer_handle.response_replied_count(),
-            1,
-            "target must send a terminal bridge rejection instead of timing out on PeerNotFound"
-        );
-        assert!(
-            member_runtime.peers().await.is_empty(),
-            "temporary bind rejection route must not leave the supervisor trusted before bind"
-        );
-        let InteractionContent::Response {
-            in_reply_to,
-            status,
-            result,
-            ..
-        } = response.interaction.content
-        else {
-            panic!(
-                "expected bridge rejection response, got {:?}",
-                response.interaction.content
-            );
-        };
-        assert_eq!(in_reply_to, interaction_id);
-        assert_eq!(status, meerkat_core::interaction::ResponseStatus::Failed);
-        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
-        let BridgeReply::Rejected { cause, reason } = reply else {
-            panic!("expected Rejected reply, got {reply:?}");
-        };
-        assert_eq!(cause, BridgeRejectionCause::AddressMismatch);
-        assert!(
-            reason.contains("bind address mismatch"),
-            "rejection should preserve the real bind failure reason, got: {reason}"
         );
     }
 
@@ -5436,6 +5249,39 @@ mod tests {
         assert!(
             trusted_peer_ids.lock().await.is_empty(),
             "failed trust publication must not leave the supervisor trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_member_invalid_bootstrap_does_not_publish_response_route() {
+        let mut payload = sample_bind_payload();
+        payload.bootstrap_token = "wrong-token".into();
+        let sender = payload.supervisor.peer_id.clone();
+        let runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        assert!(
+            matches!(
+                adapter.supervisor_binding(&session_id).await,
+                SupervisorBinding::Unbound
+            ),
+            "invalid bootstrap must not bind supervisor authority"
+        );
+        assert!(
+            trusted_peer_ids.lock().await.is_empty(),
+            "invalid bootstrap must not temporarily publish supervisor trust just to route rejection"
         );
     }
 

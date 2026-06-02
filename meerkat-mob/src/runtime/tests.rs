@@ -4265,6 +4265,10 @@ async fn spawn_live_external_peer_with_transport(
                                                             payload.supervisor.clone(),
                                                         )
                                                         .expect("valid supervisor spec");
+                                                    responder_supervisor_addresses
+                                                        .write()
+                                                        .await
+                                                        .push(supervisor_spec.address.to_string());
                                                     apply_test_peer_projection_trust(
                                                         responder_runtime.as_ref(),
                                                         supervisor_spec,
@@ -4397,6 +4401,10 @@ async fn spawn_live_external_peer_with_transport(
                                                         payload.supervisor.clone(),
                                                     )
                                                     .expect("valid supervisor spec");
+                                                responder_supervisor_addresses
+                                                    .write()
+                                                    .await
+                                                    .push(supervisor_spec.address.to_string());
                                                 apply_test_peer_projection_trust(
                                                     responder_runtime.as_ref(),
                                                     supervisor_spec,
@@ -4425,6 +4433,10 @@ async fn spawn_live_external_peer_with_transport(
                                                     payload.supervisor.clone(),
                                                 )
                                                 .expect("valid supervisor spec");
+                                            responder_supervisor_addresses
+                                                .write()
+                                                .await
+                                                .push(supervisor_spec.address.to_string());
                                             apply_test_peer_projection_trust(
                                                 responder_runtime.as_ref(),
                                                 supervisor_spec,

@@ -11911,7 +11911,7 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
         self.cancel_peer_deliveries_for_member(&agent_identity, "member is retiring")
             .await;
-        self.handle_retire_inner(&agent_identity, false, false)
+        self.handle_retire_inner(&agent_identity, false, false, false)
             .await?;
         let canceled = self
             .cancel_pending_spawns_for_member(&agent_identity, "retire command accepted")
@@ -12103,6 +12103,7 @@ impl MobActor {
         agent_identity: &MeerkatId,
         bulk: bool,
         preserve_realtime_binding: bool,
+        retain_roster_on_archive_failure: bool,
     ) -> Result<(), MobError> {
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -12357,7 +12358,9 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::handle_retire_inner disposing member"
         );
-        let report = self.dispose_member(&ctx, policy.as_mut()).await;
+        let report = self
+            .dispose_member(&ctx, policy.as_mut(), retain_roster_on_archive_failure)
+            .await;
         tracing::debug!(
             agent_identity = %agent_identity,
             "MobActor::handle_retire_inner disposed member"
@@ -12602,7 +12605,10 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::handle_respawn retiring previous member"
         );
-        if let Err(error) = self.handle_retire_inner(&agent_identity, false, true).await {
+        if let Err(error) = self
+            .handle_retire_inner(&agent_identity, false, true, true)
+            .await
+        {
             let roster_still_contains_member = {
                 let roster = self.roster.read().await;
                 roster.get(&agent_identity).is_some()
@@ -13266,6 +13272,7 @@ impl MobActor {
         &mut self,
         ctx: &DisposalContext,
         policy: &mut dyn ErrorPolicy,
+        retain_roster_on_archive_failure: bool,
     ) -> DisposalReport {
         let mut report = DisposalReport::new();
 
@@ -13325,6 +13332,23 @@ impl MobActor {
         // would leave the roster pointing at a runtime that retire already
         // terminally drained — an unreachable ghost that blocks respawn/reset.
         self.dispose_prune_edge_locks(ctx).await;
+        if archive_failed && retain_roster_on_archive_failure {
+            // Respawn retry path: the session was NOT archived (archive failed),
+            // so it may still exist as an orphan. Retain the retiring roster
+            // anchor in Retiring state so the respawn retry can re-attempt
+            // cleanup via the cleanup_retry path (handle_respawn keys on
+            // `entry.state == Retiring`); removing it would lose track of the
+            // un-archived session and defeat that retry. handle_retire_inner
+            // still returns the archive error to the caller. (Plain retire keeps
+            // the unconditional removal below, per its remove-on-archive-failure
+            // contract.)
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %ctx.agent_identity,
+                "retaining retiring roster entry after ArchiveSession failure for respawn cleanup retry"
+            );
+            return report;
+        }
         if archive_failed {
             tracing::warn!(
                 mob_id = %self.definition.id,
@@ -15848,7 +15872,7 @@ impl MobActor {
     }
 
     async fn retire_one(&mut self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
-        self.handle_retire_inner(&id, true, false)
+        self.handle_retire_inner(&id, true, false, false)
             .await
             .map_err(|error| (id, error))
     }

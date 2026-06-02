@@ -534,10 +534,14 @@ impl MobSupervisorBridge {
             }
             let send_result = async {
                 let runtime = self.runtime().await;
-                runtime
-                    .add_trusted_peer(recipient.clone())
-                    .await
-                    .map_err(MobError::from)?;
+                // Route the recipient trust through the generated machine
+                // authority (DSL), not a raw comms add_trusted_peer, so the
+                // trust write is revalidated by canonical authority under the
+                // swapped rotation authority — matching the non-fixed-port
+                // branch below and trust_recipient (Invariant #1: no raw or
+                // legacy authority writes).
+                let dsl = self.dsl.read().await.clone();
+                Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
                 self.request_json_with_runtime(
                     &runtime,
                     recipient,

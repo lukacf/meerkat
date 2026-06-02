@@ -386,8 +386,61 @@ fn validate_transcript_tool_result_shape(messages: &[Message]) -> Result<(), Tra
     Ok(())
 }
 
+fn canonicalize_digest_image_blocks(blocks: &mut [crate::types::ContentBlock]) {
+    for block in blocks.iter_mut() {
+        if let crate::types::ContentBlock::Image {
+            media_type,
+            data: crate::types::ImageData::Inline { data },
+        } = block
+        {
+            // An inline image hydrates from its blob's own bytes, so its
+            // content-addressed identity equals the blob id the store minted.
+            let blob_id = crate::blob::content_blob_id(media_type, data);
+            *block = crate::types::ContentBlock::Image {
+                media_type: media_type.clone(),
+                data: crate::types::ImageData::Blob { blob_id },
+            };
+        }
+    }
+}
+
+/// Canonicalize image payloads to their content-addressed blob identity so the
+/// transcript digest is invariant to inline-vs-blob representation.
+///
+/// The same image hydrated inline for model execution and externalized to a
+/// blob for persistence must share one transcript revision; otherwise a live
+/// session and its durable snapshot would appear "diverged" purely because of
+/// image storage form, and a runtime-backed live session would be discarded as
+/// stale mid-turn.
+fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
+    let mut canonical = messages.to_vec();
+    for message in &mut canonical {
+        match message {
+            Message::User(user) => canonicalize_digest_image_blocks(&mut user.content),
+            Message::ToolResults { results, .. } => {
+                for result in results.iter_mut() {
+                    canonicalize_digest_image_blocks(&mut result.content);
+                }
+            }
+            Message::SystemNotice(notice) => {
+                for block in &mut notice.blocks {
+                    match block {
+                        crate::types::SystemNoticeBlock::Comms { content, .. }
+                        | crate::types::SystemNoticeBlock::ExternalEvent { content, .. } => {
+                            canonicalize_digest_image_blocks(content);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    canonical
+}
+
 pub fn transcript_messages_digest(messages: &[Message]) -> Result<String, serde_json::Error> {
-    sha256_json_digest(messages)
+    sha256_json_digest(&canonicalize_messages_for_digest(messages))
 }
 
 fn validate_transcript_rewrite_record(

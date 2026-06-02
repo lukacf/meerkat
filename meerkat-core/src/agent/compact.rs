@@ -52,50 +52,66 @@ fn estimate_video_duration_tokens(duration_ms: u64) -> u64 {
 /// Text content uses `json_bytes / 4` as a rough heuristic.
 /// Image blocks use a fixed per-image estimate instead of serializing
 /// the base64 payload (which would massively overcount).
+/// Estimate tokens for a content-block slice, using fixed image/video
+/// heuristics instead of counting raw base64 payload bytes (which would
+/// massively overcount). Text blocks use `text_projection().len() / 4`.
+fn estimate_content_block_tokens(blocks: &[crate::types::ContentBlock]) -> u64 {
+    let mut tokens: u64 = 0;
+    for block in blocks {
+        match block {
+            crate::types::ContentBlock::Image { .. } => {
+                tokens += IMAGE_TOKEN_ESTIMATE;
+            }
+            crate::types::ContentBlock::Video {
+                duration_ms,
+                data: crate::types::VideoData::Inline { data },
+                ..
+            } => {
+                tokens += estimate_inline_video_tokens(data)
+                    .max(estimate_video_duration_tokens(*duration_ms));
+            }
+            _ => {
+                let len = block.text_projection().len() as u64;
+                tokens += if len > 0 { (len / 4).max(1) } else { 0 };
+            }
+        }
+    }
+    tokens
+}
+
 pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
     let mut tokens: u64 = 0;
     for msg in messages {
         match msg {
             Message::User(u) => {
-                for block in &u.content {
-                    match block {
-                        crate::types::ContentBlock::Image { .. } => {
-                            tokens += IMAGE_TOKEN_ESTIMATE;
-                        }
-                        crate::types::ContentBlock::Video {
-                            duration_ms,
-                            data: crate::types::VideoData::Inline { data },
-                            ..
-                        } => {
-                            tokens += estimate_inline_video_tokens(data)
-                                .max(estimate_video_duration_tokens(*duration_ms));
-                        }
-                        _ => {
-                            let len = block.text_projection().len() as u64;
-                            tokens += if len > 0 { (len / 4).max(1) } else { 0 };
-                        }
-                    }
-                }
+                tokens += estimate_content_block_tokens(&u.content);
             }
             Message::ToolResults { results, .. } => {
                 for r in results {
-                    for block in &r.content {
-                        match block {
-                            crate::types::ContentBlock::Image { .. } => {
-                                tokens += IMAGE_TOKEN_ESTIMATE;
-                            }
-                            crate::types::ContentBlock::Video {
-                                duration_ms,
-                                data: crate::types::VideoData::Inline { data },
-                                ..
-                            } => {
-                                tokens += estimate_inline_video_tokens(data)
-                                    .max(estimate_video_duration_tokens(*duration_ms));
-                            }
-                            _ => {
-                                let len = block.text_projection().len() as u64;
-                                tokens += if len > 0 { (len / 4).max(1) } else { 0 };
-                            }
+                    tokens += estimate_content_block_tokens(&r.content);
+                }
+            }
+            // System notices can carry image/video content blocks inside
+            // `Comms`/`ExternalEvent` payloads (e.g. a peer message relaying a
+            // blob-backed image inlined for the model). Estimate those blocks
+            // with the same fixed image/video heuristic as user/tool content;
+            // counting the serialized JSON would treat inline base64 as text
+            // and massively overcount, forcing spurious compaction.
+            Message::SystemNotice(notice) => {
+                if let Some(body) = notice.body.as_deref() {
+                    let len = body.len() as u64;
+                    tokens += if len > 0 { (len / 4).max(1) } else { 0 };
+                }
+                for block in &notice.blocks {
+                    match block {
+                        crate::types::SystemNoticeBlock::Comms { content, .. }
+                        | crate::types::SystemNoticeBlock::ExternalEvent { content, .. } => {
+                            tokens += estimate_content_block_tokens(content);
+                        }
+                        other => {
+                            let json = serde_json::to_string(other)
+                                .map_err(|e| CompactionError::EstimationFailed(e.to_string()))?;
+                            tokens += json.len() as u64 / 4;
                         }
                     }
                 }
@@ -371,5 +387,39 @@ mod tests {
         ];
 
         assert_eq!(estimate_tokens(&messages).unwrap(), 3_600);
+    }
+
+    #[test]
+    fn estimate_tokens_uses_image_heuristic_for_system_notice_comms_blocks() {
+        use crate::types::{
+            ImageData, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind,
+            SystemNoticeMessage,
+        };
+        // A relayed peer message carrying a large inline image. Counting the
+        // base64 payload as serialized JSON text would massively overcount and
+        // force spurious compaction; the estimate must use the fixed image
+        // heuristic just like user/tool content blocks.
+        let huge_base64 = "A".repeat(4_000_000);
+        let messages = vec![Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::Comms,
+            None,
+            SystemNoticeBlock::Comms {
+                kind: "message".to_string(),
+                direction: SystemNoticeDirection::Incoming,
+                peer: None,
+                request_id: None,
+                intent: None,
+                status: None,
+                summary: None,
+                payload: None,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline { data: huge_base64 },
+                }],
+            },
+        ))];
+
+        // One inline image => IMAGE_TOKEN_ESTIMATE, not ~1M tokens from base64.
+        assert_eq!(estimate_tokens(&messages).unwrap(), IMAGE_TOKEN_ESTIMATE);
     }
 }

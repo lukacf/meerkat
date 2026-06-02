@@ -173,6 +173,7 @@ pub fn load_compaction_cadence(session: &Session) -> SessionCompactionCadence {
         .unwrap_or_else(|| SessionCompactionCadence {
             session_boundary_index: infer_session_boundary_index(session.messages()),
             last_compaction_boundary_index: None,
+            last_compaction_attempt_boundary_index: None,
         })
 }
 
@@ -357,6 +358,7 @@ mod tests {
         let cadence = SessionCompactionCadence {
             session_boundary_index: 7,
             last_compaction_boundary_index: Some(4),
+            last_compaction_attempt_boundary_index: Some(6),
         };
         persist_compaction_cadence(&mut session, &cadence).unwrap();
 

@@ -4567,9 +4567,9 @@ async fn spawn_live_external_peer_with_transport(
                                         "wire trust",
                                     )
                                     .await;
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("wire ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::UnwireMember(payload) => {
@@ -4584,9 +4584,9 @@ async fn spawn_live_external_peer_with_transport(
                                         "unwire trust",
                                     )
                                     .await;
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
+                                    serde_json::to_value(super::bridge_protocol::BridgeReply::Ack(
+                                        super::bridge_protocol::BridgeAck { ok: true },
+                                    ))
                                     .expect("unwire ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::RetireMember(_) => {

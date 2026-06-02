@@ -19,6 +19,9 @@ pub struct SessionCompactionCadence {
     /// Boundary index where compaction last completed successfully.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction_boundary_index: Option<u64>,
+    /// Boundary index where compaction was last attempted, successful or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction_attempt_boundary_index: Option<u64>,
 }
 
 /// Context provided to `Compactor::should_compact` for trigger decisions.
@@ -30,7 +33,10 @@ pub struct CompactionContext {
     pub message_count: usize,
     /// Estimated history tokens (JSON bytes / 4).
     pub estimated_history_tokens: u64,
-    /// Session-scoped pre-LLM boundary index where compaction last occurred, if ever.
+    /// Session-scoped pre-LLM boundary index used by the cadence guard.
+    ///
+    /// This is the latest successful compaction boundary or failed compaction
+    /// attempt boundary, whichever is newer.
     pub last_compaction_boundary_index: Option<u64>,
     /// Current session-scoped pre-LLM boundary index.
     pub session_boundary_index: u64,

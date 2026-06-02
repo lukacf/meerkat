@@ -15,7 +15,7 @@ use meerkat_core::agent::CommsRuntime;
 #[allow(unused_imports)]
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult,
-    PeerId, PeerRoute, TrustedPeerDescriptor,
+    PeerId, PeerRoute, SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::{
@@ -45,7 +45,6 @@ use crate::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
 };
 
-#[cfg(test)]
 use crate::meerkat_machine::SupervisorBinding;
 use crate::meerkat_machine::{
     DrainExitReason, MeerkatMachine, SupervisorAuthorizeAdmission, SupervisorBindAdmission,
@@ -689,6 +688,31 @@ async fn resolve_authorized_supervisor(
     }
 }
 
+/// Gen-authority supervisor admission (PR #714) plus the PR #750 reply-route
+/// install: authorize the command through `MeerkatMachine`, then ensure the
+/// bound supervisor's response route exists so the `PeerResponse` ack can be
+/// routed back to the authenticated sender.
+async fn resolve_authorized_supervisor_with_response_route(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    sender: &PeerIngressFact,
+    payload: &BridgeSupervisorPayload,
+    context: &str,
+) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
+    let supervisor = resolve_authorized_supervisor(adapter, session_id, sender, payload).await?;
+    let current = adapter.supervisor_binding(session_id).await;
+    let binding = BoundSupervisorState::from_binding(&current).ok_or_else(|| {
+        (
+            BridgeRejectionCause::Internal,
+            format!("{context}: missing bound supervisor response state"),
+        )
+    })?;
+    let response_peer = bound_supervisor_response_descriptor(sender, &binding, context)?;
+    ensure_bridge_response_route_for_descriptor(comms_runtime, response_peer, context).await?;
+    Ok(supervisor)
+}
+
 fn bridge_capabilities() -> BridgeCapabilities {
     BridgeCapabilities {
         deliver_member_input: true,
@@ -892,6 +916,30 @@ struct BoundSupervisorState {
     address: String,
     signing_public_key: String,
     epoch: u64,
+}
+
+impl BoundSupervisorState {
+    /// Project the canonical `SupervisorBinding` authority into the response
+    /// descriptor state used to install a temporary bridge reply route.
+    fn from_binding(binding: &SupervisorBinding) -> Option<Self> {
+        let SupervisorBinding::Bound {
+            name,
+            peer_id,
+            address,
+            signing_public_key,
+            epoch,
+        } = binding
+        else {
+            return None;
+        };
+        Some(Self {
+            name: name.clone(),
+            peer_id: peer_id.clone(),
+            address: address.clone(),
+            signing_public_key: signing_public_key.clone(),
+            epoch: *epoch,
+        })
+    }
 }
 
 pub fn encode_supervisor_signing_public_key(pubkey: [u8; 32]) -> String {
@@ -1342,6 +1390,149 @@ async fn send_bridge_failure(
     .await;
 }
 
+async fn ensure_bridge_response_route_for_supervisor(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    supervisor: &BridgePeerIdentity,
+    context: &str,
+) -> Result<(), (BridgeRejectionCause, String)> {
+    ensure_bridge_response_route_for_descriptor(
+        comms_runtime,
+        supervisor.clone().into_trusted_peer_descriptor(),
+        context,
+    )
+    .await
+}
+
+async fn ensure_bridge_response_route_for_descriptor(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    descriptor: TrustedPeerDescriptor,
+    context: &str,
+) -> Result<(), (BridgeRejectionCause, String)> {
+    match comms_runtime
+        .add_private_trusted_peer(descriptor.clone())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(SendError::Unsupported(_)) => {
+            comms_runtime
+                .add_trusted_peer(descriptor)
+                .await
+                .map_err(|error| {
+                    (
+                        BridgeRejectionCause::Internal,
+                        format!("{context}: failed to install supervisor response route: {error}"),
+                    )
+                })
+        }
+        Err(error) => Err((
+            BridgeRejectionCause::Internal,
+            format!("{context}: failed to install supervisor response route: {error}"),
+        )),
+    }
+}
+
+fn bound_supervisor_response_descriptor(
+    sender: &PeerIngressFact,
+    binding: &BoundSupervisorState,
+    context: &str,
+) -> Result<TrustedPeerDescriptor, (BridgeRejectionCause, String)> {
+    let pubkey = sender.signing_pubkey.ok_or_else(|| {
+        (
+            BridgeRejectionCause::Internal,
+            format!("{context}: authenticated supervisor sender pubkey unavailable"),
+        )
+    })?;
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        binding.name.clone(),
+        &binding.peer_id,
+        pubkey,
+        &binding.address,
+    )
+    .map_err(|error| {
+        (
+            BridgeRejectionCause::Internal,
+            format!("{context}: invalid supervisor response route: {error}"),
+        )
+    })
+}
+
+async fn send_bridge_response_after_removed_supervisor_route(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+    status: meerkat_core::interaction::ResponseStatus,
+    reply: BridgeReply,
+    response_peer: TrustedPeerDescriptor,
+    context: &str,
+) {
+    send_bridge_response_with_temporary_supervisor_route(
+        comms_runtime,
+        candidate,
+        status,
+        reply,
+        response_peer,
+        context,
+    )
+    .await;
+}
+
+async fn send_bridge_response_with_temporary_supervisor_route(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+    status: meerkat_core::interaction::ResponseStatus,
+    reply: BridgeReply,
+    response_peer: TrustedPeerDescriptor,
+    context: &str,
+) {
+    let removal_key = response_peer.peer_id.as_str();
+    let add_result = match comms_runtime
+        .add_private_trusted_peer(response_peer.clone())
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(SendError::Unsupported(_)) => comms_runtime
+            .add_trusted_peer(response_peer)
+            .await
+            .map(|()| false)
+            .map_err(|error| {
+                (
+                    BridgeRejectionCause::Internal,
+                    format!("{context}: failed to install supervisor response route: {error}"),
+                )
+            }),
+        Err(error) => Err((
+            BridgeRejectionCause::Internal,
+            format!("{context}: failed to install supervisor response route: {error}"),
+        )),
+    };
+    match add_result {
+        Ok(used_private_route) => {
+            send_bridge_response(comms_runtime, candidate, status, reply).await;
+            if let Err(error) = if used_private_route {
+                comms_runtime
+                    .remove_private_trusted_peer(&removal_key)
+                    .await
+            } else {
+                comms_runtime.remove_trusted_peer(&removal_key).await
+            } {
+                tracing::warn!(
+                    error = %error,
+                    peer_id = %removal_key,
+                    "comms_drain: failed to remove temporary supervisor response route"
+                );
+            }
+        }
+        Err((cause, reason)) => {
+            tracing::warn!(
+                cause = ?cause,
+                reason = %reason,
+                peer_id = %removal_key,
+                "comms_drain: failed to install temporary supervisor response route"
+            );
+            comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+        }
+    }
+}
+
 /// Try to handle a supervisor bridge command from an incoming comms request.
 ///
 /// Returns `true` if the candidate was a bridge command (handled or rejected),
@@ -1707,6 +1898,19 @@ async fn try_handle_supervisor_bridge_command(
                 .await
             {
                 Ok(SupervisorAuthorizeAdmission::IdempotentAck) => {
+                    // PR #750 response-route fix grafted onto gen-authority admission:
+                    // install the supervisor response route before acking so the
+                    // PeerResponse can be routed back to the bound supervisor.
+                    if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
+                        comms_runtime,
+                        &supervisor,
+                        "authorize supervisor failed",
+                    )
+                    .await
+                    {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                        return true;
+                    }
                     send_bridge_response(
                         comms_runtime,
                         candidate,
@@ -1745,6 +1949,17 @@ async fn try_handle_supervisor_bridge_command(
                         format!("authorize supervisor admission failed: {error}"),
                     )
                     .await;
+                    return true;
+                }
+            };
+            let previous_response_peer = match bound_supervisor_response_descriptor(
+                sender,
+                &previous_binding,
+                "authorize supervisor failed",
+            ) {
+                Ok(descriptor) => descriptor,
+                Err((cause, reason)) => {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                     return true;
                 }
             };
@@ -2057,13 +2272,30 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             }
-            send_bridge_response(
-                comms_runtime,
-                candidate,
-                meerkat_core::interaction::ResponseStatus::Completed,
-                BridgeReply::Ack(BridgeAck { ok: true }),
-            )
-            .await;
+            // PR #750 response-route fix grafted onto gen-authority rotation:
+            // reply over the same condition that drove the action. Rotating the
+            // supervisor in place leaves the response route intact; replacing it
+            // revoked the previous route, so reply via a temporary route built
+            // from the authenticated sender + previous binding descriptor.
+            if previous_binding.peer_id == new_peer_id {
+                send_bridge_response(
+                    comms_runtime,
+                    candidate,
+                    meerkat_core::interaction::ResponseStatus::Completed,
+                    BridgeReply::Ack(BridgeAck { ok: true }),
+                )
+                .await;
+            } else {
+                send_bridge_response_after_removed_supervisor_route(
+                    comms_runtime,
+                    candidate,
+                    meerkat_core::interaction::ResponseStatus::Completed,
+                    BridgeReply::Ack(BridgeAck { ok: true }),
+                    previous_response_peer,
+                    "authorize supervisor failed",
+                )
+                .await;
+            }
             true
         }
         BridgeCommand::RevokeSupervisor(payload) => {
@@ -2193,6 +2425,11 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
+            // Reply-route fix (PR #750): capture the supervisor descriptor before
+            // the generated revoke removes its trust, so the ack can be sent over
+            // a temporary route. `supervisor_peer_id` is already bound above.
+            let supervisor_response_peer =
+                authorized_supervisor.clone().into_trusted_peer_descriptor();
             // Wave-d D-d: close the `supervisor_trust_revoke` obligation
             // with the epoch observed on the generated producer effect.
             // `RevokeSupervisor` first records the pending trust revoke,
@@ -2217,11 +2454,13 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
-            send_bridge_response(
+            send_bridge_response_after_removed_supervisor_route(
                 comms_runtime,
                 candidate,
                 meerkat_core::interaction::ResponseStatus::Completed,
                 BridgeReply::Ack(BridgeAck { ok: true }),
+                supervisor_response_peer,
+                "revoke supervisor failed",
             )
             .await;
             true
@@ -2232,11 +2471,13 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            let authorized_supervisor = match resolve_authorized_supervisor(
+            let authorized_supervisor = match resolve_authorized_supervisor_with_response_route(
                 adapter,
                 session_id,
+                comms_runtime,
                 sender,
                 &sup_payload,
+                "deliver member input failed",
             )
             .await
             {
@@ -2306,8 +2547,15 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::InterruptMember(payload) => {
-            if let Err((cause, reason)) =
-                resolve_authorized_supervisor(adapter, session_id, sender, &payload).await
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &payload,
+                "interrupt member failed",
+            )
+            .await
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -2335,8 +2583,15 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::RetireMember(payload) => {
-            if let Err((cause, reason)) =
-                resolve_authorized_supervisor(adapter, session_id, sender, &payload).await
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &payload,
+                "retire member failed",
+            )
+            .await
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -2367,8 +2622,15 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::DestroyMember(payload) => {
-            if let Err((cause, reason)) =
-                resolve_authorized_supervisor(adapter, session_id, sender, &payload).await
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &payload,
+                "destroy member failed",
+            )
+            .await
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -2399,8 +2661,15 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::ObserveMember(payload) => {
-            if let Err((cause, reason)) =
-                resolve_authorized_supervisor(adapter, session_id, sender, &payload).await
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &payload,
+                "observe member failed",
+            )
+            .await
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -2469,11 +2738,21 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            if let Err((cause, reason)) =
-                resolve_authorized_supervisor(adapter, session_id, sender, &sup_payload).await
+            match resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &sup_payload,
+                "wire member failed",
+            )
+            .await
             {
-                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                return true;
+                Ok(_) => {}
+                Err((cause, reason)) => {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                    return true;
+                }
             }
             let peer_spec = match TrustedPeerDescriptor::try_from(payload.peer_spec) {
                 Ok(spec) => spec,
@@ -2546,11 +2825,21 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            if let Err((cause, reason)) =
-                resolve_authorized_supervisor(adapter, session_id, sender, &sup_payload).await
+            match resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &sup_payload,
+                "unwire member failed",
+            )
+            .await
             {
-                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                return true;
+                Ok(_) => {}
+                Err((cause, reason)) => {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                    return true;
+                }
             }
             let peer_spec = match TrustedPeerDescriptor::try_from(payload.peer_spec) {
                 Ok(spec) => spec,
@@ -2901,6 +3190,10 @@ mod tests {
         )
     }
 
+    fn pubkey_sender_for_bridge_spec(spec: &BridgePeerSpec) -> String {
+        meerkat_comms::PubKey::new(spec.pubkey).to_pubkey_string()
+    }
+
     fn old_supervisor_bridge_spec() -> BridgePeerSpec {
         bridge_peer_spec_with_seed(
             "mob/__mob_supervisor__",
@@ -2930,6 +3223,38 @@ mod tests {
             format!("inproc://{name}"),
         )
         .expect("valid non-zero trusted peer descriptor")
+    }
+
+    async fn recorded_bridge_replies(
+        sent_commands: &Arc<tokio::sync::Mutex<Vec<CommsCommand>>>,
+    ) -> Vec<(meerkat_core::interaction::ResponseStatus, BridgeReply)> {
+        sent_commands
+            .lock()
+            .await
+            .iter()
+            .filter_map(|cmd| match cmd {
+                CommsCommand::PeerResponse { status, result, .. } => Some((
+                    *status,
+                    serde_json::from_value::<BridgeReply>(result.clone())
+                        .expect("recorded bridge response is typed"),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_completed_bridge_ack(
+        reply: &(meerkat_core::interaction::ResponseStatus, BridgeReply),
+    ) {
+        assert_eq!(
+            reply.0,
+            meerkat_core::interaction::ResponseStatus::Completed
+        );
+        assert!(
+            matches!(reply.1, BridgeReply::Ack(BridgeAck { ok: true })),
+            "expected completed bridge ack, got {:?}",
+            reply.1
+        );
     }
 
     fn trusted_tcp_peer_from_runtime(
@@ -4203,6 +4528,433 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn authorized_bridge_command_repairs_tcp_supervisor_response_route_before_reply() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let member_name = format!("tcp-observe-member-{suffix}");
+        let supervisor_name = format!("tcp-observe-supervisor-{suffix}");
+
+        let mut member_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member runtime");
+        member_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure member TCP listener");
+        member_runtime
+            .start_listeners()
+            .await
+            .expect("start member TCP listener");
+        let member_runtime = Arc::new(member_runtime);
+        let member_peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        install_test_peer_request_response_authority(&member_runtime, member_peer_handle.clone());
+
+        let mut supervisor_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor runtime");
+        supervisor_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure supervisor TCP listener");
+        supervisor_runtime
+            .start_listeners()
+            .await
+            .expect("start supervisor TCP listener");
+        let supervisor_runtime = Arc::new(supervisor_runtime);
+        install_test_peer_request_response_authority(
+            &supervisor_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
+        supervisor_runtime
+            .add_trusted_peer(member_spec.clone())
+            .await
+            .expect("supervisor trusts member target");
+        let supervisor_spec =
+            trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
+
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor_spec.name.to_string(),
+                supervisor_spec.peer_id.as_str(),
+                supervisor_spec.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor_spec),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor in DSL state");
+        assert!(
+            member_runtime
+                .peers()
+                .await
+                .iter()
+                .all(|peer| peer.peer_id != supervisor_spec.peer_id),
+            "fixture must start with authorized supervisor state but no public runtime route"
+        );
+
+        let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec::from(supervisor_spec.clone()),
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let ingress = PeerIngressFact::peer(
+            interaction_id,
+            PeerInputClass::ActionableRequest,
+            meerkat_core::PeerIngressKind::Request,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                supervisor_spec.peer_id,
+                supervisor_spec.name.as_str(),
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id: interaction_id.to_string(),
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                },
+            )
+            .with_signing_pubkey(supervisor_spec.pubkey),
+        );
+        let candidate =
+            bridge_candidate_with_ingress(supervisor_spec.name.as_str(), &command, ingress);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "bridge handler must own ObserveMember"
+        );
+        assert_eq!(
+            member_peer_handle.response_replied_count(),
+            1,
+            "target must send the terminal bridge response after repairing supervisor route"
+        );
+
+        let supervisor_pubkey = meerkat_comms::PubKey::new(supervisor_spec.pubkey);
+        assert!(
+            member_runtime.router().is_private(&supervisor_pubkey),
+            "repaired supervisor response route must remain private"
+        );
+        assert!(
+            member_runtime
+                .peers()
+                .await
+                .iter()
+                .all(|peer| peer.peer_id != supervisor_spec.peer_id),
+            "private supervisor response route must not leak through public peers()"
+        );
+
+        let response =
+            drain_one_candidate(&supervisor_runtime, "supervisor ObserveMember response").await;
+        let InteractionContent::Response {
+            in_reply_to,
+            status,
+            result,
+            ..
+        } = response.interaction.content
+        else {
+            panic!(
+                "expected bridge response, got {:?}",
+                response.interaction.content
+            );
+        };
+        assert_eq!(in_reply_to, interaction_id);
+        assert_eq!(status, meerkat_core::interaction::ResponseStatus::Completed);
+        assert!(
+            matches!(
+                serde_json::from_value::<BridgeReply>(result).expect("typed bridge reply"),
+                BridgeReply::Observation(_)
+            ),
+            "expected ObserveMember response"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn authorize_supervisor_rotation_replies_after_removing_previous_route() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let member_name = format!("tcp-authorize-member-{suffix}");
+        let old_supervisor_name = format!("tcp-authorize-old-supervisor-{suffix}");
+        let new_supervisor_name = format!("tcp-authorize-new-supervisor-{suffix}");
+
+        let mut member_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member runtime");
+        member_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure member TCP listener");
+        member_runtime
+            .start_listeners()
+            .await
+            .expect("start member TCP listener");
+        let member_runtime = Arc::new(member_runtime);
+        install_test_peer_request_response_authority(
+            &member_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let mut old_supervisor_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&old_supervisor_name)
+                .expect("old supervisor runtime");
+        old_supervisor_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure old supervisor TCP listener");
+        old_supervisor_runtime
+            .start_listeners()
+            .await
+            .expect("start old supervisor TCP listener");
+        let old_supervisor_runtime = Arc::new(old_supervisor_runtime);
+        install_test_peer_request_response_authority(
+            &old_supervisor_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let mut new_supervisor_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&new_supervisor_name)
+                .expect("new supervisor runtime");
+        new_supervisor_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure new supervisor TCP listener");
+        new_supervisor_runtime
+            .start_listeners()
+            .await
+            .expect("start new supervisor TCP listener");
+        let new_supervisor_runtime = Arc::new(new_supervisor_runtime);
+
+        let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
+        old_supervisor_runtime
+            .add_trusted_peer(member_spec)
+            .await
+            .expect("old supervisor trusts member target");
+        let old_supervisor_spec =
+            trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &old_supervisor_runtime);
+        let new_supervisor_spec =
+            trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &new_supervisor_runtime);
+        member_runtime
+            .add_trusted_peer(old_supervisor_spec.clone())
+            .await
+            .expect("member starts with old supervisor route");
+
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                old_supervisor_spec.name.to_string(),
+                old_supervisor_spec.peer_id.as_str(),
+                old_supervisor_spec.address.to_string(),
+                signing_public_key_for_descriptor(&old_supervisor_spec),
+                1,
+            )
+            .await
+            .expect("pre-bind old supervisor in DSL state");
+
+        let command = BridgeCommand::AuthorizeSupervisor(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec::from(new_supervisor_spec.clone()),
+            epoch: 2,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let ingress = PeerIngressFact::peer(
+            interaction_id,
+            PeerInputClass::ActionableRequest,
+            meerkat_core::PeerIngressKind::Request,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                old_supervisor_spec.peer_id,
+                old_supervisor_spec.name.as_str(),
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id: interaction_id.to_string(),
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                },
+            )
+            .with_signing_pubkey(old_supervisor_spec.pubkey),
+        );
+        let candidate =
+            bridge_candidate_with_ingress(old_supervisor_spec.name.as_str(), &command, ingress);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "bridge handler must own AuthorizeSupervisor"
+        );
+
+        let response = drain_one_candidate(
+            &old_supervisor_runtime,
+            "old supervisor AuthorizeSupervisor response",
+        )
+        .await;
+        let InteractionContent::Response {
+            in_reply_to,
+            status,
+            result,
+            ..
+        } = response.interaction.content
+        else {
+            panic!(
+                "expected authorize bridge response, got {:?}",
+                response.interaction.content
+            );
+        };
+        assert_eq!(in_reply_to, interaction_id);
+        assert_eq!(status, meerkat_core::interaction::ResponseStatus::Completed);
+        assert!(matches!(
+            serde_json::from_value::<BridgeReply>(result).expect("typed bridge reply"),
+            BridgeReply::Ack(BridgeAck { ok: true })
+        ));
+        let peers = member_runtime.peers().await;
+        assert!(
+            peers
+                .iter()
+                .all(|peer| peer.peer_id != old_supervisor_spec.peer_id),
+            "old supervisor route must be removed after temporary ack route cleanup"
+        );
+        assert!(
+            peers
+                .iter()
+                .any(|peer| peer.peer_id == new_supervisor_spec.peer_id),
+            "new supervisor route must remain installed after rotation"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn revoke_supervisor_replies_after_removing_supervisor_route() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let member_name = format!("tcp-revoke-member-{suffix}");
+        let supervisor_name = format!("tcp-revoke-supervisor-{suffix}");
+
+        let mut member_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member runtime");
+        member_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure member TCP listener");
+        member_runtime
+            .start_listeners()
+            .await
+            .expect("start member TCP listener");
+        let member_runtime = Arc::new(member_runtime);
+        install_test_peer_request_response_authority(
+            &member_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let mut supervisor_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor runtime");
+        supervisor_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure supervisor TCP listener");
+        supervisor_runtime
+            .start_listeners()
+            .await
+            .expect("start supervisor TCP listener");
+        let supervisor_runtime = Arc::new(supervisor_runtime);
+        install_test_peer_request_response_authority(
+            &supervisor_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
+        supervisor_runtime
+            .add_trusted_peer(member_spec)
+            .await
+            .expect("supervisor trusts member target");
+        let supervisor_spec =
+            trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
+        member_runtime
+            .add_trusted_peer(supervisor_spec.clone())
+            .await
+            .expect("member starts with supervisor route");
+
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor_spec.name.to_string(),
+                supervisor_spec.peer_id.as_str(),
+                supervisor_spec.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor_spec),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor in DSL state");
+
+        let command = BridgeCommand::RevokeSupervisor(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec::from(supervisor_spec.clone()),
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let ingress = PeerIngressFact::peer(
+            interaction_id,
+            PeerInputClass::ActionableRequest,
+            meerkat_core::PeerIngressKind::Request,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                supervisor_spec.peer_id,
+                supervisor_spec.name.as_str(),
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id: interaction_id.to_string(),
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                },
+            )
+            .with_signing_pubkey(supervisor_spec.pubkey),
+        );
+        let candidate =
+            bridge_candidate_with_ingress(supervisor_spec.name.as_str(), &command, ingress);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "bridge handler must own RevokeSupervisor"
+        );
+
+        let response =
+            drain_one_candidate(&supervisor_runtime, "supervisor RevokeSupervisor response").await;
+        let InteractionContent::Response {
+            in_reply_to,
+            status,
+            result,
+            ..
+        } = response.interaction.content
+        else {
+            panic!(
+                "expected revoke bridge response, got {:?}",
+                response.interaction.content
+            );
+        };
+        assert_eq!(in_reply_to, interaction_id);
+        assert_eq!(status, meerkat_core::interaction::ResponseStatus::Completed);
+        assert!(matches!(
+            serde_json::from_value::<BridgeReply>(result).expect("typed bridge reply"),
+            BridgeReply::Ack(BridgeAck { ok: true })
+        ));
+        assert!(
+            member_runtime
+                .peers()
+                .await
+                .iter()
+                .all(|peer| peer.peer_id != supervisor_spec.peer_id),
+            "supervisor route must be removed after temporary ack route cleanup"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn drain_one_candidate(
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         label: &str,
@@ -4255,6 +5007,8 @@ mod tests {
         add_trusted_peer_errors: HashMap<String, String>,
         remove_trusted_peer_errors: HashMap<String, String>,
         trusted_peer_ids: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        trusted_peers: Arc<tokio::sync::Mutex<HashMap<String, TrustedPeerDescriptor>>>,
+        sent_commands: Arc<tokio::sync::Mutex<Vec<CommsCommand>>>,
         peer_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
         peer_request_response_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
         completed_count: Arc<std::sync::atomic::AtomicUsize>,
@@ -4351,15 +5105,61 @@ mod tests {
             if let Some(message) = self.add_trusted_peer_errors.get(&peer_id_str) {
                 return Err(SendError::Internal(message.clone()));
             }
-            self.trusted_peer_ids.lock().await.insert(peer_id_str);
+            self.trusted_peer_ids
+                .lock()
+                .await
+                .insert(peer_id_str.clone());
+            self.trusted_peers.lock().await.insert(peer_id_str, peer);
             Ok(())
         }
 
         async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
             match self.remove_trusted_peer_errors.get(peer_id) {
                 Some(message) => Err(SendError::Internal(message.clone())),
-                None => Ok(self.trusted_peer_ids.lock().await.remove(peer_id)),
+                None => {
+                    let removed_id = self.trusted_peer_ids.lock().await.remove(peer_id);
+                    let removed_descriptor =
+                        self.trusted_peers.lock().await.remove(peer_id).is_some();
+                    Ok(removed_id || removed_descriptor)
+                }
             }
+        }
+
+        async fn send(&self, cmd: CommsCommand) -> Result<meerkat_core::SendReceipt, SendError> {
+            let receipt = match &cmd {
+                CommsCommand::PeerResponse { in_reply_to, .. } => {
+                    meerkat_core::SendReceipt::PeerResponseSent {
+                        envelope_id: Uuid::new_v4(),
+                        in_reply_to: *in_reply_to,
+                    }
+                }
+                other => {
+                    return Err(SendError::Unsupported(format!(
+                        "BootstrapRuntime only records peer responses, got {}",
+                        other.command_kind()
+                    )));
+                }
+            };
+            self.sent_commands.lock().await.push(cmd);
+            Ok(receipt)
+        }
+
+        async fn peer_ingress_runtime_snapshot(
+            &self,
+        ) -> Result<
+            meerkat_core::interaction::PeerIngressRuntimeSnapshot,
+            meerkat_core::CommsCapabilityError,
+        > {
+            Ok(meerkat_core::interaction::PeerIngressRuntimeSnapshot {
+                self_peer_id: self
+                    .peer_id()
+                    .unwrap_or_else(|| PeerId::parse(PEER_ID_RECEIVER).expect("valid peer id")),
+                auth_required: true,
+                authority_phase: meerkat_core::interaction::PeerIngressAuthorityPhase::Received,
+                trusted_peers: self.trusted_peers.lock().await.values().cloned().collect(),
+                submission_queue_len: 0,
+                queue: meerkat_core::interaction::PeerIngressQueueSnapshot::default(),
+            })
         }
     }
 
@@ -4378,6 +5178,8 @@ mod tests {
             add_trusted_peer_errors: HashMap::new(),
             remove_trusted_peer_errors: HashMap::new(),
             trusted_peer_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            trusted_peers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sent_commands: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             peer_handle: Some(peer_handle.clone()),
             peer_request_response_handle: Some(peer_handle),
             completed_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -6144,6 +6946,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_member_invalid_bootstrap_does_not_publish_response_route() {
+        let mut payload = sample_bind_payload();
+        payload.bootstrap_token = "wrong-token".into();
+        let sender = payload.supervisor.peer_id.clone();
+        let runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        assert!(
+            matches!(
+                adapter.supervisor_binding(&session_id).await,
+                SupervisorBinding::Unbound
+            ),
+            "invalid bootstrap must not bind supervisor authority"
+        );
+        assert!(
+            trusted_peer_ids.lock().await.is_empty(),
+            "invalid bootstrap must not temporarily publish supervisor trust just to route rejection"
+        );
+    }
+
+    #[tokio::test]
     async fn authorize_supervisor_restores_old_binding_when_new_trust_publish_fails() {
         // DOGMA-19 defensive scan: the old supervisor remains authoritative
         // until the new supervisor trust publishes successfully.
@@ -6270,6 +7105,60 @@ mod tests {
         assert!(
             !trusted.contains(&new_supervisor.peer_id),
             "new supervisor trust must be cleaned up after rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_supervisor_same_peer_higher_epoch_failure_keeps_existing_response_route() {
+        let supervisor = current_supervisor_bridge_spec();
+        let payload = BridgeSupervisorPayload {
+            supervisor: supervisor.clone(),
+            epoch: 2,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        };
+        let runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
+        trusted_peer_ids
+            .lock()
+            .await
+            .insert(supervisor.peer_id.clone());
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor.name.clone(),
+                supervisor.peer_id.clone(),
+                supervisor.address.clone(),
+                encode_supervisor_signing_public_key(supervisor.pubkey),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor");
+        let candidate = bridge_candidate(
+            &supervisor.peer_id,
+            &BridgeCommand::AuthorizeSupervisor(payload),
+        );
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        match adapter.supervisor_binding(&session_id).await {
+            SupervisorBinding::Bound { peer_id, epoch, .. } => {
+                assert_eq!(peer_id, supervisor.peer_id);
+                assert_eq!(epoch, 1);
+            }
+            SupervisorBinding::Unbound => panic!("supervisor must remain bound"),
+        }
+        assert!(
+            trusted_peer_ids.lock().await.contains(&supervisor.peer_id),
+            "same-supervisor epoch update must keep the existing response route installed"
         );
     }
 

@@ -940,13 +940,23 @@ where
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let current_boundary_index = self.compaction_cadence.session_boundary_index;
                 if let Some(ref compactor) = self.compactor {
+                    let last_guarded_boundary = [
+                        self.compaction_cadence.last_compaction_boundary_index,
+                        self.compaction_cadence
+                            .last_compaction_attempt_boundary_index,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .max();
                     let ctx = crate::agent::compact::build_compaction_context(
                         self.session.messages(),
                         self.last_input_tokens,
-                        self.compaction_cadence.last_compaction_boundary_index,
+                        last_guarded_boundary,
                         current_boundary_index,
                     );
                     if compactor.should_compact(&ctx) {
+                        self.compaction_cadence
+                            .last_compaction_attempt_boundary_index = Some(current_boundary_index);
                         let outcome = crate::agent::compact::run_compaction(
                             self.client.as_ref(),
                             compactor,
@@ -2918,7 +2928,9 @@ mod tests {
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
-    use crate::error::{AgentError, ToolError};
+    use crate::error::{
+        AgentError, LlmFailureReason, LlmProviderError, LlmProviderErrorKind, ToolError,
+    };
     use crate::event::AgentErrorClass;
     use crate::lifecycle::RunId;
     use crate::memory::{
@@ -3403,6 +3415,126 @@ mod tests {
                 messages: messages.to_vec(),
                 discarded: Vec::new(),
             }
+        }
+    }
+
+    struct CadenceAwareFailingCompactor {
+        seen_contexts: Mutex<Vec<CompactionContext>>,
+    }
+
+    impl CadenceAwareFailingCompactor {
+        fn new() -> Self {
+            Self {
+                seen_contexts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_contexts(&self) -> Vec<CompactionContext> {
+            self.seen_contexts.lock().unwrap().clone()
+        }
+    }
+
+    impl Compactor for CadenceAwareFailingCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            self.seen_contexts.lock().unwrap().push(ctx.clone());
+            if ctx.session_boundary_index == 0 {
+                return false;
+            }
+            if let Some(last) = ctx.last_compaction_boundary_index
+                && ctx.session_boundary_index.saturating_sub(last) < 3
+            {
+                return false;
+            }
+            true
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], _summary: &str) -> CompactionResult {
+            CompactionResult {
+                messages: messages.to_vec(),
+                discarded: Vec::new(),
+            }
+        }
+    }
+
+    struct FailingCompactionLlmClient {
+        last_user_messages: Mutex<Vec<String>>,
+    }
+
+    impl FailingCompactionLlmClient {
+        fn new() -> Self {
+            Self {
+                last_user_messages: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_last_user_messages(&self) -> Vec<String> {
+            self.last_user_messages.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for FailingCompactionLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.last_user_messages
+                .lock()
+                .unwrap()
+                .push(last_user.clone());
+
+            if last_user == "COMPACT NOW" {
+                return Err(AgentError::Llm {
+                    provider: "mock",
+                    reason: LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                        LlmProviderErrorKind::IncompleteResponse,
+                        serde_json::json!({"message": "stream ended before done"}),
+                    )),
+                    message: "stream ended before done".to_string(),
+                });
+            }
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage {
+                    input_tokens: 200_000,
+                    output_tokens: 5,
+                    ..Usage::default()
+                },
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
         }
     }
 
@@ -4436,6 +4568,69 @@ mod tests {
                 "second".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_attempt_uses_cadence_guard_before_retry() {
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(CadenceAwareFailingCompactor::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("compaction failure should preserve history and continue the turn");
+
+        let mut saw_compaction_failure = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::CompactionFailed { error } = event {
+                assert!(
+                    error.contains("stream ended before done"),
+                    "unexpected compaction failure: {error}"
+                );
+                saw_compaction_failure = true;
+            }
+        }
+        assert!(
+            saw_compaction_failure,
+            "failed compaction attempt should be surfaced"
+        );
+
+        agent.run("third".into()).await.unwrap();
+
+        let contexts = compactor.seen_contexts();
+        assert_eq!(
+            contexts
+                .iter()
+                .map(|ctx| (
+                    ctx.session_boundary_index,
+                    ctx.last_compaction_boundary_index
+                ))
+                .collect::<Vec<_>>(),
+            vec![(0, None), (1, None), (2, Some(1))],
+            "failed attempt boundary should feed the cadence guard on the next run"
+        );
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec![
+                "first".to_string(),
+                "COMPACT NOW".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+            ],
+            "the next boundary after a failed compaction should not immediately retry compaction"
+        );
+
+        let cadence = crate::agent::compact::load_compaction_cadence(agent.session());
+        assert_eq!(cadence.session_boundary_index, 3);
+        assert_eq!(cadence.last_compaction_boundary_index, None);
+        assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
     }
 
     #[tokio::test]

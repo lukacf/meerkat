@@ -1587,6 +1587,7 @@ impl LlmClient for OpenAiClient {
                 HashMap::with_capacity(4);
             let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
             let mut done_emitted = false;
+            let mut saw_terminal_fallback_output = false;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
@@ -1594,6 +1595,21 @@ impl LlmClient for OpenAiClient {
 
                 while let Some(newline_pos) = buffer.find('\n') {
                     let line = buffer[..newline_pos].trim();
+                    if line == "data: [DONE]" {
+                        buffer.drain(..=newline_pos);
+                        if !done_emitted && saw_terminal_fallback_output {
+                            done_emitted = true;
+                            let stop_reason = if streamed_tool_ids.is_empty() {
+                                StopReason::EndTurn
+                            } else {
+                                StopReason::ToolUse
+                            };
+                            yield LlmEvent::Done {
+                                outcome: LlmDoneOutcome::Success { stop_reason },
+                            };
+                        }
+                        continue;
+                    }
                     let should_process = !line.is_empty() && !line.starts_with(':');
                     let parsed_event = if should_process {
                         Self::parse_responses_sse_line(line)
@@ -1639,6 +1655,7 @@ impl LlmClient for OpenAiClient {
                                                                         if let Some(text) = part.get("text").and_then(|t| t.as_str())
                                                                             && !saw_stream_text_delta
                                                                         {
+                                                                            saw_terminal_fallback_output = true;
                                                                             assembler.on_text_delta(text, None);
                                                                             yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
                                                                         }
@@ -1647,6 +1664,7 @@ impl LlmClient for OpenAiClient {
                                                                         if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
                                                                             && !saw_stream_text_delta
                                                                         {
+                                                                            saw_terminal_fallback_output = true;
                                                                             assembler.on_text_delta(refusal, None);
                                                                             yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
                                                                         }
@@ -1698,6 +1716,7 @@ impl LlmClient for OpenAiClient {
 
                                                     assembler.on_reasoning_start();
                                                     if !summary_text.is_empty() {
+                                                        saw_terminal_fallback_output = true;
                                                         let _ = assembler.on_reasoning_delta(&summary_text);
                                                     }
                                                     assembler.on_reasoning_complete(meta.clone());
@@ -1747,6 +1766,7 @@ impl LlmClient for OpenAiClient {
                                                         args: args_value,
                                                         meta: None,
                                                     };
+                                                    saw_terminal_fallback_output = true;
                                                 }
                                                 "web_search_call" | "web_search_result" => {
                                                     let id = item.get("id")
@@ -1826,12 +1846,16 @@ impl LlmClient for OpenAiClient {
                         else if event.event_type == "response.output_text.delta" {
                             if let Some(delta) = &event.delta {
                                 saw_stream_text_delta = true;
+                                saw_terminal_fallback_output = true;
                                 assembler.on_text_delta(delta, None);
                                 yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
                             }
                         }
                         else if event.event_type == "response.reasoning_summary_text.delta" {
                             if let Some(delta) = &event.delta {
+                                if !delta.trim().is_empty() {
+                                    saw_terminal_fallback_output = true;
+                                }
                                 yield LlmEvent::ReasoningDelta { delta: delta.clone() };
                             }
                         }
@@ -1889,6 +1913,7 @@ impl LlmClient for OpenAiClient {
                                 );
 
                                 streamed_tool_ids.insert(call_id.clone());
+                                saw_terminal_fallback_output = true;
                                 yield LlmEvent::ToolCallComplete {
                                     id: call_id.clone(),
                                     name,
@@ -1932,6 +1957,7 @@ impl LlmClient for OpenAiClient {
                                 );
 
                                 streamed_tool_ids.insert(call_id.to_string());
+                                saw_terminal_fallback_output = true;
                                 yield LlmEvent::ToolCallComplete {
                                     id: call_id.to_string(),
                                     name: name.to_string(),
@@ -1976,11 +2002,15 @@ impl LlmClient for OpenAiClient {
 
                                 assembler.on_reasoning_start();
                                 if !summary_text.is_empty() {
+                                    saw_terminal_fallback_output = true;
                                     let _ = assembler.on_reasoning_delta(&summary_text);
                                 }
                                 assembler.on_reasoning_complete(meta.clone());
 
                                 streamed_reasoning_ids.insert(reasoning_id.to_string());
+                                if !summary_text.trim().is_empty() || meta.is_some() {
+                                    saw_terminal_fallback_output = true;
+                                }
                                 yield LlmEvent::ReasoningComplete {
                                     text: summary_text,
                                     meta,
@@ -4386,6 +4416,167 @@ mod tests {
         server.abort();
 
         assert_eq!(deltas, vec!["Hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_stream_done_marker_after_delta_yields_success() {
+        let payload = [
+            r#"data: {"type":"response.output_text.delta","delta":"Hello"}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut deltas = Vec::new();
+        let mut saw_success_done = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::TextDelta { delta, .. } => deltas.push(delta),
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { stop_reason },
+                } => {
+                    assert_eq!(stop_reason, StopReason::EndTurn);
+                    saw_success_done = true;
+                    break;
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        server.abort();
+
+        assert_eq!(deltas, vec!["Hello"]);
+        assert!(
+            saw_success_done,
+            "[DONE] after streamed output should be accepted as a terminal fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_done_marker_after_reasoning_delta_yields_success() {
+        let payload = [
+            r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut reasoning_deltas = Vec::new();
+        let mut saw_success_done = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ReasoningDelta { delta } => reasoning_deltas.push(delta),
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { stop_reason },
+                } => {
+                    assert_eq!(stop_reason, StopReason::EndTurn);
+                    saw_success_done = true;
+                    break;
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        server.abort();
+
+        assert_eq!(reasoning_deltas, vec!["thinking"]);
+        assert!(
+            saw_success_done,
+            "[DONE] after streamed reasoning should be accepted as a terminal fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_done_marker_after_reasoning_meta_yields_success() {
+        let payload = [
+            r#"data: {"type":"response.reasoning.done","item":{"id":"rs_meta","summary":[],"encrypted_content":"enc_meta"}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut saw_reasoning_meta = false;
+        let mut saw_success_done = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ReasoningComplete { text, meta } => {
+                    assert_eq!(text, "");
+                    assert!(matches!(
+                        meta.as_deref(),
+                        Some(ProviderMeta::OpenAi {
+                            id,
+                            encrypted_content: Some(encrypted),
+                            ..
+                        }) if id == "rs_meta" && encrypted == "enc_meta"
+                    ));
+                    saw_reasoning_meta = true;
+                }
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { stop_reason },
+                } => {
+                    assert_eq!(stop_reason, StopReason::EndTurn);
+                    saw_success_done = true;
+                    break;
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        server.abort();
+
+        assert!(saw_reasoning_meta);
+        assert!(
+            saw_success_done,
+            "[DONE] after reasoning metadata should be accepted as a terminal fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_done_marker_without_output_still_fails_incomplete() {
+        let payload = ["data: [DONE]", ""].join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut saw_incomplete_done = false;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            } = event.expect("stream event")
+            {
+                assert!(matches!(error, LlmError::IncompleteResponse { .. }));
+                saw_incomplete_done = true;
+                break;
+            }
+        }
+        server.abort();
+
+        assert!(
+            saw_incomplete_done,
+            "empty [DONE] streams should remain fail-closed"
+        );
     }
 
     #[tokio::test]

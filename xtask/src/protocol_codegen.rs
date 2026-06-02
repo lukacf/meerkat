@@ -1959,10 +1959,44 @@ fn emit_comms_trust_descriptor_helper(
                 "        return Err(format!(\"MeerkatMachine peer projection did not request trust for peer {{peer_id:?}}\"));"
             )?;
             writeln!(out, "    }};")?;
-            writeln!(out, "    if matches.next().is_some() {{")?;
             writeln!(
                 out,
-                "        return Err(format!(\"MeerkatMachine peer projection has ambiguous endpoint descriptors for peer {{peer_id:?}}\"));"
+                "    // A peer may be referenced by both the direct-wiring and the"
+            )?;
+            writeln!(
+                out,
+                "    // mob-overlay projections, and a peer-only member's display name is"
+            )?;
+            writeln!(
+                out,
+                "    // derived heuristically per source (an inproc address embeds the"
+            )?;
+            writeln!(
+                out,
+                "    // comms name; a non-inproc address falls back to a synthetic"
+            )?;
+            writeln!(
+                out,
+                "    // backend-peer label), so the name can differ for one peer. Trust"
+            )?;
+            writeln!(
+                out,
+                "    // identity is (peer_id, address, signing_key); the name is a"
+            )?;
+            writeln!(
+                out,
+                "    // non-identifying label. Only a divergent address or signing key for"
+            )?;
+            writeln!(out, "    // the same peer_id is a genuine ambiguity.")?;
+            writeln!(out, "    if let Some(other) = matches.find(|&other| {{")?;
+            writeln!(
+                out,
+                "        other.address != endpoint.address || other.signing_key != endpoint.signing_key"
+            )?;
+            writeln!(out, "    }}) {{")?;
+            writeln!(
+                out,
+                "        return Err(format!(\"MeerkatMachine peer projection has ambiguous endpoint descriptors for peer {{peer_id:?}}: {{endpoint:?}} vs {{other:?}}\"));"
             )?;
             writeln!(out, "    }}")?;
             writeln!(

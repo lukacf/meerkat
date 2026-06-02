@@ -289,7 +289,16 @@ impl Router {
             let source_private = private_peer_sources
                 .get(&peer_id)
                 .is_some_and(|sources| sources.contains(&source_kind));
-            if existing == &peer && source_private == private {
+            // Trust material is the routing identity (pubkey + addr); `name` and
+            // discovery `meta` are display-only (a peer-only member's name is
+            // derived heuristically per projection source — an inproc address
+            // embeds the comms name, a non-inproc address falls back to a
+            // synthetic backend-peer label — so it can differ for one peer).
+            // Only a divergent pubkey or addr is a genuine re-add of different
+            // routing material.
+            let same_routing_material =
+                existing.pubkey == peer.pubkey && existing.addr == peer.addr;
+            if same_routing_material && source_private == private {
                 return Ok(false);
             }
             return Err(TrustError::ConflictingGeneratedTrustSource {

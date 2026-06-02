@@ -32158,7 +32158,7 @@ async fn test_external_tcp_bind_and_peer_turn_use_routable_supervisor_bridge() {
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     spec.binding = Some(external.binding());
     handle
-        .spawn_spec(spec)
+        .spawn_spec_with_generated_owner_context(spec, SessionId::new())
         .await
         .expect("spawn TCP external member");
 
@@ -32219,7 +32219,7 @@ async fn test_external_tcp_bind_uses_configured_supervisor_advertised_address() 
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     spec.binding = Some(external.binding());
     handle
-        .spawn_spec(spec)
+        .spawn_spec_with_generated_owner_context(spec, SessionId::new())
         .await
         .expect("spawn TCP external member");
 
@@ -32465,7 +32465,7 @@ async fn test_external_tcp_peer_turn_routes_after_supervisor_rotation() {
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     spec.binding = Some(external.binding());
     handle
-        .spawn_spec(spec)
+        .spawn_spec_with_generated_owner_context(spec, SessionId::new())
         .await
         .expect("spawn TCP external member");
 

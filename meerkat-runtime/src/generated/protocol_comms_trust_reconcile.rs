@@ -163,9 +163,19 @@ fn trusted_peer_descriptor_for_request(
             "MeerkatMachine peer projection did not request trust for peer {peer_id:?}"
         ));
     };
-    if matches.next().is_some() {
+    // A peer may be referenced by both the direct-wiring and the
+    // mob-overlay projections, and a peer-only member's display name is
+    // derived heuristically per source (an inproc address embeds the
+    // comms name; a non-inproc address falls back to a synthetic
+    // backend-peer label), so the name can differ for one peer. Trust
+    // identity is (peer_id, address, signing_key); the name is a
+    // non-identifying label. Only a divergent address or signing key for
+    // the same peer_id is a genuine ambiguity.
+    if let Some(other) = matches.find(|&other| {
+        other.address != endpoint.address || other.signing_key != endpoint.signing_key
+    }) {
         return Err(format!(
-            "MeerkatMachine peer projection has ambiguous endpoint descriptors for peer {peer_id:?}"
+            "MeerkatMachine peer projection has ambiguous endpoint descriptors for peer {peer_id:?}: {endpoint:?} vs {other:?}"
         ));
     }
     trusted_peer_descriptor_from_peer_endpoint(endpoint)

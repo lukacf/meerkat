@@ -1315,13 +1315,15 @@ impl MeerkatMachine {
             })
     }
 
-    /// Test-only: install the session's generated peer-comms handle (and its
+    /// Test-support: install the session's generated peer-comms handle (and its
     /// owner token) onto a comms runtime, so the runtime accepts generated trust
     /// mutations minted from THIS adapter's session dsl authority. Mirrors what
     /// `prepare_session_runtime_bindings` does in production via
-    /// `SessionRuntimeBindings`, for tests that construct runtimes directly.
-    #[cfg(test)]
-    pub(crate) async fn test_install_session_peer_comms_handle_on_runtime(
+    /// `SessionRuntimeBindings`, for tests/harnesses that construct external
+    /// member runtimes directly (e.g. the external-TCP production-drain smoke
+    /// lane). Gated behind `test-support` so it never reaches a production build.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn test_install_session_peer_comms_handle_on_runtime(
         &self,
         session_id: &SessionId,
         runtime: &(dyn meerkat_core::handles::PeerCommsInstallTarget + '_),

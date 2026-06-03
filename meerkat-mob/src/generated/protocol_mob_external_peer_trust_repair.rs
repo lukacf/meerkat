@@ -177,7 +177,10 @@ impl MobExternalPeerTrustRepairObligation {
             Operation::PublicAdd => {
                 let peer_descriptor = peer_descriptor.ok_or_else(|| format!("generated comms trust add for peer {peer_id:?} requires a trusted peer descriptor"))?;
                 let expected_descriptor = trusted_peer_descriptor_for_request(self, peer_id)?;
-                if expected_descriptor != peer_descriptor {
+                if expected_descriptor.peer_id != peer_descriptor.peer_id
+                    || expected_descriptor.address != peer_descriptor.address
+                    || expected_descriptor.pubkey != peer_descriptor.pubkey
+                {
                     return Err(format!(
                         "generated comms trust descriptor for peer {peer_id:?} does not match requested mutation descriptor"
                     ));

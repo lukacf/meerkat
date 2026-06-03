@@ -1799,10 +1799,27 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
                     out,
                     "                let expected_descriptor = trusted_peer_descriptor_for_request(self, peer_id)?;"
                 )?;
+                // Compare trust IDENTITY (peer_id + transport address + signing
+                // pubkey), NOT the display-only `name`. A peer's name is a human
+                // slug that legitimately diverges across projection sources (e.g.
+                // a TCP peer's synthetic `mob_member/backend_peer/<id>` label vs
+                // an overlay's real name) while its routing identity is stable.
+                // Matching the full descriptor would reject a re-trust of the
+                // SAME identity carrying a differently-projected name. Mirrors the
+                // comms router's `same_routing_material` identity check.
                 writeln!(
                     out,
-                    "                if expected_descriptor != peer_descriptor {{"
+                    "                if expected_descriptor.peer_id != peer_descriptor.peer_id"
                 )?;
+                writeln!(
+                    out,
+                    "                    || expected_descriptor.address != peer_descriptor.address"
+                )?;
+                writeln!(
+                    out,
+                    "                    || expected_descriptor.pubkey != peer_descriptor.pubkey"
+                )?;
+                writeln!(out, "                {{")?;
                 writeln!(
                     out,
                     "                    return Err(format!(\"generated comms trust descriptor for peer {{peer_id:?}} does not match requested mutation descriptor\"));"

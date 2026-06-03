@@ -13,6 +13,7 @@ spelling, singular/plural forms, flags, and enum values matter.
 - There is no `rkat sessions`; use singular `rkat session`.
 - There is no `rkat resume`; use `rkat run --resume ...`.
 - There is no `rkat rpc`; use the `rkat-rpc` binary for JSON-RPC.
+- `rkat-rpc --tcp` is not a Meerkat signed peer/comms listener; use `rkat run --comms-listen-tcp ...` for remote peers and external mob members.
 - There is no `rkat image` command.
 - There is no `rkat mcp reload` CLI command.
 - There is no `--tools all`; valid values are `safe`, `workspace`, `full`, `none`.
@@ -104,7 +105,34 @@ Advanced options:
 --wait-for-mcp
 --line-format <text|json>
 --auth-binding <REALM:BINDING[:PROFILE]>
+--comms-name <NAME>                         # stable signed comms participant name
+--comms-listen-tcp <HOST:PORT>              # signed agent-to-agent TCP listener
+--comms-advertise-tcp <HOST:PORT>           # advertised signed comms address
+--comms-binding-out <PATH>                  # write external mob/runtime binding JSON
+--comms-pairing-password <PASSWORD>         # one-time signed comms enrollment password
+--comms-pairing-password-env <ENV>          # read enrollment password from env
+--comms-pairing-password-file <PATH>        # read enrollment password from file
+--agent-description <TEXT>
+--agent-label <KEY=VALUE>                   # repeatable peer metadata
+--no-comms                                  # disables comms runtime/tools
 ```
+
+Remote signed peer example:
+
+```bash
+rkat run \
+  --comms-name remote-worker \
+  --comms-listen-tcp 0.0.0.0:4200 \
+  --comms-advertise-tcp worker.example.com:4200 \
+  --comms-binding-out ./remote-worker.binding.json \
+  --keep-alive \
+  "You are a remote worker."
+```
+
+`--comms-listen-tcp`, `--comms-advertise-tcp`, `--comms-binding-out`, and
+pairing password flags cannot be combined with `--no-comms`. Use only one
+pairing password source. The generated binding has `kind: "external"`,
+advertised address, Ed25519 public identity, and typed `bootstrap_token`.
 
 Resume targets: full UUID, short UUID prefix, `realm:<uuid>`, `last`, `~`,
 `~0`, or `~N`.

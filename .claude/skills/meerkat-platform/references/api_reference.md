@@ -78,6 +78,7 @@ rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickof
 rkat config get|set|patch ...
 rkat capabilities
 rkat doctor
+rkat run --comms-listen-tcp 0.0.0.0:4200 --comms-advertise-tcp host.example:4200 --comms-binding-out target.binding.json --keep-alive "..."
 rkat-rpc                                # JSON-RPC stdio
 rkat-rpc --tcp 127.0.0.1:9000           # JSON-RPC over TCP (stdio is default)
 rkat-rpc --tcp 127.0.0.1:9000 --live-ws 127.0.0.1:9001
@@ -277,6 +278,11 @@ rkat-rpc --realm team-alpha
 rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000
 rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000 --live-ws 127.0.0.1:9001
 ```
+
+`rkat-rpc --tcp` is only the JSON-RPC host transport. It is not the signed
+Meerkat peer/comms channel used by remote agents or external mob members. For a
+remote peer, start `rkat run` with `--comms-listen-tcp` and usually
+`--comms-advertise-tcp` plus `--comms-binding-out`.
 
 ### Sessions, turns, history
 

@@ -36,6 +36,10 @@ The RPC surface is fully runtime-backed:
     wrapper such as SSH tunneling, mTLS, or another authenticated encrypted
     channel. Plain TCP host capabilities continue to report
     `secure_remote_rpc: false`.
+
+    `rkat-rpc --tcp` is a JSON-RPC host transport. It is not the signed
+    Meerkat peer/comms channel used by remote agents or external mob members;
+    use `rkat run --comms-listen-tcp ...` for that.
   </Step>
   <Step title="Send the handshake">
     ```json

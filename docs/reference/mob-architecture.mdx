@@ -47,11 +47,12 @@ Members can run as local session-backed agents or as external peers.
 | Binding | Contract |
 | --- | --- |
 | `RuntimeBinding::Session` | Meerkat provisions and owns a local session for the member. |
-| `RuntimeBinding::External` | The host declares the real peer id and address. The mob routes through that external runtime. |
+| `RuntimeBinding::External` | The host declares the external runtime address, Ed25519 public identity, and typed bootstrap token. The mob derives the real peer id and routes through that runtime. |
 
 External members require an explicit runtime binding. A bare `External` backend
 tag is not enough because the runtime needs a concrete process identity before
-it can route work or trust peer messages.
+it can route work or trust peer messages. For a remote `rkat` member, generate
+the current binding with `rkat run --comms-listen-tcp ... --comms-binding-out <path>`.
 
 ## Public Surfaces
 

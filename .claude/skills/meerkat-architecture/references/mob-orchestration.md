@@ -71,7 +71,7 @@ Operator capabilities are runtime-injected through `MobToolAuthorityContext`. `c
 
 `SessionBackend::runtime_session_state()` is the canonical owner of session registration + runtime-loop attachment for mob members. Autonomous readiness helpers should only do autonomous-specific work (drain startup, capability checks), not duplicate registration.
 
-**RuntimeBinding**: `SpawnMemberSpec.binding: Option<RuntimeBinding>` separates backend kind (definition level) from concrete runtime binding (spawn level). `RuntimeBinding::External { peer_id, address }` carries the real external process identity. The provisioner dispatches on `ProvisionMemberRequest.binding` (required `RuntimeBinding`, not optional). `resolve_binding()` in the actor translates `SpawnMemberSpec.binding` / legacy `backend` into `RuntimeBinding`, rejecting bare `External` without explicit binding.
+**RuntimeBinding**: `SpawnMemberSpec.binding: Option<RuntimeBinding>` separates backend kind (definition level) from concrete runtime binding (spawn level). `RuntimeBinding::External` carries the real external process address, Ed25519 public identity, and typed supervisor `bootstrap_token`; the real peer id is derived from the public key. The provisioner dispatches on `ProvisionMemberRequest.binding` (required `RuntimeBinding`, not optional). `resolve_binding()` in the actor translates `SpawnMemberSpec.binding` / legacy `backend` into `RuntimeBinding`, rejecting bare `External` without explicit binding.
 
 **External member identity**: `BackendPeer.peer_id` is the real external process comms key, not the placeholder session's key. The bridge session still exists for lifecycle transport. `trusted_peer_spec()` uses the bridge key (from `comms.public_key()`, passed as `fallback_peer_id`) for transport trust, keeping identity and transport separate.
 
@@ -83,7 +83,7 @@ Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobAc
 
 `delegate` auto-wiring is capability-based, not a promise. Report actual wired/not-wired results and never claim bidirectional comms unless both trust edges were established.
 
-`mob_wire` / `mob_unwire` agent tools: create and remove peer-to-peer comms trust between mob members. For local members (both in roster), wiring is bidirectional. For external members, trust is exchanged between bridge sessions (inproc transport). Real external process wiring requires host-level relay (e.g., kennel `PeerWire` payloads).
+`mob_wire` / `mob_unwire` agent tools: create and remove peer-to-peer comms trust between mob members. For local members (both in roster), wiring is bidirectional. For external members, the supervisor bridge binds against the external runtime using the typed bootstrap token and signed comms identity. A remote `rkat run --comms-listen-tcp ... --comms-binding-out <path>` process can now supply the binding directly; `rkat-rpc --tcp` remains JSON-RPC host transport and is not the peer/comms listener.
 
 ## Flows
 

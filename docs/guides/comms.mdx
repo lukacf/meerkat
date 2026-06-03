@@ -433,6 +433,11 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--agent-description <TEXT>` | Human-readable description shown to peers via `peers()` |
 | `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
+| `--comms-advertise-tcp <ADDR>` | TCP address advertised to signed peers. Required when binding a wildcard address. |
+| `--comms-binding-out <PATH>` | Write this session's external runtime binding JSON for mob hosts or other supervisors. |
+| `--comms-pairing-password <PASSWORD>` | Accept initial signed comms enrollment with a shared one-time password. |
+| `--comms-pairing-password-env <ENV>` | Read the pairing password from an environment variable. |
+| `--comms-pairing-password-file <PATH>` | Read the pairing password from a file. |
 | `--no-comms` | Disable inter-agent communication entirely |
 | `--keep-alive` | Run in keep-alive mode (stay alive for comms messages and events after initial prompt) |
 | `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--keep-alive`) |
@@ -440,6 +445,40 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 <Note>
 All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
 </Note>
+
+### Signed TCP remote peer
+
+Use `rkat run --comms-listen-tcp` when the Meerkat itself should expose the
+signed agent-to-agent comms channel. This is the path for remote mob members
+and other peer-addressable agents; it is separate from `rkat-rpc --tcp`, which
+only exposes the JSON-RPC control plane.
+
+```bash
+export RKAT_PAIRING_PASSWORD="$(openssl rand -base64 32)"
+
+rkat run \
+  --comms-name mdm-target-1 \
+  --comms-listen-tcp 0.0.0.0:4200 \
+  --comms-advertise-tcp target.example.com:4200 \
+  --comms-pairing-password-env RKAT_PAIRING_PASSWORD \
+  --comms-binding-out ./target-binding.json \
+  --agent-description "Remote MDM target" \
+  --agent-label site=gcp \
+  --keep-alive \
+  "You are the remote target. Stay available for signed peer work."
+```
+
+The binding file is a `kind: "external"` runtime binding containing the
+advertised address, the target's Ed25519 public identity, and the typed
+`bootstrap_token` used by mob supervisor bridge binding. Prefer generating this
+file with `--comms-binding-out`; a binding that only carries an address or a
+query-string bootstrap token is not enough for current external mob members.
+
+<Warning>
+Treat the pairing password and binding file as bootstrap credentials. Use a
+long random one-time password, rotate it after enrollment where practical, and
+place any public listener behind the network controls you intend to operate.
+</Warning>
 
 ### Peer metadata
 

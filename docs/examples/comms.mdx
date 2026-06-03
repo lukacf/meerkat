@@ -60,6 +60,24 @@ Keep-alive sessions stay resident so later comms or external events can wake the
   </Tab>
 </Tabs>
 
+## Listen as a remote signed peer
+
+Use the `rkat run` comms flags when the agent process itself should be reachable
+by other Meerkats or by a mob supervisor:
+
+```bash
+rkat run \
+  --comms-name remote-reviewer \
+  --comms-listen-tcp 0.0.0.0:4200 \
+  --comms-advertise-tcp reviewer.example.com:4200 \
+  --comms-binding-out ./remote-reviewer.binding.json \
+  --keep-alive \
+  "You review work sent over signed comms."
+```
+
+This is different from `rkat-rpc --tcp`, which exposes JSON-RPC for hosts and
+SDKs rather than the signed peer channel.
+
 ## Send a typed comms command
 
 `comms/send` is the typed host-side comms surface. Use it for local input, peer messages, peer lifecycle notifications, peer requests, and peer responses.

@@ -50,7 +50,11 @@ The Rust SDK lets you pick: `RuntimeBuildMode::SessionOwned(bindings)` (runtime-
 
 ## External mob members (advanced)
 
-When a mob member runs in a different process or host, declare it with `MobBackendKind::External` and pass `RuntimeBinding::External { peer_id, address }` at spawn time so the orchestrator can route comms to the real backend. Internal-process members use `Session` and need no extra wiring. Members are addressed everywhere by stable `AgentIdentity`; runtime/binding identity rotates underneath.
+When a mob member runs in a different process or host, declare it with `MobBackendKind::External` and pass a `RuntimeBinding::External` at spawn time so the orchestrator can route comms to the real backend. The current external binding carries the advertised address, the peer's Ed25519 public identity, and a typed `bootstrap_token`; the mob derives the concrete peer id from the public key. Internal-process members use `Session` and need no extra wiring. Members are addressed everywhere by stable `AgentIdentity`; runtime/binding identity rotates underneath.
+
+For a remote `rkat` process, use `rkat run --comms-listen-tcp <host:port> --comms-advertise-tcp <host:port> --comms-binding-out <path> --keep-alive ...`. The generated binding JSON is the safest source for mob spawn/host tooling because hand-written address-only bindings and query-string-only bootstrap tokens are rejected.
+
+`rkat-rpc --tcp` is not this channel. It exposes JSON-RPC to hosts and SDKs; signed Meerkat peer traffic uses the `rkat run --comms-*` comms listener.
 
 ## Surfaces
 

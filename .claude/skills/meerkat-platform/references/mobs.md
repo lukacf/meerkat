@@ -251,6 +251,31 @@ Runtime-mode behavior is shared across these surfaces because dispatch comes fro
 - autonomous members: event injection/subscription dispatch
 - turn-driven members: direct `start_turn` dispatch
 
+## External members
+
+External members run outside the local Meerkat runtime, usually in another
+process, sandbox, or host. They require an explicit `RuntimeBinding::External`
+at spawn time; a bare external backend tag is not enough. The current binding
+shape carries `kind: "external"`, the advertised comms address, the external
+runtime's Ed25519 public identity, and a typed `bootstrap_token` for supervisor
+bridge binding.
+
+For a remote `rkat` member, generate that binding from the target process:
+
+```bash
+rkat run \
+  --comms-name remote-worker \
+  --comms-listen-tcp 0.0.0.0:4200 \
+  --comms-advertise-tcp worker.example.com:4200 \
+  --comms-binding-out ./remote-worker.binding.json \
+  --keep-alive \
+  "You are a remote worker."
+```
+
+Use `rkat run --comms-listen-tcp` for the signed Meerkat peer channel.
+`rkat-rpc --tcp` is only JSON-RPC host transport and does not make an agent
+reachable as a signed peer or external mob member.
+
 ### Spawn startup policy
 
 - Mob member spawn uses deferred initial turn semantics.

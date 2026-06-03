@@ -492,7 +492,24 @@ events, flow snapshots, and work records.
 Most members are normal session-backed agents. External members are advanced:
 they require an external runtime binding with a concrete address and trusted
 peer identity so the orchestrator can route supervisor bridge traffic to the
-right process.
+right process. For a remote `rkat` process, start it with the signed comms
+listener and write the binding file:
+
+```bash
+rkat run \
+  --comms-name worker-west-1 \
+  --comms-listen-tcp 0.0.0.0:4200 \
+  --comms-advertise-tcp worker-west-1.example.com:4200 \
+  --comms-binding-out ./worker-west-1.binding.json \
+  --keep-alive \
+  "You are worker-west-1."
+```
+
+`--comms-binding-out` writes the current external binding shape: `kind:
+"external"`, advertised address, Ed25519 public identity, and typed
+`bootstrap_token`. Current mob supervisors require that typed bootstrap token
+for external bridge binding; a bare `External` backend tag, a raw address, or a
+query-string-only bootstrap token is rejected.
 
 Use external members only when the member must run outside the local Meerkat
 runtime, such as another host, sandbox, or service process.

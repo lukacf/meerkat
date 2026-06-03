@@ -4729,16 +4729,25 @@ mod tests {
         );
 
         let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
-        supervisor_runtime
-            .add_trusted_peer(member_spec.clone())
-            .await
-            .expect("supervisor trusts member target");
+        let supervisor_dsl = install_running_test_peer_comms_handle(supervisor_runtime.as_ref());
+        add_test_projection_trust_with_dsl(
+            supervisor_runtime.as_ref(),
+            Arc::clone(&supervisor_dsl),
+            member_spec.clone(),
+            1,
+            "supervisor trusts member target",
+        )
+        .await;
         let supervisor_spec =
             trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
+        adapter
+            .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
+            .await
+            .expect("install adapter session peer-comms handle on member runtime");
 
         let command = BridgeCommand::BindMember(
             meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {

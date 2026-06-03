@@ -50,6 +50,41 @@ pub(crate) struct GeneratedAdmissionProjection {
     pub runtime_semantics: RuntimeInputSemantics,
 }
 
+/// Idle-steer execution-handling-mode normalization (origin/main behavior).
+///
+/// A peer-initiated Steer/Immediate input that arrives while the runtime is IDLE
+/// has no active turn to steer into, so its fresh turn must run on the
+/// queue-compatible session-service path. Inputs that carry explicit runtime
+/// hints — external events, operator prompts, flow steps — keep their requested
+/// handling mode (the Steer there is an authored runtime hint, not an admission
+/// lane to normalize). Derived from the machine-supplied input kind, runtime-idle
+/// fact, and routing disposition; shared by every admission-projection site so
+/// the normalization is single-sourced.
+pub(crate) fn idle_steer_execution_handling_mode(
+    input_kind: InputKind,
+    runtime_idle: bool,
+    routing_disposition: crate::policy::RoutingDisposition,
+) -> Option<meerkat_core::types::HandlingMode> {
+    let peer_initiated = matches!(
+        input_kind,
+        InputKind::PeerMessage
+            | InputKind::PeerRequest
+            | InputKind::PeerResponseProgress
+            | InputKind::PeerResponseTerminal
+    );
+    if peer_initiated
+        && runtime_idle
+        && matches!(
+            routing_disposition,
+            crate::policy::RoutingDisposition::Steer | crate::policy::RoutingDisposition::Immediate
+        )
+    {
+        Some(meerkat_core::types::HandlingMode::Queue)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn generated_admission_projection_for_input(
     input: &Input,
     runtime_idle: bool,
@@ -125,26 +160,19 @@ fn generated_admission_projection(
                 record_transcript,
                 ..
             } if effect_input_id == input_id => {
+                let apply_mode: crate::policy::ApplyMode = policy_apply_mode.into();
                 let boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary =
                     runtime_boundary.into();
                 let routing_disposition: crate::policy::RoutingDisposition =
                     policy_routing_disposition.into();
-                // Project the machine-decided (boundary, routing_disposition) into
-                // the execution-handling-mode override: a Steer/Immediate input
-                // that STARTS a run normalizes to the queue-compatible session
-                // path (there is no active turn to steer into). Derived purely
-                // from machine output, not an independent shell decision.
-                let execution_handling_mode = match (boundary, routing_disposition) {
-                    (
-                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
-                        crate::policy::RoutingDisposition::Steer
-                        | crate::policy::RoutingDisposition::Immediate,
-                    ) => Some(meerkat_core::types::HandlingMode::Queue),
-                    _ => None,
-                };
+                let execution_handling_mode = idle_steer_execution_handling_mode(
+                    input_kind,
+                    runtime_idle,
+                    routing_disposition,
+                );
                 Some(GeneratedAdmissionProjection {
                     policy: PolicyDecision {
-                        apply_mode: policy_apply_mode.into(),
+                        apply_mode,
                         wake_mode: policy_wake_mode.into(),
                         queue_mode: policy_queue_mode.into(),
                         consume_point: policy_consume_point.into(),

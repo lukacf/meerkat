@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         inproc_namespace: None,
         listen_tcp: None,
         listen_uds: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -131,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
         auth: Default::default(),
         require_peer_auth: true,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     };
     let mut hive_comms_runtime = meerkat_comms::CommsRuntime::new(hive_comms_config)
         .await

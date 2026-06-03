@@ -32,6 +32,13 @@ pub struct CoreCommsConfig {
     /// Address for signed (Ed25519) agent-to-agent listener.
     #[cfg(not(target_arch = "wasm32"))]
     pub listen_tcp: Option<SocketAddr>,
+    /// Runtime peer address advertised to other signed-comms participants.
+    ///
+    /// When absent, the runtime advertises its bound listener address. Set this
+    /// when binding to a wildcard/NAT/interface-local address that peers cannot
+    /// dial directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub advertise_address: Option<String>,
     /// Address for plain-text external event listener. Only active when `auth=Open`.
     #[cfg(not(target_arch = "wasm32"))]
     pub event_listen_tcp: Option<SocketAddr>,
@@ -49,6 +56,9 @@ pub struct CoreCommsConfig {
     /// Allow binding plain event listener to non-loopback addresses.
     /// This is a prompt injection vector — only enable with explicit intent.
     pub allow_external_unauthenticated: bool,
+    /// Runtime-only pairing password for initial signed-comms enrollment.
+    #[serde(skip)]
+    pub pairing_password: Option<String>,
 }
 
 impl Default for CoreCommsConfig {
@@ -62,6 +72,8 @@ impl Default for CoreCommsConfig {
             #[cfg(not(target_arch = "wasm32"))]
             listen_tcp: None,
             #[cfg(not(target_arch = "wasm32"))]
+            advertise_address: None,
+            #[cfg(not(target_arch = "wasm32"))]
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -74,6 +86,7 @@ impl Default for CoreCommsConfig {
             auth: CommsAuthMode::default(),
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         }
     }
 }
@@ -111,6 +124,7 @@ impl CoreCommsConfig {
             inproc_namespace: self.inproc_namespace.clone(),
             listen_uds: self.listen_uds.as_ref().map(|p| resolve(p)),
             listen_tcp: self.listen_tcp,
+            advertise_address: self.advertise_address.clone(),
             event_listen_tcp: self.event_listen_tcp,
             #[cfg(unix)]
             event_listen_uds: self.event_listen_uds.as_ref().map(|p| resolve(p)),
@@ -123,6 +137,7 @@ impl CoreCommsConfig {
             auth: self.auth,
             require_peer_auth: self.require_peer_auth,
             allow_external_unauthenticated: self.allow_external_unauthenticated,
+            pairing_password: self.pairing_password.clone(),
         }
     }
 }
@@ -138,6 +153,8 @@ pub struct ResolvedCommsConfig {
     pub listen_uds: Option<PathBuf>,
     /// Address for signed (Ed25519) agent-to-agent listener.
     pub listen_tcp: Option<SocketAddr>,
+    /// Runtime peer address advertised to other signed-comms participants.
+    pub advertise_address: Option<String>,
     /// Address for plain-text external event listener.
     pub event_listen_tcp: Option<SocketAddr>,
     /// Path for plain-text external event listener (UDS).
@@ -149,4 +166,5 @@ pub struct ResolvedCommsConfig {
     pub auth: CommsAuthMode,
     pub require_peer_auth: bool,
     pub allow_external_unauthenticated: bool,
+    pub pairing_password: Option<String>,
 }

@@ -970,6 +970,13 @@ export interface BridgeCapabilities {
   wire_member?: boolean;
 }
 
+export interface BridgeDeliveryCompletion {
+  session_id: string;
+  text: string;
+  tool_calls: number;
+  turns: number;
+}
+
 export interface BridgeDeliveryPayload {
   content: ContentInput;
   epoch: number;
@@ -981,6 +988,7 @@ export interface BridgeDeliveryPayload {
 
 export interface BridgeDeliveryResponse {
   canonical_input_id?: string;
+  completion?: BridgeDeliveryCompletion;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
 }
@@ -1687,6 +1695,7 @@ export interface BridgeReplyObservation {
 
 export interface BridgeReplyDelivery {
   canonical_input_id?: string;
+  completion?: BridgeDeliveryCompletion;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
   result: "delivery";

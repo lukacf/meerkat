@@ -2049,6 +2049,7 @@ mod tests {
                     boundary:
                         meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&resume_input),
@@ -2068,6 +2069,7 @@ mod tests {
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&prompt_input),
@@ -2129,6 +2131,7 @@ mod tests {
                     boundary:
                         meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&prefix_input),
@@ -2148,6 +2151,7 @@ mod tests {
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&prompt_input),
@@ -2227,6 +2231,7 @@ mod tests {
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&event_input),
@@ -2249,6 +2254,7 @@ mod tests {
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&prompt_input),
@@ -2404,6 +2410,7 @@ mod tests {
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&input),
@@ -2459,6 +2466,7 @@ mod tests {
                     boundary:
                         meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                 },
                 crate::input::runtime_input_projection(&input),

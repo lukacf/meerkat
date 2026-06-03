@@ -821,6 +821,7 @@ fn test_config(
         inproc_namespace: namespace,
         listen_uds: None,
         listen_tcp: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -830,6 +831,7 @@ fn test_config(
         auth: meerkat_core::CommsAuthMode::Open,
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     }
 }
 

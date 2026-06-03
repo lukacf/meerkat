@@ -528,6 +528,7 @@ fn target_comms_config(name: &str, data_dir: &Path) -> ResolvedCommsConfig {
         inproc_namespace: None,
         listen_uds: None,
         listen_tcp: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -537,6 +538,7 @@ fn target_comms_config(name: &str, data_dir: &Path) -> ResolvedCommsConfig {
         auth: Default::default(),
         require_peer_auth: true,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     }
 }
 
@@ -2363,6 +2365,7 @@ mod tests {
             inproc_namespace: None,
             listen_tcp: None,
             listen_uds: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -2372,6 +2375,7 @@ mod tests {
             auth: Default::default(),
             require_peer_auth: false,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
         let comms_runtime = Arc::new(
             CommsRuntime::new_with_silent_intents(
@@ -2540,6 +2544,7 @@ mod tests {
             inproc_namespace: None,
             listen_tcp: None,
             listen_uds: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -2549,6 +2554,7 @@ mod tests {
             auth: Default::default(),
             require_peer_auth: false,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
         let comms_runtime = Arc::new(
             CommsRuntime::new_with_silent_intents(
@@ -2625,6 +2631,7 @@ mod tests {
                     inproc_namespace: None,
                     listen_tcp: None,
                     listen_uds: None,
+                    advertise_address: None,
                     event_listen_tcp: None,
                     #[cfg(unix)]
                     event_listen_uds: None,
@@ -2634,6 +2641,7 @@ mod tests {
                     auth: Default::default(),
                     require_peer_auth: false,
                     allow_external_unauthenticated: false,
+                    pairing_password: None,
                 },
                 Arc::new(HashSet::new()),
             )

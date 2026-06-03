@@ -120,7 +120,11 @@ impl DefaultPolicyTable {
                     !matches!(input, Input::Continuation(_)),
                 ),
                 meerkat_core::types::HandlingMode::Steer => pd(
-                    ApplyMode::StageRunBoundary,
+                    if runtime_idle && matches!(input, Input::Peer(_)) {
+                        ApplyMode::StageRunStart
+                    } else {
+                        ApplyMode::StageRunBoundary
+                    },
                     if runtime_idle {
                         WakeMode::WakeIfIdle
                     } else {
@@ -750,7 +754,18 @@ mod tests {
         let input = make_peer_input(Some(PeerConvention::Message), Some(HandlingMode::Steer));
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
-        assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);
+        assert_eq!(
+            decision.apply_mode,
+            ApplyMode::StageRunStart,
+            "idle steer has no active run boundary; it must start a turn"
+        );
+
+        let running_decision = DefaultPolicyTable::resolve(&input, false);
+        assert_eq!(
+            running_decision.routing_disposition,
+            RoutingDisposition::Steer
+        );
+        assert_eq!(running_decision.apply_mode, ApplyMode::StageRunBoundary);
     }
 
     #[test]
@@ -762,8 +777,20 @@ mod tests {
             }),
             Some(HandlingMode::Steer),
         );
-        let decision = DefaultPolicyTable::resolve(&input, false);
-        assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
+        let idle_decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(idle_decision.routing_disposition, RoutingDisposition::Steer);
+        assert_eq!(
+            idle_decision.apply_mode,
+            ApplyMode::StageRunStart,
+            "idle peer requests with explicit steer must not strand on a missing boundary"
+        );
+
+        let running_decision = DefaultPolicyTable::resolve(&input, false);
+        assert_eq!(
+            running_decision.routing_disposition,
+            RoutingDisposition::Steer
+        );
+        assert_eq!(running_decision.apply_mode, ApplyMode::StageRunBoundary);
     }
 
     #[test]

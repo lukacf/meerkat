@@ -884,6 +884,18 @@ pub struct BridgeDeliveryResponse {
     pub input_id: String,
     pub canonical_input_id: Option<String>,
     pub outcome: BridgeDeliveryOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<BridgeDeliveryCompletion>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeDeliveryCompletion {
+    pub session_id: String,
+    pub text: String,
+    pub turns: u32,
+    pub tool_calls: u32,
 }
 
 /// Peer wiring command payload.
@@ -1682,6 +1694,7 @@ mod tests {
                 input_id: "in-1".to_string(),
                 canonical_input_id: None,
                 outcome: BridgeDeliveryOutcome::Accepted,
+                completion: None,
             }),
             json!({
                 "result": "delivery",
@@ -1701,6 +1714,7 @@ mod tests {
                     },
                     reason: "derived durable input cannot be accepted".to_string(),
                 },
+                completion: None,
             }),
             json!({
                 "result": "delivery",

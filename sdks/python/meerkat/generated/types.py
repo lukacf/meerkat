@@ -1307,6 +1307,15 @@ class BridgeCapabilities:
 
 
 @dataclass
+class BridgeDeliveryCompletion:
+    """Request payload for BridgeDeliveryCompletion."""
+    session_id: str
+    text: str
+    tool_calls: int
+    turns: int
+
+
+@dataclass
 class BridgeDeliveryPayload:
     """Deliver one logical input to a member."""
     content: ContentInput
@@ -1323,6 +1332,7 @@ class BridgeDeliveryResponse:
     input_id: str
     outcome: BridgeDeliveryOutcome
     canonical_input_id: Optional[str] = None
+    completion: Optional[BridgeDeliveryCompletion] = None
 
 
 @dataclass
@@ -3453,6 +3463,7 @@ class BridgeReplyObservation(TypedDict, total=False):
 
 class BridgeReplyDelivery(TypedDict, total=False):
     canonical_input_id: NotRequired[str]
+    completion: NotRequired[BridgeDeliveryCompletion]
     input_id: Required[str]
     outcome: Required[BridgeDeliveryOutcome]
     result: Required[Literal['delivery']]

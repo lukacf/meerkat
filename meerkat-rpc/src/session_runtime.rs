@@ -3914,6 +3914,34 @@ impl SessionRuntime {
         (!text.is_empty()).then_some(text)
     }
 
+    async fn live_interrupt_requested_for_runtime_primitive(
+        &self,
+        session_id: &SessionId,
+        primitive: &RunPrimitive,
+    ) -> bool {
+        if primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.handling_mode)
+            == Some(meerkat_core::types::HandlingMode::Steer)
+        {
+            return true;
+        }
+
+        let contributing_input_ids = primitive.contributing_input_ids();
+        if contributing_input_ids.is_empty() {
+            return false;
+        }
+        self.runtime_adapter
+            .meerkat_machine_spine_snapshot(session_id)
+            .await
+            .is_some_and(|snapshot| {
+                snapshot.inputs.admission_order.iter().any(|input| {
+                    input.handling_mode == Some(meerkat_core::types::HandlingMode::Steer)
+                        && contributing_input_ids.contains(&input.input_id)
+                })
+            })
+    }
+
     /// Project runtime-routed peer/external input into an active live adapter.
     ///
     /// A live-only session can receive peer ingress while the provider-hosted
@@ -3939,10 +3967,9 @@ impl SessionRuntime {
             return Ok(None);
         };
 
-        if primitive
-            .turn_metadata()
-            .and_then(|metadata| metadata.handling_mode)
-            == Some(meerkat_core::types::HandlingMode::Steer)
+        if self
+            .live_interrupt_requested_for_runtime_primitive(session_id, primitive)
+            .await
         {
             host.send_command(
                 &channel_id,

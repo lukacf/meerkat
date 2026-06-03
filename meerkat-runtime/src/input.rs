@@ -1330,6 +1330,7 @@ mod tests {
             crate::ingress_types::RuntimeInputSemantics {
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                 execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
             },
         );

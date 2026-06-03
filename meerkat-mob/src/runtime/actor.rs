@@ -1997,6 +1997,7 @@ impl MobActor {
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: self.runtime_adapter.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
+            supervisor_bridge: self.supervisor_bridge.clone(),
             machine_state_watch_rx: self.machine_state_watch_tx.subscribe(),
             phase_watch_rx: self.phase_watch_tx.subscribe(),
             // W2-E: the actor's internal handle-for-tools does not carry the
@@ -4177,6 +4178,7 @@ impl MobActor {
                         }
                     }
                     self.teardown_session_runtime_bindings_from_roster().await;
+                    self.supervisor_bridge.shutdown().await;
                     // Cancel remaining lifecycle notification tasks.
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
@@ -13021,6 +13023,28 @@ impl MobActor {
         )
     }
 
+    async fn local_wiring_spec(
+        &self,
+        entry: &RosterEntry,
+        comms: &Arc<dyn CoreCommsRuntime>,
+        comms_name: &str,
+        public_key: &str,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        let mut spec = self
+            .provisioner
+            .trusted_peer_spec(&entry.member_ref, comms_name, public_key)
+            .await?;
+        if let Some(address) = comms.advertised_address() {
+            spec.address = PeerAddress::parse(&address).map_err(|error| {
+                MobError::WiringError(format!(
+                    "invalid advertised comms address for '{}': {error}",
+                    entry.agent_identity
+                ))
+            })?;
+        }
+        Ok(spec)
+    }
+
     async fn resolve_wiring_endpoint(
         &self,
         entry: &RosterEntry,
@@ -13035,8 +13059,7 @@ impl MobActor {
                 ))
             })?;
             let spec = self
-                .provisioner
-                .trusted_peer_spec(&entry.member_ref, &comms_name, &public_key)
+                .local_wiring_spec(entry, &comms, &comms_name, &public_key)
                 .await?;
             return Ok(WiringEndpoint::Local {
                 entry: Box::new(entry.clone()),

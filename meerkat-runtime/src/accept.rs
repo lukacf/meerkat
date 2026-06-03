@@ -272,7 +272,7 @@ pub fn resolve_admission(
         crate::ingress_types::RuntimeInputSemantics::from_policy_and_input(&policy, input);
     let primitive_projection = crate::input::runtime_input_projection(input);
     let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
-    let request_immediate_processing = requests_immediate_processing(input);
+    let request_immediate_processing = !runtime_idle && requests_immediate_processing(input);
     let interrupt_yielding = !request_immediate_processing
         && matches!(policy.wake_mode, crate::WakeMode::InterruptYielding);
     let wake_if_idle =
@@ -446,5 +446,51 @@ mod tests {
         };
 
         assert_eq!(handling_mode_from_policy(&policy), HandlingMode::Steer);
+    }
+
+    #[test]
+    fn idle_peer_steer_resolves_to_wake_loop_not_immediate() {
+        let input = Input::Peer(crate::input::PeerInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::Operator,
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Request {
+                request_id: "request-1".into(),
+                intent: "inspect".into(),
+            }),
+            body: "inspect this host".into(),
+            payload: None,
+            blocks: None,
+            handling_mode: Some(HandlingMode::Steer),
+        });
+
+        let resolved = resolve_admission(&input, true, &[], None);
+
+        assert_eq!(resolved.policy.apply_mode, ApplyMode::StageRunStart);
+        assert_eq!(resolved.handling_mode, HandlingMode::Steer);
+        assert!(
+            !resolved.coarse_flags.request_immediate_processing,
+            "idle steer must wake a fresh turn rather than request an active-turn immediate boundary"
+        );
+        assert!(resolved.coarse_flags.wake_if_idle);
+
+        let running_resolved = resolve_admission(&input, false, &[], None);
+
+        assert_eq!(
+            running_resolved.policy.apply_mode,
+            ApplyMode::StageRunBoundary
+        );
+        assert!(
+            running_resolved.coarse_flags.request_immediate_processing,
+            "running steer should still request active-turn immediate processing"
+        );
+        assert!(!running_resolved.coarse_flags.wake_if_idle);
     }
 }

@@ -9065,7 +9065,7 @@
   },
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.6.33"
+    "version": "0.6.34"
   },
   "openapi": "3.1.0",
   "paths": {

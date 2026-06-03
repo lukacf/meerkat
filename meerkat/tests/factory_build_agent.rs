@@ -972,6 +972,7 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
         inproc_namespace: None,
         listen_tcp: None,
         listen_uds: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -981,6 +982,7 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
         auth: Default::default(),
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     };
     let comms_runtime = Arc::new(
         CommsRuntime::new_with_silent_intents(comms_config, Arc::new(Default::default()))
@@ -2725,6 +2727,7 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
         inproc_namespace: None,
         listen_tcp: None,
         listen_uds: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -2734,6 +2737,7 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
         auth: Default::default(),
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     };
     let shared_runtime = Arc::new(
         meerkat_comms::CommsRuntime::new_with_silent_intents(

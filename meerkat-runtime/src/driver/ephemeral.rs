@@ -2688,6 +2688,7 @@ impl EphemeralRuntimeDriver {
         let runtime_semantics = RuntimeInputSemantics {
             boundary: runtime_boundary.into(),
             execution_kind: runtime_execution_kind.into(),
+            execution_handling_mode: None,
             peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                 .map(Into::into),
         };

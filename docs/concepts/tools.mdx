@@ -64,10 +64,11 @@ Register any MCP server and its tools automatically appear in the agent's tool s
 
 ```bash
 rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
-rkat mcp add api --transport http --url https://mcp.example.com/api
+rkat mcp add api --url https://mcp.example.com/api
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
 ```
 
-Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Supports stdio, streamable HTTP, and SSE transports. See the [MCP reference](/api/mcp) for full details.
+Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Supports stdio, streamable HTTP, and SSE transports. OAuth-protected HTTP servers discover auth at connect time; use `rkat mcp login <name>` or `rkat run --mcp-auth interactive` when browser login is needed. See the [MCP reference](/api/mcp) for full details.
 
 ## Built-in tools
 

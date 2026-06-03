@@ -121,6 +121,7 @@ pub enum PersistedAuthMode {
     Bedrock,
     Vertex,
     Foundry,
+    McpOauth,
     ExternalTokens,
     ExternalAuthorizer,
     Command,

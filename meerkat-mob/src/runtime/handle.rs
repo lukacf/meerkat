@@ -1085,6 +1085,7 @@ pub struct MobHandle {
     #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, RestoreFailureDiagnostic>>>,
+    pub(super) supervisor_bridge: Arc<MobSupervisorBridge>,
     /// Read-only projection of the actor-owned MobMachine state. The actor is
     /// the sole writer; handles use this only for non-blocking status/list
     /// surfaces that must remain observable while a mutating command is
@@ -1138,6 +1139,12 @@ impl MobHandle {
             reply_tx,
         })
         .await?
+    }
+
+    /// Return the routable signed supervisor bridge peer for external
+    /// members that must answer mob control-plane requests.
+    pub async fn routable_supervisor_peer(&self) -> Result<TrustedPeerDescriptor, MobError> {
+        self.supervisor_bridge.routable_supervisor_spec().await
     }
 
     async fn member_machine_projection(

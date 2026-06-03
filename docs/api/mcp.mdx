@@ -110,7 +110,13 @@ Use the `rkat mcp` commands to manage MCP servers:
 rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # Add a streamable HTTP server
-rkat mcp add api --transport http --url https://mcp.example.com/api
+rkat mcp add api --url https://mcp.example.com/api
+
+# Add a streamable HTTP server with Claude-compatible positional URL syntax
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
+
+# Log in when the HTTP server requires OAuth
+rkat mcp login glean
 
 # List servers
 rkat mcp list
@@ -149,6 +155,12 @@ Project config wins on name collisions.
   url = "https://mcp.example.com/api"
   headers = { Authorization = "Bearer ${MCP_API_TOKEN}" }
 
+  # OAuth-protected HTTP server. No OAuth schema is persisted here;
+  # discovery and token storage happen when connecting or running `mcp login`.
+  [[servers]]
+  name = "glean"
+  url = "https://king-be.glean.com/mcp/default"
+
   # Legacy SSE server
   [[servers]]
   name = "legacy-sse"
@@ -160,6 +172,13 @@ Project config wins on name collisions.
 <Note>
 Supported transports: **stdio**, **streamable HTTP** (default for URLs), and **SSE**.
 Environment variables in config use `${VAR_NAME}` syntax.
+</Note>
+
+<Note>
+For OAuth-protected streamable HTTP servers, keep config simple. Add the URL
+with `rkat mcp add`, then run `rkat mcp login <name>` for an explicit browser
+login, or `rkat run "..." --mcp-auth interactive` to allow first-use browser
+auth during an interactive TTY run. Normal runs default to `--mcp-auth stored`.
 </Note>
 
 ## Meerkat as an MCP server

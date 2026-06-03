@@ -1833,6 +1833,130 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
 }
 
 #[tokio::test]
+async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
+    struct PeerRequestExecutor {
+        session_id: SessionId,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for PeerRequestExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let turn_metadata = primitive
+                .turn_metadata()
+                .expect("idle peer request primitive should carry runtime turn metadata");
+            assert_eq!(
+                turn_metadata.handling_mode,
+                Some(meerkat_core::types::HandlingMode::Queue),
+                "idle steer is an admission lane; fresh turn execution must be normalized for the session-service path"
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 1,
+                    sequence: 1,
+                },
+                None,
+                meerkat_core::RunResult {
+                    text: "peer request executed".to_string(),
+                    session_id: self.session_id.clone(),
+                    usage: Default::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::new(crate::store::InMemoryRuntimeStore::new()),
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(PeerRequestExecutor {
+                session_id: session_id.clone(),
+                calls: calls.clone(),
+            }),
+        )
+        .await
+        .expect("register session with executor");
+
+    let input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "11111111-1111-4111-8111-111111111111".into(),
+                display_identity: Some("hive".into()),
+                runtime_id: Some(LogicalRuntimeId::new("rt:hive:0")),
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Request {
+            request_id: "req-123".into(),
+            intent: "checksum_token".into(),
+        }),
+        body: "stale rendered request".into(),
+        payload: Some(serde_json::json!({"subject": "mdm-smoke"})),
+        blocks: Some(vec![meerkat_core::types::ContentBlock::Text {
+            text: "Inspect this host and respond".into(),
+        }]),
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+    });
+
+    let (_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("idle peer request should be accepted");
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted peer request should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("idle explicit steer peer request should wake and complete");
+
+    assert!(matches!(completion, Ok(CompletionOutcome::Completed(_))));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
     struct FailingCheckpointExecutor {
         session_id: SessionId,

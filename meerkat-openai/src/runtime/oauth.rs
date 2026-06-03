@@ -76,6 +76,7 @@ pub fn chatgpt_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         ],
         token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
         include_state_in_token_exchange: false,
+        extra_token_params: Vec::new(),
         refresh_scopes: Vec::new(),
         extra_headers: Vec::new(),
     };

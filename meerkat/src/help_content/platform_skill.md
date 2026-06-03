@@ -50,7 +50,11 @@ The Rust SDK lets you pick: `RuntimeBuildMode::SessionOwned(bindings)` (runtime-
 
 ## External mob members (advanced)
 
-When a mob member runs in a different process or host, declare it with `MobBackendKind::External` and pass `RuntimeBinding::External { peer_id, address }` at spawn time so the orchestrator can route comms to the real backend. Internal-process members use `Session` and need no extra wiring. Members are addressed everywhere by stable `AgentIdentity`; runtime/binding identity rotates underneath.
+When a mob member runs in a different process or host, declare it with `MobBackendKind::External` and pass a `RuntimeBinding::External` at spawn time so the orchestrator can route comms to the real backend. The current external binding carries the advertised address, the peer's Ed25519 public identity, and a typed `bootstrap_token`; the mob derives the concrete peer id from the public key. Internal-process members use `Session` and need no extra wiring. Members are addressed everywhere by stable `AgentIdentity`; runtime/binding identity rotates underneath.
+
+For a remote `rkat` process, use `rkat run --comms-listen-tcp <host:port> --comms-advertise-tcp <host:port> --comms-binding-out <path> --keep-alive ...`. The generated binding JSON is the safest source for mob spawn/host tooling because hand-written address-only bindings and query-string-only bootstrap tokens are rejected.
+
+`rkat-rpc --tcp` is not this channel. It exposes JSON-RPC to hosts and SDKs; signed Meerkat peer traffic uses the `rkat run --comms-*` comms listener.
 
 ## Surfaces
 
@@ -80,7 +84,8 @@ Config locations:
 Command forms:
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
+rkat mcp login <NAME> [--scope project|user|local]
 rkat mcp remove <NAME> [--scope project|user|local]
 rkat mcp list [--scope project|user|local] [--json]
 rkat mcp get <NAME> [--scope project|user|local] [--json]
@@ -93,7 +98,9 @@ Examples:
 rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
 
 # HTTP server
-rkat mcp add linear --transport http --url https://mcp.example.com
+rkat mcp add linear --url https://mcp.example.com
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
+rkat mcp login glean
 
 # User-wide server with environment passed to the stdio process
 rkat mcp add github --scope user -e GITHUB_TOKEN=ghp_... -- npx -y @modelcontextprotocol/server-github
@@ -106,6 +113,7 @@ Notes:
 
 - Use `--transport http` for streamable HTTP and `--transport sse` for legacy SSE.
 - `-H KEY:VALUE` is for HTTP/SSE headers; `-e KEY=VALUE` is for stdio process environment.
+- OAuth for HTTP MCP servers is discovered at connect/login time. Keep config to name/url/transport/headers; do not add an auth schema. `rkat mcp login <name>` runs browser OAuth explicitly. `rkat run` defaults to `--mcp-auth stored`; use `--mcp-auth interactive` for first-use browser auth in a TTY run.
 - `rkat mcp` is a config surface. Live mutation of a running session uses JSON-RPC `mcp/add|remove|reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, or SDK helpers.
 
 ## Mob behavior (current contract)
@@ -636,6 +644,7 @@ Tool visibility can change during a session without restarting the agent. All ch
 - **External filters** — allow-list or deny-list staged via `ToolScopeHandle`, applied at `CallingLlm` boundary. Persisted in session metadata (`tool_scope_external_filter`).
 - **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
 - **Configured MCP servers** — CLI `rkat mcp add/remove/list/get` edits `.rkat/mcp.toml` or `~/.rkat/mcp.toml`. New `rkat run` and `rkat run --resume` sessions load that config.
+- **MCP HTTP OAuth** — streamable HTTP servers can require OAuth without any auth schema in MCP config. Stored mode (`rkat run --mcp-auth stored`, the default) uses persisted tokens only and reports `rkat mcp login <server>` when auth is missing. Interactive mode (`--mcp-auth interactive`) may open a browser from a TTY, store tokens, reconnect, and continue the run.
 - **Live MCP mutation** — JSON-RPC `mcp/add`, `mcp/remove`, `mcp/reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, and SDK helpers stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
 - **Async MCP loading** — At startup, MCP servers connect in parallel in the background. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary. Tools appear as each server completes its handshake. A typed `mcp` system notice is recorded while servers are still connecting.
   - Per-server timeout: `connect_timeout_secs` in `.rkat/mcp.toml` (default: 10s)

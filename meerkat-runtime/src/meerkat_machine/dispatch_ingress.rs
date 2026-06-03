@@ -231,6 +231,35 @@ impl MeerkatMachine {
 
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
+                    // origin/main observability: surface the idle/running
+                    // disposition (idle, attached non-steer, or attached peer)
+                    // for ingress-admission diagnostics, including the
+                    // remote-comms / paired-TCP peer admission path. The
+                    // semantic decision itself is NOT taken here: it flows
+                    // through the canonical machine seam
+                    // (resolve_admission_with_active_turn_boundary), which
+                    // derives idle vs running internally from the recovered
+                    // authority plus active_turn_boundary_available (P0
+                    // Invariant 1 — no handwritten admission resolution).
+                    let input_kind = input.kind();
+                    let runtime_idle = !active_turn_boundary_available
+                        && (state == RuntimeState::Idle
+                            || (state == RuntimeState::Attached
+                                && !matches!(
+                                    input.handling_mode(),
+                                    Some(meerkat_core::types::HandlingMode::Steer)
+                                ))
+                            || (state == RuntimeState::Attached
+                                && matches!(input, Input::Peer(_))));
+                    tracing::debug!(
+                        session_id = %session_id,
+                        input_kind = ?input_kind,
+                        runtime_state = ?state,
+                        visible_state = ?visible_state,
+                        runtime_idle,
+                        active_turn_boundary_available,
+                        "resolving runtime ingress admission via canonical machine seam"
+                    );
                     let resolved = driver.resolve_admission_with_active_turn_boundary(
                         &input,
                         active_turn_boundary_available,

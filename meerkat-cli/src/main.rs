@@ -72,7 +72,8 @@ use meerkat_core::HookRunOverrides;
 use meerkat_core::SessionId;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
-use meerkat_core::mcp_config::{McpScope, McpTransportKind};
+#[cfg(feature = "mcp")]
+use meerkat_core::mcp_config::{McpConfig, McpScope, McpTransportConfig, McpTransportKind};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin};
 use std::path::{Path, PathBuf};
@@ -951,6 +952,22 @@ enum CliOutputFormat {
     Html,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliMcpAuthMode {
+    Stored,
+    Interactive,
+}
+
+#[cfg(feature = "mcp")]
+impl From<CliMcpAuthMode> for meerkat_auth_core::McpAuthMode {
+    fn from(value: CliMcpAuthMode) -> Self {
+        match value {
+            CliMcpAuthMode::Stored => Self::Stored,
+            CliMcpAuthMode::Interactive => Self::Interactive,
+        }
+    }
+}
+
 impl CliOutputFormat {
     fn as_str(self) -> &'static str {
         match self {
@@ -1349,6 +1366,17 @@ enum Commands {
         #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         wait_for_mcp: bool,
 
+        /// MCP auth behavior for HTTP servers that require OAuth.
+        #[cfg(feature = "mcp")]
+        #[arg(
+            long = "mcp-auth",
+            value_enum,
+            default_value = "stored",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        mcp_auth: CliMcpAuthMode,
+
         // === Output verbosity ===
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v', help_heading = "Common options")]
@@ -1363,6 +1391,96 @@ enum Commands {
         /// Implied by `--stdin lines` (line-mode stdin requires keep-alive).
         #[arg(long, help_heading = "Common options")]
         keep_alive: bool,
+
+        /// Stable comms participant name for this session.
+        #[arg(
+            long = "comms-name",
+            value_name = "NAME",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_name: Option<String>,
+
+        /// TCP address for this session's signed agent-to-agent comms listener.
+        #[arg(
+            long = "comms-listen-tcp",
+            value_name = "HOST:PORT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_listen_tcp: Option<String>,
+
+        /// TCP address this session should advertise to signed comms peers.
+        #[arg(
+            long = "comms-advertise-tcp",
+            value_name = "HOST:PORT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_advertise_tcp: Option<String>,
+
+        /// Write this session's external comms runtime binding as JSON.
+        #[arg(
+            long = "comms-binding-out",
+            value_name = "PATH",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_binding_out: Option<PathBuf>,
+
+        /// Pairing password for initial signed comms enrollment.
+        #[arg(
+            long = "comms-pairing-password",
+            value_name = "PASSWORD",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_pairing_password: Option<String>,
+
+        /// Read the comms pairing password from an environment variable.
+        #[arg(
+            long = "comms-pairing-password-env",
+            value_name = "ENV",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_pairing_password_env: Option<String>,
+
+        /// Read the comms pairing password from a file.
+        #[arg(
+            long = "comms-pairing-password-file",
+            value_name = "PATH",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_pairing_password_file: Option<PathBuf>,
+
+        /// Disable comms tools/runtime for this session.
+        #[arg(
+            long = "no-comms",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        no_comms: bool,
+
+        /// Human-readable description exposed to comms peers.
+        #[arg(
+            long = "agent-description",
+            value_name = "TEXT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        agent_description: Option<String>,
+
+        /// Peer metadata label (key=value, repeatable). Exposed to comms peers.
+        #[arg(
+            long = "agent-label",
+            value_name = "KEY=VALUE",
+            value_parser = parse_label,
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        agent_labels: Vec<(String, String)>,
 
         /// How stdin should be handled
         #[arg(
@@ -1507,7 +1625,7 @@ enum Commands {
 
     #[cfg(feature = "mcp")]
     #[command(
-        after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list\n  rkat mcp get filesystem --scope project"
+        after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add glean --url https://king-be.glean.com/mcp/default\n  rkat mcp add --transport http glean https://king-be.glean.com/mcp/default\n  rkat mcp login glean\n  rkat mcp list\n  rkat mcp get filesystem --scope project"
     )]
     /// MCP server management
     Mcp {
@@ -2140,6 +2258,10 @@ enum McpCommands {
         /// Server name
         name: String,
 
+        /// Server URL for http/sse transports
+        #[arg(value_name = "URL")]
+        positional_url: Option<String>,
+
         /// Transport type (default: stdio for command, http for url)
         #[arg(long, short = 't', value_enum)]
         transport: Option<CliTransport>,
@@ -2163,6 +2285,16 @@ enum McpCommands {
         /// Command and arguments after -- (for stdio transport)
         #[arg(last = true, num_args = 0..)]
         command: Vec<String>,
+    },
+
+    /// Log in to an OAuth-protected HTTP MCP server
+    Login {
+        /// Server name
+        name: String,
+
+        /// Scope to read from
+        #[arg(long, value_enum)]
+        scope: Option<CliMcpScope>,
     },
 
     /// Remove an MCP server
@@ -2399,6 +2531,7 @@ enum CliMcpScope {
     Local,
 }
 
+#[cfg(feature = "mcp")]
 impl From<CliMcpScope> for Option<McpScope> {
     fn from(s: CliMcpScope) -> Self {
         match s {
@@ -2482,8 +2615,20 @@ async fn main() -> anyhow::Result<ExitCode> {
             yolo,
             #[cfg(feature = "mcp")]
             wait_for_mcp,
+            #[cfg(feature = "mcp")]
+            mcp_auth,
             verbose,
             keep_alive,
+            comms_name,
+            comms_listen_tcp,
+            comms_advertise_tcp,
+            comms_binding_out,
+            comms_pairing_password,
+            comms_pairing_password_env,
+            comms_pairing_password_file,
+            no_comms,
+            agent_description,
+            agent_labels,
             stdin,
             line_format,
             auth_binding,
@@ -2496,6 +2641,10 @@ async fn main() -> anyhow::Result<ExitCode> {
             let wait_for_mcp_enabled = wait_for_mcp;
             #[cfg(not(feature = "mcp"))]
             let wait_for_mcp_enabled = false;
+            #[cfg(feature = "mcp")]
+            let mcp_auth_mode = mcp_auth;
+            #[cfg(not(feature = "mcp"))]
+            let mcp_auth_mode = CliMcpAuthMode::Stored;
             // Wave-c C-12: parse user-supplied `realm:binding[:profile]`
             // at the CLI argument boundary. Downstream receives the
             // typed `Option<AuthBindingRef>`; the opaque-string form
@@ -2538,8 +2687,19 @@ async fn main() -> anyhow::Result<ExitCode> {
                 tools,
                 yolo,
                 wait_for_mcp_enabled,
+                mcp_auth_mode,
                 verbose,
                 keep_alive,
+                comms_name,
+                comms_listen_tcp,
+                comms_advertise_tcp,
+                comms_binding_out,
+                comms_pairing_password,
+                comms_pairing_password_env,
+                comms_pairing_password_file,
+                no_comms,
+                agent_description,
+                agent_labels,
                 stdin,
                 line_format,
                 auth_binding,
@@ -2600,7 +2760,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::WorkGraph { command } => handle_workgraph_command(command, &cli_scope).await,
         #[cfg(feature = "mcp")]
-        Commands::Mcp { command } => handle_mcp_command(command).await,
+        Commands::Mcp { command } => handle_mcp_command(command, &cli_scope).await,
         #[cfg(feature = "skills")]
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
         #[cfg(feature = "mob")]
@@ -2712,8 +2872,19 @@ async fn handle_help_command(
         Some(ToolPreset::None),
         false,
         false,
+        CliMcpAuthMode::Stored,
         false,
         false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        Vec::new(),
         StdinMode::Off,
         LineFormat::Text,
         None,
@@ -2755,8 +2926,19 @@ async fn handle_run_command(
     tools: Option<ToolPreset>,
     yolo: bool,
     wait_for_mcp: bool,
+    mcp_auth: CliMcpAuthMode,
     verbose: bool,
     keep_alive: bool,
+    comms_name: Option<String>,
+    comms_listen_tcp: Option<String>,
+    comms_advertise_tcp: Option<String>,
+    comms_binding_out: Option<PathBuf>,
+    comms_pairing_password: Option<String>,
+    comms_pairing_password_env: Option<String>,
+    comms_pairing_password_file: Option<PathBuf>,
+    no_comms: bool,
+    agent_description: Option<String>,
+    agent_labels: Vec<(String, String)>,
     stdin: StdinMode,
     line_format: LineFormat,
     auth_binding: Option<AuthBindingRef>,
@@ -2774,8 +2956,39 @@ async fn handle_run_command(
     if output.is_html() && output_schema.is_some() {
         anyhow::bail!("--html cannot be combined with --schema in HTML Output Mode V1");
     }
+    if no_comms && comms_binding_out.is_some() {
+        anyhow::bail!("--comms-binding-out cannot be used with --no-comms");
+    }
+    if no_comms && comms_listen_tcp.is_some() {
+        anyhow::bail!("--comms-listen-tcp cannot be used with --no-comms");
+    }
+    if no_comms && comms_advertise_tcp.is_some() {
+        anyhow::bail!("--comms-advertise-tcp cannot be used with --no-comms");
+    }
+    if no_comms
+        && (comms_pairing_password.is_some()
+            || comms_pairing_password_env.is_some()
+            || comms_pairing_password_file.is_some())
+    {
+        anyhow::bail!("comms pairing password flags cannot be used with --no-comms");
+    }
+    let pairing_password = resolve_comms_pairing_password(
+        comms_pairing_password,
+        comms_pairing_password_env,
+        comms_pairing_password_file,
+    )?;
+    let comms_advertise_address = resolve_comms_advertise_tcp(comms_advertise_tcp)?;
 
     if let Some(session_id) = resume {
+        let comms_overrides = CommsOverrides {
+            name: comms_name,
+            listen_tcp: comms_listen_tcp,
+            advertise_address: comms_advertise_address,
+            binding_out: comms_binding_out,
+            pairing_password,
+            disabled: no_comms,
+            peer_meta: build_peer_meta(agent_description, agent_labels)?,
+        };
         return resume_session(
             &session_id,
             prompt,
@@ -2804,9 +3017,11 @@ async fn handle_run_command(
             scope,
             verbose,
             wait_for_mcp,
+            mcp_auth,
             tools,
             yolo,
             keep_alive,
+            comms_overrides,
         )
         .await;
     }
@@ -2849,6 +3064,15 @@ async fn handle_run_command(
         .map(|s| parse_output_schema(s))
         .transpose()?;
     let tooling = resolve_tool_preset(tools.unwrap_or(ToolPreset::Safe), yolo);
+    let comms_overrides = CommsOverrides {
+        name: comms_name,
+        listen_tcp: comms_listen_tcp,
+        advertise_address: comms_advertise_address,
+        binding_out: comms_binding_out,
+        pairing_password,
+        disabled: no_comms,
+        peer_meta: build_peer_meta(agent_description, agent_labels)?,
+    };
     let html_output_request =
         resolve_html_output_request(&output, &config, &config_base_dir).await?;
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
@@ -2889,13 +3113,14 @@ async fn handle_run_command(
                 merged_provider_params,
                 parsed_output_schema,
                 2,
-                CommsOverrides::default(),
+                comms_overrides,
                 tooling.builtins,
                 tooling.shell,
                 tooling.memory,
                 tooling.workgraph,
                 tooling.mob,
                 wait_for_mcp,
+                mcp_auth,
                 verbose,
                 keep_alive || matches!(stdin, StdinMode::Lines),
                 matches!(stdin, StdinMode::Lines),
@@ -3245,8 +3470,113 @@ fn parse_hook_run_overrides(
 struct CommsOverrides {
     name: Option<String>,
     listen_tcp: Option<String>,
+    advertise_address: Option<String>,
+    binding_out: Option<PathBuf>,
+    pairing_password: Option<String>,
     disabled: bool,
     peer_meta: Option<meerkat_core::PeerMeta>,
+}
+
+impl CommsOverrides {
+    fn requires_runtime(&self) -> bool {
+        self.name.is_some()
+            || self.listen_tcp.is_some()
+            || self.advertise_address.is_some()
+            || self.binding_out.is_some()
+            || self.pairing_password.is_some()
+            || self.peer_meta.is_some()
+    }
+}
+
+fn resolve_comms_advertise_tcp(advertise_tcp: Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(advertise_tcp) = advertise_tcp else {
+        return Ok(None);
+    };
+    let addr: std::net::SocketAddr = advertise_tcp
+        .parse()
+        .map_err(|err| anyhow::anyhow!("invalid --comms-advertise-tcp address: {err}"))?;
+    Ok(Some(format!("tcp://{addr}")))
+}
+
+fn resolve_comms_pairing_password(
+    password: Option<String>,
+    env: Option<String>,
+    file: Option<PathBuf>,
+) -> anyhow::Result<Option<String>> {
+    let supplied =
+        usize::from(password.is_some()) + usize::from(env.is_some()) + usize::from(file.is_some());
+    if supplied > 1 {
+        anyhow::bail!(
+            "use only one of --comms-pairing-password, --comms-pairing-password-env, or --comms-pairing-password-file"
+        );
+    }
+    if let Some(password) = password {
+        return Ok(Some(password));
+    }
+    if let Some(env) = env {
+        let value = std::env::var(&env).map_err(|err| {
+            anyhow::anyhow!("failed to read {env} for comms pairing password: {err}")
+        })?;
+        return Ok(Some(value));
+    }
+    if let Some(file) = file {
+        let value = std::fs::read_to_string(&file).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to read comms pairing password file {}: {err}",
+                file.display()
+            )
+        })?;
+        return Ok(Some(value.trim_end_matches(['\r', '\n']).to_string()));
+    }
+    Ok(None)
+}
+
+fn build_peer_meta(
+    description: Option<String>,
+    labels: Vec<(String, String)>,
+) -> anyhow::Result<Option<meerkat_core::PeerMeta>> {
+    if description.is_none() && labels.is_empty() {
+        return Ok(None);
+    }
+    let meta = meerkat_core::PeerMeta {
+        description,
+        labels: std::collections::BTreeMap::from_iter(labels),
+    };
+    meerkat::surface::validate_public_peer_meta(Some(&meta)).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(Some(meta))
+}
+
+#[cfg(feature = "comms")]
+async fn write_comms_binding_out(
+    path: &Path,
+    comms_runtime: &(dyn meerkat_core::agent::CommsRuntime + Send + Sync),
+) -> anyhow::Result<()> {
+    let public_key = comms_runtime.public_key().ok_or_else(|| {
+        anyhow::anyhow!("--comms-binding-out requires a comms runtime with an Ed25519 public key")
+    })?;
+    let address = comms_runtime.advertised_address().ok_or_else(|| {
+        anyhow::anyhow!("--comms-binding-out requires a comms runtime with an advertised address")
+    })?;
+
+    let mut binding = serde_json::json!({
+        "kind": "external",
+        "address": address,
+        "identity": {
+            "kind": "ed25519_public_key",
+            "public_key": public_key,
+        },
+    });
+    if let Some(bootstrap_token) = comms_runtime.bridge_bootstrap_token() {
+        binding["bootstrap_token"] = serde_json::Value::String(bootstrap_token);
+    }
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let bytes = serde_json::to_vec_pretty(&binding)?;
+    tokio::fs::write(path, bytes).await?;
+    eprintln!("Wrote comms external binding to {}", path.display());
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -6737,6 +7067,69 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     }
 }
 
+#[cfg(feature = "mcp")]
+struct CliMcpBrowserOpener {
+    mode: CliMcpAuthMode,
+}
+
+#[cfg(feature = "mcp")]
+#[async_trait::async_trait]
+impl meerkat_auth_core::BrowserOpener for CliMcpBrowserOpener {
+    async fn open(&self, url: &str) -> Result<(), meerkat_auth_core::McpOAuthError> {
+        if self.mode == CliMcpAuthMode::Interactive {
+            use std::io::IsTerminal;
+            if !std::io::stderr().is_terminal() {
+                return Err(meerkat_auth_core::McpOAuthError::InteractiveRequiresTty);
+            }
+        }
+        webbrowser::open(url)
+            .map_err(|error| meerkat_auth_core::McpOAuthError::Browser(error.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mcp")]
+fn open_mcp_auth_resolver(
+    mode: CliMcpAuthMode,
+) -> anyhow::Result<Option<Arc<dyn meerkat_mcp::McpAuthResolver>>> {
+    Ok(Some(Arc::new(open_mcp_oauth_authority(mode)?)))
+}
+
+#[cfg(feature = "mcp")]
+fn open_mcp_oauth_authority(
+    mode: CliMcpAuthMode,
+) -> anyhow::Result<meerkat_auth_core::McpOAuthAuthority> {
+    let store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+        .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?
+        .open()
+        .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
+    let browser: Arc<dyn meerkat_auth_core::BrowserOpener> = Arc::new(CliMcpBrowserOpener { mode });
+    Ok(meerkat_auth_core::McpOAuthAuthority::new(store, browser))
+}
+
+#[cfg(feature = "mcp")]
+fn mcp_server_may_need_oauth(server: &meerkat_core::mcp_config::McpServerConfig) -> bool {
+    let McpTransportConfig::Http(http) = &server.transport else {
+        return false;
+    };
+    if !matches!(server.transport_kind(), McpTransportKind::StreamableHttp) {
+        return false;
+    }
+    !http
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+}
+
+#[cfg(feature = "mcp")]
+fn mcp_ready_wait_timeout(max_server_timeout_secs: u32, mcp_auth: CliMcpAuthMode) -> Duration {
+    let base = Duration::from_secs(max_server_timeout_secs as u64 + 5);
+    match mcp_auth {
+        CliMcpAuthMode::Stored => Duration::from_secs(base.as_secs().min(60)),
+        CliMcpAuthMode::Interactive => base + meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT,
+    }
+}
+
 /// Create MCP tool dispatcher from config files.
 ///
 /// Servers are staged and launched in parallel via `apply_staged()`. When
@@ -6747,6 +7140,7 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
 async fn create_mcp_tools(
     scope: &RuntimeScope,
     wait_for_mcp: bool,
+    mcp_auth: CliMcpAuthMode,
     external_surface_handle: Option<Arc<dyn meerkat_core::ExternalToolSurfaceHandle>>,
 ) -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_core::mcp_config::{McpConfig, McpScope};
@@ -6791,13 +7185,22 @@ async fn create_mcp_tools(
     }
 
     tracing::info!("Loading {} MCP server(s)", servers_with_scope.len());
+    let has_oauth_candidate = servers_with_scope
+        .iter()
+        .any(|server| mcp_server_may_need_oauth(&server.server));
+    let mcp_auth_resolver = if has_oauth_candidate {
+        open_mcp_auth_resolver(mcp_auth)?
+    } else {
+        None
+    };
 
     // Stage all servers for parallel connection through the generated
     // session-owned surface authority.
     let Some(external_surface_handle) = external_surface_handle else {
         anyhow::bail!("MCP config requires generated external-tool surface authority");
     };
-    let mut router = McpRouter::new_with_surface_handle(external_surface_handle);
+    let mut router = McpRouter::new_with_surface_handle(external_surface_handle)
+        .with_mcp_auth(mcp_auth.into(), mcp_auth_resolver);
     for s in &servers_with_scope {
         tracing::info!("Staging MCP server: {}", s.server.name);
         router
@@ -6813,14 +7216,15 @@ async fn create_mcp_tools(
 
     let adapter = McpRouterAdapter::new(router);
 
-    if wait_for_mcp && result.pending_count > 0 {
+    let should_wait_for_mcp = wait_for_mcp || has_oauth_candidate;
+    if should_wait_for_mcp && result.pending_count > 0 {
         // Compute timeout: max(connect_timeout_secs) + 5s, capped at 60s
         let max_server_timeout = servers_with_scope
             .iter()
             .filter_map(|s| s.server.connect_timeout_secs)
             .max()
             .unwrap_or(McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS);
-        let total_timeout = std::time::Duration::from_secs((max_server_timeout as u64 + 5).min(60));
+        let total_timeout = mcp_ready_wait_timeout(max_server_timeout, mcp_auth);
 
         tracing::info!(
             "Waiting for {} MCP server(s) to connect (timeout: {}s)...",
@@ -6857,6 +7261,7 @@ fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
 async fn load_mcp_external_tools(
     scope: &RuntimeScope,
     wait_for_mcp: bool,
+    mcp_auth: CliMcpAuthMode,
     external_surface_handle: Option<Arc<dyn meerkat_core::ExternalToolSurfaceHandle>>,
 ) -> anyhow::Result<(
     Option<Arc<dyn AgentToolDispatcher>>,
@@ -6864,7 +7269,7 @@ async fn load_mcp_external_tools(
 )> {
     #[cfg(feature = "mcp")]
     {
-        match create_mcp_tools(scope, wait_for_mcp, external_surface_handle).await {
+        match create_mcp_tools(scope, wait_for_mcp, mcp_auth, external_surface_handle).await {
             Ok(Some(adapter)) => {
                 let adapter = Arc::new(adapter);
                 let external: Arc<dyn AgentToolDispatcher> = adapter.clone();
@@ -6878,6 +7283,7 @@ async fn load_mcp_external_tools(
     {
         let _ = scope;
         let _ = wait_for_mcp;
+        let _ = mcp_auth;
         let _ = external_surface_handle;
         Ok((None, None))
     }
@@ -8050,6 +8456,7 @@ async fn run_agent(
     enable_workgraph: bool,
     enable_mob: bool,
     wait_for_mcp: bool,
+    mcp_auth: CliMcpAuthMode,
     verbose: bool,
     keep_alive: bool,
     stdin_events: bool,
@@ -8091,6 +8498,7 @@ async fn run_agent(
             enable_workgraph,
             enable_mob,
             wait_for_mcp,
+            mcp_auth,
             verbose,
             keep_alive,
             stdin_events,
@@ -8145,10 +8553,10 @@ async fn run_agent(
         // When keep_alive is requested and no explicit name is provided, derive one
         // from the session_id so the factory's comms_name requirement is satisfied.
         let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
-            comms_overrides
-                .name
-                .clone()
-                .or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
+            comms_overrides.name.clone().or_else(|| {
+                (keep_alive || comms_overrides.requires_runtime())
+                    .then(|| format!("cli/{session_id}"))
+            })
         } else {
             None
         };
@@ -8205,6 +8613,11 @@ async fn run_agent(
             config.comms.mode = CommsRuntimeMode::Tcp;
             config.comms.address = Some(addr.clone());
         }
+        #[cfg(feature = "comms")]
+        {
+            config.comms.advertise_address = comms_overrides.advertise_address.clone();
+            config.comms.pairing_password = comms_overrides.pairing_password.clone();
+        }
 
         // Build the parent session service on the runtime-backed persistent
         // surface. CLI one-shots must leave the runtime snapshot as durable
@@ -8259,6 +8672,7 @@ async fn run_agent(
         let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(
             scope,
             wait_for_mcp,
+            mcp_auth,
             Some(Arc::clone(bindings.external_tool_surface())),
         )
         .await?;
@@ -8460,6 +8874,14 @@ async fn run_agent(
             #[cfg(feature = "comms")]
             {
                 let comms_rt = service.comms_runtime(&session_id).await;
+                if let Some(path) = comms_overrides.binding_out.as_deref() {
+                    let comms_ref = comms_rt.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--comms-binding-out requested, but no comms runtime exists"
+                        )
+                    })?;
+                    write_comms_binding_out(path, comms_ref).await?;
+                }
                 runtime_adapter
                     .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                     .await;
@@ -8573,9 +8995,11 @@ async fn resume_session(
     scope: &RuntimeScope,
     verbose: bool,
     wait_for_mcp: bool,
+    mcp_auth: CliMcpAuthMode,
     tools: Option<ToolPreset>,
     yolo: bool,
     keep_alive: bool,
+    comms_overrides: CommsOverrides,
 ) -> anyhow::Result<()> {
     let stdin = resolve_stdin_mode(stdin);
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
@@ -8611,9 +9035,11 @@ async fn resume_session(
         None,
         verbose,
         wait_for_mcp,
+        mcp_auth,
         tools,
         yolo,
         keep_alive,
+        comms_overrides,
     )
     .await
 }
@@ -8649,9 +9075,11 @@ async fn resume_session_with_llm_override(
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
     wait_for_mcp: bool,
+    mcp_auth: CliMcpAuthMode,
     tools: Option<ToolPreset>,
     yolo: bool,
     keep_alive: bool,
+    comms_overrides: CommsOverrides,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
@@ -8685,9 +9113,11 @@ async fn resume_session_with_llm_override(
             llm_override,
             verbose,
             wait_for_mcp,
+            mcp_auth,
             tools,
             yolo,
             keep_alive,
+            comms_overrides,
         );
         anyhow::bail!("resume requires rkat built with session-store support");
     }
@@ -8707,6 +9137,17 @@ async fn resume_session_with_llm_override(
         log_stage("load_config");
         let (config, config_base_dir) = load_config(scope).await?;
         let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
+        let mut config = config;
+        #[cfg(feature = "comms")]
+        if let Some(ref addr) = comms_overrides.listen_tcp {
+            config.comms.mode = CommsRuntimeMode::Tcp;
+            config.comms.address = Some(addr.clone());
+        }
+        #[cfg(feature = "comms")]
+        {
+            config.comms.advertise_address = comms_overrides.advertise_address.clone();
+            config.comms.pairing_password = comms_overrides.pairing_password.clone();
+        }
         let has_max_duration = max_duration.is_some();
         let has_max_tool_calls = max_tool_calls.is_some();
         let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
@@ -8842,8 +9283,12 @@ async fn resume_session_with_llm_override(
         }
 
         #[cfg(feature = "comms")]
-        let factory =
-            factory.comms(tooling.comms.resolve(config.tools.comms_enabled) || keep_alive);
+        let factory = factory.comms(
+            !comms_overrides.disabled
+                && (tooling.comms.resolve(config.tools.comms_enabled)
+                    || keep_alive
+                    || comms_overrides.requires_runtime()),
+        );
 
         log_stage("build_cli_persistent_service");
         // Build persistent session service for resume — durable runtime semantics.
@@ -8883,6 +9328,7 @@ async fn resume_session_with_llm_override(
         let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(
             scope,
             wait_for_mcp,
+            mcp_auth,
             Some(Arc::clone(resume_bindings.external_tool_surface())),
         )
         .await?;
@@ -8935,6 +9381,15 @@ async fn resume_session_with_llm_override(
 
         let hooks_override =
             (hooks_override != HookRunOverrides::default()).then_some(hooks_override);
+        let comms_name_override = if cfg!(feature = "comms") && !comms_overrides.disabled {
+            comms_overrides.name.clone().or_else(|| {
+                comms_overrides
+                    .requires_runtime()
+                    .then(|| format!("cli/{session_id}"))
+            })
+        } else {
+            None
+        };
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
             model: model_override,
             provider: provider.map(Provider::as_core),
@@ -8943,6 +9398,8 @@ async fn resume_session_with_llm_override(
             system_prompt,
             output_schema: parsed_output_schema,
             keep_alive: keep_alive_override,
+            comms_name: comms_name_override,
+            peer_meta: comms_overrides.peer_meta,
             hooks_override,
             budget_limits: budget_override,
             override_builtins: explicit_tooling.map(|resolved| resolved.builtins),
@@ -9098,6 +9555,14 @@ async fn resume_session_with_llm_override(
             #[cfg(feature = "comms")]
             {
                 let comms_rt = service.comms_runtime(&session_id).await;
+                if let Some(path) = comms_overrides.binding_out.as_deref() {
+                    let comms_ref = comms_rt.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--comms-binding-out requested, but no comms runtime exists"
+                        )
+                    })?;
+                    write_comms_binding_out(path, comms_ref).await?;
+                }
                 resume_adapter
                     .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                     .await;
@@ -11080,10 +11545,11 @@ async fn handle_skills_command(
 
 /// Handle MCP subcommands
 #[cfg(feature = "mcp")]
-async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
+async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> anyhow::Result<()> {
     match command {
         McpCommands::Add {
             name,
+            positional_url,
             transport,
             scope,
             url,
@@ -11096,16 +11562,24 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
                 CliTransport::Http => McpTransportKind::StreamableHttp,
                 CliTransport::Sse => McpTransportKind::Sse,
             });
-            mcp::add_server(
+            mcp::add_server(mcp::AddServerRequest {
                 name,
                 transport,
                 url,
+                positional_url,
                 headers,
                 command,
                 env,
-                matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
-            )
+                project_scope: matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
+            })
             .await
+        }
+        McpCommands::Login { name, scope } => {
+            let scope = scope.map(|s| match s {
+                CliMcpScope::User => McpScope::User,
+                CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
+            });
+            login_mcp_server(name, scope, cli_scope).await
         }
         McpCommands::Remove { name, scope } => {
             let scope = scope.map(|s| match s {
@@ -11129,6 +11603,120 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
             mcp::get_server(name, scope, json).await
         }
     }
+}
+
+#[cfg(feature = "mcp")]
+async fn load_mcp_login_servers(
+    name: &str,
+    scope: Option<McpScope>,
+    cli_scope: &RuntimeScope,
+) -> anyhow::Result<Vec<meerkat_core::mcp_config::McpServerWithScope>> {
+    let servers = match scope {
+        Some(scope) => {
+            let config = McpConfig::load_scope_from_roots(
+                scope,
+                cli_scope.context_root.as_deref(),
+                cli_scope.user_config_root.as_deref(),
+            )
+            .await?;
+            config
+                .servers
+                .into_iter()
+                .filter(|server| server.name == name)
+                .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope })
+                .collect::<Vec<_>>()
+        }
+        None => McpConfig::load_with_scopes_from_roots(
+            cli_scope.context_root.as_deref(),
+            cli_scope.user_config_root.as_deref(),
+        )
+        .await?
+        .into_iter()
+        .filter(|server| server.server.name == name)
+        .collect::<Vec<_>>(),
+    };
+    Ok(servers)
+}
+
+#[cfg(feature = "mcp")]
+async fn login_mcp_server(
+    name: String,
+    scope: Option<McpScope>,
+    cli_scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    let servers = load_mcp_login_servers(&name, scope, cli_scope).await?;
+    if servers.is_empty() {
+        anyhow::bail!("MCP server '{name}' not found");
+    }
+    if servers.len() > 1 {
+        anyhow::bail!(
+            "MCP server '{name}' exists in multiple scopes. Specify --scope user or --scope project."
+        );
+    }
+    let server = servers
+        .into_iter()
+        .next()
+        .expect("non-empty checked")
+        .server;
+    let McpTransportConfig::Http(http) = &server.transport else {
+        anyhow::bail!("MCP OAuth login supports streamable HTTP servers only");
+    };
+    if !matches!(server.transport_kind(), McpTransportKind::StreamableHttp) {
+        anyhow::bail!("MCP OAuth login supports streamable HTTP servers only");
+    }
+    if http
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        anyhow::bail!(
+            "MCP server '{}' already has a static Authorization header; remove that header before using OAuth login",
+            server.name
+        );
+    }
+
+    let authority = open_mcp_oauth_authority(CliMcpAuthMode::Interactive)?;
+    let target = meerkat_auth_core::McpAuthTarget::new(server.name.clone(), http.url.clone());
+    let www_authenticate = preflight_mcp_auth_challenge(&http.url).await;
+    authority
+        .interactive_login(&target, www_authenticate.as_deref())
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    println!("Logged in MCP server '{}' ({})", server.name, http.url);
+    Ok(())
+}
+
+#[cfg(feature = "mcp")]
+async fn preflight_mcp_auth_challenge(url: &str) -> Option<String> {
+    let response = reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "mcp-oauth-preflight",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "rkat",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }))
+        .send()
+        .await
+        .ok()?;
+    if !matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return None;
+    }
+    response
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(feature = "mob")]
@@ -12541,7 +13129,7 @@ where
     // can read callback_request_tx() during mob creation and resume.
     let callback_rx = runtime.init_callback_channel();
     let (mcp_external_tools, _mcp_adapter_guard) =
-        load_mcp_external_tools(scope, false, None).await?;
+        load_mcp_external_tools(scope, false, CliMcpAuthMode::Stored, None).await?;
 
     let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
         let runtime = runtime.clone();
@@ -14866,8 +15454,19 @@ default_model = "gemma"
             tools,
             yolo,
             false,
+            CliMcpAuthMode::Stored,
             false,
             false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Vec::new(),
             stdin,
             line_format,
             auth_binding,
@@ -15514,6 +16113,83 @@ default_model = "gemma"
                 assert!(keep_alive);
                 assert!(matches!(stdin, StdinMode::Lines));
             }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_run_parses_comms_target_flags() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "--comms-name",
+            "bob-s-your-uncle",
+            "--comms-listen-tcp",
+            "127.0.0.1:4200",
+            "--comms-advertise-tcp",
+            "203.0.113.10:4200",
+            "--agent-description",
+            "You review code when asked.",
+            "--agent-label",
+            "site=gcp",
+            "--agent-label",
+            "target_kind=mdm",
+            "--comms-binding-out",
+            "/tmp/rkat-target-binding.json",
+            "--comms-pairing-password",
+            "0123456789abcdef0123456789abcdef",
+            "--keep-alive",
+            "ready",
+        ])
+        .expect("run comms target flags should parse");
+        match cli.command {
+            Commands::Run {
+                comms_name,
+                comms_listen_tcp,
+                comms_advertise_tcp,
+                comms_binding_out,
+                comms_pairing_password,
+                agent_description,
+                agent_labels,
+                no_comms,
+                keep_alive,
+                ..
+            } => {
+                assert_eq!(comms_name.as_deref(), Some("bob-s-your-uncle"));
+                assert_eq!(comms_listen_tcp.as_deref(), Some("127.0.0.1:4200"));
+                assert_eq!(comms_advertise_tcp.as_deref(), Some("203.0.113.10:4200"));
+                assert_eq!(
+                    comms_binding_out.as_deref(),
+                    Some(Path::new("/tmp/rkat-target-binding.json"))
+                );
+                assert_eq!(
+                    comms_pairing_password.as_deref(),
+                    Some("0123456789abcdef0123456789abcdef")
+                );
+                assert_eq!(
+                    agent_description.as_deref(),
+                    Some("You review code when asked.")
+                );
+                assert_eq!(
+                    agent_labels,
+                    vec![
+                        ("site".to_string(), "gcp".to_string()),
+                        ("target_kind".to_string(), "mdm".to_string())
+                    ]
+                );
+                assert!(keep_alive);
+                assert!(!no_comms);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_run_parses_no_comms() {
+        let cli = Cli::try_parse_from(["rkat", "run", "--no-comms", "hello"])
+            .expect("--no-comms should parse");
+        match cli.command {
+            Commands::Run { no_comms, .. } => assert!(no_comms),
             _ => unreachable!(),
         }
     }
@@ -16190,6 +16866,231 @@ default_model = "gemma"
             }
             _ => unreachable!("expected mcp remove"),
         }
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn test_cli_mcp_add_http_forms_and_run_mcp_auth_parse() {
+        let codex_style = Cli::try_parse_from([
+            "rkat",
+            "mcp",
+            "add",
+            "glean",
+            "--url",
+            "https://king-be.glean.com/mcp/default",
+        ])
+        .expect("mcp add name --url URL should parse");
+        match codex_style.command {
+            Commands::Mcp {
+                command:
+                    McpCommands::Add {
+                        name,
+                        url,
+                        positional_url,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "glean");
+                assert_eq!(
+                    url.as_deref(),
+                    Some("https://king-be.glean.com/mcp/default")
+                );
+                assert_eq!(positional_url, None);
+            }
+            _ => unreachable!("expected mcp add"),
+        }
+
+        let claude_style = Cli::try_parse_from([
+            "rkat",
+            "mcp",
+            "add",
+            "--transport",
+            "http",
+            "glean",
+            "https://king-be.glean.com/mcp/default",
+        ])
+        .expect("mcp add --transport http name URL should parse");
+        match claude_style.command {
+            Commands::Mcp {
+                command:
+                    McpCommands::Add {
+                        name,
+                        transport,
+                        positional_url,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "glean");
+                assert!(matches!(transport, Some(CliTransport::Http)));
+                assert_eq!(
+                    positional_url.as_deref(),
+                    Some("https://king-be.glean.com/mcp/default")
+                );
+            }
+            _ => unreachable!("expected mcp add"),
+        }
+
+        let run = Cli::try_parse_from(["rkat", "run", "Hello world", "--mcp-auth", "interactive"])
+            .expect("run prompt --mcp-auth interactive should parse");
+        match run.command {
+            Commands::Run {
+                prompt, mcp_auth, ..
+            } => {
+                assert_eq!(prompt, "Hello world");
+                assert_eq!(mcp_auth, CliMcpAuthMode::Interactive);
+            }
+            _ => unreachable!("expected run"),
+        }
+
+        let login = Cli::try_parse_from(["rkat", "mcp", "login", "glean", "--scope", "project"])
+            .expect("mcp login should parse");
+        match login.command {
+            Commands::Mcp {
+                command: McpCommands::Login { name, scope },
+            } => {
+                assert_eq!(name, "glean");
+                assert!(matches!(scope, Some(CliMcpScope::Project)));
+            }
+            _ => unreachable!("expected mcp login"),
+        }
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn test_cli_mcp_oauth_resolver_is_needed_only_for_streamable_http_without_static_auth() {
+        let streamable = meerkat_core::McpServerConfig::streamable_http(
+            "glean",
+            "https://king-be.glean.com/mcp/default",
+            std::collections::HashMap::new(),
+        );
+        assert!(mcp_server_may_need_oauth(&streamable));
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer static".to_string());
+        let static_auth = meerkat_core::McpServerConfig::streamable_http(
+            "static",
+            "https://example.test/mcp",
+            headers,
+        );
+        assert!(!mcp_server_may_need_oauth(&static_auth));
+
+        let sse = meerkat_core::McpServerConfig::sse(
+            "sse",
+            "https://example.test/sse",
+            std::collections::HashMap::new(),
+        );
+        assert!(!mcp_server_may_need_oauth(&sse));
+
+        let stdio = meerkat_core::McpServerConfig::stdio(
+            "stdio",
+            "mcp-server",
+            Vec::<String>::new(),
+            std::collections::HashMap::new(),
+        );
+        assert!(!mcp_server_may_need_oauth(&stdio));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_mcp_login_lookup_uses_cli_roots_and_explicit_scope() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let context_root = temp.path().join("project");
+        let user_root = temp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat"))
+            .await
+            .expect("create project .rkat");
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .expect("create user .rkat");
+        tokio::fs::write(
+            context_root.join(".rkat/mcp.toml"),
+            r#"
+[[servers]]
+name = "glean"
+url = "https://project.example/mcp"
+"#,
+        )
+        .await
+        .expect("write project mcp config");
+        tokio::fs::write(
+            user_root.join(".rkat/mcp.toml"),
+            r#"
+[[servers]]
+name = "glean"
+url = "https://user.example/mcp"
+"#,
+        )
+        .await
+        .expect("write user mcp config");
+
+        let mut scope = test_scope(temp.path().join("realm-state"), "test");
+        scope.context_root = Some(context_root);
+        scope.user_config_root = Some(user_root);
+
+        let servers = load_mcp_login_servers("glean", Some(McpScope::User), &scope)
+            .await
+            .expect("load mcp login servers");
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].scope, McpScope::User);
+        let url = match &servers[0].server.transport {
+            McpTransportConfig::Http(http) => Some(http.url.as_str()),
+            McpTransportConfig::Stdio(_) => None,
+        };
+        assert_eq!(url, Some("https://user.example/mcp"));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_mcp_login_preflight_returns_www_authenticate_challenge() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test HTTP listener binds");
+        let url = format!(
+            "http://{}/mcp",
+            listener.local_addr().expect("listener addr")
+        );
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("preflight connects");
+            let mut buffer = vec![0_u8; 4096];
+            let bytes = socket.read(&mut buffer).await.expect("request reads");
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            assert!(request.starts_with("POST /mcp "));
+            assert!(request.contains(r#""method":"initialize""#));
+            let challenge =
+                r#"Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp""#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: {challenge}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("response writes");
+        });
+
+        let challenge = preflight_mcp_auth_challenge(&url)
+            .await
+            .expect("preflight should return auth challenge");
+
+        assert!(challenge.contains("resource_metadata"));
+        handle.await.expect("preflight server finishes");
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn test_cli_mcp_interactive_wait_budget_includes_browser_login_timeout() {
+        assert_eq!(
+            mcp_ready_wait_timeout(120, CliMcpAuthMode::Stored),
+            std::time::Duration::from_secs(60),
+            "stored mode keeps the legacy readiness cap"
+        );
+        assert_eq!(
+            mcp_ready_wait_timeout(10, CliMcpAuthMode::Interactive),
+            std::time::Duration::from_secs(15) + meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT,
+            "interactive mode should not cut off browser login at the normal connect cap"
+        );
     }
 
     #[test]

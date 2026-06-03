@@ -4,6 +4,7 @@ use http::header::WWW_AUTHENTICATE;
 use reqwest::header::{ACCEPT, HeaderMap};
 use sse_stream::{Sse, SseStream};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::transport::common::http_header::{
@@ -21,6 +22,35 @@ use rmcp::transport::streamable_http_client::{
 pub(crate) struct ReqwestStreamableHttpClient {
     client: reqwest::Client,
     headers: HeaderMap,
+    auth_challenge: AuthChallengeRecorder,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AuthChallengeRecorder {
+    inner: Arc<Mutex<Option<String>>>,
+}
+
+impl AuthChallengeRecorder {
+    pub(crate) fn record(&self, response: &reqwest::Response) {
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) && let Some(header) = response.headers().get(WWW_AUTHENTICATE)
+            && let Ok(header) = header.to_str()
+        {
+            *self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(header.to_string());
+        }
+    }
+
+    pub(crate) fn take(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
 }
 
 /// Lazy-initialized shared reqwest client for Streamable HTTP transports
@@ -28,18 +58,25 @@ static DEFAULT_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(reqwest::Client::new);
 
 impl ReqwestStreamableHttpClient {
-    /// Create a new HTTP client using the shared default reqwest::Client
-    pub(crate) fn new(headers: HeaderMap) -> Self {
+    pub(crate) fn new_with_auth_challenge(
+        headers: HeaderMap,
+        auth_challenge: AuthChallengeRecorder,
+    ) -> Self {
         Self {
             client: DEFAULT_HTTP_CLIENT.clone(),
             headers,
+            auth_challenge,
         }
     }
 
     /// Create an HTTP client with a custom reqwest::Client
     #[allow(dead_code)]
     pub(crate) fn with_client(client: reqwest::Client, headers: HeaderMap) -> Self {
-        Self { client, headers }
+        Self {
+            client,
+            headers,
+            auth_challenge: AuthChallengeRecorder::default(),
+        }
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -77,6 +114,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .send()
             .await
             .map_err(StreamableHttpError::Client)?;
+        self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
         }
@@ -150,6 +188,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             .send()
             .await
             .map_err(StreamableHttpError::Client)?;
+        self.auth_challenge.record(&response);
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && let Some(header) = response.headers().get(WWW_AUTHENTICATE)
         {

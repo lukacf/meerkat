@@ -365,6 +365,19 @@ impl McpConfig {
         read_mcp_file(path.as_deref()).await
     }
 
+    /// Load from a specific scope using explicit convention roots.
+    pub async fn load_scope_from_roots(
+        scope: McpScope,
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<Self, McpConfigError> {
+        let path = match scope {
+            McpScope::User => user_config_root.map(user_mcp_path_in),
+            McpScope::Project => context_root.map(project_mcp_path_in),
+        };
+        read_mcp_file(path.as_deref()).await
+    }
+
     /// Check if a server exists in a specific scope
     pub async fn server_exists(name: &str, scope: McpScope) -> Result<bool, McpConfigError> {
         let config = Self::load_scope(scope).await?;
@@ -1029,6 +1042,51 @@ command = "user-only-cmd"
             .await
             .unwrap();
         assert!(merged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_scope_from_roots_reads_unmerged_scope() {
+        let temp = TempDir::new().unwrap();
+        let context_root = temp.path().join("context");
+        let user_root = temp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+
+        tokio::fs::write(
+            context_root.join(".rkat/mcp.toml"),
+            r#"
+[[servers]]
+name = "shared"
+command = "context-cmd"
+"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            user_root.join(".rkat/mcp.toml"),
+            r#"
+[[servers]]
+name = "shared"
+command = "user-cmd"
+"#,
+        )
+        .await
+        .unwrap();
+
+        let user =
+            McpConfig::load_scope_from_roots(McpScope::User, Some(&context_root), Some(&user_root))
+                .await
+                .unwrap();
+        assert_eq!(user.servers[0].name, "shared");
+        let command = match &user.servers[0].transport {
+            McpTransportConfig::Stdio(stdio) => Some(stdio.command.as_str()),
+            McpTransportConfig::Http(_) => None,
+        };
+        assert_eq!(command, Some("user-cmd"));
     }
 
     #[tokio::test]

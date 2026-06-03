@@ -1,7 +1,7 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.6.32
+// Contract version: 0.6.33
 
-export const CONTRACT_VERSION = "0.6.32";
+export const CONTRACT_VERSION = "0.6.33";
 
 export interface WireUsage {
   input_tokens: number;
@@ -979,6 +979,13 @@ export interface BridgeCapabilities {
   wire_member?: boolean;
 }
 
+export interface BridgeDeliveryCompletion {
+  session_id: string;
+  text: string;
+  tool_calls: number;
+  turns: number;
+}
+
 export interface BridgeDeliveryPayload {
   content: ContentInput;
   epoch: number;
@@ -990,6 +997,7 @@ export interface BridgeDeliveryPayload {
 
 export interface BridgeDeliveryResponse {
   canonical_input_id?: string;
+  completion?: BridgeDeliveryCompletion;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
 }
@@ -1697,6 +1705,7 @@ export interface BridgeReplyObservation {
 
 export interface BridgeReplyDelivery {
   canonical_input_id?: string;
+  completion?: BridgeDeliveryCompletion;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
   result: "delivery";

@@ -278,6 +278,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "BridgeBootstrapToken": schema_for!(crate::wire::supervisor_bridge::BridgeBootstrapToken),
         "BridgeCapabilities": schema_for!(crate::wire::BridgeCapabilities),
         "BridgeCommand": schema_for!(crate::wire::BridgeCommand),
+        "BridgeDeliveryCompletion": schema_for!(crate::wire::BridgeDeliveryCompletion),
         "BridgeDeliveryOutcome": schema_for!(crate::wire::BridgeDeliveryOutcome),
         "BridgeDeliveryPayload": schema_for!(crate::wire::BridgeDeliveryPayload),
         "BridgeDeliveryRejectionCause": schema_for!(crate::wire::BridgeDeliveryRejectionCause),

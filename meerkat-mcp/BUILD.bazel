@@ -42,7 +42,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.32",
+        "CARGO_PKG_VERSION": "0.6.33",
         "CARGO_MANIFEST_DIR": "./meerkat-mcp",
     },
     proc_macro_deps = all_crate_deps(
@@ -50,6 +50,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -76,7 +77,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.32",
+        "CARGO_PKG_VERSION": "0.6.33",
         "CARGO_MANIFEST_DIR": "./meerkat-mcp",
     },
     proc_macro_deps = all_crate_deps(
@@ -84,6 +85,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat:meerkat_auth_core_agent_factory_build",
         "//meerkat:meerkat_capabilities_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
@@ -114,7 +116,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.32",
+        "CARGO_PKG_VERSION": "0.6.33",
         "CARGO_MANIFEST_DIR": "./meerkat-mcp",
     },
     tags = [
@@ -134,6 +136,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -168,7 +171,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.32",
+        "CARGO_PKG_VERSION": "0.6.33",
         "CARGO_BIN_NAME": "external_tool_integration",
         "CARGO_MANIFEST_DIR": "./meerkat-mcp",
     },
@@ -185,6 +188,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
@@ -220,7 +224,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.32",
+        "CARGO_PKG_VERSION": "0.6.33",
         "CARGO_BIN_NAME": "lifecycle_contract",
         "CARGO_MANIFEST_DIR": "./meerkat-mcp",
     },
@@ -240,6 +244,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",

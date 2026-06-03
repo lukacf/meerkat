@@ -56,6 +56,9 @@ pub(crate) fn for_input(
         },
         _ => RuntimeTurnMetadata::default(),
     };
+    if let Some(handling_mode) = semantics.execution_handling_mode {
+        metadata.handling_mode = Some(handling_mode);
+    }
     metadata.execution_kind = Some(semantics.execution_kind);
     metadata.peer_response_terminal_apply_intent = semantics.peer_response_terminal_apply_intent;
     metadata
@@ -3363,7 +3366,7 @@ mod tests {
     }
 
     #[test]
-    fn primitive_from_peer_input_preserves_explicit_handling_mode() {
+    fn primitive_from_idle_peer_steer_normalizes_execution_handling_mode() {
         let mut input = make_peer_message("peer-steer", "urgent helper update");
         let Input::Peer(peer) = &mut input else {
             panic!("make_peer_message must build a peer input");
@@ -3377,8 +3380,8 @@ mod tests {
             .expect("peer primitive should carry turn metadata");
         assert_eq!(
             meta.handling_mode,
-            Some(meerkat_core::types::HandlingMode::Steer),
-            "peer handling_mode must survive primitive construction for live/steer projection"
+            Some(meerkat_core::types::HandlingMode::Queue),
+            "idle steer is already admitted into the steer lane; fresh turn execution must be queue-compatible"
         );
     }
 
@@ -3408,6 +3411,7 @@ mod tests {
             crate::ingress_types::RuntimeInputSemantics {
                 boundary: RunApplyBoundary::RunStart,
                 execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
             },
         )

@@ -378,6 +378,7 @@ async fn runtime_auth_disabled_directory_skips_zero_pubkey_inproc_identity() {
         trusted_peers_path: tmp.path().join("trusted_peers.json"),
         listen_uds: None,
         listen_tcp: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -385,6 +386,7 @@ async fn runtime_auth_disabled_directory_skips_zero_pubkey_inproc_identity() {
         auth: meerkat_core::CommsAuthMode::Open,
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     })
     .await
     .expect("auth-disabled runtime");
@@ -742,6 +744,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust()
         trusted_peers_path: tmp.path().join("trusted_peers.json"),
         listen_uds: None,
         listen_tcp: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -749,6 +752,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_trust()
         auth: meerkat_core::CommsAuthMode::Open,
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     })
     .await
     .expect("auth-disabled runtime");
@@ -816,6 +820,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_live_ca
         trusted_peers_path: tmp.path().join("trusted_peers.json"),
         listen_uds: None,
         listen_tcp: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,
@@ -823,6 +828,7 @@ async fn runtime_auth_disabled_directory_suppresses_inproc_for_duplicate_live_ca
         auth: meerkat_core::CommsAuthMode::Open,
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     })
     .await
     .expect("auth-disabled runtime");

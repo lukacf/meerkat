@@ -94,6 +94,15 @@ impl MobSupervisorBridge {
                         "failed to configure mob supervisor comms listener '{participant_name}': {error}"
                     ))
                 })?;
+            if let Some(advertised_address) = endpoint_config.advertised_address.clone() {
+                runtime
+                    .set_advertise_address_for_unstarted_runtime(advertised_address)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to configure mob supervisor advertised address '{participant_name}': {error}"
+                        ))
+                    })?;
+            }
             runtime.start_listeners().await.map_err(|error| {
                 MobError::Internal(format!(
                     "failed to start mob supervisor comms listener '{participant_name}': {error}"
@@ -274,6 +283,22 @@ impl MobSupervisorBridge {
         *self.dsl.write().await = dsl;
         self.buffered_candidates.lock().await.clear();
         Ok(())
+    }
+
+    pub(crate) async fn rotate(
+        &self,
+        authority: SupervisorAuthorityRecord,
+    ) -> Result<(), MobError> {
+        let _request_guard = self.request_lock.lock().await;
+        self.replace_runtime_authority_locked(authority, true).await
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let runtime = self.runtime().await;
+            runtime.stop_listeners_for_rebind().await;
+        }
     }
 
     /// Rebuild the supervisor runtime under a (possibly new) authority record,

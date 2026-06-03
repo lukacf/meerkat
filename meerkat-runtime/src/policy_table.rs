@@ -124,25 +124,45 @@ fn generated_admission_projection(
                 runtime_peer_response_terminal_apply_intent,
                 record_transcript,
                 ..
-            } if effect_input_id == input_id => Some(GeneratedAdmissionProjection {
-                policy: PolicyDecision {
-                    apply_mode: policy_apply_mode.into(),
-                    wake_mode: policy_wake_mode.into(),
-                    queue_mode: policy_queue_mode.into(),
-                    consume_point: policy_consume_point.into(),
-                    drain_policy: policy_drain_policy.into(),
-                    routing_disposition: policy_routing_disposition.into(),
-                    record_transcript,
-                    emit_operator_content: record_transcript,
-                    policy_version: PolicyVersion(policy_version),
-                },
-                runtime_semantics: RuntimeInputSemantics {
-                    boundary: runtime_boundary.into(),
-                    execution_kind: runtime_execution_kind.into(),
-                    peer_response_terminal_apply_intent:
-                        runtime_peer_response_terminal_apply_intent.map(Into::into),
-                },
-            }),
+            } if effect_input_id == input_id => {
+                let boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary =
+                    runtime_boundary.into();
+                let routing_disposition: crate::policy::RoutingDisposition =
+                    policy_routing_disposition.into();
+                // Project the machine-decided (boundary, routing_disposition) into
+                // the execution-handling-mode override: a Steer/Immediate input
+                // that STARTS a run normalizes to the queue-compatible session
+                // path (there is no active turn to steer into). Derived purely
+                // from machine output, not an independent shell decision.
+                let execution_handling_mode = match (boundary, routing_disposition) {
+                    (
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                        crate::policy::RoutingDisposition::Steer
+                        | crate::policy::RoutingDisposition::Immediate,
+                    ) => Some(meerkat_core::types::HandlingMode::Queue),
+                    _ => None,
+                };
+                Some(GeneratedAdmissionProjection {
+                    policy: PolicyDecision {
+                        apply_mode: policy_apply_mode.into(),
+                        wake_mode: policy_wake_mode.into(),
+                        queue_mode: policy_queue_mode.into(),
+                        consume_point: policy_consume_point.into(),
+                        drain_policy: policy_drain_policy.into(),
+                        routing_disposition,
+                        record_transcript,
+                        emit_operator_content: record_transcript,
+                        policy_version: PolicyVersion(policy_version),
+                    },
+                    runtime_semantics: RuntimeInputSemantics {
+                        boundary,
+                        execution_kind: runtime_execution_kind.into(),
+                        execution_handling_mode,
+                        peer_response_terminal_apply_intent:
+                            runtime_peer_response_terminal_apply_intent.map(Into::into),
+                    },
+                })
+            }
             _ => None,
         })
         .ok_or_else(|| {

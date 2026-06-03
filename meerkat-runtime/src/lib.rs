@@ -373,6 +373,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
             } => Some(ingress_types::RuntimeInputSemantics {
                 boundary: runtime_boundary.into(),
                 execution_kind: runtime_execution_kind.into(),
+                execution_handling_mode: None,
                 peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                     .map(Into::into),
             }),

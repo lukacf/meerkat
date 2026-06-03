@@ -7,14 +7,13 @@ icon: "bolt"
 ## Install
 
 <Tabs>
-  <Tab title="Rust crate">
-    ```toml Cargo.toml
-    [dependencies]
-    meerkat = { version = "0.6.23", features = ["anthropic", "jsonl-store"] }
-    meerkat-store = "0.6.23"
-    meerkat-tools = "0.6.23"
-    tokio = { version = "1", features = ["full"] }
+  <Tab title="CLI">
+    ```bash
+    brew install lukacf/meerkat/rkat
     ```
+    <Note>
+    The Homebrew tap supports macOS and Linux. On Linux, install Homebrew first from the [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) instructions, then use the same tap command.
+    </Note>
   </Tab>
   <Tab title="Python">
     ```bash
@@ -32,7 +31,16 @@ icon: "bolt"
     The SDK resolves `rkat-rpc` automatically by default and downloads it when needed. Install the standalone binary only if you want to manage it yourself.
     </Note>
   </Tab>
-  <Tab title="CLI">
+  <Tab title="Rust crate">
+    ```toml Cargo.toml
+    [dependencies]
+    meerkat = { version = "0.6.23", features = ["anthropic", "jsonl-store"] }
+    meerkat-store = "0.6.23"
+    meerkat-tools = "0.6.23"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Tab>
+  <Tab title="Cargo">
     ```bash
     cargo install rkat
     ```
@@ -128,6 +136,16 @@ Register an MCP server and its tools are available to the agent immediately:
 ```bash
 rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 rkat run "List the files in /tmp"
+```
+
+Remote streamable HTTP MCP servers can be added with a URL. OAuth-protected
+servers keep config simple and authenticate when you log in or run
+interactively:
+
+```bash
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
+rkat mcp login glean
+rkat run "Use Glean to search for onboarding docs"
 ```
 
 ## Enforce budgets

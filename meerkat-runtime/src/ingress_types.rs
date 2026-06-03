@@ -11,6 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationContextAppend, PeerResponseTerminalApplyIntent,
     RunApplyBoundary,
 };
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{InputKind, KindId};
@@ -76,6 +77,7 @@ pub struct RequestId(pub String);
 pub struct RuntimeInputSemantics {
     pub(crate) boundary: RunApplyBoundary,
     pub(crate) execution_kind: RuntimeExecutionKind,
+    pub(crate) execution_handling_mode: Option<HandlingMode>,
     pub(crate) peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
@@ -129,6 +131,7 @@ mod tests {
 
         assert_eq!(semantics.boundary, RunApplyBoundary::RunStart);
         assert_eq!(semantics.execution_kind, RuntimeExecutionKind::ContentTurn);
+        assert_eq!(semantics.execution_handling_mode, None);
         assert_eq!(
             semantics.peer_response_terminal_apply_intent,
             Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
@@ -149,6 +152,7 @@ mod tests {
             semantics.execution_kind,
             RuntimeExecutionKind::ResumePending
         );
+        assert_eq!(semantics.execution_handling_mode, None);
         assert_eq!(semantics.peer_response_terminal_apply_intent, None);
     }
 

@@ -5302,6 +5302,36 @@
     ],
     "title": "BridgeCommand"
   },
+  "BridgeDeliveryCompletion": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "session_id": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      },
+      "tool_calls": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "turns": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "session_id",
+      "text",
+      "turns",
+      "tool_calls"
+    ],
+    "title": "BridgeDeliveryCompletion",
+    "type": "object"
+  },
   "BridgeDeliveryOutcome": {
     "$defs": {
       "BridgeDeliveryRejectionCause": {
@@ -5807,6 +5837,34 @@
   },
   "BridgeDeliveryResponse": {
     "$defs": {
+      "BridgeDeliveryCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turns": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "text",
+          "turns",
+          "tool_calls"
+        ],
+        "type": "object"
+      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -5962,6 +6020,16 @@
         "type": [
           "string",
           "null"
+        ]
+      },
+      "completion": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgeDeliveryCompletion"
+          },
+          {
+            "type": "null"
+          }
         ]
       },
       "input_id": {
@@ -6630,6 +6698,34 @@
         },
         "type": "object"
       },
+      "BridgeDeliveryCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turns": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "text",
+          "turns",
+          "tool_calls"
+        ],
+        "type": "object"
+      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -6961,6 +7057,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "completion": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeDeliveryCompletion"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "input_id": {
@@ -7657,6 +7763,34 @@
           }
         ]
       },
+      "BridgeDeliveryCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turns": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "text",
+          "turns",
+          "tool_calls"
+        ],
+        "type": "object"
+      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -8080,6 +8214,16 @@
                 "type": [
                   "string",
                   "null"
+                ]
+              },
+              "completion": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeDeliveryCompletion"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "input_id": {
@@ -9525,6 +9669,34 @@
         },
         "type": "object"
       },
+      "BridgeDeliveryCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turns": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "text",
+          "turns",
+          "tool_calls"
+        ],
+        "type": "object"
+      },
       "BridgeDeliveryOutcome": {
         "description": "Outcome of a delivery attempt.",
         "oneOf": [
@@ -9855,6 +10027,16 @@
                 "type": [
                   "string",
                   "null"
+                ]
+              },
+              "completion": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeDeliveryCompletion"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "input_id": {

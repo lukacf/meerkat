@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.33] - 2026-06-03
+
+Meerkat 0.6.33 adds paired TCP comms for remote mob targets and hardens
+supervisor bridge completion for signed remote sessions.
+
+### Added
+
+- **Paired TCP comms for remote mob targets** (#751) — adds `rkat run` comms
+  flags for signed TCP listeners, external binding output, pairing password
+  sources, and target metadata labels, plus password-proof pairing that installs
+  trusted peers without sending the raw password.
+
+### Fixed
+
+- **Remote supervisor bridge completion** (#751) — returns bridge delivery
+  completion through the comms drain and local bridge so external mob targets
+  can complete supervisor requests reliably.
+- **Remote mob shutdown cleanup** (#751) — stops the mob supervisor bridge on
+  shutdown and normalizes idle peer `steer` admission so execution runs through
+  the runtime loop as `queue`.
+
 ## [0.6.32] - 2026-06-02
 
 Meerkat 0.6.32 fixes external supervisor bridge responses for remote mob

@@ -193,6 +193,14 @@ impl MobSupervisorBridge {
         self.replace_runtime_authority_locked(authority, true).await
     }
 
+    pub(crate) async fn shutdown(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let runtime = self.runtime().await;
+            runtime.stop_listeners_for_rebind().await;
+        }
+    }
+
     async fn replace_runtime_authority_locked(
         &self,
         authority: SupervisorAuthorityRecord,

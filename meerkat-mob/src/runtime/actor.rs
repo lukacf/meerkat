@@ -4178,6 +4178,7 @@ impl MobActor {
                         }
                     }
                     self.teardown_session_runtime_bindings_from_roster().await;
+                    self.supervisor_bridge.shutdown().await;
                     // Cancel remaining lifecycle notification tasks.
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();

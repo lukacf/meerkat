@@ -1264,6 +1264,8 @@ pub struct CommsRuntimeConfig {
     pub mode: CommsRuntimeMode,
     /// Address for agent-to-agent (signed) listener.
     pub address: Option<String>,
+    /// Peer address advertised to other signed-comms participants.
+    pub advertise_address: Option<String>,
     pub auth: CommsAuthMode,
     /// Whether inter-agent peer traffic requires cryptographic validation.
     ///
@@ -1287,6 +1289,7 @@ impl Default for CommsRuntimeConfig {
         Self {
             mode: CommsRuntimeMode::Inproc,
             address: None,
+            advertise_address: None,
             auth: CommsAuthMode::default(),
             require_peer_auth: true,
             event_address: None,
@@ -2782,12 +2785,17 @@ auth = "ed25519"
         let toml_str = r#"
 mode = "tcp"
 address = "127.0.0.1:4200"
+advertise_address = "tcp://203.0.113.10:4200"
 auth = "none"
 require_peer_auth = false
 event_address = "127.0.0.1:4201"
 "#;
         let parsed: CommsRuntimeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.event_address.as_deref(), Some("127.0.0.1:4201"));
+        assert_eq!(
+            parsed.advertise_address.as_deref(),
+            Some("tcp://203.0.113.10:4200")
+        );
         assert_eq!(parsed.auth, CommsAuthMode::Open);
         assert!(!parsed.require_peer_auth);
     }

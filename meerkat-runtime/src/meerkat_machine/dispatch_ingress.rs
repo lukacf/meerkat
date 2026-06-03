@@ -84,8 +84,15 @@ impl MeerkatMachine {
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
                     let input_kind = input.kind();
-                    let runtime_idle =
-                        state.is_idle_or_attached() && !active_turn_boundary_available;
+                    let runtime_idle = !active_turn_boundary_available
+                        && (state == RuntimeState::Idle
+                            || (state == RuntimeState::Attached
+                                && !matches!(
+                                    input.handling_mode(),
+                                    Some(meerkat_core::types::HandlingMode::Steer)
+                                ))
+                            || (state == RuntimeState::Attached
+                                && matches!(input, Input::Peer(_))));
                     let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
                     tracing::debug!(
                         session_id = %session_id,

@@ -120,7 +120,7 @@ impl DefaultPolicyTable {
                     !matches!(input, Input::Continuation(_)),
                 ),
                 meerkat_core::types::HandlingMode::Steer => pd(
-                    if runtime_idle {
+                    if runtime_idle && matches!(input, Input::Peer(_)) {
                         ApplyMode::StageRunStart
                     } else {
                         ApplyMode::StageRunBoundary

@@ -821,6 +821,7 @@ fn test_config(
         inproc_namespace: namespace,
         listen_uds: None,
         listen_tcp: None,
+        advertise_address: None,
         event_listen_tcp: None,
         #[cfg(unix)]
         event_listen_uds: None,

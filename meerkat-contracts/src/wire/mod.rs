@@ -169,11 +169,11 @@ pub use session::{
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
-    BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
-    BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeHardCancelPayload, BridgeMemberRuntimeState, BridgeObservationResponse,
-    BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload, BridgeProtocolVersion,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    BridgeCommandDecodeError, BridgeDeliveryCompletion, BridgeDeliveryOutcome,
+    BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
+    BridgeDestroyResponse, BridgeHardCancelPayload, BridgeMemberRuntimeState,
+    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
+    BridgeProtocolVersion, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
     SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION,
     SUPERVISOR_BRIDGE_INTENT, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
     SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS, UnsupportedBridgeProtocolVersion,

@@ -1382,6 +1382,15 @@ enum Commands {
         )]
         comms_listen_tcp: Option<String>,
 
+        /// TCP address this session should advertise to signed comms peers.
+        #[arg(
+            long = "comms-advertise-tcp",
+            value_name = "HOST:PORT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_advertise_tcp: Option<String>,
+
         /// Write this session's external comms runtime binding as JSON.
         #[arg(
             long = "comms-binding-out",
@@ -2567,6 +2576,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             keep_alive,
             comms_name,
             comms_listen_tcp,
+            comms_advertise_tcp,
             comms_binding_out,
             comms_pairing_password,
             comms_pairing_password_env,
@@ -2632,6 +2642,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 keep_alive,
                 comms_name,
                 comms_listen_tcp,
+                comms_advertise_tcp,
                 comms_binding_out,
                 comms_pairing_password,
                 comms_pairing_password_env,
@@ -2819,6 +2830,7 @@ async fn handle_help_command(
         None,
         None,
         None,
+        None,
         false,
         None,
         Vec::new(),
@@ -2867,6 +2879,7 @@ async fn handle_run_command(
     keep_alive: bool,
     comms_name: Option<String>,
     comms_listen_tcp: Option<String>,
+    comms_advertise_tcp: Option<String>,
     comms_binding_out: Option<PathBuf>,
     comms_pairing_password: Option<String>,
     comms_pairing_password_env: Option<String>,
@@ -2894,16 +2907,31 @@ async fn handle_run_command(
     if no_comms && comms_binding_out.is_some() {
         anyhow::bail!("--comms-binding-out cannot be used with --no-comms");
     }
+    if no_comms && comms_listen_tcp.is_some() {
+        anyhow::bail!("--comms-listen-tcp cannot be used with --no-comms");
+    }
+    if no_comms && comms_advertise_tcp.is_some() {
+        anyhow::bail!("--comms-advertise-tcp cannot be used with --no-comms");
+    }
+    if no_comms
+        && (comms_pairing_password.is_some()
+            || comms_pairing_password_env.is_some()
+            || comms_pairing_password_file.is_some())
+    {
+        anyhow::bail!("comms pairing password flags cannot be used with --no-comms");
+    }
     let pairing_password = resolve_comms_pairing_password(
         comms_pairing_password,
         comms_pairing_password_env,
         comms_pairing_password_file,
     )?;
+    let comms_advertise_address = resolve_comms_advertise_tcp(comms_advertise_tcp)?;
 
     if let Some(session_id) = resume {
         let comms_overrides = CommsOverrides {
             name: comms_name,
             listen_tcp: comms_listen_tcp,
+            advertise_address: comms_advertise_address,
             binding_out: comms_binding_out,
             pairing_password,
             disabled: no_comms,
@@ -2986,6 +3014,7 @@ async fn handle_run_command(
     let comms_overrides = CommsOverrides {
         name: comms_name,
         listen_tcp: comms_listen_tcp,
+        advertise_address: comms_advertise_address,
         binding_out: comms_binding_out,
         pairing_password,
         disabled: no_comms,
@@ -3387,10 +3416,32 @@ fn parse_hook_run_overrides(
 struct CommsOverrides {
     name: Option<String>,
     listen_tcp: Option<String>,
+    advertise_address: Option<String>,
     binding_out: Option<PathBuf>,
     pairing_password: Option<String>,
     disabled: bool,
     peer_meta: Option<meerkat_core::PeerMeta>,
+}
+
+impl CommsOverrides {
+    fn requires_runtime(&self) -> bool {
+        self.name.is_some()
+            || self.listen_tcp.is_some()
+            || self.advertise_address.is_some()
+            || self.binding_out.is_some()
+            || self.pairing_password.is_some()
+            || self.peer_meta.is_some()
+    }
+}
+
+fn resolve_comms_advertise_tcp(advertise_tcp: Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(advertise_tcp) = advertise_tcp else {
+        return Ok(None);
+    };
+    let addr: std::net::SocketAddr = advertise_tcp
+        .parse()
+        .map_err(|err| anyhow::anyhow!("invalid --comms-advertise-tcp address: {err}"))?;
+    Ok(Some(format!("tcp://{addr}")))
 }
 
 fn resolve_comms_pairing_password(
@@ -8324,10 +8375,10 @@ async fn run_agent(
         // When keep_alive is requested and no explicit name is provided, derive one
         // from the session_id so the factory's comms_name requirement is satisfied.
         let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
-            comms_overrides
-                .name
-                .clone()
-                .or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
+            comms_overrides.name.clone().or_else(|| {
+                (keep_alive || comms_overrides.requires_runtime())
+                    .then(|| format!("cli/{session_id}"))
+            })
         } else {
             None
         };
@@ -8386,6 +8437,7 @@ async fn run_agent(
         }
         #[cfg(feature = "comms")]
         {
+            config.comms.advertise_address = comms_overrides.advertise_address.clone();
             config.comms.pairing_password = comms_overrides.pairing_password.clone();
         }
 
@@ -8902,6 +8954,7 @@ async fn resume_session_with_llm_override(
         }
         #[cfg(feature = "comms")]
         {
+            config.comms.advertise_address = comms_overrides.advertise_address.clone();
             config.comms.pairing_password = comms_overrides.pairing_password.clone();
         }
         let has_max_duration = max_duration.is_some();
@@ -9040,7 +9093,9 @@ async fn resume_session_with_llm_override(
         #[cfg(feature = "comms")]
         let factory = factory.comms(
             !comms_overrides.disabled
-                && (tooling.comms.resolve(config.tools.comms_enabled) || keep_alive),
+                && (tooling.comms.resolve(config.tools.comms_enabled)
+                    || keep_alive
+                    || comms_overrides.requires_runtime()),
         );
 
         log_stage("build_cli_persistent_service");
@@ -9133,6 +9188,15 @@ async fn resume_session_with_llm_override(
 
         let hooks_override =
             (hooks_override != HookRunOverrides::default()).then_some(hooks_override);
+        let comms_name_override = if cfg!(feature = "comms") && !comms_overrides.disabled {
+            comms_overrides.name.clone().or_else(|| {
+                comms_overrides
+                    .requires_runtime()
+                    .then(|| format!("cli/{session_id}"))
+            })
+        } else {
+            None
+        };
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
             model: model_override,
             provider: provider.map(Provider::as_core),
@@ -9141,7 +9205,7 @@ async fn resume_session_with_llm_override(
             system_prompt,
             output_schema: parsed_output_schema,
             keep_alive: keep_alive_override,
-            comms_name: comms_overrides.name,
+            comms_name: comms_name_override,
             peer_meta: comms_overrides.peer_meta,
             hooks_override,
             budget_limits: budget_override,
@@ -14909,6 +14973,7 @@ default_model = "gemma"
             None,
             None,
             None,
+            None,
             false,
             None,
             Vec::new(),
@@ -15571,6 +15636,8 @@ default_model = "gemma"
             "bob-s-your-uncle",
             "--comms-listen-tcp",
             "127.0.0.1:4200",
+            "--comms-advertise-tcp",
+            "203.0.113.10:4200",
             "--agent-description",
             "You review code when asked.",
             "--agent-label",
@@ -15580,7 +15647,7 @@ default_model = "gemma"
             "--comms-binding-out",
             "/tmp/rkat-target-binding.json",
             "--comms-pairing-password",
-            "demo-password",
+            "0123456789abcdef0123456789abcdef",
             "--keep-alive",
             "ready",
         ])
@@ -15589,6 +15656,7 @@ default_model = "gemma"
             Commands::Run {
                 comms_name,
                 comms_listen_tcp,
+                comms_advertise_tcp,
                 comms_binding_out,
                 comms_pairing_password,
                 agent_description,
@@ -15599,11 +15667,15 @@ default_model = "gemma"
             } => {
                 assert_eq!(comms_name.as_deref(), Some("bob-s-your-uncle"));
                 assert_eq!(comms_listen_tcp.as_deref(), Some("127.0.0.1:4200"));
+                assert_eq!(comms_advertise_tcp.as_deref(), Some("203.0.113.10:4200"));
                 assert_eq!(
                     comms_binding_out.as_deref(),
                     Some(Path::new("/tmp/rkat-target-binding.json"))
                 );
-                assert_eq!(comms_pairing_password.as_deref(), Some("demo-password"));
+                assert_eq!(
+                    comms_pairing_password.as_deref(),
+                    Some("0123456789abcdef0123456789abcdef")
+                );
                 assert_eq!(
                     agent_description.as_deref(),
                     Some("You review code when asked.")

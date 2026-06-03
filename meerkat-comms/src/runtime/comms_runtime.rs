@@ -14,6 +14,7 @@ use crate::peer_directory_reachability_authority::{
 use crate::tokio;
 use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
 use async_trait::async_trait;
+#[cfg(not(target_arch = "wasm32"))]
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::Stream;
 use futures::task::{Context, Poll};
@@ -32,7 +33,7 @@ use meerkat_core::{BlobStore, MissingBlobBehavior};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-#[cfg(unix)]
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -151,11 +152,17 @@ impl ResolvedPeer {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_VERSION: u32 = 1;
+#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_HELLO_KIND: &str = "meerkat_pairing_hello";
+#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_CHALLENGE_KIND: &str = "meerkat_pairing_challenge";
+#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_PROOF_KIND: &str = "meerkat_pairing_proof";
+#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_COMPLETE_KIND: &str = "meerkat_pairing_complete";
+#[cfg(not(target_arch = "wasm32"))]
 const PAIRING_CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -191,6 +198,31 @@ fn comms_pairing_password_proof(
     hasher.update([0]);
     hasher.update(caller_address.as_bytes());
     BASE64_STANDARD.encode(hasher.finalize())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut diff = left.len() ^ right.len();
+    let max = left.len().max(right.len());
+    for idx in 0..max {
+        let left_byte = left.get(idx).copied().unwrap_or_default();
+        let right_byte = right.get(idx).copied().unwrap_or_default();
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+    diff == 0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_pairing_secret(secret: &str) -> Result<(), std::io::Error> {
+    if secret.len() < 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "comms pairing secret must be at least 32 bytes; use a random one-time bootstrap token",
+        ));
+    }
+    Ok(())
 }
 
 /// Derive a stable [`meerkat_core::comms::PeerId`] from a signing pubkey.
@@ -1558,6 +1590,7 @@ impl CommsRuntime {
             trusted_peers_path: std::path::PathBuf::new(),
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -1630,6 +1663,18 @@ impl CommsRuntime {
             return Err(CommsRuntimeError::AlreadyStarted);
         }
         self.config.listen_tcp = Some(listen_tcp);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_advertise_address_for_unstarted_runtime(
+        &mut self,
+        advertise_address: String,
+    ) -> Result<(), CommsRuntimeError> {
+        if self.listeners_started {
+            return Err(CommsRuntimeError::AlreadyStarted);
+        }
+        self.config.advertise_address = Some(advertise_address);
         Ok(())
     }
 
@@ -1707,6 +1752,7 @@ impl CommsRuntime {
             trusted_peers_path: identity_dir.join("trusted_peers.json"),
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -2020,6 +2066,9 @@ impl CommsRuntime {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn advertised_address(&self) -> String {
+        if let Some(ref advertised) = self.config.advertise_address {
+            return advertised.clone();
+        }
         if let Some(ref uds) = self.config.listen_uds {
             return format!("uds://{}", uds.display());
         }
@@ -2062,6 +2111,7 @@ impl CommsRuntime {
                 require_peer_auth: self.require_peer_auth,
                 inbox_sender: inbox_sender.clone(),
                 pairing_password: self.config.pairing_password.clone(),
+                advertise_address: self.config.advertise_address.clone(),
                 trusted_peers_path: self.config.trusted_peers_path.clone(),
                 participant_name: self.config.name.clone(),
                 bridge_bootstrap_token: self.bridge_bootstrap_token.clone(),
@@ -2954,6 +3004,7 @@ struct TcpListenerConfig {
     require_peer_auth: bool,
     inbox_sender: InboxSender,
     pairing_password: Option<String>,
+    advertise_address: Option<String>,
     trusted_peers_path: std::path::PathBuf,
     participant_name: String,
     bridge_bootstrap_token: String,
@@ -2969,13 +3020,33 @@ async fn spawn_tcp_listener(config: TcpListenerConfig) -> Result<ListenerHandle,
         require_peer_auth,
         inbox_sender,
         pairing_password,
+        advertise_address,
         trusted_peers_path,
         participant_name,
         bridge_bootstrap_token,
     } = config;
+    if let Some(secret) = pairing_password.as_deref() {
+        validate_pairing_secret(secret)?;
+    }
     let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
-    let target_address = format!("tcp://{local_addr}");
+    let target_address = if let Some(advertise_address) = advertise_address {
+        parse_peer_address(&advertise_address).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid comms advertised address '{advertise_address}': {error}"),
+            )
+        })?;
+        advertise_address
+    } else {
+        if local_addr.ip().is_unspecified() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "signed comms listener bound to a wildcard address requires an explicit advertised address",
+            ));
+        }
+        format!("tcp://{local_addr}")
+    };
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let (keypair, router, trusted, inbox_sender) = (
@@ -3202,7 +3273,7 @@ async fn handle_pairing_connection(
         &caller.identity.public_key,
         &caller.address,
     );
-    if supplied != expected {
+    if !constant_time_str_eq(supplied, &expected) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "invalid pairing password proof",
@@ -3682,6 +3753,7 @@ mod tests {
             inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -3700,7 +3772,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = test_runtime_config("pairing-target", &tmp);
         config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
-        config.pairing_password = Some("demo-password".to_string());
+        config.pairing_password = Some("0123456789abcdef0123456789abcdef".to_string());
         let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
             config,
             Arc::new(HashSet::new()),
@@ -3735,7 +3807,7 @@ mod tests {
         assert_eq!(challenge["kind"], PAIRING_CHALLENGE_KIND);
         let challenge_token = challenge["challenge"].as_str().unwrap();
         let proof = comms_pairing_password_proof(
-            "demo-password",
+            "0123456789abcdef0123456789abcdef",
             challenge_token,
             &caller_public_key,
             caller_address,
@@ -3796,7 +3868,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = test_runtime_config("pairing-delayed-target", &tmp);
         config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
-        config.pairing_password = Some("demo-password".to_string());
+        config.pairing_password = Some("0123456789abcdef0123456789abcdef".to_string());
         let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
             config,
             Arc::new(HashSet::new()),
@@ -3827,6 +3899,47 @@ mod tests {
         reader.read_line(&mut line).await.unwrap();
         let challenge: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(challenge["kind"], PAIRING_CHALLENGE_KIND);
+    }
+
+    #[tokio::test]
+    async fn wildcard_signed_listener_requires_advertised_address() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = test_runtime_config("wildcard-target", &tmp);
+        config.listen_tcp = Some("0.0.0.0:0".parse().unwrap());
+        let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+
+        let error = runtime
+            .start_listeners()
+            .await
+            .expect_err("wildcard listener without advertise address should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires an explicit advertised address"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_advertised_address_overrides_bound_listener_address() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = test_runtime_config("advertised-target", &tmp);
+        config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
+        config.advertise_address = Some("tcp://203.0.113.10:4200".to_string());
+        let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+
+        runtime.start_listeners().await.unwrap();
+        assert_eq!(runtime.advertised_address(), "tcp://203.0.113.10:4200");
     }
 
     #[tokio::test]
@@ -3938,6 +4051,7 @@ mod tests {
             inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -3966,6 +4080,7 @@ mod tests {
             inproc_namespace: None,
             listen_uds: None,
             listen_tcp: Some("127.0.0.1:0".parse().unwrap()),
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -3995,6 +4110,7 @@ mod tests {
             inproc_namespace: None,
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: Some("0.0.0.0:4201".parse().unwrap()),
             #[cfg(unix)]
             event_listen_uds: None,
@@ -5985,6 +6101,7 @@ mod tests {
             require_peer_auth: false,
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
@@ -6003,6 +6120,7 @@ mod tests {
             require_peer_auth: false,
             listen_uds: None,
             listen_tcp: None,
+            advertise_address: None,
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,

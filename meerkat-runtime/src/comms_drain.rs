@@ -20,12 +20,12 @@ use meerkat_core::interaction::{
 use meerkat_core::types::SessionId;
 
 use meerkat_contracts::wire::supervisor_bridge::{
-    BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryCompletion,
-    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
-    BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
-    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec,
-    BridgeRejectionCause, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_INTENT, canonicalize_bridge_address, decode_bridge_command,
+    BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
+    BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
+    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
+    BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
+    BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
+    canonicalize_bridge_address, decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -1726,8 +1726,8 @@ async fn try_handle_supervisor_bridge_command(
                 .accept_input_with_completion(session_id, input)
                 .await
             {
-                Ok((accept_outcome, completion_handle)) => {
-                    let mut response = match accept_outcome {
+                Ok((accept_outcome, _completion_handle)) => {
+                    let response = match accept_outcome {
                         crate::accept::AcceptOutcome::Accepted { input_id, .. } => {
                             BridgeDeliveryResponse {
                                 input_id: request_input_id,
@@ -1760,9 +1760,6 @@ async fn try_handle_supervisor_bridge_command(
                             }
                         }
                     };
-                    if let Some(handle) = completion_handle {
-                        response.completion = completion_outcome_bridge_result(handle.wait().await);
-                    }
                     send_bridge_response(
                         comms_runtime,
                         candidate,
@@ -2196,27 +2193,6 @@ fn runtime_state_to_bridge(state: crate::RuntimeState) -> BridgeMemberRuntimeSta
         crate::RuntimeState::Stopped => BridgeMemberRuntimeState::Stopped,
         crate::RuntimeState::Destroyed => BridgeMemberRuntimeState::Destroyed,
     }
-}
-
-fn completion_outcome_bridge_result(
-    outcome: CompletionOutcome,
-) -> Option<BridgeDeliveryCompletion> {
-    let result = match outcome {
-        CompletionOutcome::Completed(result) => *result,
-        CompletionOutcome::CompletedWithFinalizationFailure { result, .. } => *result,
-        CompletionOutcome::CompletedWithoutResult
-        | CompletionOutcome::CallbackPending { .. }
-        | CompletionOutcome::Cancelled
-        | CompletionOutcome::Abandoned(_)
-        | CompletionOutcome::AbandonedWithError { .. }
-        | CompletionOutcome::RuntimeTerminated(_) => return None,
-    };
-    Some(BridgeDeliveryCompletion {
-        session_id: result.session_id.to_string(),
-        text: result.text,
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-    })
 }
 
 fn interaction_terminal_event(
@@ -4426,6 +4402,23 @@ mod tests {
             peer.handling_mode,
             Some(HandlingMode::Queue),
             "bridge delivery explicit queue must survive into MeerkatMachine admission"
+        );
+    }
+
+    #[test]
+    fn bridge_delivery_handler_does_not_wait_for_completion_inline() {
+        let source = include_str!("comms_drain.rs");
+        let deliver_start = source
+            .find("BridgeCommand::DeliverMemberInput")
+            .expect("deliver command branch exists");
+        let deliver_end = source[deliver_start..]
+            .find("fn bridge_runtime_state")
+            .map(|offset| deliver_start + offset)
+            .expect("bridge runtime state helper follows command match");
+        let deliver_source = &source[deliver_start..deliver_end];
+        assert!(
+            !deliver_source.contains(".wait().await"),
+            "bridge delivery admission must not block the comms drain waiting for completion"
         );
     }
 

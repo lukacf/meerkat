@@ -32,6 +32,13 @@ pub struct CoreCommsConfig {
     /// Address for signed (Ed25519) agent-to-agent listener.
     #[cfg(not(target_arch = "wasm32"))]
     pub listen_tcp: Option<SocketAddr>,
+    /// Runtime peer address advertised to other signed-comms participants.
+    ///
+    /// When absent, the runtime advertises its bound listener address. Set this
+    /// when binding to a wildcard/NAT/interface-local address that peers cannot
+    /// dial directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub advertise_address: Option<String>,
     /// Address for plain-text external event listener. Only active when `auth=Open`.
     #[cfg(not(target_arch = "wasm32"))]
     pub event_listen_tcp: Option<SocketAddr>,
@@ -64,6 +71,8 @@ impl Default for CoreCommsConfig {
             listen_uds: None,
             #[cfg(not(target_arch = "wasm32"))]
             listen_tcp: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            advertise_address: None,
             #[cfg(not(target_arch = "wasm32"))]
             event_listen_tcp: None,
             #[cfg(unix)]
@@ -115,6 +124,7 @@ impl CoreCommsConfig {
             inproc_namespace: self.inproc_namespace.clone(),
             listen_uds: self.listen_uds.as_ref().map(|p| resolve(p)),
             listen_tcp: self.listen_tcp,
+            advertise_address: self.advertise_address.clone(),
             event_listen_tcp: self.event_listen_tcp,
             #[cfg(unix)]
             event_listen_uds: self.event_listen_uds.as_ref().map(|p| resolve(p)),
@@ -143,6 +153,8 @@ pub struct ResolvedCommsConfig {
     pub listen_uds: Option<PathBuf>,
     /// Address for signed (Ed25519) agent-to-agent listener.
     pub listen_tcp: Option<SocketAddr>,
+    /// Runtime peer address advertised to other signed-comms participants.
+    pub advertise_address: Option<String>,
     /// Address for plain-text external event listener.
     pub event_listen_tcp: Option<SocketAddr>,
     /// Path for plain-text external event listener (UDS).

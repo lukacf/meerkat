@@ -693,7 +693,7 @@ async fn resolve_authorized_supervisor(
 /// bound supervisor's response route exists so the `PeerResponse` ack can be
 /// routed back to the authenticated sender.
 async fn resolve_authorized_supervisor_with_response_route(
-    adapter: &MeerkatMachine,
+    adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
     sender: &PeerIngressFact,
@@ -709,7 +709,14 @@ async fn resolve_authorized_supervisor_with_response_route(
         )
     })?;
     let response_peer = bound_supervisor_response_descriptor(sender, &binding, context)?;
-    ensure_bridge_response_route_for_descriptor(comms_runtime, response_peer, context).await?;
+    ensure_bridge_response_route_for_descriptor(
+        adapter,
+        session_id,
+        comms_runtime,
+        response_peer,
+        context,
+    )
+    .await?;
     Ok(supervisor)
 }
 
@@ -1205,6 +1212,42 @@ async fn bind_and_publish_supervisor_trust(
     .map_err(|error| format!("{context}: trust publication failed: {error}"))
 }
 
+/// Re-install the PRIVATE supervisor admission trust edge for the current
+/// binding, mirroring the Bootstrap path (`bind_and_publish_supervisor_trust`).
+///
+/// Used by the BindMember idempotent-ack repair: the DSL already holds the
+/// supervisor binding, but the runtime's private admission edge may be missing
+/// (e.g. after a transport rebind). `RequestSupervisorTrustPublish` restates the
+/// current binding and emits a generated publish obligation whose authority
+/// owner token derives from the session dsl authority; the obligation is spent
+/// as a PRIVATE add. The supervisor is a control-plane edge and MUST NOT surface
+/// in the public peer directory (see `add_private_trusted_peer` doc).
+async fn republish_private_supervisor_trust(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    supervisor: &TrustedPeerDescriptor,
+) -> Result<(), String> {
+    adapter
+        .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+        .await
+        .map_err(|error| format!("local endpoint rejected: {error}"))?;
+    let obligation = supervisor_route_publish_obligation(
+        adapter,
+        session_id,
+        supervisor,
+        "bind member idempotent ack trust repair",
+    )
+    .await?;
+    publish_supervisor_trust_from_generated_obligation(
+        adapter,
+        session_id,
+        comms_runtime,
+        &obligation,
+    )
+    .await
+}
+
 fn trusted_peer_descriptor_from_bound_supervisor_state(
     previous: &BoundSupervisorState,
 ) -> Result<TrustedPeerDescriptor, String> {
@@ -1391,11 +1434,15 @@ async fn send_bridge_failure(
 }
 
 async fn ensure_bridge_response_route_for_supervisor(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
     supervisor: &BridgePeerIdentity,
     context: &str,
 ) -> Result<(), (BridgeRejectionCause, String)> {
     ensure_bridge_response_route_for_descriptor(
+        adapter,
+        session_id,
         comms_runtime,
         supervisor.clone().into_trusted_peer_descriptor(),
         context,
@@ -1404,31 +1451,25 @@ async fn ensure_bridge_response_route_for_supervisor(
 }
 
 async fn ensure_bridge_response_route_for_descriptor(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
     descriptor: TrustedPeerDescriptor,
     context: &str,
 ) -> Result<(), (BridgeRejectionCause, String)> {
-    match comms_runtime
-        .add_private_trusted_peer(descriptor.clone())
+    let obligation = supervisor_route_publish_obligation(adapter, session_id, &descriptor, context)
         .await
-    {
-        Ok(()) => Ok(()),
-        Err(SendError::Unsupported(_)) => {
-            comms_runtime
-                .add_trusted_peer(descriptor)
-                .await
-                .map_err(|error| {
-                    (
-                        BridgeRejectionCause::Internal,
-                        format!("{context}: failed to install supervisor response route: {error}"),
-                    )
-                })
-        }
-        Err(error) => Err((
-            BridgeRejectionCause::Internal,
-            format!("{context}: failed to install supervisor response route: {error}"),
-        )),
-    }
+        .map_err(|reason| (BridgeRejectionCause::Internal, reason))?;
+    let authority = supervisor_publish_authority(&obligation)
+        .map_err(|reason| (BridgeRejectionCause::Internal, reason))?;
+    apply_generated_private_trust_add(comms_runtime, descriptor, authority)
+        .await
+        .map_err(|error| {
+            (
+                BridgeRejectionCause::Internal,
+                format!("{context}: failed to install supervisor response route: {error}"),
+            )
+        })
 }
 
 fn bound_supervisor_response_descriptor(
@@ -1456,64 +1497,37 @@ fn bound_supervisor_response_descriptor(
     })
 }
 
-async fn send_bridge_response_after_removed_supervisor_route(
-    comms_runtime: &Arc<dyn CommsRuntime>,
-    candidate: &PeerInputCandidate,
-    status: meerkat_core::interaction::ResponseStatus,
-    reply: BridgeReply,
-    response_peer: TrustedPeerDescriptor,
-    context: &str,
-) {
-    send_bridge_response_with_temporary_supervisor_route(
-        comms_runtime,
-        candidate,
-        status,
-        reply,
-        response_peer,
-        context,
-    )
-    .await;
-}
-
+/// Install a temporary PRIVATE supervisor response route, send the reply over
+/// it, then remove it.
+///
+/// The supervisor's trust edge was revoked before the reply (revoke /
+/// rotation-to-a-new-supervisor), so the router can no longer dial the original
+/// supervisor. The caller captures a generated (add, remove) authority pair
+/// from a single supervisor-publish obligation WHILE THE BINDING WAS STILL
+/// PRESENT (the obligation's owner token derives from the session dsl
+/// authority). This reinstalls the private admission edge just long enough to
+/// route the terminal ack, then removes it so no stale control-plane edge
+/// survives the reply.
 async fn send_bridge_response_with_temporary_supervisor_route(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
     status: meerkat_core::interaction::ResponseStatus,
     reply: BridgeReply,
     response_peer: TrustedPeerDescriptor,
-    context: &str,
+    add_authority: CommsTrustMutationAuthority,
+    remove_authority: CommsTrustMutationAuthority,
 ) {
-    let removal_key = response_peer.peer_id.as_str();
-    let add_result = match comms_runtime
-        .add_private_trusted_peer(response_peer.clone())
-        .await
-    {
-        Ok(()) => Ok(true),
-        Err(SendError::Unsupported(_)) => comms_runtime
-            .add_trusted_peer(response_peer)
-            .await
-            .map(|()| false)
-            .map_err(|error| {
-                (
-                    BridgeRejectionCause::Internal,
-                    format!("{context}: failed to install supervisor response route: {error}"),
-                )
-            }),
-        Err(error) => Err((
-            BridgeRejectionCause::Internal,
-            format!("{context}: failed to install supervisor response route: {error}"),
-        )),
-    };
-    match add_result {
-        Ok(used_private_route) => {
+    let removal_key = response_peer.peer_id.to_string();
+    match apply_generated_private_trust_add(comms_runtime, response_peer, add_authority).await {
+        Ok(()) => {
             send_bridge_response(comms_runtime, candidate, status, reply).await;
-            if let Err(error) = if used_private_route {
-                comms_runtime
-                    .remove_private_trusted_peer(&removal_key)
-                    .await
-            } else {
-                comms_runtime.remove_trusted_peer(&removal_key).await
-            } {
+            if let Err(error) = apply_generated_private_trust_remove(
+                comms_runtime,
+                removal_key.clone(),
+                remove_authority,
+            )
+            .await
+            {
                 tracing::warn!(
                     error = %error,
                     peer_id = %removal_key,
@@ -1521,9 +1535,8 @@ async fn send_bridge_response_with_temporary_supervisor_route(
                 );
             }
         }
-        Err((cause, reason)) => {
+        Err(reason) => {
             tracing::warn!(
-                cause = ?cause,
                 reason = %reason,
                 peer_id = %removal_key,
                 "comms_drain: failed to install temporary supervisor response route"
@@ -1531,6 +1544,60 @@ async fn send_bridge_response_with_temporary_supervisor_route(
             comms_runtime.mark_interaction_complete(&candidate.interaction.id);
         }
     }
+}
+
+/// Stage a generated `RequestSupervisorTrustPublish` restating the CURRENT
+/// binding and return the single publish obligation it emits. The obligation's
+/// authority owner token derives from the session dsl authority, so a
+/// trust-mutation authority minted from it validates against a runtime carrying
+/// the same MeerkatMachine owner token.
+async fn supervisor_route_publish_obligation(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    descriptor: &TrustedPeerDescriptor,
+    context: &str,
+) -> Result<crate::protocol_supervisor_trust_publish::SupervisorTrustPublishObligation, String> {
+    let binding = adapter.supervisor_binding(session_id).await;
+    let bound = BoundSupervisorState::from_binding(&binding).ok_or_else(|| {
+        format!("{context}: supervisor binding absent for response-route authority")
+    })?;
+    let transition = adapter
+        .stage_supervisor_trust_publish_request(
+            session_id,
+            bound.name.clone(),
+            bound.peer_id.clone(),
+            bound.address.clone(),
+            bound.signing_public_key.clone(),
+            bound.epoch,
+        )
+        .await
+        .map_err(|error| {
+            format!("{context}: generated supervisor route publish request rejected: {error}")
+        })?;
+    let obligation =
+        single_supervisor_publish_obligation(adapter, session_id, &transition, context).await?;
+    if obligation.peer_id().as_str() != descriptor.peer_id.as_str() {
+        return Err(format!(
+            "{context}: generated supervisor route publish obligation peer_id mismatch"
+        ));
+    }
+    Ok(obligation)
+}
+
+/// Mint a PRIVATE (add, remove) authority pair for a temporary supervisor
+/// response route from a single generated publish obligation restating the
+/// current binding. Must be called WHILE the binding is still present.
+async fn generated_temporary_supervisor_route_authority_pair(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    descriptor: &TrustedPeerDescriptor,
+    context: &str,
+) -> Result<(CommsTrustMutationAuthority, CommsTrustMutationAuthority), String> {
+    let obligation =
+        supervisor_route_publish_obligation(adapter, session_id, descriptor, context).await?;
+    let add = supervisor_publish_authority(&obligation)?;
+    let remove = supervisor_publish_cleanup_authority(&obligation)?;
+    Ok((add, remove))
 }
 
 /// Try to handle a supervisor bridge command from an incoming comms request.
@@ -1667,7 +1734,14 @@ async fn try_handle_supervisor_bridge_command(
                                 return true;
                             }
                         };
-                    if let Err(error) = comms_runtime.add_trusted_peer(supervisor_spec).await {
+                    if let Err(error) = republish_private_supervisor_trust(
+                        adapter,
+                        session_id,
+                        comms_runtime,
+                        &supervisor_spec,
+                    )
+                    .await
+                    {
                         send_bridge_failure(
                             comms_runtime,
                             candidate,
@@ -1902,6 +1976,8 @@ async fn try_handle_supervisor_bridge_command(
                     // install the supervisor response route before acking so the
                     // PeerResponse can be routed back to the bound supervisor.
                     if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
+                        adapter,
+                        session_id,
                         comms_runtime,
                         &supervisor,
                         "authorize supervisor failed",
@@ -1993,6 +2069,36 @@ async fn try_handle_supervisor_bridge_command(
                 return true;
             }
             let new_peer_id = supervisor_spec.peer_id.as_str();
+            // For a supervisor REPLACEMENT (different peer), capture the generated
+            // PRIVATE (add, remove) authority pair for the temporary reply route
+            // to the PREVIOUS supervisor BEFORE the rotation revokes it —
+            // `RequestSupervisorTrustPublish` requires a live binding, and the
+            // router can only dial a peer that holds a trust-store address entry.
+            // In-place rotation keeps the existing route, so no capture is needed.
+            let rotation_reply_route_authority = if previous_binding.peer_id == new_peer_id {
+                None
+            } else {
+                match generated_temporary_supervisor_route_authority_pair(
+                    adapter,
+                    session_id,
+                    &previous_response_peer,
+                    "authorize supervisor failed",
+                )
+                .await
+                {
+                    Ok(pair) => Some(pair),
+                    Err(reason) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            reason,
+                        )
+                        .await;
+                        return true;
+                    }
+                }
+            };
             if previous_binding.peer_id == new_peer_id {
                 let authorize_transition = match adapter
                     .stage_supervisor_authorize(
@@ -2274,9 +2380,11 @@ async fn try_handle_supervisor_bridge_command(
             }
             // PR #750 response-route fix grafted onto gen-authority rotation:
             // reply over the same condition that drove the action. Rotating the
-            // supervisor in place leaves the response route intact; replacing it
-            // revoked the previous route, so reply via a temporary route built
-            // from the authenticated sender + previous binding descriptor.
+            // supervisor in place leaves the (private) response route intact;
+            // replacing it revoked the previous route, so reply via a temporary
+            // PRIVATE route built from the authenticated sender + previous binding
+            // descriptor, using the authority pair captured before the revoke
+            // unbound the previous supervisor.
             if previous_binding.peer_id == new_peer_id {
                 send_bridge_response(
                     comms_runtime,
@@ -2286,13 +2394,26 @@ async fn try_handle_supervisor_bridge_command(
                 )
                 .await;
             } else {
-                send_bridge_response_after_removed_supervisor_route(
+                let Some((add_authority, remove_authority)) = rotation_reply_route_authority else {
+                    // Unreachable: the authority pair is always captured for the
+                    // different-peer branch above. Fail closed rather than panic.
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        "rotation reply route authority missing".to_string(),
+                    )
+                    .await;
+                    return true;
+                };
+                send_bridge_response_with_temporary_supervisor_route(
                     comms_runtime,
                     candidate,
                     meerkat_core::interaction::ResponseStatus::Completed,
                     BridgeReply::Ack(BridgeAck { ok: true }),
                     previous_response_peer,
-                    "authorize supervisor failed",
+                    add_authority,
+                    remove_authority,
                 )
                 .await;
             }
@@ -2321,6 +2442,34 @@ async fn try_handle_supervisor_bridge_command(
                 return true;
             }
             let supervisor_peer_id = authorized_supervisor.peer_id.as_str();
+            // Capture the generated PRIVATE (add, remove) authority pair for the
+            // temporary reply route BEFORE the revoke unbinds the supervisor —
+            // `RequestSupervisorTrustPublish` requires a live binding, and the
+            // router can only dial a peer with a trust-store address entry.
+            let revoke_reply_route_authority = {
+                let response_descriptor =
+                    authorized_supervisor.clone().into_trusted_peer_descriptor();
+                match generated_temporary_supervisor_route_authority_pair(
+                    adapter,
+                    session_id,
+                    &response_descriptor,
+                    "revoke supervisor failed",
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(reason) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            reason,
+                        )
+                        .await;
+                        return true;
+                    }
+                }
+            };
             let revoke_transition = match adapter
                 .stage_supervisor_revoke(session_id, supervisor_peer_id.clone(), payload.epoch)
                 .await
@@ -2454,13 +2603,15 @@ async fn try_handle_supervisor_bridge_command(
                 .await;
                 return true;
             }
-            send_bridge_response_after_removed_supervisor_route(
+            let (add_authority, remove_authority) = revoke_reply_route_authority;
+            send_bridge_response_with_temporary_supervisor_route(
                 comms_runtime,
                 candidate,
                 meerkat_core::interaction::ResponseStatus::Completed,
                 BridgeReply::Ack(BridgeAck { ok: true }),
                 supervisor_response_peer,
-                "revoke supervisor failed",
+                add_authority,
+                remove_authority,
             )
             .await;
             true
@@ -3111,6 +3262,43 @@ mod tests {
             CommsTrustMutationResult::Added { .. } => {}
             other => panic!("{context}: unexpected trust mutation result {other:?}"),
         }
+    }
+
+    /// Seed a PRIVATE supervisor trust edge on `runtime` via the production
+    /// generated supervisor-publish path against `adapter`'s session dsl. The
+    /// runtime must already carry the adapter session's peer-comms owner token
+    /// (via `test_install_session_peer_comms_handle_on_runtime`), and the
+    /// supervisor must already be bound so `RequestSupervisorTrustPublish`
+    /// restates the live binding.
+    ///
+    /// Seeding through `MeerkatMachineSupervisorPublish` (not a public
+    /// projection) is required so the production PRIVATE revoke — which only
+    /// removes rows owned by that same source kind — actually removes the edge.
+    async fn add_member_private_supervisor_trust_via_adapter(
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        supervisor: &TrustedPeerDescriptor,
+        _epoch: u64,
+        context: &str,
+    ) {
+        let runtime_dyn: Arc<dyn CommsRuntime> = Arc::clone(runtime) as Arc<dyn CommsRuntime>;
+        adapter
+            .stage_local_endpoint_for_comms_runtime(session_id, runtime_dyn.as_ref())
+            .await
+            .unwrap_or_else(|error| panic!("{context}: local endpoint rejected: {error}"));
+        let obligation =
+            supervisor_route_publish_obligation(adapter, session_id, supervisor, context)
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+        publish_supervisor_trust_from_generated_obligation(
+            adapter,
+            session_id,
+            &runtime_dyn,
+            &obligation,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{context}: private trust publish failed: {error}"));
     }
 
     fn install_running_test_peer_comms_handle(
@@ -4415,10 +4603,15 @@ mod tests {
         );
 
         let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
-        supervisor_runtime
-            .add_trusted_peer(member_spec.clone())
-            .await
-            .expect("supervisor trusts member target");
+        let supervisor_dsl = install_running_test_peer_comms_handle(supervisor_runtime.as_ref());
+        add_test_projection_trust_with_dsl(
+            supervisor_runtime.as_ref(),
+            Arc::clone(&supervisor_dsl),
+            member_spec.clone(),
+            1,
+            "supervisor trusts member target",
+        )
+        .await;
         let supervisor_spec =
             trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
 
@@ -4436,6 +4629,10 @@ mod tests {
             )
             .await
             .expect("pre-bind supervisor in DSL state");
+        adapter
+            .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
+            .await
+            .expect("install adapter session peer-comms handle on member runtime");
         assert!(
             member_runtime
                 .peers()
@@ -4496,11 +4693,17 @@ mod tests {
         );
         assert!(
             member_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(supervisor_spec.pubkey)),
+            "idempotent BindMember must repair the PRIVATE supervisor admission edge"
+        );
+        assert!(
+            member_runtime
                 .peers()
                 .await
                 .iter()
-                .any(|peer| peer.peer_id == supervisor_spec.peer_id),
-            "idempotent BindMember must repair the sendable supervisor trust projection"
+                .all(|peer| peer.peer_id != supervisor_spec.peer_id),
+            "repaired supervisor edge is a control-plane route; it must not surface in public peers()"
         );
         let InteractionContent::Response {
             in_reply_to,
@@ -4563,10 +4766,15 @@ mod tests {
         );
 
         let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
-        supervisor_runtime
-            .add_trusted_peer(member_spec.clone())
-            .await
-            .expect("supervisor trusts member target");
+        let supervisor_dsl = install_running_test_peer_comms_handle(supervisor_runtime.as_ref());
+        add_test_projection_trust_with_dsl(
+            supervisor_runtime.as_ref(),
+            Arc::clone(&supervisor_dsl),
+            member_spec.clone(),
+            1,
+            "supervisor trusts member target",
+        )
+        .await;
         let supervisor_spec =
             trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
 
@@ -4584,6 +4792,10 @@ mod tests {
             )
             .await
             .expect("pre-bind supervisor in DSL state");
+        adapter
+            .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
+            .await
+            .expect("install adapter session peer-comms handle on member runtime");
         assert!(
             member_runtime
                 .peers()
@@ -4724,18 +4936,24 @@ mod tests {
         let new_supervisor_runtime = Arc::new(new_supervisor_runtime);
 
         let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
-        old_supervisor_runtime
-            .add_trusted_peer(member_spec)
-            .await
-            .expect("old supervisor trusts member target");
+        let old_supervisor_dsl =
+            install_running_test_peer_comms_handle(old_supervisor_runtime.as_ref());
+        add_test_projection_trust_with_dsl(
+            old_supervisor_runtime.as_ref(),
+            Arc::clone(&old_supervisor_dsl),
+            member_spec,
+            1,
+            "old supervisor trusts member target",
+        )
+        .await;
         let old_supervisor_spec =
             trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &old_supervisor_runtime);
         let new_supervisor_spec =
             trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &new_supervisor_runtime);
-        member_runtime
-            .add_trusted_peer(old_supervisor_spec.clone())
-            .await
-            .expect("member starts with old supervisor route");
+        // member_runtime's initial old-supervisor trust is seeded below via the
+        // PRIVATE supervisor-publish path against the adapter session, after the
+        // session is registered and the old supervisor is bound — so the
+        // production PRIVATE revoke (MeerkatMachineSupervisorPublish) removes it.
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
@@ -4751,6 +4969,25 @@ mod tests {
             )
             .await
             .expect("pre-bind old supervisor in DSL state");
+        adapter
+            .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
+            .await
+            .expect("install adapter session peer-comms handle on member runtime");
+        add_member_private_supervisor_trust_via_adapter(
+            &adapter,
+            &session_id,
+            &member_runtime,
+            &old_supervisor_spec,
+            1,
+            "member starts with old supervisor private route",
+        )
+        .await;
+        assert!(
+            member_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(old_supervisor_spec.pubkey)),
+            "member must start with a PRIVATE old supervisor route"
+        );
 
         let command = BridgeCommand::AuthorizeSupervisor(BridgeSupervisorPayload {
             supervisor: BridgePeerSpec::from(new_supervisor_spec.clone()),
@@ -4811,17 +5048,31 @@ mod tests {
             BridgeReply::Ack(BridgeAck { ok: true })
         ));
         let peers = member_runtime.peers().await;
+        // Supervisor trust is a PRIVATE control-plane edge: neither old nor new
+        // supervisor may appear in the public peer directory.
         assert!(
             peers
                 .iter()
                 .all(|peer| peer.peer_id != old_supervisor_spec.peer_id),
-            "old supervisor route must be removed after temporary ack route cleanup"
+            "old supervisor route must be removed after rotation"
         );
         assert!(
             peers
                 .iter()
-                .any(|peer| peer.peer_id == new_supervisor_spec.peer_id),
-            "new supervisor route must remain installed after rotation"
+                .all(|peer| peer.peer_id != new_supervisor_spec.peer_id),
+            "new supervisor route must stay private (not in public peers())"
+        );
+        assert!(
+            member_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(new_supervisor_spec.pubkey)),
+            "new supervisor private route must remain installed after rotation"
+        );
+        assert!(
+            !member_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(old_supervisor_spec.pubkey)),
+            "old supervisor private route must be fully removed after rotation"
         );
     }
 
@@ -4863,16 +5114,20 @@ mod tests {
         );
 
         let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
-        supervisor_runtime
-            .add_trusted_peer(member_spec)
-            .await
-            .expect("supervisor trusts member target");
+        let supervisor_dsl = install_running_test_peer_comms_handle(supervisor_runtime.as_ref());
+        add_test_projection_trust_with_dsl(
+            supervisor_runtime.as_ref(),
+            Arc::clone(&supervisor_dsl),
+            member_spec,
+            1,
+            "supervisor trusts member target",
+        )
+        .await;
         let supervisor_spec =
             trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
-        member_runtime
-            .add_trusted_peer(supervisor_spec.clone())
-            .await
-            .expect("member starts with supervisor route");
+        // member_runtime's supervisor trust is seeded below via the PRIVATE
+        // supervisor-publish path against the adapter session, after register +
+        // bind, so the production PRIVATE revoke removes it.
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
@@ -4888,6 +5143,25 @@ mod tests {
             )
             .await
             .expect("pre-bind supervisor in DSL state");
+        adapter
+            .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
+            .await
+            .expect("install adapter session peer-comms handle on member runtime");
+        add_member_private_supervisor_trust_via_adapter(
+            &adapter,
+            &session_id,
+            &member_runtime,
+            &supervisor_spec,
+            1,
+            "member starts with supervisor private route",
+        )
+        .await;
+        assert!(
+            member_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(supervisor_spec.pubkey)),
+            "member must start with a PRIVATE supervisor route"
+        );
 
         let command = BridgeCommand::RevokeSupervisor(BridgeSupervisorPayload {
             supervisor: BridgePeerSpec::from(supervisor_spec.clone()),
@@ -4950,7 +5224,13 @@ mod tests {
                 .await
                 .iter()
                 .all(|peer| peer.peer_id != supervisor_spec.peer_id),
-            "supervisor route must be removed after temporary ack route cleanup"
+            "supervisor route must be removed after revoke"
+        );
+        assert!(
+            !member_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(supervisor_spec.pubkey)),
+            "supervisor private admission edge must be fully removed after revoke"
         );
     }
 

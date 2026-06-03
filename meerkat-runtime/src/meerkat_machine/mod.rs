@@ -1315,6 +1315,25 @@ impl MeerkatMachine {
             })
     }
 
+    /// Test-only: install the session's generated peer-comms handle (and its
+    /// owner token) onto a comms runtime, so the runtime accepts generated trust
+    /// mutations minted from THIS adapter's session dsl authority. Mirrors what
+    /// `prepare_session_runtime_bindings` does in production via
+    /// `SessionRuntimeBindings`, for tests that construct runtimes directly.
+    #[cfg(test)]
+    pub(crate) async fn test_install_session_peer_comms_handle_on_runtime(
+        &self,
+        session_id: &SessionId,
+        runtime: &(dyn meerkat_core::handles::PeerCommsInstallTarget + '_),
+    ) -> Result<(), String> {
+        let dsl = self
+            .session_dsl_authority(session_id)
+            .await
+            .map_err(|error| format!("session dsl authority unavailable: {error}"))?;
+        let handle = std::sync::Arc::new(crate::handles::HandleDslAuthority::from_shared(dsl));
+        crate::handles::RuntimePeerCommsHandle::install_generated_on(handle, runtime)
+    }
+
     fn preview_dsl_input_on_state(
         state: &dsl::MeerkatMachineState,
         input: dsl::MeerkatMachineInput,

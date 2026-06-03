@@ -20,6 +20,8 @@ pub mod auth_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod mcp_oauth;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oauth_flow;
 // `resolver` contains per-source-spec arms that are individually cfg-split
 // for filesystem/command/managed-store sources. The InlineSecret, Env
@@ -44,6 +46,11 @@ pub use auth_store::refresh::InMemoryCoordinator;
 pub use auth_store::{
     AutoTokenStore, CommandCredentialRunner, CommandCredentialSpec, EphemeralTokenStore,
     FileTokenStore,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use mcp_oauth::{
+    BrowserOpener, MCP_INTERACTIVE_LOGIN_TIMEOUT, McpAuthMode, McpAuthTarget, McpOAuthAuthority,
+    McpOAuthError,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{RefreshCoordinator, RefreshError, TokenStore};

@@ -75,6 +75,9 @@ pub struct OAuthEndpoints {
     /// authorization-code token exchange request.
     #[serde(default)]
     pub include_state_in_token_exchange: bool,
+    /// Provider/resource-specific token request params.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_token_params: Vec<(String, String)>,
     /// Scopes to request during refresh-token exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refresh_scopes: Vec<String>,
@@ -193,6 +196,7 @@ mod tests {
             extra_authorize_params: Vec::new(),
             token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
             include_state_in_token_exchange: false,
+            extra_token_params: Vec::new(),
             refresh_scopes: Vec::new(),
             extra_headers: Vec::new(),
         };
@@ -221,6 +225,7 @@ mod tests {
             extra_authorize_params: Vec::new(),
             token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
             include_state_in_token_exchange: false,
+            extra_token_params: Vec::new(),
             refresh_scopes: Vec::new(),
             extra_headers: Vec::new(),
         };
@@ -245,6 +250,7 @@ mod tests {
             ],
             token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
             include_state_in_token_exchange: false,
+            extra_token_params: Vec::new(),
             refresh_scopes: Vec::new(),
             extra_headers: Vec::new(),
         };

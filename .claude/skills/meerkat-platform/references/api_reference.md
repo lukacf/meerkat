@@ -62,7 +62,7 @@ rkat session delete <ID>
 rkat session interrupt <ID>
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
-rkat mcp add|remove|list|get ...
+rkat mcp add|login|remove|list|get ...
 rkat skill add <PATH> [--name <NAME>]
 rkat skill remove|get <NAME_OR_SOURCE_UUID_OR_PATH> [--json for get]
 rkat skill list [--json]
@@ -101,6 +101,7 @@ Important `rkat run` options:
 --allow-tool <TOOL>                    # repeatable first-turn allow overlay
 --block-tool <TOOL>                    # repeatable first-turn block overlay
 --wait-for-mcp
+--mcp-auth <stored|interactive>
 --auth-binding <REALM:BINDING[:PROFILE]>
 --output <text|json|html> / --json / --html / --browser
 --stream / --no-stream
@@ -148,7 +149,8 @@ read-only observability surface.
 `rkat mcp` edits project/user MCP server config; it is not the live mutation surface for an already-running session.
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
+rkat mcp login <NAME> [--scope project|user|local]
 rkat mcp remove <NAME> [--scope project|user|local]
 rkat mcp list [--scope project|user|local] [--json]
 rkat mcp get <NAME> [--scope project|user|local] [--json]
@@ -158,9 +160,13 @@ Examples:
 
 ```bash
 rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
-rkat mcp add linear --transport http --url https://mcp.example.com
+rkat mcp add linear --url https://mcp.example.com
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
+rkat mcp login glean
 rkat mcp list
 ```
+
+HTTP OAuth is runtime-discovered. Keep `.rkat/mcp.toml` to name/url/transport/headers; `rkat mcp login <name>` performs explicit browser login. `rkat run` defaults to `--mcp-auth stored`; use `--mcp-auth interactive` to let a TTY run authenticate and retry when a streamable HTTP MCP server requires OAuth.
 
 ### Mob CLI surface
 

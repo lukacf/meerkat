@@ -62,6 +62,9 @@ pub async fn exchange_authorization_code_with_state(
         })?;
         form.push(("state", state.to_string()));
     }
+    for (key, value) in &endpoints.extra_token_params {
+        form.push((key.as_str(), value.clone()));
+    }
     send_token_request(http, endpoints, &form).await
 }
 
@@ -82,6 +85,9 @@ pub async fn exchange_refresh_token(
     }
     if !endpoints.refresh_scopes.is_empty() {
         form.push(("scope", endpoints.refresh_scopes.join(" ")));
+    }
+    for (key, value) in &endpoints.extra_token_params {
+        form.push((key.as_str(), value.clone()));
     }
     send_token_request(http, endpoints, &form).await
 }

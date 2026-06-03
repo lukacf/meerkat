@@ -50,7 +50,7 @@ rkat session list|show|delete|interrupt ...
 rkat live open|status|close ...
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
-rkat mcp add|remove|list|get ...
+rkat mcp add|login|remove|list|get ...
 rkat mob spawn-helper|fork-helper|member-status|force-cancel|respawn|wait-kickoff|run-flow|flow-status|pack|inspect|validate|deploy|web ...
 rkat skill add|remove|get|list|inspect ...
 rkat config get|set|patch ...
@@ -103,6 +103,7 @@ Advanced options:
 --instructions <TEXT>           # repeatable
 --app-context <JSON>
 --wait-for-mcp
+--mcp-auth <stored|interactive>
 --line-format <text|json>
 --auth-binding <REALM:BINDING[:PROFILE]>
 --comms-name <NAME>                         # stable signed comms participant name
@@ -194,7 +195,8 @@ rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 ## MCP
 
 ```bash
-rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] (--url <URL> | -- <CMD...>)
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user|local] [-H KEY:VALUE...] [-e KEY=VALUE...] [--url <URL> | <URL> | -- <CMD...>]
+rkat mcp login <NAME> [--scope project|user|local]
 rkat mcp remove <NAME> [--scope project|user|local]
 rkat mcp list [--scope project|user|local] [--json]
 rkat mcp get <NAME> [--scope project|user|local] [--json]
@@ -203,6 +205,11 @@ rkat mcp get <NAME> [--scope project|user|local] [--json]
 Omit `--scope` on `list`/`get` to search all scopes. Do not pass `--scope all`.
 Live mutation of an already-running session uses RPC/REST/MCP/SDK surfaces, not
 `rkat mcp reload`.
+
+For streamable HTTP OAuth, `rkat mcp add` remains simple: no auth schema is
+stored in MCP config. Use `rkat mcp login <name>` for explicit browser login.
+`rkat run` defaults to stored MCP OAuth tokens; use `--mcp-auth interactive`
+to allow first-use browser auth and reconnect in a TTY run.
 
 ## Realm
 

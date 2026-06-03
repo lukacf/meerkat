@@ -135,7 +135,11 @@ Built-in tool categories: builtins, shell, semantic memory, and mob orchestratio
 rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # Add a streamable HTTP server
-rkat mcp add remote-api --transport http --url https://mcp.example.com/api
+rkat mcp add remote-api --url https://mcp.example.com/api
+
+# Add an OAuth-protected streamable HTTP server and log in
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
+rkat mcp login glean
 
 # List all registered servers
 rkat mcp list

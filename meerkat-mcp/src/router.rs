@@ -16,8 +16,9 @@ use crate::generated::{
     protocol_surface_completion::{self, SurfaceCompletionObligation},
     protocol_surface_snapshot_alignment::{self, SurfaceSnapshotAlignmentObligation},
 };
-use crate::{McpConnection, McpError};
+use crate::{McpAuthResolver, McpConnection, McpError};
 use async_trait::async_trait;
+use meerkat_auth_core::McpAuthMode;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::McpServerConfig;
@@ -1295,6 +1296,8 @@ pub struct McpRouter {
     /// construction, via a sync trait method — without needing to block on
     /// the async router lock.
     mcp_lifecycle_handle: Arc<StdRwLock<Option<Arc<dyn McpServerLifecycleHandle>>>>,
+    mcp_auth_mode: McpAuthMode,
+    mcp_auth_resolver: Option<Arc<dyn McpAuthResolver>>,
 }
 
 impl McpRouter {
@@ -1311,6 +1314,8 @@ impl McpRouter {
             pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
             mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
+            mcp_auth_mode: McpAuthMode::Stored,
+            mcp_auth_resolver: None,
         }
     }
 
@@ -1400,6 +1405,16 @@ impl McpRouter {
             surface_handle,
             DEFAULT_REMOVAL_TIMEOUT,
         ))
+    }
+
+    pub fn with_mcp_auth(
+        mut self,
+        mode: McpAuthMode,
+        resolver: Option<Arc<dyn McpAuthResolver>>,
+    ) -> Self {
+        self.mcp_auth_mode = mode;
+        self.mcp_auth_resolver = resolver;
+        self
     }
 
     /// Create a new router with a custom remove-drain timeout.
@@ -1748,8 +1763,15 @@ impl McpRouter {
             .insert(server_name, obligation.clone());
 
         let tx = self.pending_tx.clone();
+        let auth_mode = self.mcp_auth_mode;
+        let auth_resolver = self.mcp_auth_resolver.clone();
         tokio::spawn(async move {
-            let result = McpConnection::connect_and_enumerate(&config).await;
+            let result = McpConnection::connect_and_enumerate_with_mcp_auth(
+                &config,
+                auth_mode,
+                auth_resolver,
+            )
+            .await;
             if let Err(error) = tx.send(PendingResult { obligation, result }).await {
                 let server_name = error.0.obligation.surface_id.clone();
                 McpRouter::close_result_connection_if_present(server_name, error.0.result);
@@ -1986,7 +2008,12 @@ impl McpRouter {
     /// Backward-compatible immediate install path. Bypasses staged/boundary
     /// flow and directly drives the surface owner through Stage -> Apply -> Success.
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
-        let (conn, tools) = McpConnection::connect_and_enumerate(&config).await?;
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            self.mcp_auth_mode,
+            self.mcp_auth_resolver.clone(),
+        )
+        .await?;
 
         let server_name = config.name.clone();
         let sid = SurfaceId::from(server_name.as_str());

@@ -130,6 +130,16 @@ rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 rkat run "List the files in /tmp"
 ```
 
+Remote streamable HTTP MCP servers can be added with a URL. OAuth-protected
+servers keep config simple and authenticate when you log in or run
+interactively:
+
+```bash
+rkat mcp add --transport http glean https://king-be.glean.com/mcp/default
+rkat mcp login glean
+rkat run "Use Glean to search for onboarding docs"
+```
+
 ## Enforce budgets
 
 Cap token usage, wall-clock time, or tool calls:

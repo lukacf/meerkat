@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.34] - 2026-06-03
+
+Meerkat 0.6.34 adds interactive OAuth for streamable HTTP MCP servers and
+promotes the Homebrew tap install path across the public docs.
+
+### Added
+
+- **Interactive OAuth for HTTP MCP servers** (#752) — adds `rkat mcp add` URL
+  forms for Codex/Claude-compatible HTTP MCP servers, runtime-discovered OAuth
+  with DCR, PKCE, refresh, stored and interactive modes, plus `rkat mcp login`.
+- **Homebrew install documentation** (#753) — promotes
+  `brew install lukacf/meerkat/rkat` in the README and quickstart, documents
+  macOS/Linux tap support, and expands distribution docs for tap credentials and
+  companion binaries.
+
 ## [0.6.33] - 2026-06-03
 
 Meerkat 0.6.33 adds paired TCP comms for remote mob targets and hardens

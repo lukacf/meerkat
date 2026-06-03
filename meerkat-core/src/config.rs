@@ -1274,6 +1274,12 @@ pub struct CommsRuntimeConfig {
     /// Address for the plain-text external event listener.
     /// Only active when `auth = "none"`. Accepts newline-delimited JSON or text.
     pub event_address: Option<String>,
+    /// Runtime-only enrollment password for initial comms pairing.
+    ///
+    /// This is deliberately skipped by serde so CLI/env/file overrides do not
+    /// persist a bootstrap secret into realm config or session metadata.
+    #[serde(skip)]
+    pub pairing_password: Option<String>,
 }
 
 impl Default for CommsRuntimeConfig {
@@ -1284,6 +1290,7 @@ impl Default for CommsRuntimeConfig {
             auth: CommsAuthMode::default(),
             require_peer_auth: true,
             event_address: None,
+            pairing_password: None,
         }
     }
 }

@@ -4129,6 +4129,7 @@ async fn spawn_live_external_peer_with_transport(
                                                 .to_string(),
                                             ),
                                             outcome: super::bridge_protocol::BridgeDeliveryOutcome::Accepted,
+                                            completion: None,
                                         };
                                         responses
                                             .insert(payload.input_id.clone(), response.clone());

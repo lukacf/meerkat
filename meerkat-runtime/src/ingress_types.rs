@@ -11,6 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationContextAppend, PeerResponseTerminalApplyIntent,
     RunApplyBoundary,
 };
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{InputKind, KindId};
@@ -78,6 +79,7 @@ pub struct RequestId(pub String);
 pub struct RuntimeInputSemantics {
     pub boundary: RunApplyBoundary,
     pub execution_kind: RuntimeExecutionKind,
+    pub execution_handling_mode: Option<HandlingMode>,
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
@@ -108,9 +110,19 @@ impl RuntimeInputSemantics {
         execution_kind: RuntimeExecutionKind,
         peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
     ) -> Self {
+        let boundary = Self::boundary_from_policy(policy);
+        let execution_handling_mode = match (boundary, policy.routing_disposition) {
+            (
+                RunApplyBoundary::RunStart,
+                crate::policy::RoutingDisposition::Steer
+                | crate::policy::RoutingDisposition::Immediate,
+            ) => Some(HandlingMode::Queue),
+            _ => None,
+        };
         Self {
-            boundary: Self::boundary_from_policy(policy),
+            boundary,
             execution_kind,
+            execution_handling_mode,
             peer_response_terminal_apply_intent,
         }
     }
@@ -186,9 +198,26 @@ mod tests {
 
         assert_eq!(semantics.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(semantics.execution_kind, RuntimeExecutionKind::ContentTurn);
+        assert_eq!(semantics.execution_handling_mode, None);
         assert_eq!(
             semantics.peer_response_terminal_apply_intent,
             Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+        );
+    }
+
+    #[test]
+    fn idle_steer_run_start_normalizes_execution_handling_mode() {
+        let mut policy = policy(ApplyMode::StageRunStart);
+        policy.routing_disposition = crate::policy::RoutingDisposition::Steer;
+
+        let semantics =
+            RuntimeInputSemantics::from_policy_and_kind(&policy, InputKind::PeerRequest);
+
+        assert_eq!(semantics.boundary, RunApplyBoundary::RunStart);
+        assert_eq!(
+            semantics.execution_handling_mode,
+            Some(HandlingMode::Queue),
+            "steer remains the admission lane, but a fresh run starts through the queue-compatible session-service path"
         );
     }
 
@@ -204,6 +233,7 @@ mod tests {
             semantics.execution_kind,
             RuntimeExecutionKind::ResumePending
         );
+        assert_eq!(semantics.execution_handling_mode, None);
         assert_eq!(semantics.peer_response_terminal_apply_intent, None);
     }
 

@@ -830,6 +830,7 @@ fn test_config(
         auth: meerkat_core::CommsAuthMode::Open,
         require_peer_auth: false,
         allow_external_unauthenticated: false,
+        pairing_password: None,
     }
 }
 

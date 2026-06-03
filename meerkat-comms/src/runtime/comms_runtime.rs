@@ -14,6 +14,7 @@ use crate::peer_directory_reachability_authority::{
 use crate::tokio;
 use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
@@ -44,6 +45,11 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
+};
 use uuid::Uuid;
 
 /// Default reservation TTL (time from `Reserved` to `Expired` if not attached).
@@ -143,6 +149,48 @@ impl ResolvedPeer {
     fn reachability_key(&self) -> ReachabilityKey {
         ReachabilityKey::new(self.name.as_str(), self.peer_id.as_str())
     }
+}
+
+const PAIRING_VERSION: u32 = 1;
+const PAIRING_HELLO_KIND: &str = "meerkat_pairing_hello";
+const PAIRING_CHALLENGE_KIND: &str = "meerkat_pairing_challenge";
+const PAIRING_PROOF_KIND: &str = "meerkat_pairing_proof";
+const PAIRING_COMPLETE_KIND: &str = "meerkat_pairing_complete";
+const PAIRING_CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, serde::Deserialize)]
+struct PairingPeerIdentity {
+    kind: String,
+    public_key: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, serde::Deserialize)]
+struct PairingPeer {
+    name: String,
+    address: String,
+    identity: PairingPeerIdentity,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn comms_pairing_password_proof(
+    password: &str,
+    challenge: &str,
+    caller_public_key: &str,
+    caller_address: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"meerkat-comms-pairing-v1");
+    hasher.update([0]);
+    hasher.update(password.as_bytes());
+    hasher.update([0]);
+    hasher.update(challenge.as_bytes());
+    hasher.update([0]);
+    hasher.update(caller_public_key.as_bytes());
+    hasher.update([0]);
+    hasher.update(caller_address.as_bytes());
+    BASE64_STANDARD.encode(hasher.finalize())
 }
 
 /// Derive a stable [`meerkat_core::comms::PeerId`] from a signing pubkey.
@@ -1517,6 +1565,7 @@ impl CommsRuntime {
             auth: meerkat_core::CommsAuthMode::Open,
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
         let router = Router::with_shared_peers(
             keypair.clone(),
@@ -1665,6 +1714,7 @@ impl CommsRuntime {
             auth: meerkat_core::CommsAuthMode::Open,
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
         let router = Router::with_shared_peers(
             keypair.clone(),
@@ -1986,6 +2036,7 @@ impl CommsRuntime {
         }
 
         let inbox_sender = self.router.inbox_sender().clone();
+        let router = self.router.clone();
         let max_line_length = self.config.comms_config.max_message_bytes as usize;
 
         // === Signed (Ed25519) listeners — ALWAYS run for agent-to-agent comms ===
@@ -2003,13 +2054,18 @@ impl CommsRuntime {
         }
 
         if let Some(ref addr) = self.config.listen_tcp {
-            let handle = spawn_tcp_listener(
-                &addr.to_string(),
-                self.keypair.clone(),
-                self.trusted_peers.clone(),
-                self.require_peer_auth,
-                inbox_sender.clone(),
-            )
+            let handle = spawn_tcp_listener(TcpListenerConfig {
+                addr: addr.to_string(),
+                keypair: self.keypair.clone(),
+                router,
+                trusted: self.trusted_peers.clone(),
+                require_peer_auth: self.require_peer_auth,
+                inbox_sender: inbox_sender.clone(),
+                pairing_password: self.config.pairing_password.clone(),
+                trusted_peers_path: self.config.trusted_peers_path.clone(),
+                participant_name: self.config.name.clone(),
+                bridge_bootstrap_token: self.bridge_bootstrap_token.clone(),
+            })
             .await?;
             if let Some(local_addr) = handle.local_addr {
                 self.config.listen_tcp = Some(local_addr);
@@ -2890,26 +2946,67 @@ async fn spawn_uds_listener(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn spawn_tcp_listener(
-    addr: &str,
+struct TcpListenerConfig {
+    addr: String,
     keypair: Arc<Keypair>,
+    router: Arc<Router>,
     trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
-) -> Result<ListenerHandle, std::io::Error> {
-    let listener = TcpListener::bind(addr).await?;
+    pairing_password: Option<String>,
+    trusted_peers_path: std::path::PathBuf,
+    participant_name: String,
+    bridge_bootstrap_token: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn spawn_tcp_listener(config: TcpListenerConfig) -> Result<ListenerHandle, std::io::Error> {
+    let TcpListenerConfig {
+        addr,
+        keypair,
+        router,
+        trusted,
+        require_peer_auth,
+        inbox_sender,
+        pairing_password,
+        trusted_peers_path,
+        participant_name,
+        bridge_bootstrap_token,
+    } = config;
+    let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
+    let target_address = format!("tcp://{local_addr}");
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (keypair, trusted, inbox_sender) =
-                (keypair.clone(), trusted.clone(), inbox_sender.clone());
+            let (keypair, router, trusted, inbox_sender) = (
+                keypair.clone(),
+                router.clone(),
+                trusted.clone(),
+                inbox_sender.clone(),
+            );
+            let pairing_password = pairing_password.clone();
+            let trusted_peers_path = trusted_peers_path.clone();
+            let participant_name = participant_name.clone();
+            let bridge_bootstrap_token = bridge_bootstrap_token.clone();
+            let target_address = target_address.clone();
             tokio::spawn(async move {
                 // Share the router-owned trust handle directly — no
                 // snapshot clone — so the transport trust gate reads the
                 // same live state the inbox admission gate consults.
-                let _ =
-                    handle_connection(stream, require_peer_auth, &keypair, &trusted, &inbox_sender)
-                        .await;
+                let _ = handle_tcp_connection_or_pairing(
+                    stream,
+                    require_peer_auth,
+                    &keypair,
+                    &router,
+                    &trusted,
+                    &inbox_sender,
+                    pairing_password.as_deref(),
+                    &trusted_peers_path,
+                    &participant_name,
+                    &bridge_bootstrap_token,
+                    &target_address,
+                )
+                .await;
             });
         }
     });
@@ -2917,6 +3014,239 @@ async fn spawn_tcp_listener(
         handle,
         local_addr: Some(local_addr),
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+async fn handle_tcp_connection_or_pairing(
+    stream: TcpStream,
+    require_peer_auth: bool,
+    keypair: &Keypair,
+    router: &Router,
+    trusted: &Arc<parking_lot::RwLock<TrustedPeers>>,
+    inbox_sender: &InboxSender,
+    pairing_password: Option<&str>,
+    trusted_peers_path: &Path,
+    participant_name: &str,
+    bridge_bootstrap_token: &str,
+    target_address: &str,
+) -> Result<(), std::io::Error> {
+    let mut first = [0_u8; 1];
+    let is_pairing = pairing_password.is_some()
+        && matches!(
+            tokio::time::timeout(PAIRING_CLASSIFY_TIMEOUT, stream.peek(&mut first)).await,
+            Ok(Ok(1))
+        )
+        && first[0] == b'{';
+    if is_pairing {
+        let Some(pairing_password) = pairing_password else {
+            return handle_connection(stream, require_peer_auth, keypair, trusted, inbox_sender)
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()));
+        };
+        return handle_pairing_connection(
+            stream,
+            keypair,
+            router,
+            trusted,
+            pairing_password,
+            trusted_peers_path,
+            participant_name,
+            bridge_bootstrap_token,
+            target_address,
+        )
+        .await;
+    }
+
+    handle_connection(stream, require_peer_auth, keypair, trusted, inbox_sender)
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_pairing_line(
+    reader: &mut BufReader<TcpStream>,
+    buf: &mut String,
+) -> Result<serde_json::Value, std::io::Error> {
+    buf.clear();
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), reader.read_line(buf))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "pairing read timed out")
+        })??;
+    if bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "pairing peer closed connection",
+        ));
+    }
+    serde_json::from_str(buf).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid pairing JSON: {err}"),
+        )
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pairing_field<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, std::io::Error> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("pairing request missing string field '{field}'"),
+            )
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn write_pairing_json(
+    writer: &mut TcpStream,
+    value: serde_json::Value,
+) -> Result<(), std::io::Error> {
+    let bytes = serde_json::to_vec(&value).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pairing response encode failed: {err}"),
+        )
+    })?;
+    writer.write_all(&bytes).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+async fn handle_pairing_connection(
+    stream: TcpStream,
+    keypair: &Keypair,
+    router: &Router,
+    trusted: &Arc<parking_lot::RwLock<TrustedPeers>>,
+    pairing_password: &str,
+    trusted_peers_path: &Path,
+    participant_name: &str,
+    bridge_bootstrap_token: &str,
+    target_address: &str,
+) -> Result<(), std::io::Error> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let hello = read_pairing_line(&mut reader, &mut line).await?;
+    if pairing_field(&hello, "kind")? != PAIRING_HELLO_KIND {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected meerkat pairing hello",
+        ));
+    }
+    if hello
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default()
+        != u64::from(PAIRING_VERSION)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported meerkat pairing version",
+        ));
+    }
+
+    let challenge = Uuid::new_v4().to_string();
+    write_pairing_json(
+        reader.get_mut(),
+        serde_json::json!({
+            "kind": PAIRING_CHALLENGE_KIND,
+            "version": PAIRING_VERSION,
+            "challenge": challenge,
+            "target": {
+                "name": participant_name,
+                "address": target_address,
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": keypair.public_key().to_pubkey_string(),
+                }
+            }
+        }),
+    )
+    .await?;
+
+    let proof = read_pairing_line(&mut reader, &mut line).await?;
+    if pairing_field(&proof, "kind")? != PAIRING_PROOF_KIND {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected meerkat pairing proof",
+        ));
+    }
+    let caller_value = proof.get("caller").cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing proof missing caller",
+        )
+    })?;
+    let caller: PairingPeer = serde_json::from_value(caller_value).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid pairing caller: {err}"),
+        )
+    })?;
+    if caller.identity.kind != "ed25519_public_key" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing caller identity must be ed25519_public_key",
+        ));
+    }
+    let supplied = pairing_field(&proof, "password_proof")?;
+    let expected = comms_pairing_password_proof(
+        pairing_password,
+        &challenge,
+        &caller.identity.public_key,
+        &caller.address,
+    );
+    if supplied != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "invalid pairing password proof",
+        ));
+    }
+
+    let pubkey = PubKey::from_pubkey_string(&caller.identity.public_key).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid pairing caller public key: {err}"),
+        )
+    })?;
+    router
+        .add_trusted_peer(TrustedPeer {
+            name: caller.name.clone(),
+            pubkey,
+            addr: caller.address.clone(),
+            meta: crate::PeerMeta::default(),
+        })
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+    let peers_snapshot = trusted.read().clone();
+    peers_snapshot
+        .save(trusted_peers_path)
+        .await
+        .map_err(|err| std::io::Error::other(format!("persist paired trust: {err}")))?;
+
+    write_pairing_json(
+        reader.get_mut(),
+        serde_json::json!({
+            "kind": PAIRING_COMPLETE_KIND,
+            "version": PAIRING_VERSION,
+            "binding": {
+                "kind": "external",
+                "address": target_address,
+                "bootstrap_token": bridge_bootstrap_token,
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": keypair.public_key().to_pubkey_string(),
+                }
+            },
+            "comms_name": participant_name,
+        }),
+    )
+    .await
 }
 
 /// Max concurrent connections for the plain listener (DoS protection).
@@ -3361,7 +3691,142 @@ mod tests {
             auth: meerkat_core::CommsAuthMode::Open,
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_password_installs_trusted_peer_and_returns_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = test_runtime_config("pairing-target", &tmp);
+        config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
+        config.pairing_password = Some("demo-password".to_string());
+        let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+        runtime.start_listeners().await.unwrap();
+        let addr = runtime.config.listen_tcp.unwrap();
+
+        let caller_keypair = Keypair::generate();
+        let caller_public_key = caller_keypair.public_key().to_pubkey_string();
+        let caller_address = "tcp://127.0.0.1:65530";
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(
+                serde_json::json!({
+                    "kind": PAIRING_HELLO_KIND,
+                    "version": PAIRING_VERSION,
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        reader.get_mut().write_all(b"\n").await.unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let challenge: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(challenge["kind"], PAIRING_CHALLENGE_KIND);
+        let challenge_token = challenge["challenge"].as_str().unwrap();
+        let proof = comms_pairing_password_proof(
+            "demo-password",
+            challenge_token,
+            &caller_public_key,
+            caller_address,
+        );
+        line.clear();
+        reader
+            .get_mut()
+            .write_all(
+                serde_json::json!({
+                    "kind": PAIRING_PROOF_KIND,
+                    "version": PAIRING_VERSION,
+                    "password_proof": proof,
+                    "caller": {
+                        "name": "hive",
+                        "address": caller_address,
+                        "identity": {
+                            "kind": "ed25519_public_key",
+                            "public_key": caller_public_key,
+                        }
+                    }
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        reader.get_mut().write_all(b"\n").await.unwrap();
+
+        reader.read_line(&mut line).await.unwrap();
+        let complete: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(complete["kind"], PAIRING_COMPLETE_KIND);
+        assert_eq!(complete["binding"]["kind"], "external");
+        assert_eq!(
+            complete["binding"]["identity"]["public_key"],
+            runtime.public_key().to_pubkey_string()
+        );
+
+        let persisted = TrustedPeers::load(&runtime.config.trusted_peers_path)
+            .await
+            .unwrap();
+        assert!(
+            persisted
+                .peers
+                .iter()
+                .any(|peer| { peer.name == "hive" && peer.pubkey == caller_keypair.public_key() })
+        );
+        let live_peers = CoreCommsRuntime::peers(&runtime).await;
+        assert!(
+            live_peers
+                .iter()
+                .any(|peer| peer.peer_id == caller_keypair.public_key().to_peer_id()),
+            "pairing must update the live router peer-id index, not only trusted_peers.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_classification_tolerates_delayed_hello() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = test_runtime_config("pairing-delayed-target", &tmp);
+        config.listen_tcp = Some("127.0.0.1:0".parse().unwrap());
+        config.pairing_password = Some("demo-password".to_string());
+        let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+        runtime.start_listeners().await.unwrap();
+        let addr = runtime.config.listen_tcp.unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let mut reader = BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(
+                serde_json::json!({
+                    "kind": PAIRING_HELLO_KIND,
+                    "version": PAIRING_VERSION,
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        reader.get_mut().write_all(b"\n").await.unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let challenge: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(challenge["kind"], PAIRING_CHALLENGE_KIND);
     }
 
     #[tokio::test]
@@ -3482,6 +3947,7 @@ mod tests {
             auth: meerkat_core::CommsAuthMode::Open,
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
 
         let runtime = CommsRuntime::new(config).await.unwrap();
@@ -3509,6 +3975,7 @@ mod tests {
             auth: meerkat_core::CommsAuthMode::Open,
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
 
         let mut runtime = CommsRuntime::new(config).await.unwrap();
@@ -3537,6 +4004,7 @@ mod tests {
             auth: meerkat_core::CommsAuthMode::Open,
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
 
         let mut runtime = CommsRuntime::new(config).await.unwrap();
@@ -5521,6 +5989,7 @@ mod tests {
             #[cfg(unix)]
             event_listen_uds: None,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
 
         let receiver_config = ResolvedCommsConfig {
@@ -5538,6 +6007,7 @@ mod tests {
             #[cfg(unix)]
             event_listen_uds: None,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         };
 
         let sender = CommsRuntime::new(sender_config).await.unwrap();

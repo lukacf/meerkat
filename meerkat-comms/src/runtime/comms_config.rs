@@ -49,6 +49,9 @@ pub struct CoreCommsConfig {
     /// Allow binding plain event listener to non-loopback addresses.
     /// This is a prompt injection vector — only enable with explicit intent.
     pub allow_external_unauthenticated: bool,
+    /// Runtime-only pairing password for initial signed-comms enrollment.
+    #[serde(skip)]
+    pub pairing_password: Option<String>,
 }
 
 impl Default for CoreCommsConfig {
@@ -74,6 +77,7 @@ impl Default for CoreCommsConfig {
             auth: CommsAuthMode::default(),
             require_peer_auth: true,
             allow_external_unauthenticated: false,
+            pairing_password: None,
         }
     }
 }
@@ -123,6 +127,7 @@ impl CoreCommsConfig {
             auth: self.auth,
             require_peer_auth: self.require_peer_auth,
             allow_external_unauthenticated: self.allow_external_unauthenticated,
+            pairing_password: self.pairing_password.clone(),
         }
     }
 }
@@ -149,4 +154,5 @@ pub struct ResolvedCommsConfig {
     pub auth: CommsAuthMode,
     pub require_peer_auth: bool,
     pub allow_external_unauthenticated: bool,
+    pub pairing_password: Option<String>,
 }

@@ -1364,6 +1364,87 @@ enum Commands {
         #[arg(long, help_heading = "Common options")]
         keep_alive: bool,
 
+        /// Stable comms participant name for this session.
+        #[arg(
+            long = "comms-name",
+            value_name = "NAME",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_name: Option<String>,
+
+        /// TCP address for this session's signed agent-to-agent comms listener.
+        #[arg(
+            long = "comms-listen-tcp",
+            value_name = "HOST:PORT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_listen_tcp: Option<String>,
+
+        /// Write this session's external comms runtime binding as JSON.
+        #[arg(
+            long = "comms-binding-out",
+            value_name = "PATH",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_binding_out: Option<PathBuf>,
+
+        /// Pairing password for initial signed comms enrollment.
+        #[arg(
+            long = "comms-pairing-password",
+            value_name = "PASSWORD",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_pairing_password: Option<String>,
+
+        /// Read the comms pairing password from an environment variable.
+        #[arg(
+            long = "comms-pairing-password-env",
+            value_name = "ENV",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_pairing_password_env: Option<String>,
+
+        /// Read the comms pairing password from a file.
+        #[arg(
+            long = "comms-pairing-password-file",
+            value_name = "PATH",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        comms_pairing_password_file: Option<PathBuf>,
+
+        /// Disable comms tools/runtime for this session.
+        #[arg(
+            long = "no-comms",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        no_comms: bool,
+
+        /// Human-readable description exposed to comms peers.
+        #[arg(
+            long = "agent-description",
+            value_name = "TEXT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        agent_description: Option<String>,
+
+        /// Peer metadata label (key=value, repeatable). Exposed to comms peers.
+        #[arg(
+            long = "agent-label",
+            value_name = "KEY=VALUE",
+            value_parser = parse_label,
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
+        agent_labels: Vec<(String, String)>,
+
         /// How stdin should be handled
         #[arg(
             long,
@@ -2484,6 +2565,15 @@ async fn main() -> anyhow::Result<ExitCode> {
             wait_for_mcp,
             verbose,
             keep_alive,
+            comms_name,
+            comms_listen_tcp,
+            comms_binding_out,
+            comms_pairing_password,
+            comms_pairing_password_env,
+            comms_pairing_password_file,
+            no_comms,
+            agent_description,
+            agent_labels,
             stdin,
             line_format,
             auth_binding,
@@ -2540,6 +2630,15 @@ async fn main() -> anyhow::Result<ExitCode> {
                 wait_for_mcp_enabled,
                 verbose,
                 keep_alive,
+                comms_name,
+                comms_listen_tcp,
+                comms_binding_out,
+                comms_pairing_password,
+                comms_pairing_password_env,
+                comms_pairing_password_file,
+                no_comms,
+                agent_description,
+                agent_labels,
                 stdin,
                 line_format,
                 auth_binding,
@@ -2714,6 +2813,15 @@ async fn handle_help_command(
         false,
         false,
         false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        Vec::new(),
         StdinMode::Off,
         LineFormat::Text,
         None,
@@ -2757,6 +2865,15 @@ async fn handle_run_command(
     wait_for_mcp: bool,
     verbose: bool,
     keep_alive: bool,
+    comms_name: Option<String>,
+    comms_listen_tcp: Option<String>,
+    comms_binding_out: Option<PathBuf>,
+    comms_pairing_password: Option<String>,
+    comms_pairing_password_env: Option<String>,
+    comms_pairing_password_file: Option<PathBuf>,
+    no_comms: bool,
+    agent_description: Option<String>,
+    agent_labels: Vec<(String, String)>,
     stdin: StdinMode,
     line_format: LineFormat,
     auth_binding: Option<AuthBindingRef>,
@@ -2774,8 +2891,24 @@ async fn handle_run_command(
     if output.is_html() && output_schema.is_some() {
         anyhow::bail!("--html cannot be combined with --schema in HTML Output Mode V1");
     }
+    if no_comms && comms_binding_out.is_some() {
+        anyhow::bail!("--comms-binding-out cannot be used with --no-comms");
+    }
+    let pairing_password = resolve_comms_pairing_password(
+        comms_pairing_password,
+        comms_pairing_password_env,
+        comms_pairing_password_file,
+    )?;
 
     if let Some(session_id) = resume {
+        let comms_overrides = CommsOverrides {
+            name: comms_name,
+            listen_tcp: comms_listen_tcp,
+            binding_out: comms_binding_out,
+            pairing_password,
+            disabled: no_comms,
+            peer_meta: build_peer_meta(agent_description, agent_labels)?,
+        };
         return resume_session(
             &session_id,
             prompt,
@@ -2807,6 +2940,7 @@ async fn handle_run_command(
             tools,
             yolo,
             keep_alive,
+            comms_overrides,
         )
         .await;
     }
@@ -2849,6 +2983,14 @@ async fn handle_run_command(
         .map(|s| parse_output_schema(s))
         .transpose()?;
     let tooling = resolve_tool_preset(tools.unwrap_or(ToolPreset::Safe), yolo);
+    let comms_overrides = CommsOverrides {
+        name: comms_name,
+        listen_tcp: comms_listen_tcp,
+        binding_out: comms_binding_out,
+        pairing_password,
+        disabled: no_comms,
+        peer_meta: build_peer_meta(agent_description, agent_labels)?,
+    };
     let html_output_request =
         resolve_html_output_request(&output, &config, &config_base_dir).await?;
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
@@ -2889,7 +3031,7 @@ async fn handle_run_command(
                 merged_provider_params,
                 parsed_output_schema,
                 2,
-                CommsOverrides::default(),
+                comms_overrides,
                 tooling.builtins,
                 tooling.shell,
                 tooling.memory,
@@ -3245,8 +3387,91 @@ fn parse_hook_run_overrides(
 struct CommsOverrides {
     name: Option<String>,
     listen_tcp: Option<String>,
+    binding_out: Option<PathBuf>,
+    pairing_password: Option<String>,
     disabled: bool,
     peer_meta: Option<meerkat_core::PeerMeta>,
+}
+
+fn resolve_comms_pairing_password(
+    password: Option<String>,
+    env: Option<String>,
+    file: Option<PathBuf>,
+) -> anyhow::Result<Option<String>> {
+    let supplied =
+        usize::from(password.is_some()) + usize::from(env.is_some()) + usize::from(file.is_some());
+    if supplied > 1 {
+        anyhow::bail!(
+            "use only one of --comms-pairing-password, --comms-pairing-password-env, or --comms-pairing-password-file"
+        );
+    }
+    if let Some(password) = password {
+        return Ok(Some(password));
+    }
+    if let Some(env) = env {
+        let value = std::env::var(&env).map_err(|err| {
+            anyhow::anyhow!("failed to read {env} for comms pairing password: {err}")
+        })?;
+        return Ok(Some(value));
+    }
+    if let Some(file) = file {
+        let value = std::fs::read_to_string(&file).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to read comms pairing password file {}: {err}",
+                file.display()
+            )
+        })?;
+        return Ok(Some(value.trim_end_matches(['\r', '\n']).to_string()));
+    }
+    Ok(None)
+}
+
+fn build_peer_meta(
+    description: Option<String>,
+    labels: Vec<(String, String)>,
+) -> anyhow::Result<Option<meerkat_core::PeerMeta>> {
+    if description.is_none() && labels.is_empty() {
+        return Ok(None);
+    }
+    let meta = meerkat_core::PeerMeta {
+        description,
+        labels: std::collections::BTreeMap::from_iter(labels),
+    };
+    meerkat::surface::validate_public_peer_meta(Some(&meta)).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(Some(meta))
+}
+
+#[cfg(feature = "comms")]
+async fn write_comms_binding_out(
+    path: &Path,
+    comms_runtime: &(dyn meerkat_core::agent::CommsRuntime + Send + Sync),
+) -> anyhow::Result<()> {
+    let public_key = comms_runtime.public_key().ok_or_else(|| {
+        anyhow::anyhow!("--comms-binding-out requires a comms runtime with an Ed25519 public key")
+    })?;
+    let address = comms_runtime.advertised_address().ok_or_else(|| {
+        anyhow::anyhow!("--comms-binding-out requires a comms runtime with an advertised address")
+    })?;
+
+    let mut binding = serde_json::json!({
+        "kind": "external",
+        "address": address,
+        "identity": {
+            "kind": "ed25519_public_key",
+            "public_key": public_key,
+        },
+    });
+    if let Some(bootstrap_token) = comms_runtime.bridge_bootstrap_token() {
+        binding["bootstrap_token"] = serde_json::Value::String(bootstrap_token);
+    }
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let bytes = serde_json::to_vec_pretty(&binding)?;
+    tokio::fs::write(path, bytes).await?;
+    eprintln!("Wrote comms external binding to {}", path.display());
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -8159,6 +8384,10 @@ async fn run_agent(
             config.comms.mode = CommsRuntimeMode::Tcp;
             config.comms.address = Some(addr.clone());
         }
+        #[cfg(feature = "comms")]
+        {
+            config.comms.pairing_password = comms_overrides.pairing_password.clone();
+        }
 
         // Build the parent session service on the runtime-backed persistent
         // surface. CLI one-shots must leave the runtime snapshot as durable
@@ -8411,6 +8640,14 @@ async fn run_agent(
             #[cfg(feature = "comms")]
             {
                 let comms_rt = service.comms_runtime(&session_id).await;
+                if let Some(path) = comms_overrides.binding_out.as_deref() {
+                    let comms_ref = comms_rt.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--comms-binding-out requested, but no comms runtime exists"
+                        )
+                    })?;
+                    write_comms_binding_out(path, comms_ref).await?;
+                }
                 runtime_adapter
                     .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                     .await;
@@ -8522,6 +8759,7 @@ async fn resume_session(
     tools: Option<ToolPreset>,
     yolo: bool,
     keep_alive: bool,
+    comms_overrides: CommsOverrides,
 ) -> anyhow::Result<()> {
     let stdin = resolve_stdin_mode(stdin);
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
@@ -8560,6 +8798,7 @@ async fn resume_session(
         tools,
         yolo,
         keep_alive,
+        comms_overrides,
     )
     .await
 }
@@ -8598,6 +8837,7 @@ async fn resume_session_with_llm_override(
     tools: Option<ToolPreset>,
     yolo: bool,
     keep_alive: bool,
+    comms_overrides: CommsOverrides,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
@@ -8634,6 +8874,7 @@ async fn resume_session_with_llm_override(
             tools,
             yolo,
             keep_alive,
+            comms_overrides,
         );
         anyhow::bail!("resume requires rkat built with session-store support");
     }
@@ -8653,6 +8894,16 @@ async fn resume_session_with_llm_override(
         log_stage("load_config");
         let (config, config_base_dir) = load_config(scope).await?;
         let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
+        let mut config = config;
+        #[cfg(feature = "comms")]
+        if let Some(ref addr) = comms_overrides.listen_tcp {
+            config.comms.mode = CommsRuntimeMode::Tcp;
+            config.comms.address = Some(addr.clone());
+        }
+        #[cfg(feature = "comms")]
+        {
+            config.comms.pairing_password = comms_overrides.pairing_password.clone();
+        }
         let has_max_duration = max_duration.is_some();
         let has_max_tool_calls = max_tool_calls.is_some();
         let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
@@ -8787,8 +9038,10 @@ async fn resume_session_with_llm_override(
         }
 
         #[cfg(feature = "comms")]
-        let factory =
-            factory.comms(tooling.comms.resolve(config.tools.comms_enabled) || keep_alive);
+        let factory = factory.comms(
+            !comms_overrides.disabled
+                && (tooling.comms.resolve(config.tools.comms_enabled) || keep_alive),
+        );
 
         log_stage("build_cli_persistent_service");
         // Build persistent session service for resume — durable runtime semantics.
@@ -8888,6 +9141,8 @@ async fn resume_session_with_llm_override(
             system_prompt,
             output_schema: parsed_output_schema,
             keep_alive: keep_alive_override,
+            comms_name: comms_overrides.name,
+            peer_meta: comms_overrides.peer_meta,
             hooks_override,
             budget_limits: budget_override,
             override_builtins: explicit_tooling.map(|resolved| resolved.builtins),
@@ -9040,6 +9295,14 @@ async fn resume_session_with_llm_override(
             #[cfg(feature = "comms")]
             {
                 let comms_rt = service.comms_runtime(&session_id).await;
+                if let Some(path) = comms_overrides.binding_out.as_deref() {
+                    let comms_ref = comms_rt.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--comms-binding-out requested, but no comms runtime exists"
+                        )
+                    })?;
+                    write_comms_binding_out(path, comms_ref).await?;
+                }
                 resume_adapter
                     .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                     .await;
@@ -14640,6 +14903,15 @@ default_model = "gemma"
             false,
             false,
             false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Vec::new(),
             stdin,
             line_format,
             auth_binding,
@@ -15286,6 +15558,76 @@ default_model = "gemma"
                 assert!(keep_alive);
                 assert!(matches!(stdin, StdinMode::Lines));
             }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_run_parses_comms_target_flags() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "--comms-name",
+            "bob-s-your-uncle",
+            "--comms-listen-tcp",
+            "127.0.0.1:4200",
+            "--agent-description",
+            "You review code when asked.",
+            "--agent-label",
+            "site=gcp",
+            "--agent-label",
+            "target_kind=mdm",
+            "--comms-binding-out",
+            "/tmp/rkat-target-binding.json",
+            "--comms-pairing-password",
+            "demo-password",
+            "--keep-alive",
+            "ready",
+        ])
+        .expect("run comms target flags should parse");
+        match cli.command {
+            Commands::Run {
+                comms_name,
+                comms_listen_tcp,
+                comms_binding_out,
+                comms_pairing_password,
+                agent_description,
+                agent_labels,
+                no_comms,
+                keep_alive,
+                ..
+            } => {
+                assert_eq!(comms_name.as_deref(), Some("bob-s-your-uncle"));
+                assert_eq!(comms_listen_tcp.as_deref(), Some("127.0.0.1:4200"));
+                assert_eq!(
+                    comms_binding_out.as_deref(),
+                    Some(Path::new("/tmp/rkat-target-binding.json"))
+                );
+                assert_eq!(comms_pairing_password.as_deref(), Some("demo-password"));
+                assert_eq!(
+                    agent_description.as_deref(),
+                    Some("You review code when asked.")
+                );
+                assert_eq!(
+                    agent_labels,
+                    vec![
+                        ("site".to_string(), "gcp".to_string()),
+                        ("target_kind".to_string(), "mdm".to_string())
+                    ]
+                );
+                assert!(keep_alive);
+                assert!(!no_comms);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_run_parses_no_comms() {
+        let cli = Cli::try_parse_from(["rkat", "run", "--no-comms", "hello"])
+            .expect("--no-comms should parse");
+        match cli.command {
+            Commands::Run { no_comms, .. } => assert!(no_comms),
             _ => unreachable!(),
         }
     }

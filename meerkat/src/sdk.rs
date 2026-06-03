@@ -477,6 +477,7 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
                     listen_tcp: Some(listen_tcp),
                     auth: config.comms.auth,
                     event_listen_tcp,
+                    pairing_password: config.comms.pairing_password.clone(),
                     ..Default::default()
                 };
                 let resolved = comms.resolve_paths(base_dir.as_ref());
@@ -503,6 +504,7 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
                     listen_uds: Some(std::path::PathBuf::from(address)),
                     auth: config.comms.auth,
                     event_listen_tcp,
+                    pairing_password: config.comms.pairing_password.clone(),
                     ..Default::default()
                 };
                 let resolved = comms.resolve_paths(base_dir.as_ref());
@@ -578,6 +580,7 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
                 listen_tcp: Some(listen_tcp),
                 auth: config.comms.auth,
                 event_listen_tcp,
+                pairing_password: config.comms.pairing_password.clone(),
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());
@@ -605,6 +608,7 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
                 listen_uds: Some(std::path::PathBuf::from(address)),
                 auth: config.comms.auth,
                 event_listen_tcp,
+                pairing_password: config.comms.pairing_password.clone(),
                 ..Default::default()
             };
             let resolved = comms.resolve_paths(base_dir.as_ref());

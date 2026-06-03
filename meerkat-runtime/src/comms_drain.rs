@@ -20,12 +20,12 @@ use meerkat_core::interaction::{
 use meerkat_core::types::SessionId;
 
 use meerkat_contracts::wire::supervisor_bridge::{
-    BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
-    BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
-    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
-    BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
-    BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
-    canonicalize_bridge_address, decode_bridge_command,
+    BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryCompletion,
+    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
+    BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
+    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec,
+    BridgeRejectionCause, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    SUPERVISOR_BRIDGE_INTENT, canonicalize_bridge_address, decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -1323,7 +1323,7 @@ async fn try_handle_supervisor_bridge_command(
                     session_id,
                     supervisor_spec.name.as_str().to_owned(),
                     supervisor_spec.peer_id.as_str(),
-                    advertised_address.clone(),
+                    supervisor_spec.address.to_string(),
                     payload.epoch,
                 )
                 // Wave-c C-6r V5: typed `PeerName` / `PeerId` carry the
@@ -1722,14 +1722,18 @@ async fn try_handle_supervisor_bridge_command(
                 candidate.interaction.id,
                 payload,
             );
-            match adapter.accept_input(session_id, input).await {
-                Ok(outcome) => {
-                    let response = match outcome {
+            match adapter
+                .accept_input_with_completion(session_id, input)
+                .await
+            {
+                Ok((accept_outcome, completion_handle)) => {
+                    let mut response = match accept_outcome {
                         crate::accept::AcceptOutcome::Accepted { input_id, .. } => {
                             BridgeDeliveryResponse {
                                 input_id: request_input_id,
                                 canonical_input_id: Some(input_id.to_string()),
                                 outcome: BridgeDeliveryOutcome::Accepted,
+                                completion: None,
                             }
                         }
                         crate::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -1740,6 +1744,7 @@ async fn try_handle_supervisor_bridge_command(
                                 outcome: BridgeDeliveryOutcome::Deduplicated {
                                     existing_input_id: existing_id,
                                 },
+                                completion: None,
                             }
                         }
                         crate::accept::AcceptOutcome::Rejected { reason } => {
@@ -1751,9 +1756,13 @@ async fn try_handle_supervisor_bridge_command(
                                     cause,
                                     reason: reason.to_string(),
                                 },
+                                completion: None,
                             }
                         }
                     };
+                    if let Some(handle) = completion_handle {
+                        response.completion = completion_outcome_bridge_result(handle.wait().await);
+                    }
                     send_bridge_response(
                         comms_runtime,
                         candidate,
@@ -1948,7 +1957,7 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            match require_authorized_supervisor_with_response_route(
+            let authorized_supervisor = match require_authorized_supervisor_with_response_route(
                 comms_runtime,
                 sender,
                 &sup_payload,
@@ -1957,12 +1966,12 @@ async fn try_handle_supervisor_bridge_command(
             )
             .await
             {
-                Ok(_) => {}
+                Ok(supervisor) => supervisor,
                 Err((cause, reason)) => {
                     send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                     return true;
                 }
-            }
+            };
             // D-track-b: route WireMember through the DSL authority's
             // peer-projection state. The stager helper applies
             // `AddDirectPeerEndpoint`, emits
@@ -1994,6 +2003,16 @@ async fn try_handle_supervisor_bridge_command(
                 .await
             {
                 Ok(()) => {
+                    if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
+                        comms_runtime,
+                        &authorized_supervisor,
+                        "wire member failed",
+                    )
+                    .await
+                    {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                        return true;
+                    }
                     send_bridge_response(
                         comms_runtime,
                         candidate,
@@ -2014,6 +2033,16 @@ async fn try_handle_supervisor_bridge_command(
                         .direct_peer_endpoint_contains(session_id, &endpoint)
                         .await
                     {
+                        if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
+                            comms_runtime,
+                            &authorized_supervisor,
+                            "wire member failed",
+                        )
+                        .await
+                        {
+                            send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                            return true;
+                        }
                         send_bridge_response(
                             comms_runtime,
                             candidate,
@@ -2040,7 +2069,7 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            match require_authorized_supervisor_with_response_route(
+            let authorized_supervisor = match require_authorized_supervisor_with_response_route(
                 comms_runtime,
                 sender,
                 &sup_payload,
@@ -2049,12 +2078,12 @@ async fn try_handle_supervisor_bridge_command(
             )
             .await
             {
-                Ok(_) => {}
+                Ok(supervisor) => supervisor,
                 Err((cause, reason)) => {
                     send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                     return true;
                 }
-            }
+            };
             // D-track-b: mirror of WireMember — route UnwireMember
             // through `RemoveDirectPeerEndpoint`. The DSL authority's
             // peer-projection state is the source of truth; the trust
@@ -2083,6 +2112,16 @@ async fn try_handle_supervisor_bridge_command(
                 .await
             {
                 Ok(()) => {
+                    if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
+                        comms_runtime,
+                        &authorized_supervisor,
+                        "unwire member failed",
+                    )
+                    .await
+                    {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                        return true;
+                    }
                     send_bridge_response(
                         comms_runtime,
                         candidate,
@@ -2103,6 +2142,16 @@ async fn try_handle_supervisor_bridge_command(
                         .direct_peer_endpoint_contains(session_id, &endpoint)
                         .await
                     {
+                        if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
+                            comms_runtime,
+                            &authorized_supervisor,
+                            "unwire member failed",
+                        )
+                        .await
+                        {
+                            send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                            return true;
+                        }
                         send_bridge_response(
                             comms_runtime,
                             candidate,
@@ -2147,6 +2196,27 @@ fn runtime_state_to_bridge(state: crate::RuntimeState) -> BridgeMemberRuntimeSta
         crate::RuntimeState::Stopped => BridgeMemberRuntimeState::Stopped,
         crate::RuntimeState::Destroyed => BridgeMemberRuntimeState::Destroyed,
     }
+}
+
+fn completion_outcome_bridge_result(
+    outcome: CompletionOutcome,
+) -> Option<BridgeDeliveryCompletion> {
+    let result = match outcome {
+        CompletionOutcome::Completed(result) => *result,
+        CompletionOutcome::CompletedWithFinalizationFailure { result, .. } => *result,
+        CompletionOutcome::CompletedWithoutResult
+        | CompletionOutcome::CallbackPending { .. }
+        | CompletionOutcome::Cancelled
+        | CompletionOutcome::Abandoned(_)
+        | CompletionOutcome::AbandonedWithError { .. }
+        | CompletionOutcome::RuntimeTerminated(_) => return None,
+    };
+    Some(BridgeDeliveryCompletion {
+        session_id: result.session_id.to_string(),
+        text: result.text,
+        turns: result.turns,
+        tool_calls: result.tool_calls,
+    })
 }
 
 fn interaction_terminal_event(
@@ -3181,6 +3251,137 @@ mod tests {
             peer_handle.response_replied_count(),
             1,
             "real CommsRuntime::send(PeerResponse) should pass the inbound-state guard"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn bind_member_bootstrap_stores_supervisor_address_not_member_address() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let member_name = format!("tcp-bootstrap-member-{suffix}");
+        let supervisor_name = format!("tcp-bootstrap-supervisor-{suffix}");
+
+        let mut member_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member runtime");
+        member_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure member TCP listener");
+        member_runtime
+            .start_listeners()
+            .await
+            .expect("start member TCP listener");
+        let member_runtime = Arc::new(member_runtime);
+        install_test_peer_request_response_authority(
+            &member_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let mut supervisor_runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor runtime");
+        supervisor_runtime
+            .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("configure supervisor TCP listener");
+        supervisor_runtime
+            .start_listeners()
+            .await
+            .expect("start supervisor TCP listener");
+        let supervisor_runtime = Arc::new(supervisor_runtime);
+        install_test_peer_request_response_authority(
+            &supervisor_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+
+        let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
+        supervisor_runtime
+            .add_trusted_peer(member_spec.clone())
+            .await
+            .expect("supervisor trusts member target");
+        let supervisor_spec =
+            trusted_tcp_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
+
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let command = BridgeCommand::BindMember(
+            meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+                supervisor: BridgePeerSpec::from(supervisor_spec.clone()),
+                epoch: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                expected_peer_id: member_spec.peer_id.as_str(),
+                expected_address: member_spec.address.to_string(),
+                bootstrap_token: member_runtime.bridge_bootstrap_token().to_owned().into(),
+            },
+        );
+        let request_receipt = supervisor_runtime
+            .send(CommsCommand::PeerRequest {
+                to: PeerRoute::with_display_name(member_spec.peer_id, member_spec.name.clone()),
+                intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                params: serde_json::to_value(&command).expect("serialize bridge command"),
+                blocks: None,
+                handling_mode: HandlingMode::Queue,
+                stream: meerkat_core::comms::InputStreamMode::None,
+            })
+            .await
+            .expect("supervisor sends bootstrap BindMember over TCP");
+        let meerkat_core::SendReceipt::PeerRequestSent { interaction_id, .. } = request_receipt
+        else {
+            panic!("expected PeerRequestSent receipt, got {request_receipt:?}");
+        };
+
+        let candidate = drain_one_candidate(&member_runtime, "member BindMember request").await;
+        assert_eq!(
+            candidate.interaction.id, interaction_id,
+            "member must receive the correlated bridge request"
+        );
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "bridge handler must own BindMember"
+        );
+
+        let binding = adapter.supervisor_binding(&session_id).await;
+        let SupervisorBinding::Bound {
+            address: bound_address,
+            ..
+        } = binding
+        else {
+            panic!("bootstrap bind should leave supervisor bound, got {binding:?}");
+        };
+        assert_eq!(
+            bound_address,
+            supervisor_spec.address.to_string(),
+            "supervisor binding must store the supervisor route, not the member route"
+        );
+        assert_ne!(
+            bound_address,
+            member_spec.address.to_string(),
+            "storing the member address under the supervisor pubkey makes later bridge replies loop back to the member"
+        );
+
+        let response =
+            drain_one_candidate(&supervisor_runtime, "supervisor BindMember response").await;
+        let InteractionContent::Response { result, .. } = response.interaction.content else {
+            panic!(
+                "expected bridge response, got {:?}",
+                response.interaction.content
+            );
+        };
+        let BridgeReply::BindMember(bind_response) =
+            serde_json::from_value(result).expect("typed bridge reply")
+        else {
+            panic!("expected BindMember reply");
+        };
+        assert_eq!(bind_response.peer_id, member_spec.peer_id.as_str());
+        assert_eq!(
+            bind_response.address,
+            canonicalize_bridge_address(&member_spec.address.to_string()),
+            "BindMember reply still reports the member's canonical advertised address"
         );
     }
 

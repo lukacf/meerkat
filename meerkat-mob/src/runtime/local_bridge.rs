@@ -153,6 +153,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             input_id: input_id.to_string(),
                             canonical_input_id: Some(id.to_string()),
                             outcome: BridgeDeliveryOutcome::Accepted,
+                            completion: None,
                         }
                     }
                     meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -163,6 +164,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             outcome: BridgeDeliveryOutcome::Deduplicated {
                                 existing_input_id: existing_id,
                             },
+                            completion: None,
                         }
                     }
                     meerkat_runtime::AcceptOutcome::Rejected { reason } => {
@@ -174,6 +176,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                                 cause,
                                 reason: reason.to_string(),
                             },
+                            completion: None,
                         }
                     }
                     _ => BridgeDeliveryResponse {
@@ -185,6 +188,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             },
                             reason: "unexpected accept outcome".to_string(),
                         },
+                        completion: None,
                     },
                 };
                 Ok(response)

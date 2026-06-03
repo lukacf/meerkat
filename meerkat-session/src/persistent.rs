@@ -1608,22 +1608,41 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<(Option<Session>, bool), SessionError> {
         let session = if let Some(runtime_store) = self.runtime_store.as_ref() {
-            match Self::load_runtime_session_snapshot_for_session(runtime_store, id).await? {
-                Some(session) => Some(session),
-                None => {
-                    let store_projection = self
-                        .store
-                        .load(id)
-                        .await
-                        .map_err(|e| SessionError::Store(Box::new(e)))?;
-                    match store_projection {
-                        Some(session)
-                            if runtime_backed_store_projection_can_recover_authority(&session)
-                                || self.runtime_projection_fallback_quarantined(id).await =>
-                        {
+            // Once the machine has retired the runtime, the durable archived
+            // projection is the authoritative read source. The runtime session
+            // snapshot is frozen at the pre-retirement revision (retire commits
+            // only the lifecycle transition, never clearing the snapshot) and
+            // never carries the archived lifecycle mirror, so returning it here
+            // would mask the retired projection. The durable projection already
+            // carries the post-retirement transcript revision and the archived
+            // metadata written by the archive flow.
+            if matches!(
+                Self::load_runtime_state_for_session(runtime_store, id).await?,
+                Some(RuntimeState::Retired)
+            ) {
+                self.store
+                    .load(id)
+                    .await
+                    .map_err(|e| SessionError::Store(Box::new(e)))?
+            } else {
+                match Self::load_runtime_session_snapshot_for_session(runtime_store, id).await? {
+                    Some(session) => Some(session),
+                    None => {
+                        let store_projection = self
+                            .store
+                            .load(id)
+                            .await
+                            .map_err(|e| SessionError::Store(Box::new(e)))?;
+                        match store_projection {
                             Some(session)
+                                if runtime_backed_store_projection_can_recover_authority(
+                                    &session,
+                                ) || self.runtime_projection_fallback_quarantined(id).await =>
+                            {
+                                Some(session)
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     }
                 }
             }
@@ -3720,10 +3739,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session: Session,
     ) -> Result<Session, SessionError> {
         let session = self.normalized_session_for_persistence(session).await?;
-        self.store
-            .save(&session)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?;
+        save_session_projection_allowing_internal_rewrite(
+            self.store.as_ref(),
+            self.blob_store.as_ref(),
+            self.event_store.as_ref(),
+            self.projector.as_ref(),
+            &session,
+        )
+        .await?;
         Ok(session)
     }
 

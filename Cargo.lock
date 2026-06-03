@@ -2891,6 +2891,8 @@ dependencies = [
  "tokio_with_wasm",
  "tracing",
  "urlencoding",
+ "uuid",
+ "webbrowser",
 ]
 
 [[package]]
@@ -3201,9 +3203,11 @@ name = "meerkat-mcp"
 version = "0.6.33"
 dependencies = [
  "async-trait",
+ "axum",
  "futures",
  "http 1.4.0",
  "inventory",
+ "meerkat-auth-core",
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
@@ -4721,6 +4725,7 @@ dependencies = [
  "humantime",
  "meerkat",
  "meerkat-anthropic",
+ "meerkat-auth-core",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",

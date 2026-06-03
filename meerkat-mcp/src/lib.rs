@@ -12,7 +12,7 @@ mod router;
 mod transport;
 
 pub use adapter::McpRouterAdapter;
-pub use connection::McpConnection;
+pub use connection::{McpAuthResolver, McpConnection};
 pub use error::McpError;
 pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
 pub use protocol::McpProtocol;

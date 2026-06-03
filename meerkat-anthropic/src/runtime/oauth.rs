@@ -86,6 +86,7 @@ pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         extra_authorize_params: vec![("code".into(), "true".into())],
         token_request_format: OAuthTokenRequestFormat::Json,
         include_state_in_token_exchange: true,
+        extra_token_params: Vec::new(),
         refresh_scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
         extra_headers: Vec::new(),
     };
@@ -108,6 +109,7 @@ pub fn console_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         extra_authorize_params: Vec::new(),
         token_request_format: OAuthTokenRequestFormat::Json,
         include_state_in_token_exchange: true,
+        extra_token_params: Vec::new(),
         refresh_scopes: CONSOLE_SCOPES.iter().map(|s| (*s).to_string()).collect(),
         extra_headers: Vec::new(),
     };

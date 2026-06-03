@@ -200,12 +200,12 @@ per-binding (ops registry membership, adapter ownership for a running channel).
 | `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle` |
 | `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas, **supervisor bridge protocol (`BridgeCommand`, `BridgeReply`, `BridgePeerSpec`, `BridgeSupervisorPayload`)** | — |
 | `meerkat-client` | Compatibility client shim that re-exports provider surfaces | Compatibility exports only |
-| `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, cloud authorizers | — |
+| `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh, cloud authorizers | — |
 | `meerkat-providers` | Compatibility provider-runtime/auth shim surface | — |
 | `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` | Provider-specific client/runtime implementations | Implements `AgentLlmClient` via provider-specific crates |
 | `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
-| `meerkat-mcp` | MCP client, protocol transport, router (routes to `ExternalToolSurfaceHandle`) | — |
+| `meerkat-mcp` | MCP client, protocol transport, router mechanics (routes to `ExternalToolSurfaceHandle`; asks injected auth resolver for bearer tokens but does not own OAuth lifecycle) | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent), turn admission slot (shell) | Implements `SessionService` |
 | `meerkat-runtime` | Runtime control plane, policy engine, completion-feed wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519), peer identity claims, pure peer data types | Implements `CommsRuntime` |

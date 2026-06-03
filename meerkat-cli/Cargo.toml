@@ -38,6 +38,7 @@ required-features = ["integration-real-tests"]
 
 [dependencies]
 meerkat = { workspace = true, features = ["openai-realtime"] }
+meerkat-auth-core = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "native-keyring", "refresh-file-lock"] }

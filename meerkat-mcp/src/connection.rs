@@ -5,6 +5,8 @@ use crate::transport::sse::{SseClientConfig, SseClientTransport};
 use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
 };
+use async_trait::async_trait;
+use meerkat_auth_core::{McpAuthMode, McpAuthTarget, McpOAuthError};
 use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
@@ -27,9 +29,49 @@ pub struct McpConnection {
     service: RunningService<RoleClient, ()>,
 }
 
+#[async_trait]
+pub trait McpAuthResolver: Send + Sync {
+    async fn stored_bearer_token(
+        &self,
+        target: &McpAuthTarget,
+    ) -> Result<Option<String>, McpOAuthError>;
+
+    async fn interactive_login(
+        &self,
+        target: &McpAuthTarget,
+        www_authenticate: Option<&str>,
+    ) -> Result<String, McpOAuthError>;
+}
+
+#[async_trait]
+impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
+    async fn stored_bearer_token(
+        &self,
+        target: &McpAuthTarget,
+    ) -> Result<Option<String>, McpOAuthError> {
+        self.stored_bearer_token(target).await
+    }
+
+    async fn interactive_login(
+        &self,
+        target: &McpAuthTarget,
+        www_authenticate: Option<&str>,
+    ) -> Result<String, McpOAuthError> {
+        self.interactive_login(target, www_authenticate).await
+    }
+}
+
 impl McpConnection {
     /// Connect to an MCP server and perform the initialize handshake
     pub async fn connect(config: &McpServerConfig) -> Result<Self, McpError> {
+        Self::connect_with_mcp_auth(config, McpAuthMode::Stored, None).await
+    }
+
+    pub async fn connect_with_mcp_auth(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+    ) -> Result<Self, McpError> {
         let service = match &config.transport {
             McpTransportConfig::Stdio(stdio) => {
                 let mut cmd = Command::new(&stdio.command);
@@ -54,16 +96,14 @@ impl McpConnection {
                     .map_err(|e| McpError::ConnectionFailed { reason: e })?;
                 match http.transport.unwrap_or_default() {
                     McpHttpTransport::StreamableHttp => {
-                        let client = ReqwestStreamableHttpClient::new(headers);
-                        let transport = StreamableHttpClientTransport::with_client(
-                            client,
-                            StreamableHttpClientTransportConfig::with_uri(http.url.clone()),
-                        );
-                        ().serve(transport)
-                            .await
-                            .map_err(|e| McpError::ConnectionFailed {
-                                reason: format!("Failed to establish MCP connection: {e}"),
-                            })?
+                        return Self::connect_streamable_http(
+                            config,
+                            headers,
+                            &http.url,
+                            auth_mode,
+                            auth_resolver,
+                        )
+                        .await;
                     }
                     McpHttpTransport::Sse => {
                         let client = ReqwestSseClient::new(headers);
@@ -94,6 +134,128 @@ impl McpConnection {
         })
     }
 
+    async fn connect_streamable_http(
+        config: &McpServerConfig,
+        headers: reqwest::header::HeaderMap,
+        url: &str,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+    ) -> Result<Self, McpError> {
+        let has_static_authorization = headers
+            .keys()
+            .any(|name| name.as_str().eq_ignore_ascii_case("authorization"));
+        if has_static_authorization {
+            return Self::connect_streamable_http_once(config, headers, url, None, None)
+                .await
+                .map_err(StreamableConnectError::into_mcp_error);
+        }
+        let target = McpAuthTarget::new(config.name.clone(), url.to_string());
+        let mut stored_token = None;
+        let mut force_interactive_reauth = false;
+        if let Some(resolver) = auth_resolver.as_deref() {
+            match resolver.stored_bearer_token(&target).await {
+                Ok(token) => stored_token = token,
+                Err(McpOAuthError::ReauthRequired { .. })
+                    if matches!(auth_mode, McpAuthMode::Interactive) =>
+                {
+                    force_interactive_reauth = true;
+                }
+                Err(error) => return Err(mcp_auth_error_to_connection_failed(error)),
+            }
+        }
+        if force_interactive_reauth {
+            let Some(resolver) = auth_resolver else {
+                return Err(mcp_auth_error_to_connection_failed(
+                    McpOAuthError::ReauthRequired {
+                        server_name: config.name.clone(),
+                    },
+                ));
+            };
+            let token = resolver
+                .interactive_login(&target, None)
+                .await
+                .map_err(mcp_auth_error_to_connection_failed)?;
+            return Self::connect_streamable_http_once(config, headers, url, Some(token), None)
+                .await
+                .map_err(StreamableConnectError::into_mcp_error);
+        }
+        let first = Self::connect_streamable_http_once(
+            config,
+            headers.clone(),
+            url,
+            stored_token.clone(),
+            Some(crate::transport::streamable_http::AuthChallengeRecorder::default()),
+        )
+        .await;
+        match first {
+            Ok(connection) => Ok(connection),
+            Err(err) if auth_failure_suggests_oauth(&err) => {
+                let challenge = err.auth_challenge();
+                let Some(resolver) = auth_resolver else {
+                    return Err(StreamableConnectError::into_mcp_error(err));
+                };
+                let token = match (stored_token, auth_mode) {
+                    (Some(_), McpAuthMode::Stored) => {
+                        return Err(McpError::ConnectionFailed {
+                            reason: McpOAuthError::ReauthRequired {
+                                server_name: config.name.clone(),
+                            }
+                            .to_string(),
+                        });
+                    }
+                    (Some(_), McpAuthMode::Interactive) => resolver
+                        .interactive_login(&target, challenge.as_deref())
+                        .await
+                        .map_err(mcp_auth_error_to_connection_failed)?,
+                    (None, McpAuthMode::Stored) => {
+                        return Err(McpError::ConnectionFailed {
+                            reason: McpOAuthError::MissingStoredToken {
+                                server_name: config.name.clone(),
+                            }
+                            .to_string(),
+                        });
+                    }
+                    (None, McpAuthMode::Interactive) => resolver
+                        .interactive_login(&target, challenge.as_deref())
+                        .await
+                        .map_err(mcp_auth_error_to_connection_failed)?,
+                };
+                Self::connect_streamable_http_once(config, headers, url, Some(token), None)
+                    .await
+                    .map_err(StreamableConnectError::into_mcp_error)
+            }
+            Err(err) => Err(err.into_mcp_error()),
+        }
+    }
+
+    async fn connect_streamable_http_once(
+        config: &McpServerConfig,
+        headers: reqwest::header::HeaderMap,
+        url: &str,
+        bearer_token: Option<String>,
+        recorder: Option<crate::transport::streamable_http::AuthChallengeRecorder>,
+    ) -> Result<Self, StreamableConnectError> {
+        let recorder = recorder.unwrap_or_default();
+        let client =
+            ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone());
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+        if let Some(token) = bearer_token {
+            transport_config = transport_config.auth_header(token);
+        }
+        let transport = StreamableHttpClientTransport::with_client(client, transport_config);
+        let service =
+            ().serve(transport)
+                .await
+                .map_err(|error| StreamableConnectError {
+                    reason: format!("Failed to establish MCP connection: {error}"),
+                    auth_challenge: recorder.take(),
+                })?;
+        Ok(Self {
+            config: config.clone(),
+            service,
+        })
+    }
+
     /// Default connection timeout in seconds.
     pub const DEFAULT_CONNECT_TIMEOUT_SECS: u32 = 10;
 
@@ -105,14 +267,25 @@ impl McpConnection {
     pub async fn connect_and_enumerate(
         config: &McpServerConfig,
     ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
+        Self::connect_and_enumerate_with_mcp_auth(config, McpAuthMode::Stored, None).await
+    }
+
+    pub async fn connect_and_enumerate_with_mcp_auth(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+    ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
         let timeout_secs = config
             .connect_timeout_secs
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_SECS);
-        let timeout = Duration::from_secs(timeout_secs as u64);
+        let mut timeout = Duration::from_secs(timeout_secs as u64);
+        if matches!(auth_mode, McpAuthMode::Interactive) {
+            timeout += meerkat_auth_core::MCP_INTERACTIVE_LOGIN_TIMEOUT;
+        }
 
         let server_name = config.name.clone();
         tokio::time::timeout(timeout, async {
-            let conn = Self::connect(config).await?;
+            let conn = Self::connect_with_mcp_auth(config, auth_mode, auth_resolver).await?;
             let tools = conn
                 .list_tools(&server_name)
                 .await?
@@ -228,6 +401,38 @@ impl McpConnection {
     }
 }
 
+struct StreamableConnectError {
+    reason: String,
+    auth_challenge: Option<String>,
+}
+
+impl StreamableConnectError {
+    fn auth_challenge(&self) -> Option<String> {
+        self.auth_challenge.clone()
+    }
+
+    fn into_mcp_error(self) -> McpError {
+        McpError::ConnectionFailed {
+            reason: self.reason,
+        }
+    }
+}
+
+fn auth_failure_suggests_oauth(error: &StreamableConnectError) -> bool {
+    error.auth_challenge.is_some()
+        || error.reason.contains("Auth required")
+        || error.reason.contains("401")
+        || error.reason.contains("403")
+        || error.reason.contains("Unauthorized")
+        || error.reason.contains("Forbidden")
+}
+
+fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
+    McpError::ConnectionFailed {
+        reason: error.to_string(),
+    }
+}
+
 /// Convert MCP [`Content`] items to [`ContentBlock`] variants.
 ///
 /// Text and image content are captured. Other content types (resources,
@@ -251,9 +456,18 @@ fn extract_content_blocks(contents: Vec<rmcp::model::Content>) -> Vec<ContentBlo
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::{Json, Router};
     use rmcp::model::Content;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
 
     /// Test that content block extraction works correctly with multiple text items
     #[test]
@@ -526,6 +740,325 @@ pub mod tests {
             .await;
         assert!(result.is_err(), "Fail tool should return error");
 
+        conn.close().await.expect("Failed to close connection");
+    }
+
+    struct HttpMcpTestState {
+        accepted_token: &'static str,
+        seen_authorizations: Mutex<Vec<Option<String>>>,
+    }
+
+    async fn spawn_http_mcp_server(
+        accepted_token: &'static str,
+    ) -> (String, Arc<HttpMcpTestState>) {
+        let state = Arc::new(HttpMcpTestState {
+            accepted_token,
+            seen_authorizations: Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route("/mcp", post(http_mcp_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, state)
+    }
+
+    async fn http_mcp_handler(
+        State(state): State<Arc<HttpMcpTestState>>,
+        headers: HeaderMap,
+        Json(request): Json<Value>,
+    ) -> impl IntoResponse {
+        let authorization = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        state
+            .seen_authorizations
+            .lock()
+            .unwrap()
+            .push(authorization.clone());
+
+        if authorization.as_deref() != Some(&format!("Bearer {}", state.accepted_token)) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(
+                    http::header::WWW_AUTHENTICATE,
+                    "Bearer resource_metadata=\"/.well-known/oauth-protected-resource/mcp\"",
+                )],
+            )
+                .into_response();
+        }
+
+        let Some(id) = request.get("id").cloned() else {
+            return StatusCode::ACCEPTED.into_response();
+        };
+        let response = match request.get("method").and_then(|method| method.as_str()) {
+            Some("initialize") => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "http-mcp-test-server",
+                        "version": "0.1.0"
+                    }
+                }
+            }),
+            Some("tools/list") => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "tools": [{
+                        "name": "echo",
+                        "description": "Echo input",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": { "type": "string" }
+                            }
+                        }
+                    }]
+                }
+            }),
+            method => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("unsupported method {method:?}")
+                }
+            }),
+        };
+        (StatusCode::OK, Json(response)).into_response()
+    }
+
+    struct FakeMcpAuthResolver {
+        stored_token: Option<String>,
+        stored_reauth_required: bool,
+        interactive_token: String,
+        interactive_delay: Option<Duration>,
+        interactive_calls: AtomicUsize,
+        challenges: Mutex<Vec<Option<String>>>,
+    }
+
+    impl FakeMcpAuthResolver {
+        fn new(stored_token: Option<&str>, interactive_token: &str) -> Self {
+            Self {
+                stored_token: stored_token.map(ToOwned::to_owned),
+                stored_reauth_required: false,
+                interactive_token: interactive_token.to_owned(),
+                interactive_delay: None,
+                interactive_calls: AtomicUsize::new(0),
+                challenges: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_interactive_delay(mut self, delay: Duration) -> Self {
+            self.interactive_delay = Some(delay);
+            self
+        }
+
+        fn with_stored_reauth_required(mut self) -> Self {
+            self.stored_reauth_required = true;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl McpAuthResolver for FakeMcpAuthResolver {
+        async fn stored_bearer_token(
+            &self,
+            target: &McpAuthTarget,
+        ) -> Result<Option<String>, McpOAuthError> {
+            if self.stored_reauth_required {
+                return Err(McpOAuthError::ReauthRequired {
+                    server_name: target.server_name.clone(),
+                });
+            }
+            Ok(self.stored_token.clone())
+        }
+
+        async fn interactive_login(
+            &self,
+            _target: &McpAuthTarget,
+            www_authenticate: Option<&str>,
+        ) -> Result<String, McpOAuthError> {
+            if let Some(delay) = self.interactive_delay {
+                tokio::time::sleep(delay).await;
+            }
+            self.interactive_calls.fetch_add(1, Ordering::SeqCst);
+            self.challenges
+                .lock()
+                .unwrap()
+                .push(www_authenticate.map(ToOwned::to_owned));
+            Ok(self.interactive_token.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_stored_token_is_injected_for_streamable_http() {
+        let (url, state) = spawn_http_mcp_server("stored-token").await;
+        let config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        let resolver = Arc::new(FakeMcpAuthResolver::new(Some("stored-token"), "unused"));
+
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Stored,
+            Some(resolver),
+        )
+        .await
+        .expect("stored token should connect");
+
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+        assert!(
+            state
+                .seen_authorizations
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|header| header.as_deref() == Some("Bearer stored-token")),
+            "streamable HTTP requests should include the stored bearer token"
+        );
+        conn.close().await.expect("Failed to close connection");
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_interactive_login_retries_streamable_http_connect() {
+        let (url, state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        let resolver = Arc::new(FakeMcpAuthResolver::new(None, "interactive-token"));
+
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver.clone()),
+        )
+        .await
+        .expect("interactive login should retry and connect");
+
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+        assert_eq!(resolver.interactive_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            resolver
+                .challenges
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|challenge| challenge
+                    .as_deref()
+                    .is_some_and(|value| value.contains("resource_metadata"))),
+            "interactive login should receive the WWW-Authenticate challenge"
+        );
+        let seen = state.seen_authorizations.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(Option::is_none),
+            "first connect attempt should be unauthenticated"
+        );
+        assert!(
+            seen.iter()
+                .any(|header| header.as_deref() == Some("Bearer interactive-token")),
+            "retry should include the interactive bearer token"
+        );
+        conn.close().await.expect("Failed to close connection");
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_interactive_login_gets_browser_timeout_budget() {
+        let (url, _state) = spawn_http_mcp_server("interactive-token").await;
+        let mut config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        config.connect_timeout_secs = Some(1);
+        let resolver = Arc::new(
+            FakeMcpAuthResolver::new(None, "interactive-token")
+                .with_interactive_delay(Duration::from_millis(1200)),
+        );
+
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver),
+        )
+        .await
+        .expect("interactive login should not be cut off by the normal connect timeout");
+
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+        conn.close().await.expect("Failed to close connection");
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_interactive_mode_recovers_from_stored_reauth_required() {
+        let (url, state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        let resolver = Arc::new(
+            FakeMcpAuthResolver::new(None, "interactive-token").with_stored_reauth_required(),
+        );
+
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver.clone()),
+        )
+        .await
+        .expect("interactive mode should reauth when stored credentials require it");
+
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+        assert_eq!(resolver.interactive_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            state
+                .seen_authorizations
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|header| header.as_deref() == Some("Bearer interactive-token")),
+            "reauth retry should connect with the interactive token"
+        );
+        conn.close().await.expect("Failed to close connection");
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_interactive_mode_recovers_from_server_rejected_stored_token() {
+        let (url, state) = spawn_http_mcp_server("interactive-token").await;
+        let config = McpServerConfig::streamable_http("glean", url, HashMap::new());
+        let resolver = Arc::new(FakeMcpAuthResolver::new(
+            Some("stale-stored-token"),
+            "interactive-token",
+        ));
+
+        let (conn, tools) = McpConnection::connect_and_enumerate_with_mcp_auth(
+            &config,
+            McpAuthMode::Interactive,
+            Some(resolver.clone()),
+        )
+        .await
+        .expect("interactive mode should reauth when the server rejects a stored token");
+
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+        assert_eq!(resolver.interactive_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            resolver
+                .challenges
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|challenge| challenge
+                    .as_deref()
+                    .is_some_and(|value| value.contains("resource_metadata"))),
+            "server-rejected stored tokens should pass the auth challenge into reauth"
+        );
+        let seen = state.seen_authorizations.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .any(|header| header.as_deref() == Some("Bearer stale-stored-token")),
+            "first connect attempt should use the stored token"
+        );
+        assert!(
+            seen.iter()
+                .any(|header| header.as_deref() == Some("Bearer interactive-token")),
+            "reauth retry should use the interactive token"
+        );
         conn.close().await.expect("Failed to close connection");
     }
 }

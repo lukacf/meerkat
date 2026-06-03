@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-capabilities = { workspace = true }
+meerkat-auth-core = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 rmcp = { workspace = true, features = [
@@ -38,6 +39,7 @@ sse-stream = "0.2"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 meerkat-runtime = { workspace = true }
+axum = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["serde"]  # proc macro (derive)

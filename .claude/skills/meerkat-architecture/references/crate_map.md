@@ -5,7 +5,8 @@
 ```
 meerkat-models            (compatibility shim — re-exports meerkat-core::model_profile)
 meerkat-llm-core          (LLM client trait surface, streaming primitives shared by providers)
-meerkat-auth-core         (token stores, OAuth helpers, cloud authorizers — no meerkat-core deps)
+meerkat-auth-core         (token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh,
+                           cloud authorizers — no meerkat-core deps)
 
 meerkat-core              (pure types, traits, agent loop, session-store contract, model_profile catalog,
                            DSL handle traits)

@@ -64,10 +64,16 @@ pub fn build_server_config(
     name: String,
     transport: Option<McpTransportKind>,
     url: Option<String>,
+    positional_url: Option<String>,
     headers: Vec<String>,
     command: Vec<String>,
     env: Vec<String>,
 ) -> anyhow::Result<McpServerConfig> {
+    if url.is_some() && positional_url.is_some() {
+        anyhow::bail!("Provide either --url or a positional URL, not both");
+    }
+    let url = url.or(positional_url);
+
     if url.is_some() && !command.is_empty() {
         anyhow::bail!("Provide either --url or a stdio command after --, not both");
     }
@@ -97,7 +103,7 @@ pub fn build_server_config(
         // HTTP/SSE without URL
         (Some(McpTransportKind::StreamableHttp | McpTransportKind::Sse), None, _) => {
             anyhow::bail!(
-                "HTTP/SSE transport requires --url. Usage: rkat mcp add <name> -t http --url <url>"
+                "HTTP/SSE transport requires a URL. Usage: rkat mcp add --transport http <name> <url>"
             );
         }
         // URL provided, no explicit transport - default to streamable-http
@@ -115,37 +121,50 @@ pub fn build_server_config(
             anyhow::bail!(
                 "Either command or URL is required.\n\
                  Stdio: rkat mcp add <name> -- <command> [args...]\n\
-                 HTTP:  rkat mcp add <name> --url <url>"
+                 HTTP:  rkat mcp add <name> --url <url>\n\
+                 HTTP:  rkat mcp add --transport http <name> <url>"
             );
         }
     };
     Ok(server)
 }
 
+pub struct AddServerRequest {
+    pub name: String,
+    pub transport: Option<McpTransportKind>,
+    pub url: Option<String>,
+    pub positional_url: Option<String>,
+    pub headers: Vec<String>,
+    pub command: Vec<String>,
+    pub env: Vec<String>,
+    pub project_scope: bool,
+}
+
 /// Add an MCP server to the configuration
-pub async fn add_server(
-    name: String,
-    transport: Option<McpTransportKind>,
-    url: Option<String>,
-    headers: Vec<String>,
-    command: Vec<String>,
-    env: Vec<String>,
-    project_scope: bool,
-) -> anyhow::Result<()> {
-    let scope = if project_scope {
+pub async fn add_server(request: AddServerRequest) -> anyhow::Result<()> {
+    let scope = if request.project_scope {
         McpScope::Project
     } else {
         McpScope::User
     };
 
     // Check if server already exists in this scope
-    if McpConfig::server_exists(&name, scope).await? {
+    let name = &request.name;
+    if McpConfig::server_exists(name, scope).await? {
         anyhow::bail!(
             "MCP server '{name}' already exists in {scope} scope. Remove it first with: rkat mcp remove {name} --scope {scope}"
         );
     }
 
-    let server = build_server_config(name.clone(), transport, url, headers, command, env)?;
+    let server = build_server_config(
+        request.name.clone(),
+        request.transport,
+        request.url,
+        request.positional_url,
+        request.headers,
+        request.command,
+        request.env,
+    )?;
 
     // Get the file path for this scope
     let path = match scope {
@@ -306,6 +325,8 @@ pub async fn list_servers(scope: Option<McpScope>, json_output: bool) -> anyhow:
         if servers.is_empty() {
             println!("No MCP servers configured.");
             println!("\nAdd a server with: rkat mcp add <name> -- <command> [args...]");
+            println!("Or HTTP:          rkat mcp add <name> --url <url>");
+            println!("Then OAuth login: rkat mcp login <name>");
             return Ok(());
         }
 
@@ -824,6 +845,7 @@ command = "cmd"
             "mixed".to_string(),
             None,
             Some("https://mcp.example.com".to_string()),
+            None,
             Vec::new(),
             vec!["npx".to_string(), "-y".to_string(), "server".to_string()],
             Vec::new(),
@@ -835,6 +857,47 @@ command = "cmd"
                 .unwrap_err()
                 .to_string()
                 .contains("either --url or a stdio command")
+        );
+    }
+
+    #[test]
+    fn test_build_server_config_accepts_positional_http_url_without_auth_spec() {
+        let server = build_server_config(
+            "glean".to_string(),
+            Some(McpTransportKind::StreamableHttp),
+            None,
+            Some("https://king-be.glean.com/mcp/default".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        match server.transport {
+            McpTransportConfig::Http(http) => {
+                assert_eq!(http.url, "https://king-be.glean.com/mcp/default");
+                assert!(http.headers.is_empty());
+            }
+            _ => panic!("expected http transport"),
+        }
+    }
+
+    #[test]
+    fn test_build_server_config_rejects_ambiguous_url_forms() {
+        let result = build_server_config(
+            "ambiguous".to_string(),
+            Some(McpTransportKind::StreamableHttp),
+            Some("https://one.example/mcp".to_string()),
+            Some("https://two.example/mcp".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("either --url or a positional URL")
         );
     }
 

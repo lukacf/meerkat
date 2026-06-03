@@ -500,7 +500,7 @@ fn validate_transcript_rewrite_record(
             revision_body.messages.len()
         )));
     }
-    let original_span_digest = sha256_json_digest(&parent_body.messages[start..end])
+    let original_span_digest = transcript_messages_digest(&parent_body.messages[start..end])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if original_span_digest != commit.original_span_digest {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
@@ -554,8 +554,9 @@ fn validate_transcript_rewrite_record(
             "rewrite revision changed messages after the selected span".to_string(),
         ));
     }
-    let replacement_digest = sha256_json_digest(&revision_body.messages[start..replacement_end])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    let replacement_digest =
+        transcript_messages_digest(&revision_body.messages[start..replacement_end])
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if replacement_digest != commit.replacement_digest {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "replacement span digest {replacement_digest} does not match commit digest {}",
@@ -3355,10 +3356,11 @@ impl Session {
         rewritten.extend_from_slice(&self.messages[end..]);
         validate_transcript_tool_result_shape(&rewritten)?;
 
-        let original_span_digest = sha256_json_digest(&self.messages[start..end])
+        let original_span_digest = transcript_messages_digest(&self.messages[start..end])
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        let replacement_digest = sha256_json_digest(&rewritten[start..start + replacement_len])
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        let replacement_digest =
+            transcript_messages_digest(&rewritten[start..start + replacement_len])
+                .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
         let revision = transcript_messages_digest(&rewritten)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
         if revision == parent_revision {

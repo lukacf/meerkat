@@ -281,7 +281,7 @@ impl MobMcpState {
             // Auto-create realm profile store when persistent storage is available.
             #[cfg(not(target_arch = "wasm32"))]
             if !self.realm_profile_store_explicit {
-                let db_path = mob_root.join("realm_profiles.db");
+                let db_path = mob_root.join(Self::REALM_PROFILE_STORE_FILE_NAME);
                 match meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
                     Ok(store) => {
                         self.realm_profile_store =
@@ -368,6 +368,13 @@ impl MobMcpState {
 
         Ok(())
     }
+
+    /// Reserved filename of the realm-scoped profile store inside the mob
+    /// persistent root. This database lives in the same directory as the
+    /// per-mob `*.db` files but is NOT a mob event log; the restore scan must
+    /// never treat it as a mob storage candidate.
+    #[cfg(not(target_arch = "wasm32"))]
+    const REALM_PROFILE_STORE_FILE_NAME: &str = "realm_profiles.db";
 
     fn persistent_mob_root(runtime_root: &Path) -> PathBuf {
         runtime_root.join("mobs")
@@ -525,6 +532,17 @@ impl MobMcpState {
                 })?;
                 if !file_type.is_file()
                     || path.extension().and_then(|ext| ext.to_str()) != Some("db")
+                {
+                    continue;
+                }
+                // The realm-scoped profile store DB lives in this same
+                // directory (see `with_persistent_storage_root`) but is not a
+                // mob event log. Opening it as mob storage spawns a SQLite
+                // event-bus watcher thread and then deletes the file because
+                // its mob_events log is empty — silently destroying realm
+                // profiles. Never treat it as a mob storage candidate.
+                if path.file_name().and_then(|name| name.to_str())
+                    == Some(Self::REALM_PROFILE_STORE_FILE_NAME)
                 {
                     continue;
                 }

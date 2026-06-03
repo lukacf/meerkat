@@ -9,7 +9,7 @@ Meerkat publishes one source project across several consumer surfaces:
 | Artifact | Audience | Published as |
 |----------|----------|--------------|
 | Rust crates | Rust library users and surface binaries | crates.io |
-| `rkat` | CLI users | GitHub Release binary, Rust crate binary |
+| `rkat` | CLI users | Homebrew tap for macOS/Linux, GitHub Release binary, Rust crate binary |
 | `rkat-rpc` | SDK backends and JSON-RPC hosts | GitHub Release binary |
 | `rkat-rest` | HTTP/SSE service hosts | GitHub Release binary |
 | `rkat-mcp` | MCP host integrations | GitHub Release binary |
@@ -56,6 +56,25 @@ Release assets include platform archives plus a checksum manifest:
 - `checksums.sha256`
 - `index.json`
 
+## Homebrew Tap
+
+The featured CLI install path is the Homebrew tap:
+
+```bash
+brew install lukacf/meerkat/rkat
+```
+
+The generated formula supports both macOS and Linux release assets. Linux users
+should install Homebrew from the official
+[Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) instructions before
+using the same tap command.
+
+The formula installs `rkat` plus the companion binaries:
+
+- `rkat-rpc`
+- `rkat-rest`
+- `rkat-mcp`
+
 Reduced distributions are source builds of the same crates with a narrower
 feature set, not separate public binaries.
 
@@ -76,9 +95,10 @@ embedding a separate runtime implementation.
 1. Validate the release candidate.
 2. Build platform binaries.
 3. Create the GitHub release and upload binary assets.
-4. Publish Rust crates.
-5. Publish Python and TypeScript packages.
-6. Run install smoke checks for at least one platform.
+4. Update the Homebrew tap formula.
+5. Publish Rust crates.
+6. Publish Python and TypeScript packages.
+7. Run install smoke checks for at least one platform.
 
 Manual release dispatch supports dry-run registry validation. Locally, use:
 
@@ -106,6 +126,7 @@ Registry credentials are independent:
 
 | Registry | Credential |
 |----------|------------|
+| Homebrew tap | `HOMEBREW_TAP_TOKEN` |
 | crates.io | Cargo publish token |
 | PyPI | `PYPI_API_TOKEN` |
 | npm | `NPM_TOKEN` |

@@ -46,21 +46,23 @@ The library still comes first; surfaces come second. Pick the entry point that f
 | **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
 | **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, and realm-scoped WorkGraph commitments | Single agent or ad hoc delegation |
 | **Portable deployment** | Signed `.mobpack` artifacts with `pack`, `inspect`, `validate`, `deploy`, and `mob web build` | No equivalent portable team artifact flow |
-| **Distribution** | Release binaries, Homebrew tap, SDK auto-runtime, crates, PyPI, npm | Runtime plus dependencies |
+| **Distribution** | Homebrew tap for macOS/Linux, release binaries, SDK auto-runtime, crates, PyPI, npm | Runtime plus dependencies |
 
 Those tools excel at interactive development with rich terminal UIs. Meerkat is for automated pipelines, embedded agents, multi-agent systems, browser-delivered agents, and applications that need programmatic control over lifecycle, credentials, tools, and runtime events.
 
 ## Quick Start
 
 ```bash
-cargo install rkat
+brew install lukacf/meerkat/rkat
 export RKAT_OPENAI_API_KEY=sk-...
 ```
 
-`RKAT_OPENAI_API_KEY`, `RKAT_ANTHROPIC_API_KEY`, and `RKAT_GEMINI_API_KEY` take precedence over the provider-native names (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`). Azure OpenAI uses `RKAT_AZURE_OPENAI_API_KEY` plus `RKAT_AZURE_OPENAI_ENDPOINT` (or the unprefixed Azure names). You can also install from the Homebrew tap, use release binaries, or let the Python and TypeScript SDKs auto-resolve `rkat-rpc`:
+The Homebrew tap supports macOS and Linux. On Linux, install Homebrew first from the [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) instructions, then use the same tap command.
+
+`RKAT_OPENAI_API_KEY`, `RKAT_ANTHROPIC_API_KEY`, and `RKAT_GEMINI_API_KEY` take precedence over the provider-native names (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`). Azure OpenAI uses `RKAT_AZURE_OPENAI_API_KEY` plus `RKAT_AZURE_OPENAI_ENDPOINT` (or the unprefixed Azure names). You can also install from release binaries, build from crates.io, or let the Python and TypeScript SDKs auto-resolve `rkat-rpc`:
 
 ```bash
-brew install lukacf/meerkat/rkat
+cargo install rkat
 pip install meerkat-sdk
 npm install @rkat/sdk
 npm install @rkat/web

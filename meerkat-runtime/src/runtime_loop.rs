@@ -1258,8 +1258,8 @@ async fn process_queue(
                 crate::meerkat_machine::machine_batch_runtime_semantics(&d, &staged_ids);
             let projections =
                 crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
-            let primitive = match semantics {
-                Some(semantics) => {
+            let primitive = match (semantics, projections) {
+                (Some(semantics), Some(projections)) => {
                     let boundary = semantics.first().map(|semantics| semantics.boundary).ok_or(
                         meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
                             field: "runtime_boundary",
@@ -1276,10 +1276,19 @@ async fn process_queue(
                         Err(error) => Err(error),
                     }
                 }
-                None => Err(
+                (None, _) => Err(
                     meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
                         field: "execution_kind",
                         reason: "runtime-stamped execution kind missing for one or more inputs",
+                    },
+                ),
+                // Fail closed alongside semantics: a missing primitive projection
+                // (co-recorded with runtime semantics) must reject the batch, not
+                // construct a run primitive from a defaulted projection.
+                (Some(_), None) => Err(
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                        field: "primitive_projection",
+                        reason: "runtime-stamped primitive projection missing for one or more inputs",
                     },
                 ),
             };

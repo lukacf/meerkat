@@ -819,6 +819,28 @@ impl CoreCommsRuntime for CommsRuntime {
                     ));
                 }
                 let effective_handling_mode = if is_terminal_reply {
+                    // Preflight the inbound lifecycle STATE before the
+                    // irreversible transport send. The terminal `response_replied`
+                    // transition applied after the send commits a
+                    // `PeerResponseReplied` guarded on the `inbound_peer_requests`
+                    // state being `Received` — a DIFFERENT substate than the
+                    // handling-mode lane (`inbound_peer_request_lanes`) checked
+                    // below. Without this state check, a recorded lane could pass
+                    // the lane preflight while the request is no longer repliable,
+                    // so the post-send `response_replied` would reject AFTER the
+                    // remote has already seen the terminal response — a split
+                    // where the remote considers the request answered but local
+                    // authority reports rejection. Validating repliability here
+                    // keeps the send and the authority transition consistent
+                    // (the post-send transition cannot reject under the
+                    // single-owner session task).
+                    if peer_handle.inbound_state(corr_id)
+                        != Some(meerkat_core::InboundPeerRequestState::Received)
+                    {
+                        return Err(SendError::Validation(format!(
+                            "PeerResponse terminal reply for corr_id {corr_id} is not in a repliable inbound state; response not sent"
+                        )));
+                    }
                     let resolved =
                         handling_mode.or_else(|| peer_handle.inbound_handling_mode(corr_id));
                     if resolved.is_none() {

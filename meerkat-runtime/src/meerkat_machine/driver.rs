@@ -1303,12 +1303,11 @@ pub(crate) fn machine_batch_runtime_semantics(
 pub(crate) fn machine_batch_primitive_projections(
     driver: &DriverEntry,
     inputs: &[(InputId, Input)],
-) -> Vec<crate::ingress_types::RuntimeInputProjection> {
+) -> Option<Vec<crate::ingress_types::RuntimeInputProjection>> {
     let ingress = driver.driver_ingress();
     inputs
         .iter()
         .map(|(id, input)| {
-            let projection = ingress.primitive_projection(id).unwrap_or_default();
             if matches!(
                 input,
                 Input::Peer(crate::input::PeerInput {
@@ -1316,9 +1315,19 @@ pub(crate) fn machine_batch_primitive_projections(
                     ..
                 })
             ) {
-                crate::input::runtime_input_projection_for_machine_batch(input)
+                // ResponseTerminal projections are derived from the input itself,
+                // not from the admitted ingress projection.
+                Some(crate::input::runtime_input_projection_for_machine_batch(
+                    input,
+                ))
             } else {
-                projection
+                // Fail closed: the admitted primitive projection is co-recorded
+                // with runtime semantics (`record_admission_metadata`), so a
+                // missing projection here is a real gap, not a defaultable
+                // absence. Returning `None` rejects the whole batch — mirroring
+                // `machine_batch_runtime_semantics` — rather than silently
+                // feeding a default projection into run-primitive construction.
+                ingress.primitive_projection(id)
             }
         })
         .collect()

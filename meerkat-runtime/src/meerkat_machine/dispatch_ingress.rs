@@ -786,17 +786,30 @@ impl MeerkatMachine {
                             Some(mut semantics) if semantics.len() == 1 => {
                                 let projection_inputs =
                                     [(dequeued_id.clone(), dequeued_input.clone())];
-                                let projections =
-                                    crate::meerkat_machine::machine_batch_primitive_projections(
-                                        &driver,
-                                        &projection_inputs,
-                                    );
-                                crate::runtime_loop::admitted_input_to_primitive(
-                                    &dequeued_input,
-                                    dequeued_id.clone(),
-                                    projections.into_iter().next().unwrap_or_default(),
-                                    semantics.remove(0),
+                                // Fail closed: a missing primitive projection
+                                // (co-recorded with runtime semantics) rejects the
+                                // input rather than defaulting into the primitive.
+                                match crate::meerkat_machine::machine_batch_primitive_projections(
+                                    &driver,
+                                    &projection_inputs,
                                 )
+                                .and_then(|projections| projections.into_iter().next())
+                                {
+                                    Some(projection) => {
+                                        crate::runtime_loop::admitted_input_to_primitive(
+                                            &dequeued_input,
+                                            dequeued_id.clone(),
+                                            projection,
+                                            semantics.remove(0),
+                                        )
+                                    }
+                                    None => Err(
+                                        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                                            field: "primitive_projection",
+                                            reason: "runtime-stamped primitive projection missing for staged input",
+                                        },
+                                    ),
+                                }
                             }
                             _ => Err(
                                 meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {

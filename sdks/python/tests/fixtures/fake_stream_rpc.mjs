@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
+import { readFileSync } from "node:fs";
 
-const CONTRACT_VERSION = "0.6.0";
+const versionInfo = JSON.parse(
+  readFileSync(new URL("../../../../artifacts/schemas/version.json", import.meta.url), "utf8"),
+);
+const CONTRACT_VERSION = versionInfo.contract_version;
 
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);

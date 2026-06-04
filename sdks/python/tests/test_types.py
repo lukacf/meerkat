@@ -94,8 +94,9 @@ from meerkat.generated.types import (
 
 
 def test_contract_version():
-    """Contract version should be semver."""
-    parts = CONTRACT_VERSION.split(".")
+    """Contract version should be semver, including optional prerelease labels."""
+    core = CONTRACT_VERSION.split("-", 1)[0].split("+", 1)[0]
+    parts = core.split(".")
     assert len(parts) == 3
     for part in parts:
         int(part)

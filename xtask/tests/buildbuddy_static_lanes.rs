@@ -393,7 +393,15 @@ fn public_version_surfaces_are_in_sync() {
         assert!(!digits.is_empty(), "missing numeric {key}");
         parts.push(digits);
     }
-    let contract_version = parts.join(".");
+    let mut contract_version = parts.join(".");
+    if let Some(prerelease) = find_all_between(
+        &version_rs,
+        "pub const PRERELEASE: Option<&'static str> = Some(\"",
+        "\");",
+    ) {
+        contract_version.push('-');
+        contract_version.push_str(&prerelease);
+    }
     assert_eq!(contract_version, cargo_version, "contract version mismatch");
 
     let schema_version: serde_json::Value =

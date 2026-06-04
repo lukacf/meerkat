@@ -3408,9 +3408,13 @@ class MeerkatClient:
 
     @staticmethod
     def _check_version_compatible(server: str, client: str) -> bool:
+        def core_parts(version: str) -> list[int]:
+            core = version.split("-", 1)[0].split("+", 1)[0]
+            return [int(x) for x in core.split(".")]
+
         try:
-            s_parts = [int(x) for x in server.split(".")]
-            c_parts = [int(x) for x in client.split(".")]
+            s_parts = core_parts(server)
+            c_parts = core_parts(client)
             if s_parts[0] == 0 and c_parts[0] == 0:
                 return s_parts[1] == c_parts[1]
             return s_parts[0] == c_parts[0]

@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, SessionCallTimeoutOverrideKindValues, SessionDurableProviderKindValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SessionToolCategoryOverrideKindValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues
+CONSTANTS BooleanValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -33,22 +33,22 @@ resume_provider_recompute_from_model(model_override_present, provider_override_p
 resume_reject_clear_and_set_auth_binding(clear_auth_binding, auth_binding_override_present) == (clear_auth_binding /\ auth_binding_override_present)
 resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present) == (clear_provider_params /\ provider_params_override_present)
 resume_reject_provider_requires_model(provider_override_present, model_override_present) == (provider_override_present /\ (model_override_present = FALSE))
-tail_has_pending_boundary(session_tail) == ((session_tail = "User") \/ (session_tail = "ToolResults"))
+tail_has_pending_boundary(session_tail) == (IF (session_tail = "User") THEN TRUE ELSE (session_tail = "ToolResults"))
 realtime_stop_reason_records_completion(stop_reason) == (stop_reason = "Other")
 realtime_stop_reason_removes_completion(stop_reason) == (stop_reason = "ToolUse")
 realtime_stop_reason_discards(stop_reason) == (stop_reason = "Cancelled")
 realtime_should_mark_ready_after_write(response_completed, text_after_write_present) == (response_completed /\ text_after_write_present)
-realtime_lane_accepts(item_has_text, current_lane, requested_lane) == ((current_lane = requested_lane) \/ (item_has_text = FALSE))
+realtime_lane_accepts(item_has_text, current_lane, requested_lane) == (IF (current_lane = requested_lane) THEN TRUE ELSE (item_has_text = FALSE))
 realtime_delta_is_duplicate(delta_id_present, delta_id_seen) == (delta_id_present /\ delta_id_seen)
-persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) == ((has_previous /\ content_identical) \/ (has_previous /\ content_extends_previous /\ appended_starts_with_separator /\ incoming_is_runtime_context_append) \/ ((has_previous = FALSE) /\ incoming_is_runtime_context_append))
-append_is_new(idempotency_key_present, existing_key_matches, existing_key_conflicts) == ((idempotency_key_present = FALSE) \/ ((existing_key_matches = FALSE) /\ (existing_key_conflicts = FALSE)))
+persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) == (IF (has_previous /\ content_identical) THEN TRUE ELSE (IF (has_previous /\ content_extends_previous /\ appended_starts_with_separator /\ incoming_is_runtime_context_append) THEN TRUE ELSE ((has_previous = FALSE) /\ incoming_is_runtime_context_append)))
+append_is_new(idempotency_key_present, existing_key_matches, existing_key_conflicts) == (IF (idempotency_key_present = FALSE) THEN TRUE ELSE ((existing_key_matches = FALSE) /\ (existing_key_conflicts = FALSE)))
 append_is_duplicate(idempotency_key_present, existing_key_matches, existing_key_conflicts) == (idempotency_key_present /\ existing_key_matches /\ (existing_key_conflicts = FALSE))
 append_is_conflict(idempotency_key_present, existing_key_conflicts) == (idempotency_key_present /\ existing_key_conflicts)
 append_is_empty(trimmed_text_byte_count) == (trimmed_text_byte_count = 0)
 should_store_initial_prompt(arg_phase, prompt_has_content) == ((arg_phase = "Pending") /\ prompt_has_content)
 phase_allows_initial_turn_overrides(arg_phase) == (arg_phase = "Pending")
 resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase) == (has_build_only_overrides /\ (phase_allows_initial_turn_overrides(first_turn_phase) = FALSE))
-has_effective_pending_boundary(session_tail, staged_tool_result_count) == (tail_has_pending_boundary(session_tail) \/ (staged_tool_result_count > 0))
+has_effective_pending_boundary(session_tail, staged_tool_result_count) == (IF tail_has_pending_boundary(session_tail) THEN TRUE ELSE (staged_tool_result_count > 0))
 resume_overrides_admissible(provider_override_present, model_override_present, clear_provider_params, provider_params_override_present, clear_auth_binding, auth_binding_override_present, has_build_only_overrides, first_turn_phase) == ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ (resume_reject_clear_and_set_provider_params(clear_provider_params, provider_params_override_present) = FALSE) /\ (resume_reject_clear_and_set_auth_binding(clear_auth_binding, auth_binding_override_present) = FALSE) /\ (resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase) = FALSE))
 
 Init ==
@@ -60,7 +60,7 @@ Init ==
 
 MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase = "Ready"
-    /\ (((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive") \/ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending"))
+    /\ (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive") THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
@@ -136,7 +136,7 @@ StageSessionInitialPromptClear(session_id, prompt_has_content) ==
 
 StageSessionToolResults(session_id, result_count) ==
     /\ phase = "Ready"
-    /\ (((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive") \/ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending") \/ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed"))
+    /\ (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive") THEN TRUE ELSE (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending") THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, result_count)
@@ -195,7 +195,7 @@ RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pendi
 
 RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_present, pending_tool_result_message_count) ==
     /\ phase = "Ready"
-    /\ ((arg_phase = "Inactive") \/ (arg_phase = "Pending") \/ (arg_phase = "Consumed"))
+    /\ (IF (arg_phase = "Inactive") THEN TRUE ELSE (IF (arg_phase = "Pending") THEN TRUE ELSE (arg_phase = "Consumed")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, arg_phase)
@@ -301,7 +301,7 @@ ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
 
 ResolveRealtimeItemObservedPresent(role, response_discarded) ==
     /\ phase = "Ready"
-    /\ ((role # "Assistant") \/ (response_discarded = FALSE))
+    /\ (IF (role # "Assistant") THEN TRUE ELSE (response_discarded = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
@@ -340,7 +340,7 @@ ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, 
 
 ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
     /\ phase = "Ready"
-    /\ ((response_id_valid = FALSE) \/ realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
+    /\ (IF (response_id_valid = FALSE) THEN TRUE ELSE realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
@@ -420,7 +420,7 @@ ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discard
 
 ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discarded, stop_reason) ==
     /\ phase = "Ready"
-    /\ (response_id_valid /\ (response_discarded \/ realtime_stop_reason_discards(stop_reason)))
+    /\ (response_id_valid /\ (IF response_discarded THEN TRUE ELSE realtime_stop_reason_discards(stop_reason)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
@@ -484,7 +484,7 @@ ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, i
 
 ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
     /\ phase = "Ready"
-    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ ((item_ready = FALSE) \/ (item_text_present = FALSE)))
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ (IF (item_ready = FALSE) THEN TRUE ELSE (item_text_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
@@ -508,7 +508,7 @@ ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized,
 
 ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
     /\ phase = "Ready"
-    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ ((response_id_present = FALSE) \/ (completion_present = FALSE)))
+    /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ (IF (response_id_present = FALSE) THEN TRUE ELSE (completion_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
@@ -522,7 +522,7 @@ AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
-AuthorizeSessionMetadataPersist(schema_version, model_present, max_tokens, structured_output_retries, provider, self_hosted_server_present, provider_params_present, tooling_builtins, tooling_shell, tooling_comms, tooling_mob, tooling_memory, tooling_schedule, tooling_workgraph, tooling_image_generation, tooling_web_search, active_skill_count, keep_alive, comms_name_present, peer_meta_present, realm_id_present, instance_id_present, backend_present, config_generation_present, auth_binding_present) ==
+AuthorizeSessionMetadataPersist(schema_version, model_present) ==
     /\ phase = "Ready"
     /\ ((schema_version > 0) /\ (model_present = TRUE))
     /\ phase' = "Ready"
@@ -530,15 +530,15 @@ AuthorizeSessionMetadataPersist(schema_version, model_present, max_tokens, struc
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
-AuthorizeSessionBuildStatePersist(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, mob_tool_authority_context_generated, call_timeout_override) ==
+AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated) ==
     /\ phase = "Ready"
-    /\ ((mob_tool_authority_context_present = FALSE) \/ (mob_tool_authority_context_generated = TRUE))
+    /\ (IF (mob_tool_authority_context_present = FALSE) THEN TRUE ELSE (mob_tool_authority_context_generated = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
-RestoreSessionBuildState(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, call_timeout_override) ==
+RestoreSessionBuildState ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
@@ -547,7 +547,7 @@ RestoreSessionBuildState(system_prompt_present, output_schema_present, hook_entr
 
 AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing) ==
     /\ phase = "Ready"
-    /\ ((prompt_present = TRUE) \/ (prompt_byte_count = 0))
+    /\ (IF (prompt_present = TRUE) THEN TRUE ELSE (prompt_byte_count = 0))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
@@ -722,9 +722,9 @@ Next ==
     \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
     \/ \E item_materialized \in BOOLEAN : \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
     \/ \E item_count \in 0..2 : \E first_seen_count \in 0..2 : \E first_seen_unique_count \in 0..2 : \E every_item_has_order_entry \in BOOLEAN : \E every_order_entry_has_item \in BOOLEAN : \E all_identity_fields_valid \in BOOLEAN : \E all_delta_ids_valid \in BOOLEAN : \E all_completion_response_ids_valid \in BOOLEAN : \E all_discarded_response_ids_valid \in BOOLEAN : \E all_materialized_items_were_ready_or_skipped \in BOOLEAN : \E all_assistant_items_have_response_unless_skipped \in BOOLEAN : \E all_ready_assistant_items_have_completion_or_are_skipped \in BOOLEAN : \E all_materialized_assistant_completions_consumed \in BOOLEAN : \E all_completed_assistant_text_items_are_ready_or_materialized_or_skipped \in BOOLEAN : \E all_discarded_assistant_items_are_skipped_or_materialized \in BOOLEAN : AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized)
-    \/ \E schema_version \in 0..2 : \E model_present \in BOOLEAN : \E max_tokens \in 0..2 : \E structured_output_retries \in 0..2 : \E provider \in SessionDurableProviderKindValues : \E self_hosted_server_present \in BOOLEAN : \E provider_params_present \in BOOLEAN : \E tooling_builtins \in SessionToolCategoryOverrideKindValues : \E tooling_shell \in SessionToolCategoryOverrideKindValues : \E tooling_comms \in SessionToolCategoryOverrideKindValues : \E tooling_mob \in SessionToolCategoryOverrideKindValues : \E tooling_memory \in SessionToolCategoryOverrideKindValues : \E tooling_schedule \in SessionToolCategoryOverrideKindValues : \E tooling_workgraph \in SessionToolCategoryOverrideKindValues : \E tooling_image_generation \in SessionToolCategoryOverrideKindValues : \E tooling_web_search \in SessionToolCategoryOverrideKindValues : \E active_skill_count \in 0..2 : \E keep_alive \in BOOLEAN : \E comms_name_present \in BOOLEAN : \E peer_meta_present \in BOOLEAN : \E realm_id_present \in BOOLEAN : \E instance_id_present \in BOOLEAN : \E backend_present \in BOOLEAN : \E config_generation_present \in BOOLEAN : \E auth_binding_present \in BOOLEAN : AuthorizeSessionMetadataPersist(schema_version, model_present, max_tokens, structured_output_retries, provider, self_hosted_server_present, provider_params_present, tooling_builtins, tooling_shell, tooling_comms, tooling_mob, tooling_memory, tooling_schedule, tooling_workgraph, tooling_image_generation, tooling_web_search, active_skill_count, keep_alive, comms_name_present, peer_meta_present, realm_id_present, instance_id_present, backend_present, config_generation_present, auth_binding_present)
-    \/ \E system_prompt_present \in BOOLEAN : \E output_schema_present \in BOOLEAN : \E hook_entry_count \in 0..2 : \E disabled_hook_count \in 0..2 : \E budget_limits_present \in BOOLEAN : \E recoverable_tool_count \in 0..2 : \E silent_comms_intent_count \in 0..2 : \E max_inline_peer_notifications_present \in BOOLEAN : \E app_context_present \in BOOLEAN : \E additional_instruction_count \in 0..2 : \E shell_env_count \in 0..2 : \E mob_tool_authority_context_present \in BOOLEAN : \E mob_tool_authority_context_generated \in BOOLEAN : \E call_timeout_override \in SessionCallTimeoutOverrideKindValues : AuthorizeSessionBuildStatePersist(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, mob_tool_authority_context_generated, call_timeout_override)
-    \/ \E system_prompt_present \in BOOLEAN : \E output_schema_present \in BOOLEAN : \E hook_entry_count \in 0..2 : \E disabled_hook_count \in 0..2 : \E budget_limits_present \in BOOLEAN : \E recoverable_tool_count \in 0..2 : \E silent_comms_intent_count \in 0..2 : \E max_inline_peer_notifications_present \in BOOLEAN : \E app_context_present \in BOOLEAN : \E additional_instruction_count \in 0..2 : \E shell_env_count \in 0..2 : \E mob_tool_authority_context_present \in BOOLEAN : \E call_timeout_override \in SessionCallTimeoutOverrideKindValues : RestoreSessionBuildState(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, call_timeout_override)
+    \/ \E schema_version \in 0..2 : \E model_present \in BOOLEAN : AuthorizeSessionMetadataPersist(schema_version, model_present)
+    \/ \E mob_tool_authority_context_present \in BOOLEAN : \E mob_tool_authority_context_generated \in BOOLEAN : AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated)
+    \/ RestoreSessionBuildState
     \/ \E source \in SessionSystemPromptSourceValues : \E prompt_present \in BOOLEAN : \E prompt_byte_count \in 0..2 : \E replacing_existing \in BOOLEAN : AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count)

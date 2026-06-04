@@ -455,7 +455,7 @@ auth_machine_RefreshFailedPermanent(arg_http_status, arg_oauth_error_code, arg_l
        /\ packet.payload.local_credential_unusable = arg_local_credential_unusable
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
-       /\ ((packet.payload.local_credential_unusable = TRUE) \/ (packet.payload.http_status = Some(401)) \/ (packet.payload.http_status = Some(403)) \/ (packet.payload.oauth_error_code = Some("invalid_grant")) \/ (packet.payload.oauth_error_code = Some("invalid_client")) \/ (packet.payload.oauth_error_code = Some("unauthorized_client")) \/ (packet.payload.oauth_error_code = Some("invalid_scope")) \/ (packet.payload.oauth_error_code = Some("access_denied")) \/ (packet.payload.oauth_error_code = Some("permission_denied")) \/ (packet.payload.oauth_error_code = Some("expired_token")))
+       /\ (IF (packet.payload.local_credential_unusable = TRUE) THEN TRUE ELSE (IF (packet.payload.http_status = Some(401)) THEN TRUE ELSE (IF (packet.payload.http_status = Some(403)) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("invalid_grant")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("invalid_client")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("unauthorized_client")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("invalid_scope")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("access_denied")) THEN TRUE ELSE (IF (packet.payload.oauth_error_code = Some("permission_denied")) THEN TRUE ELSE (packet.payload.oauth_error_code = Some("expired_token")))))))))))
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_refresh_attempt' = (auth_machine_refresh_attempt + 1)
        /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
@@ -832,8 +832,8 @@ auth_machine_RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth(arg_lifecyc
        /\ packet.payload.restored_oauth_membership_observed = arg_restored_oauth_membership_observed
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
-       /\ ((packet.payload.credential_present = FALSE) \/ (packet.payload.lifecycle_phase = None) \/ (packet.payload.lifecycle_phase = Some("Released")))
-       /\ ((auth_machine_oauth_outstanding_flow_count > 0) \/ packet.payload.restored_oauth_membership_observed)
+       /\ (IF (packet.payload.credential_present = FALSE) THEN TRUE ELSE (IF (packet.payload.lifecycle_phase = None) THEN TRUE ELSE (packet.payload.lifecycle_phase = Some("Released"))))
+       /\ (IF (auth_machine_oauth_outstanding_flow_count > 0) THEN TRUE ELSE packet.payload.restored_oauth_membership_observed)
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_expires_at' = None
        /\ auth_machine_last_refresh' = None
@@ -866,7 +866,7 @@ auth_machine_RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth(arg_life
        /\ packet.payload.restored_oauth_membership_observed = arg_restored_oauth_membership_observed
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
-       /\ ((packet.payload.credential_present = FALSE) \/ (packet.payload.lifecycle_phase = None) \/ (packet.payload.lifecycle_phase = Some("Released")))
+       /\ (IF (packet.payload.credential_present = FALSE) THEN TRUE ELSE (IF (packet.payload.lifecycle_phase = None) THEN TRUE ELSE (packet.payload.lifecycle_phase = Some("Released"))))
        /\ ((auth_machine_oauth_outstanding_flow_count = 0) /\ (packet.payload.restored_oauth_membership_observed = FALSE))
        /\ auth_machine_phase' = "Released"
        /\ auth_machine_expires_at' = None
@@ -1036,7 +1036,7 @@ auth_machine_RestoreAuthoritySnapshotReauthRequired(arg_lifecycle_phase, arg_exp
        /\ packet.payload.credential_published_at_millis = arg_credential_published_at_millis
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Valid" \/ auth_machine_phase = "Expiring" \/ auth_machine_phase = "Expired" \/ auth_machine_phase = "Refreshing" \/ auth_machine_phase = "ReauthRequired" \/ auth_machine_phase = "Released"
-       /\ ((packet.payload.lifecycle_phase = "ReauthRequired") /\ ((packet.payload.credential_present = FALSE) \/ (packet.payload.credential_published_at_millis # None)))
+       /\ ((packet.payload.lifecycle_phase = "ReauthRequired") /\ (IF (packet.payload.credential_present = FALSE) THEN TRUE ELSE (packet.payload.credential_published_at_millis # None)))
        /\ auth_machine_phase' = "ReauthRequired"
        /\ auth_machine_expires_at' = packet.payload.expires_at
        /\ auth_machine_last_refresh' = packet.payload.last_refresh
@@ -3309,7 +3309,7 @@ auth_machine_ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefresh
        /\ packet.payload.intent = arg_intent
        /\ ~HigherPriorityReady("auth_machine_authority")
        /\ auth_machine_phase = "Refreshing"
-       /\ ((auth_machine_credential_present = FALSE) /\ ((packet.payload.intent = "UseCredential") \/ (packet.payload.intent = "HoldAuthority")))
+       /\ ((auth_machine_credential_present = FALSE) /\ (IF (packet.payload.intent = "UseCredential") THEN TRUE ELSE (packet.payload.intent = "HoldAuthority")))
        /\ auth_machine_phase' = "Refreshing"
        /\ UNCHANGED << auth_machine_expires_at, auth_machine_last_refresh, auth_machine_refresh_attempt, auth_machine_credential_present, auth_machine_credential_generation, auth_machine_credential_published_at_millis, auth_machine_oauth_browser_flow_ids, auth_machine_oauth_browser_flow_providers, auth_machine_oauth_browser_flow_redirect_uris, auth_machine_oauth_browser_flow_expires_at_millis, auth_machine_oauth_device_flow_ids, auth_machine_oauth_device_flow_providers, auth_machine_oauth_device_flow_expires_at_millis, auth_machine_oauth_device_poll_ids, auth_machine_oauth_outstanding_flow_count, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)

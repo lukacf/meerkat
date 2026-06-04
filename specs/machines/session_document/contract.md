@@ -34,9 +34,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid: Bool)
 - `ResolveRealtimeMaterializeCandidate`(item_materialized: Bool, predecessor_materialized: Bool, item_skipped: Bool, item_ready: Bool, item_text_present: Bool, role: RealtimeTranscriptRoleKind, response_id_present: Bool, completion_present: Bool, completion_usage_consumed: Bool)
 - `RestoreRealtimeTranscriptState`(item_count: u64, first_seen_count: u64, first_seen_unique_count: u64, every_item_has_order_entry: Bool, every_order_entry_has_item: Bool, all_identity_fields_valid: Bool, all_delta_ids_valid: Bool, all_completion_response_ids_valid: Bool, all_discarded_response_ids_valid: Bool, all_materialized_items_were_ready_or_skipped: Bool, all_assistant_items_have_response_unless_skipped: Bool, all_ready_assistant_items_have_completion_or_are_skipped: Bool, all_materialized_assistant_completions_consumed: Bool, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: Bool, all_discarded_assistant_items_are_skipped_or_materialized: Bool)
-- `AuthorizeSessionMetadataPersist`(schema_version: u64, model_present: Bool, max_tokens: u64, structured_output_retries: u64, provider: SessionDurableProviderKind, self_hosted_server_present: Bool, provider_params_present: Bool, tooling_builtins: SessionToolCategoryOverrideKind, tooling_shell: SessionToolCategoryOverrideKind, tooling_comms: SessionToolCategoryOverrideKind, tooling_mob: SessionToolCategoryOverrideKind, tooling_memory: SessionToolCategoryOverrideKind, tooling_schedule: SessionToolCategoryOverrideKind, tooling_workgraph: SessionToolCategoryOverrideKind, tooling_image_generation: SessionToolCategoryOverrideKind, tooling_web_search: SessionToolCategoryOverrideKind, active_skill_count: u64, keep_alive: Bool, comms_name_present: Bool, peer_meta_present: Bool, realm_id_present: Bool, instance_id_present: Bool, backend_present: Bool, config_generation_present: Bool, auth_binding_present: Bool)
-- `AuthorizeSessionBuildStatePersist`(system_prompt_present: Bool, output_schema_present: Bool, hook_entry_count: u64, disabled_hook_count: u64, budget_limits_present: Bool, recoverable_tool_count: u64, silent_comms_intent_count: u64, max_inline_peer_notifications_present: Bool, app_context_present: Bool, additional_instruction_count: u64, shell_env_count: u64, mob_tool_authority_context_present: Bool, mob_tool_authority_context_generated: Bool, call_timeout_override: SessionCallTimeoutOverrideKind)
-- `RestoreSessionBuildState`(system_prompt_present: Bool, output_schema_present: Bool, hook_entry_count: u64, disabled_hook_count: u64, budget_limits_present: Bool, recoverable_tool_count: u64, silent_comms_intent_count: u64, max_inline_peer_notifications_present: Bool, app_context_present: Bool, additional_instruction_count: u64, shell_env_count: u64, mob_tool_authority_context_present: Bool, call_timeout_override: SessionCallTimeoutOverrideKind)
+- `AuthorizeSessionMetadataPersist`(schema_version: u64, model_present: Bool)
+- `AuthorizeSessionBuildStatePersist`(mob_tool_authority_context_present: Bool, mob_tool_authority_context_generated: Bool)
+- `RestoreSessionBuildState`
 - `AuthorizeSystemPromptMutation`(source: SessionSystemPromptSource, prompt_present: Bool, prompt_byte_count: u64, replacing_existing: Bool)
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, clear_provider_params: Bool, provider_params_override_present: Bool, clear_auth_binding: Bool, auth_binding_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
@@ -543,7 +543,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSessionMetadataPersist`
 - From: `Ready`
-- On: `AuthorizeSessionMetadataPersist`(schema_version, model_present, max_tokens, structured_output_retries, provider, self_hosted_server_present, provider_params_present, tooling_builtins, tooling_shell, tooling_comms, tooling_mob, tooling_memory, tooling_schedule, tooling_workgraph, tooling_image_generation, tooling_web_search, active_skill_count, keep_alive, comms_name_present, peer_meta_present, realm_id_present, instance_id_present, backend_present, config_generation_present, auth_binding_present)
+- On: `AuthorizeSessionMetadataPersist`(schema_version, model_present)
 - Guards:
   - ``
 - Emits: `SessionMetadataPersistAuthorized`
@@ -551,7 +551,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeSessionBuildStatePersist`
 - From: `Ready`
-- On: `AuthorizeSessionBuildStatePersist`(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, mob_tool_authority_context_generated, call_timeout_override)
+- On: `AuthorizeSessionBuildStatePersist`(mob_tool_authority_context_present, mob_tool_authority_context_generated)
 - Guards:
   - ``
 - Emits: `SessionBuildStatePersistAuthorized`
@@ -559,7 +559,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreSessionBuildState`
 - From: `Ready`
-- On: `RestoreSessionBuildState`(system_prompt_present, output_schema_present, hook_entry_count, disabled_hook_count, budget_limits_present, recoverable_tool_count, silent_comms_intent_count, max_inline_peer_notifications_present, app_context_present, additional_instruction_count, shell_env_count, mob_tool_authority_context_present, call_timeout_override)
+- On: `RestoreSessionBuildState`()
 - Emits: `SessionBuildStateRestoreAuthorized`
 - To: `Ready`
 

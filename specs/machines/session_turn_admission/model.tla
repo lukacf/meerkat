@@ -27,8 +27,8 @@ VARIABLES phase, model_step_count, interrupt_pending, shutdown_pending, last_pub
 
 vars == << phase, model_step_count, interrupt_pending, shutdown_pending, last_public_terminal >>
 
-prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == ((prompt_trimmed_text_byte_count > 0) \/ (prompt_non_text_block_count > 0))
-is_active_phase(arg_phase) == ((arg_phase = "Admitted") \/ (arg_phase = "Running") \/ (arg_phase = "Completing"))
+prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count) == (IF (prompt_trimmed_text_byte_count > 0) THEN TRUE ELSE (prompt_non_text_block_count > 0))
+is_active_phase(arg_phase) == (IF (arg_phase = "Admitted") THEN TRUE ELSE (IF (arg_phase = "Running") THEN TRUE ELSE (arg_phase = "Completing")))
 
 Init ==
     /\ phase = "Idle"
@@ -380,7 +380,7 @@ Next ==
     \/ ResolveLastStartTurnPublicTerminalNoPendingShuttingDown
     \/ TerminalStutter
 
-shutdown_phase_is_not_active == ((phase # "ShuttingDown") \/ (is_active_phase(phase) = FALSE))
+shutdown_phase_is_not_active == (IF (phase # "ShuttingDown") THEN TRUE ELSE (is_active_phase(phase) = FALSE))
 
 CiStateConstraint == /\ model_step_count <= 6
 DeepStateConstraint == /\ model_step_count <= 8

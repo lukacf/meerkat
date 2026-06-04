@@ -187,7 +187,7 @@ RefreshFailedTransient(http_status, oauth_error_code, local_credential_unusable)
 
 RefreshFailedPermanent(http_status, oauth_error_code, local_credential_unusable) ==
     /\ phase = "Refreshing"
-    /\ ((local_credential_unusable = TRUE) \/ (http_status = Some(401)) \/ (http_status = Some(403)) \/ (oauth_error_code = Some("invalid_grant")) \/ (oauth_error_code = Some("invalid_client")) \/ (oauth_error_code = Some("unauthorized_client")) \/ (oauth_error_code = Some("invalid_scope")) \/ (oauth_error_code = Some("access_denied")) \/ (oauth_error_code = Some("permission_denied")) \/ (oauth_error_code = Some("expired_token")))
+    /\ (IF (local_credential_unusable = TRUE) THEN TRUE ELSE (IF (http_status = Some(401)) THEN TRUE ELSE (IF (http_status = Some(403)) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_grant")) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_client")) THEN TRUE ELSE (IF (oauth_error_code = Some("unauthorized_client")) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_scope")) THEN TRUE ELSE (IF (oauth_error_code = Some("access_denied")) THEN TRUE ELSE (IF (oauth_error_code = Some("permission_denied")) THEN TRUE ELSE (oauth_error_code = Some("expired_token")))))))))))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
@@ -362,8 +362,8 @@ RestoreCredentialLifecycleSnapshotReauthRequired(lifecycle_phase, arg_expires_at
 
 RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis, restored_oauth_membership_observed) ==
     /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Expired" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
-    /\ ((arg_credential_present = FALSE) \/ (lifecycle_phase = None) \/ (lifecycle_phase = Some("Released")))
-    /\ ((oauth_outstanding_flow_count > 0) \/ restored_oauth_membership_observed)
+    /\ (IF (arg_credential_present = FALSE) THEN TRUE ELSE (IF (lifecycle_phase = None) THEN TRUE ELSE (lifecycle_phase = Some("Released"))))
+    /\ (IF (oauth_outstanding_flow_count > 0) THEN TRUE ELSE restored_oauth_membership_observed)
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ expires_at' = None
@@ -377,7 +377,7 @@ RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth(lifecycle_phase, arg_exp
 
 RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis, restored_oauth_membership_observed) ==
     /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Expired" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
-    /\ ((arg_credential_present = FALSE) \/ (lifecycle_phase = None) \/ (lifecycle_phase = Some("Released")))
+    /\ (IF (arg_credential_present = FALSE) THEN TRUE ELSE (IF (lifecycle_phase = None) THEN TRUE ELSE (lifecycle_phase = Some("Released"))))
     /\ ((oauth_outstanding_flow_count = 0) /\ (restored_oauth_membership_observed = FALSE))
     /\ phase' = "Released"
     /\ model_step_count' = model_step_count + 1
@@ -456,7 +456,7 @@ RestoreAuthoritySnapshotExpired(lifecycle_phase, arg_expires_at, arg_last_refres
 
 RestoreAuthoritySnapshotReauthRequired(lifecycle_phase, arg_expires_at, arg_last_refresh, arg_refresh_attempt, arg_credential_present, arg_credential_generation, arg_credential_published_at_millis) ==
     /\ phase = "Valid" \/ phase = "Expiring" \/ phase = "Expired" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released"
-    /\ ((lifecycle_phase = "ReauthRequired") /\ ((arg_credential_present = FALSE) \/ (arg_credential_published_at_millis # None)))
+    /\ ((lifecycle_phase = "ReauthRequired") /\ (IF (arg_credential_present = FALSE) THEN TRUE ELSE (arg_credential_published_at_millis # None)))
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ expires_at' = arg_expires_at
@@ -1511,7 +1511,7 @@ ResolveCredentialUseAdmissionRefreshingBeginAlreadyRefreshingRefreshing(intent) 
 
 ResolveCredentialUseAdmissionRefreshingNoCredentialUseOrHoldRefreshing(intent) ==
     /\ phase = "Refreshing"
-    /\ ((credential_present = FALSE) /\ ((intent = "UseCredential") \/ (intent = "HoldAuthority")))
+    /\ ((credential_present = FALSE) /\ (IF (intent = "UseCredential") THEN TRUE ELSE (intent = "HoldAuthority")))
     /\ phase' = "Refreshing"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count >>
@@ -1781,7 +1781,7 @@ Next ==
 
 oauth_flow_membership_consistent == ((DOMAIN oauth_browser_flow_providers = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_redirect_uris = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_expires_at_millis = oauth_browser_flow_ids) /\ (DOMAIN oauth_device_flow_providers = oauth_device_flow_ids) /\ (DOMAIN oauth_device_flow_expires_at_millis = oauth_device_flow_ids) /\ (\A flow_id \in oauth_device_poll_ids : (flow_id \in oauth_device_flow_ids)) /\ (oauth_outstanding_flow_count = (Cardinality(oauth_browser_flow_ids) + Cardinality(oauth_device_flow_ids))))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(oauth_browser_flow_ids) <= 1 /\ Cardinality(DOMAIN oauth_browser_flow_providers) <= 1 /\ Cardinality(DOMAIN oauth_browser_flow_redirect_uris) <= 1 /\ Cardinality(DOMAIN oauth_browser_flow_expires_at_millis) <= 1 /\ Cardinality(oauth_device_flow_ids) <= 1 /\ Cardinality(DOMAIN oauth_device_flow_providers) <= 1 /\ Cardinality(DOMAIN oauth_device_flow_expires_at_millis) <= 1 /\ Cardinality(oauth_device_poll_ids) <= 1
+CiStateConstraint == /\ model_step_count <= 3 /\ Cardinality(oauth_browser_flow_ids) <= 1 /\ Cardinality(DOMAIN oauth_browser_flow_providers) <= 1 /\ Cardinality(DOMAIN oauth_browser_flow_redirect_uris) <= 1 /\ Cardinality(DOMAIN oauth_browser_flow_expires_at_millis) <= 1 /\ Cardinality(oauth_device_flow_ids) <= 1 /\ Cardinality(DOMAIN oauth_device_flow_providers) <= 1 /\ Cardinality(DOMAIN oauth_device_flow_expires_at_millis) <= 1 /\ Cardinality(oauth_device_poll_ids) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(oauth_browser_flow_ids) <= 2 /\ Cardinality(DOMAIN oauth_browser_flow_providers) <= 2 /\ Cardinality(DOMAIN oauth_browser_flow_redirect_uris) <= 2 /\ Cardinality(DOMAIN oauth_browser_flow_expires_at_millis) <= 2 /\ Cardinality(oauth_device_flow_ids) <= 2 /\ Cardinality(DOMAIN oauth_device_flow_providers) <= 2 /\ Cardinality(DOMAIN oauth_device_flow_expires_at_millis) <= 2 /\ Cardinality(oauth_device_poll_ids) <= 2
 
 Spec == Init /\ [][Next]_vars

@@ -8095,12 +8095,11 @@ impl<'a> MachineTlaCompiler<'a> {
                     .collect::<Vec<_>>(),
                 " /\\ ",
             ),
-            Expr::Or(items) => join_exprs(
+            Expr::Or(items) => render_or_short_circuit(
                 &items
                     .iter()
                     .map(|item| self.render_expr_with_types(item, env, binding_env, binding_types))
                     .collect::<Vec<_>>(),
-                " \\/ ",
             ),
             Expr::Eq(left, right) => format!(
                 "({} = {})",
@@ -8838,6 +8837,33 @@ fn join_exprs(items: &[String], separator: &str) -> String {
         items[0].clone()
     } else {
         format!("({})", items.join(separator))
+    }
+}
+
+/// Render a boolean disjunction as a short-circuiting `IF a THEN TRUE ELSE …`
+/// chain instead of `a \/ b`.
+///
+/// TLC expands an action-level `\/` into a tableau and evaluates *every*
+/// disjunct independently to enumerate successor states. That breaks the
+/// idiomatic optional guard `opt = None \/ opt.value > now`: the second
+/// disjunct's `opt.value > now` is evaluated even when `opt = None`
+/// (`None` still has a `"value"` field equal to the string `"none"`), so TLC
+/// raises `first argument of > should be an integer, but instead it is "none"`.
+/// `IF a THEN TRUE ELSE b` is boolean-equivalent to `a \/ b` but is evaluated
+/// as a single function: the `ELSE` branch is only evaluated when `a` is false,
+/// matching the short-circuit that `/\` already gives conjunctive guards. State
+/// space and enabledness are unchanged. Empty/single disjunctions preserve the
+/// prior `join_exprs` behavior.
+fn render_or_short_circuit(items: &[String]) -> String {
+    match items {
+        [] => "TRUE".into(),
+        [single] => single.clone(),
+        [first, rest @ ..] => {
+            format!(
+                "(IF {first} THEN TRUE ELSE {})",
+                render_or_short_circuit(rest)
+            )
+        }
     }
 }
 

@@ -95,32 +95,6 @@ pub enum RealtimeTranscriptMaterializeDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SessionDurableProviderKind {
-    Anthropic,
-    OpenAI,
-    Gemini,
-    SelfHosted,
-    #[default]
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SessionToolCategoryOverrideKind {
-    #[default]
-    Inherit,
-    Enable,
-    Disable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SessionCallTimeoutOverrideKind {
-    #[default]
-    Inherit,
-    Disabled,
-    Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SessionSystemPromptSource {
     #[default]
     DirectMutation,
@@ -324,61 +298,12 @@ pub enum SessionDocumentInput {
     AuthorizeSessionMetadataPersist {
         schema_version: u64,
         model_present: bool,
-        max_tokens: u64,
-        structured_output_retries: u64,
-        provider: SessionDurableProviderKind,
-        self_hosted_server_present: bool,
-        provider_params_present: bool,
-        tooling_builtins: SessionToolCategoryOverrideKind,
-        tooling_shell: SessionToolCategoryOverrideKind,
-        tooling_comms: SessionToolCategoryOverrideKind,
-        tooling_mob: SessionToolCategoryOverrideKind,
-        tooling_memory: SessionToolCategoryOverrideKind,
-        tooling_schedule: SessionToolCategoryOverrideKind,
-        tooling_workgraph: SessionToolCategoryOverrideKind,
-        tooling_image_generation: SessionToolCategoryOverrideKind,
-        tooling_web_search: SessionToolCategoryOverrideKind,
-        active_skill_count: u64,
-        keep_alive: bool,
-        comms_name_present: bool,
-        peer_meta_present: bool,
-        realm_id_present: bool,
-        instance_id_present: bool,
-        backend_present: bool,
-        config_generation_present: bool,
-        auth_binding_present: bool,
     },
     AuthorizeSessionBuildStatePersist {
-        system_prompt_present: bool,
-        output_schema_present: bool,
-        hook_entry_count: u64,
-        disabled_hook_count: u64,
-        budget_limits_present: bool,
-        recoverable_tool_count: u64,
-        silent_comms_intent_count: u64,
-        max_inline_peer_notifications_present: bool,
-        app_context_present: bool,
-        additional_instruction_count: u64,
-        shell_env_count: u64,
         mob_tool_authority_context_present: bool,
         mob_tool_authority_context_generated: bool,
-        call_timeout_override: SessionCallTimeoutOverrideKind,
     },
-    RestoreSessionBuildState {
-        system_prompt_present: bool,
-        output_schema_present: bool,
-        hook_entry_count: u64,
-        disabled_hook_count: u64,
-        budget_limits_present: bool,
-        recoverable_tool_count: u64,
-        silent_comms_intent_count: u64,
-        max_inline_peer_notifications_present: bool,
-        app_context_present: bool,
-        additional_instruction_count: u64,
-        shell_env_count: u64,
-        mob_tool_authority_context_present: bool,
-        call_timeout_override: SessionCallTimeoutOverrideKind,
-    },
+    RestoreSessionBuildState,
     AuthorizeSystemPromptMutation {
         source: SessionSystemPromptSource,
         prompt_present: bool,
@@ -2176,29 +2101,6 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::AuthorizeSessionMetadataPersist {
                 schema_version,
                 model_present,
-                max_tokens,
-                structured_output_retries,
-                provider,
-                self_hosted_server_present,
-                provider_params_present,
-                tooling_builtins,
-                tooling_shell,
-                tooling_comms,
-                tooling_mob,
-                tooling_memory,
-                tooling_schedule,
-                tooling_workgraph,
-                tooling_image_generation,
-                tooling_web_search,
-                active_skill_count,
-                keep_alive,
-                comms_name_present,
-                peer_meta_present,
-                realm_id_present,
-                instance_id_present,
-                backend_present,
-                config_generation_present,
-                auth_binding_present,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -2222,20 +2124,8 @@ impl SessionDocumentMachineAuthority {
                 }
             }
             SessionDocumentInput::AuthorizeSessionBuildStatePersist {
-                system_prompt_present,
-                output_schema_present,
-                hook_entry_count,
-                disabled_hook_count,
-                budget_limits_present,
-                recoverable_tool_count,
-                silent_comms_intent_count,
-                max_inline_peer_notifications_present,
-                app_context_present,
-                additional_instruction_count,
-                shell_env_count,
                 mob_tool_authority_context_present,
                 mob_tool_authority_context_generated,
-                call_timeout_override,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -2259,21 +2149,7 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
-            SessionDocumentInput::RestoreSessionBuildState {
-                system_prompt_present,
-                output_schema_present,
-                hook_entry_count,
-                disabled_hook_count,
-                budget_limits_present,
-                recoverable_tool_count,
-                silent_comms_intent_count,
-                max_inline_peer_notifications_present,
-                app_context_present,
-                additional_instruction_count,
-                shell_env_count,
-                mob_tool_authority_context_present,
-                call_timeout_override,
-            } => {
+            SessionDocumentInput::RestoreSessionBuildState => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready) {
                     matches.push(SessionDocumentTransition::RestoreSessionBuildState);
@@ -2946,125 +2822,28 @@ impl SessionDocumentMachineAuthority {
         &mut self,
         schema_version: u64,
         model_present: bool,
-        max_tokens: u64,
-        structured_output_retries: u64,
-        provider: SessionDurableProviderKind,
-        self_hosted_server_present: bool,
-        provider_params_present: bool,
-        tooling_builtins: SessionToolCategoryOverrideKind,
-        tooling_shell: SessionToolCategoryOverrideKind,
-        tooling_comms: SessionToolCategoryOverrideKind,
-        tooling_mob: SessionToolCategoryOverrideKind,
-        tooling_memory: SessionToolCategoryOverrideKind,
-        tooling_schedule: SessionToolCategoryOverrideKind,
-        tooling_workgraph: SessionToolCategoryOverrideKind,
-        tooling_image_generation: SessionToolCategoryOverrideKind,
-        tooling_web_search: SessionToolCategoryOverrideKind,
-        active_skill_count: u64,
-        keep_alive: bool,
-        comms_name_present: bool,
-        peer_meta_present: bool,
-        realm_id_present: bool,
-        instance_id_present: bool,
-        backend_present: bool,
-        config_generation_present: bool,
-        auth_binding_present: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::AuthorizeSessionMetadataPersist {
             schema_version,
             model_present,
-            max_tokens,
-            structured_output_retries,
-            provider,
-            self_hosted_server_present,
-            provider_params_present,
-            tooling_builtins,
-            tooling_shell,
-            tooling_comms,
-            tooling_mob,
-            tooling_memory,
-            tooling_schedule,
-            tooling_workgraph,
-            tooling_image_generation,
-            tooling_web_search,
-            active_skill_count,
-            keep_alive,
-            comms_name_present,
-            peer_meta_present,
-            realm_id_present,
-            instance_id_present,
-            backend_present,
-            config_generation_present,
-            auth_binding_present,
         })
     }
 
     pub fn authorize_session_build_state_persist(
         &mut self,
-        system_prompt_present: bool,
-        output_schema_present: bool,
-        hook_entry_count: u64,
-        disabled_hook_count: u64,
-        budget_limits_present: bool,
-        recoverable_tool_count: u64,
-        silent_comms_intent_count: u64,
-        max_inline_peer_notifications_present: bool,
-        app_context_present: bool,
-        additional_instruction_count: u64,
-        shell_env_count: u64,
         mob_tool_authority_context_present: bool,
         mob_tool_authority_context_generated: bool,
-        call_timeout_override: SessionCallTimeoutOverrideKind,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::AuthorizeSessionBuildStatePersist {
-            system_prompt_present,
-            output_schema_present,
-            hook_entry_count,
-            disabled_hook_count,
-            budget_limits_present,
-            recoverable_tool_count,
-            silent_comms_intent_count,
-            max_inline_peer_notifications_present,
-            app_context_present,
-            additional_instruction_count,
-            shell_env_count,
             mob_tool_authority_context_present,
             mob_tool_authority_context_generated,
-            call_timeout_override,
         })
     }
 
     pub fn restore_session_build_state(
         &mut self,
-        system_prompt_present: bool,
-        output_schema_present: bool,
-        hook_entry_count: u64,
-        disabled_hook_count: u64,
-        budget_limits_present: bool,
-        recoverable_tool_count: u64,
-        silent_comms_intent_count: u64,
-        max_inline_peer_notifications_present: bool,
-        app_context_present: bool,
-        additional_instruction_count: u64,
-        shell_env_count: u64,
-        mob_tool_authority_context_present: bool,
-        call_timeout_override: SessionCallTimeoutOverrideKind,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::RestoreSessionBuildState {
-            system_prompt_present,
-            output_schema_present,
-            hook_entry_count,
-            disabled_hook_count,
-            budget_limits_present,
-            recoverable_tool_count,
-            silent_comms_intent_count,
-            max_inline_peer_notifications_present,
-            app_context_present,
-            additional_instruction_count,
-            shell_env_count,
-            mob_tool_authority_context_present,
-            call_timeout_override,
-        })
+        self.apply_input(SessionDocumentInput::RestoreSessionBuildState)
     }
 
     pub fn authorize_system_prompt_mutation(

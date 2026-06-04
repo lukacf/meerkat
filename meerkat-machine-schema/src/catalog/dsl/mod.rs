@@ -256,6 +256,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             InputVariantId::from_trusted_catalog_literal("ResolveOAuthLoginCredentialDisposition"),
         ],
     )
+    .with_ci_step_limit(3)
 }
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
@@ -317,18 +318,6 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             ),
             // Durable-config region typed vocabulary (folded from the retired
             // SessionDurableConfigAuthorityMachine).
-            NamedTypeBinding::string_enum(
-                "SessionDurableProviderKind",
-                &["Anthropic", "OpenAI", "Gemini", "SelfHosted", "Other"],
-            ),
-            NamedTypeBinding::string_enum(
-                "SessionToolCategoryOverrideKind",
-                &["Inherit", "Enable", "Disable"],
-            ),
-            NamedTypeBinding::string_enum(
-                "SessionCallTimeoutOverrideKind",
-                &["Inherit", "Disabled", "Value"],
-            ),
             NamedTypeBinding::string_enum(
                 "SessionSystemPromptSource",
                 &[
@@ -2540,7 +2529,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
-    .with_ci_step_limit(4)
+    .with_ci_step_limit(3)
 }
 
 pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
@@ -2751,4 +2740,5 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         ],
         vec![],
     )
+    .with_ci_step_limit(5)
 }

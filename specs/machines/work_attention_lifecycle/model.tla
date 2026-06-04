@@ -28,15 +28,15 @@ VARIABLES phase, model_step_count, revision, paused_until_utc_ms, superseded_by_
 
 vars == << phase, model_step_count, revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
 
-attention_can_close_own_review_item(mode, delegated_authority) == (((mode = "Review") \/ (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
+attention_can_close_own_review_item(mode, delegated_authority) == ((IF (mode = "Review") THEN TRUE ELSE (mode = "Falsify")) /\ (delegated_authority = "CloseOwnReviewItem"))
 attention_can_link(mode) == (mode = "Coordinate")
 attention_can_create(mode) == (mode = "Coordinate")
 attention_can_block(mode) == (mode = "Pursue")
-attention_can_update(mode) == ((mode = "Pursue") \/ (mode = "Coordinate"))
+attention_can_update(mode) == (IF (mode = "Pursue") THEN TRUE ELSE (mode = "Coordinate"))
 attention_can_release(mode) == (mode = "Pursue")
 attention_can_add_evidence(mode) == (mode # "Observe")
-attention_can_get(mode) == ((mode = "Pursue") \/ (mode = "Coordinate") \/ (mode = "Review") \/ (mode = "Falsify") \/ (mode = "Judge") \/ (mode = "Observe"))
-attention_is_adversarial(mode) == ((mode = "Review") \/ (mode = "Falsify") \/ (mode = "Observe"))
+attention_can_get(mode) == (IF (mode = "Pursue") THEN TRUE ELSE (IF (mode = "Coordinate") THEN TRUE ELSE (IF (mode = "Review") THEN TRUE ELSE (IF (mode = "Falsify") THEN TRUE ELSE (IF (mode = "Judge") THEN TRUE ELSE (mode = "Observe"))))))
+attention_is_adversarial(mode) == (IF (mode = "Review") THEN TRUE ELSE (IF (mode = "Falsify") THEN TRUE ELSE (mode = "Observe")))
 attention_can_close_if_policy_allows(mode, delegated_authority) == ((delegated_authority = "CloseIfPolicyAllows") /\ (attention_is_adversarial(mode) = FALSE))
 attention_can_link_derived_from(mode) == attention_can_link(mode)
 attention_can_link_related(mode) == attention_can_link(mode)
@@ -145,7 +145,7 @@ ClassifyEligibilityPausedElapsed(now_utc_ms) ==
 
 ClassifyEligibilityPausedPending(now_utc_ms) ==
     /\ phase = "Paused"
-    /\ ((paused_until_utc_ms = None) \/ ((IF "value" \in DOMAIN paused_until_utc_ms THEN paused_until_utc_ms["value"] ELSE None) > now_utc_ms))
+    /\ (IF (paused_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN paused_until_utc_ms THEN paused_until_utc_ms["value"] ELSE None) > now_utc_ms))
     /\ phase' = "Paused"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << revision, paused_until_utc_ms, superseded_by_binding_key, terminal_at_utc_ms >>
@@ -212,9 +212,9 @@ Next ==
     \/ \E mode \in WorkAttentionModeValues : \E delegated_authority \in AttentionDelegatedAuthorityValues : ClassifyAuthorityStopped(mode, delegated_authority)
     \/ TerminalStutter
 
-live_has_no_terminal_time == (((phase # "Active") /\ (phase # "Paused")) \/ (terminal_at_utc_ms = None))
-paused_has_pause_state == ((phase = "Paused") \/ (paused_until_utc_ms = None))
-superseded_records_successor == ((phase # "Superseded") \/ (superseded_by_binding_key # None))
+live_has_no_terminal_time == (IF ((phase # "Active") /\ (phase # "Paused")) THEN TRUE ELSE (terminal_at_utc_ms = None))
+paused_has_pause_state == (IF (phase = "Paused") THEN TRUE ELSE (paused_until_utc_ms = None))
+superseded_records_successor == (IF (phase # "Superseded") THEN TRUE ELSE (superseded_by_binding_key # None))
 
 CiStateConstraint == /\ model_step_count <= 6
 DeepStateConstraint == /\ model_step_count <= 8

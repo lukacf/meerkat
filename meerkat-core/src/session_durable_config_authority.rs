@@ -12,20 +12,17 @@
 //! - system-prompt-mutation admission (`prompt_present || prompt_byte_count == 0`).
 //!
 //! This module performs only the MECHANICAL work the DSL cannot express: it
-//! extracts typed presence/count/kind observations from the bulky
+//! extracts the typed facts the machine's verdict actually reads from the bulky
 //! [`SessionMetadata`](crate::SessionMetadata) /
-//! [`SessionBuildState`](crate::SessionBuildState) records and feeds them to
-//! the machine, then mirrors the machine's admit/reject verdict. It NEVER
-//! decides admission itself, and it passes the original typed value through
-//! unchanged on admit — no fact is pre-reduced before the machine sees it.
+//! [`SessionBuildState`](crate::SessionBuildState) records and feeds those —
+//! and only those — to the machine, then mirrors the machine's admit/reject
+//! verdict. It NEVER decides admission itself, and it passes the original typed
+//! value through unchanged on admit — no fact is pre-reduced before the machine
+//! sees it. The shell does not mirror the full record into machine inputs: a
+//! field the verdict never branches on is not an authority input.
 
-use crate::generated::session_document::{
-    self, SessionDocumentEffect, SessionDocumentError, SessionDurableProviderKind,
-};
-use crate::{
-    CallTimeoutOverride, Provider, SessionBuildState, SessionMetadata, SessionTooling,
-    ToolCategoryOverride,
-};
+use crate::generated::session_document::{self, SessionDocumentEffect, SessionDocumentError};
+use crate::{SessionBuildState, SessionMetadata};
 
 /// Typed provenance class for a system-prompt mutation request.
 ///
@@ -151,43 +148,6 @@ fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-fn provider_kind(provider: Provider) -> SessionDurableProviderKind {
-    match provider {
-        Provider::Anthropic => SessionDurableProviderKind::Anthropic,
-        Provider::OpenAI => SessionDurableProviderKind::OpenAI,
-        Provider::Gemini => SessionDurableProviderKind::Gemini,
-        Provider::SelfHosted => SessionDurableProviderKind::SelfHosted,
-        Provider::Other => SessionDurableProviderKind::Other,
-    }
-}
-
-fn tool_override_kind(
-    value: ToolCategoryOverride,
-) -> session_document::SessionToolCategoryOverrideKind {
-    match value {
-        ToolCategoryOverride::Inherit => session_document::SessionToolCategoryOverrideKind::Inherit,
-        ToolCategoryOverride::Enable => session_document::SessionToolCategoryOverrideKind::Enable,
-        ToolCategoryOverride::Disable => session_document::SessionToolCategoryOverrideKind::Disable,
-    }
-}
-
-fn call_timeout_override_kind(
-    value: &CallTimeoutOverride,
-) -> session_document::SessionCallTimeoutOverrideKind {
-    match value {
-        CallTimeoutOverride::Inherit => session_document::SessionCallTimeoutOverrideKind::Inherit,
-        CallTimeoutOverride::Disabled => session_document::SessionCallTimeoutOverrideKind::Disabled,
-        CallTimeoutOverride::Value(_) => session_document::SessionCallTimeoutOverrideKind::Value,
-    }
-}
-
-fn active_skill_count(tooling: &SessionTooling) -> u64 {
-    tooling
-        .active_skills
-        .as_ref()
-        .map_or(0, |skills| usize_to_u64(skills.len()))
-}
-
 fn document_authority() -> session_document::SessionDocumentMachineAuthority {
     session_document::SessionDocumentMachineAuthority::new()
 }
@@ -200,29 +160,6 @@ fn drive_metadata_persist(
     let effects = authority.authorize_session_metadata_persist(
         u64::from(metadata.schema_version),
         !metadata.model.trim().is_empty(),
-        u64::from(metadata.max_tokens),
-        u64::from(metadata.structured_output_retries),
-        provider_kind(metadata.provider),
-        metadata.self_hosted_server_id.is_some(),
-        metadata.provider_params.is_some(),
-        tool_override_kind(metadata.tooling.builtins),
-        tool_override_kind(metadata.tooling.shell),
-        tool_override_kind(metadata.tooling.comms),
-        tool_override_kind(metadata.tooling.mob),
-        tool_override_kind(metadata.tooling.memory),
-        tool_override_kind(metadata.tooling.schedule),
-        tool_override_kind(metadata.tooling.workgraph),
-        tool_override_kind(metadata.tooling.image_generation),
-        tool_override_kind(metadata.tooling.web_search),
-        active_skill_count(&metadata.tooling),
-        metadata.keep_alive,
-        metadata.comms_name.is_some(),
-        metadata.peer_meta.is_some(),
-        metadata.realm_id.is_some(),
-        metadata.instance_id.is_some(),
-        metadata.backend.is_some(),
-        metadata.config_generation.is_some(),
-        metadata.auth_binding.is_some(),
     )?;
     expect_effect(&effects, |effect| {
         matches!(
@@ -243,26 +180,8 @@ fn drive_build_state_persist(
         .is_some_and(|context| context.is_generated_authority_context());
     let mut authority = document_authority();
     let effects = authority.authorize_session_build_state_persist(
-        state.system_prompt.is_some(),
-        state.output_schema.is_some(),
-        usize_to_u64(state.hooks_override.entries.len()),
-        usize_to_u64(state.hooks_override.disable.len()),
-        state.budget_limits.is_some(),
-        usize_to_u64(state.recoverable_tool_defs.len()),
-        usize_to_u64(state.silent_comms_intents.len()),
-        state.max_inline_peer_notifications.is_some(),
-        state.app_context.is_some(),
-        state
-            .additional_instructions
-            .as_ref()
-            .map_or(0, |items| usize_to_u64(items.len())),
-        state
-            .shell_env
-            .as_ref()
-            .map_or(0, |items| usize_to_u64(items.len())),
         mob_tool_authority_context_present,
         mob_tool_authority_context_generated,
-        call_timeout_override_kind(&state.call_timeout_override),
     )?;
     expect_effect(&effects, |effect| {
         matches!(
@@ -272,32 +191,12 @@ fn drive_build_state_persist(
     })
 }
 
-/// Drive the build-state restore authorization transition.
-fn drive_build_state_restore(
-    state: &SessionBuildState,
-) -> Result<(), SessionDurableConfigAuthorityError> {
+/// Drive the build-state restore authorization transition. The machine's
+/// restore guard is `Ready`-only — it reads no build-state facts — so this
+/// drives the transition without threading the (shell-retained) snapshot.
+fn drive_build_state_restore() -> Result<(), SessionDurableConfigAuthorityError> {
     let mut authority = document_authority();
-    let effects = authority.restore_session_build_state(
-        state.system_prompt.is_some(),
-        state.output_schema.is_some(),
-        usize_to_u64(state.hooks_override.entries.len()),
-        usize_to_u64(state.hooks_override.disable.len()),
-        state.budget_limits.is_some(),
-        usize_to_u64(state.recoverable_tool_defs.len()),
-        usize_to_u64(state.silent_comms_intents.len()),
-        state.max_inline_peer_notifications.is_some(),
-        state.app_context.is_some(),
-        state
-            .additional_instructions
-            .as_ref()
-            .map_or(0, |items| usize_to_u64(items.len())),
-        state
-            .shell_env
-            .as_ref()
-            .map_or(0, |items| usize_to_u64(items.len())),
-        state.mob_tool_authority_context.is_some(),
-        call_timeout_override_kind(&state.call_timeout_override),
-    )?;
+    let effects = authority.restore_session_build_state()?;
     expect_effect(&effects, |effect| {
         matches!(
             effect,
@@ -357,7 +256,7 @@ pub fn authorize_session_build_state_persist(
 pub fn restore_session_build_state(
     state: SessionBuildState,
 ) -> Result<SessionBuildState, SessionDurableConfigAuthorityError> {
-    drive_build_state_restore(&state)?;
+    drive_build_state_restore()?;
     Ok(state)
 }
 

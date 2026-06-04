@@ -29,8 +29,8 @@ VARIABLES phase, model_step_count, approval_ids, approval_statuses, approval_app
 
 vars == << phase, model_step_count, approval_ids, approval_statuses, approval_approve_allowed, approval_deny_allowed, approval_has_expiry >>
 
-is_terminal_status(status) == ((status = "Approved") \/ (status = "Denied") \/ (status = "Cancelled"))
-allowed_non_empty(approve_allowed, deny_allowed) == (approve_allowed \/ deny_allowed)
+is_terminal_status(status) == (IF (status = "Approved") THEN TRUE ELSE (IF (status = "Denied") THEN TRUE ELSE (status = "Cancelled")))
+allowed_non_empty(approve_allowed, deny_allowed) == (IF approve_allowed THEN TRUE ELSE deny_allowed)
 
 Init ==
     /\ phase = "Ready"
@@ -147,7 +147,7 @@ RestoreDenied(approval_id, status, approve_allowed, deny_allowed, has_expiry, de
 
 RestoreRejectedInvalidRecord(approval_id, status, approve_allowed, deny_allowed, has_expiry, decision) ==
     /\ phase = "Ready"
-    /\ (((approval_id \in approval_ids) = FALSE) /\ allowed_non_empty(approve_allowed, deny_allowed) /\ (((status = "Pending") /\ (decision # None)) \/ ((status = "Expired") /\ (decision # None)) \/ ((status = "Cancelled") /\ (decision # None)) \/ ((status = "Approved") /\ ((approve_allowed = FALSE) \/ (decision # Some("Approve")))) \/ ((status = "Denied") /\ ((deny_allowed = FALSE) \/ (decision # Some("Deny"))))))
+    /\ (((approval_id \in approval_ids) = FALSE) /\ allowed_non_empty(approve_allowed, deny_allowed) /\ (IF ((status = "Pending") /\ (decision # None)) THEN TRUE ELSE (IF ((status = "Expired") /\ (decision # None)) THEN TRUE ELSE (IF ((status = "Cancelled") /\ (decision # None)) THEN TRUE ELSE (IF ((status = "Approved") /\ (IF (approve_allowed = FALSE) THEN TRUE ELSE (decision # Some("Approve")))) THEN TRUE ELSE ((status = "Denied") /\ (IF (deny_allowed = FALSE) THEN TRUE ELSE (decision # Some("Deny")))))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << approval_ids, approval_statuses, approval_approve_allowed, approval_deny_allowed, approval_has_expiry >>
@@ -172,7 +172,7 @@ ObserveExpiryExpiresPending(approval_id, expired) ==
 
 ObserveExpiryPendingNoop(approval_id, expired) ==
     /\ phase = "Ready"
-    /\ ((approval_id \in approval_ids) /\ ((IF "value" \in DOMAIN (IF (approval_id \in DOMAIN approval_statuses) THEN Some((IF approval_id \in DOMAIN approval_statuses THEN approval_statuses[approval_id] ELSE "None")) ELSE None) THEN (IF (approval_id \in DOMAIN approval_statuses) THEN Some((IF approval_id \in DOMAIN approval_statuses THEN approval_statuses[approval_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending") /\ (((IF "value" \in DOMAIN (IF (approval_id \in DOMAIN approval_has_expiry) THEN Some((IF approval_id \in DOMAIN approval_has_expiry THEN approval_has_expiry[approval_id] ELSE FALSE)) ELSE None) THEN (IF (approval_id \in DOMAIN approval_has_expiry) THEN Some((IF approval_id \in DOMAIN approval_has_expiry THEN approval_has_expiry[approval_id] ELSE FALSE)) ELSE None)["value"] ELSE None) = FALSE) \/ (expired = FALSE)))
+    /\ ((approval_id \in approval_ids) /\ ((IF "value" \in DOMAIN (IF (approval_id \in DOMAIN approval_statuses) THEN Some((IF approval_id \in DOMAIN approval_statuses THEN approval_statuses[approval_id] ELSE "None")) ELSE None) THEN (IF (approval_id \in DOMAIN approval_statuses) THEN Some((IF approval_id \in DOMAIN approval_statuses THEN approval_statuses[approval_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Pending") /\ (IF ((IF "value" \in DOMAIN (IF (approval_id \in DOMAIN approval_has_expiry) THEN Some((IF approval_id \in DOMAIN approval_has_expiry THEN approval_has_expiry[approval_id] ELSE FALSE)) ELSE None) THEN (IF (approval_id \in DOMAIN approval_has_expiry) THEN Some((IF approval_id \in DOMAIN approval_has_expiry THEN approval_has_expiry[approval_id] ELSE FALSE)) ELSE None)["value"] ELSE None) = FALSE) THEN TRUE ELSE (expired = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << approval_ids, approval_statuses, approval_approve_allowed, approval_deny_allowed, approval_has_expiry >>

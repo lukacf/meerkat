@@ -689,126 +689,6 @@ impl std::fmt::Display for ResumeSelfHostedSelection {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum SessionCallTimeoutOverrideKind {
-    #[default]
-    #[serde(rename = "Inherit")]
-    Inherit,
-    #[serde(rename = "Disabled")]
-    Disabled,
-    #[serde(rename = "Value")]
-    Value,
-}
-impl SessionCallTimeoutOverrideKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Inherit => "Inherit",
-            Self::Disabled => "Disabled",
-            Self::Value => "Value",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SessionCallTimeoutOverrideKind {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Inherit" => Ok(Self::Inherit),
-            "Disabled" => Ok(Self::Disabled),
-            "Value" => Ok(Self::Value),
-            other => Err(format!(
-                "invalid SessionCallTimeoutOverrideKind value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SessionCallTimeoutOverrideKind {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SessionCallTimeoutOverrideKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum SessionDurableProviderKind {
-    #[default]
-    #[serde(rename = "Anthropic")]
-    Anthropic,
-    #[serde(rename = "OpenAI")]
-    OpenAI,
-    #[serde(rename = "Gemini")]
-    Gemini,
-    #[serde(rename = "SelfHosted")]
-    SelfHosted,
-    #[serde(rename = "Other")]
-    Other,
-}
-impl SessionDurableProviderKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "Anthropic",
-            Self::OpenAI => "OpenAI",
-            Self::Gemini => "Gemini",
-            Self::SelfHosted => "SelfHosted",
-            Self::Other => "Other",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SessionDurableProviderKind {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Anthropic" => Ok(Self::Anthropic),
-            "OpenAI" => Ok(Self::OpenAI),
-            "Gemini" => Ok(Self::Gemini),
-            "SelfHosted" => Ok(Self::SelfHosted),
-            "Other" => Ok(Self::Other),
-            other => Err(format!(
-                "invalid SessionDurableProviderKind value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SessionDurableProviderKind {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SessionDurableProviderKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum SessionFirstTurnPhase {
     #[default]
     #[serde(rename = "Inactive")]
@@ -991,62 +871,6 @@ impl std::convert::TryFrom<String> for SessionSystemPromptSource {
     }
 }
 impl std::fmt::Display for SessionSystemPromptSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum SessionToolCategoryOverrideKind {
-    #[default]
-    #[serde(rename = "Inherit")]
-    Inherit,
-    #[serde(rename = "Enable")]
-    Enable,
-    #[serde(rename = "Disable")]
-    Disable,
-}
-impl SessionToolCategoryOverrideKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Inherit => "Inherit",
-            Self::Enable => "Enable",
-            Self::Disable => "Disable",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SessionToolCategoryOverrideKind {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Inherit" => Ok(Self::Inherit),
-            "Enable" => Ok(Self::Enable),
-            "Disable" => Ok(Self::Disable),
-            other => Err(format!(
-                "invalid SessionToolCategoryOverrideKind value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SessionToolCategoryOverrideKind {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SessionToolCategoryOverrideKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1389,63 +1213,14 @@ pub mod inputs {
     pub struct AuthorizeSessionMetadataPersist {
         pub schema_version: u64,
         pub model_present: bool,
-        pub max_tokens: u64,
-        pub structured_output_retries: u64,
-        pub provider: SessionDurableProviderKind,
-        pub self_hosted_server_present: bool,
-        pub provider_params_present: bool,
-        pub tooling_builtins: SessionToolCategoryOverrideKind,
-        pub tooling_shell: SessionToolCategoryOverrideKind,
-        pub tooling_comms: SessionToolCategoryOverrideKind,
-        pub tooling_mob: SessionToolCategoryOverrideKind,
-        pub tooling_memory: SessionToolCategoryOverrideKind,
-        pub tooling_schedule: SessionToolCategoryOverrideKind,
-        pub tooling_workgraph: SessionToolCategoryOverrideKind,
-        pub tooling_image_generation: SessionToolCategoryOverrideKind,
-        pub tooling_web_search: SessionToolCategoryOverrideKind,
-        pub active_skill_count: u64,
-        pub keep_alive: bool,
-        pub comms_name_present: bool,
-        pub peer_meta_present: bool,
-        pub realm_id_present: bool,
-        pub instance_id_present: bool,
-        pub backend_present: bool,
-        pub config_generation_present: bool,
-        pub auth_binding_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeSessionBuildStatePersist {
-        pub system_prompt_present: bool,
-        pub output_schema_present: bool,
-        pub hook_entry_count: u64,
-        pub disabled_hook_count: u64,
-        pub budget_limits_present: bool,
-        pub recoverable_tool_count: u64,
-        pub silent_comms_intent_count: u64,
-        pub max_inline_peer_notifications_present: bool,
-        pub app_context_present: bool,
-        pub additional_instruction_count: u64,
-        pub shell_env_count: u64,
         pub mob_tool_authority_context_present: bool,
         pub mob_tool_authority_context_generated: bool,
-        pub call_timeout_override: SessionCallTimeoutOverrideKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RestoreSessionBuildState {
-        pub system_prompt_present: bool,
-        pub output_schema_present: bool,
-        pub hook_entry_count: u64,
-        pub disabled_hook_count: u64,
-        pub budget_limits_present: bool,
-        pub recoverable_tool_count: u64,
-        pub silent_comms_intent_count: u64,
-        pub max_inline_peer_notifications_present: bool,
-        pub app_context_present: bool,
-        pub additional_instruction_count: u64,
-        pub shell_env_count: u64,
-        pub mob_tool_authority_context_present: bool,
-        pub call_timeout_override: SessionCallTimeoutOverrideKind,
-    }
+    pub struct RestoreSessionBuildState {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeSystemPromptMutation {
         pub source: SessionSystemPromptSource,

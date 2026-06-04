@@ -233,8 +233,8 @@ Next ==
     \/ TerminalStutter
 
 revision_is_positive == (revision > 0)
-deleted_has_no_planning_cursor == ((phase # "Deleted") \/ (planning_cursor_utc_ms = None))
-planning_cursor_requires_occurrence_progress == ((planning_cursor_utc_ms = None) \/ (next_occurrence_ordinal > 0))
+deleted_has_no_planning_cursor == (IF (phase # "Deleted") THEN TRUE ELSE (planning_cursor_utc_ms = None))
+planning_cursor_requires_occurrence_progress == (IF (planning_cursor_utc_ms = None) THEN TRUE ELSE (next_occurrence_ordinal > 0))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(superseded_ack_ids) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(superseded_ack_ids) <= 2

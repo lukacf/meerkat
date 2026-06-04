@@ -243,6 +243,22 @@ fn control_error_into_session_error(err: SessionControlError) -> SessionError {
     }
 }
 
+/// Whether a SessionStore projection may stand in as the authoritative read
+/// source when the runtime snapshot is absent and the session was not
+/// snapshot-quarantined (see `runtime_projection_fallback_quarantined`).
+///
+/// INVARIANT-1 FOLLOW-UP: this recovery-source eligibility is currently a shell
+/// predicate — a persisted projection is treated as substantive (and thus a
+/// valid authority) when it carries canonical session metadata or build state.
+/// It is deliberately LOAD-BEARING: it is what lets a store-only session (one
+/// created/persisted without ever running through the runtime, so it has no
+/// runtime snapshot) load at all, distinct from the quarantine path which only
+/// covers a rejected+cleared snapshot. The canonical home for this decision is
+/// a `SessionDocumentMachine` recovery-source projection (the planned LUC-524
+/// fold of session-document facts into a canonical machine in `meerkat-core`);
+/// that machine is not yet built, so the decision lives here for now. Do NOT
+/// remove this predicate before that machine exists — store-only sessions would
+/// otherwise silently fail to load.
 fn runtime_backed_store_projection_can_recover_authority(session: &Session) -> bool {
     session.session_metadata().is_some() || session.build_state().is_some()
 }

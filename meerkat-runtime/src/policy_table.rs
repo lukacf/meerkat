@@ -238,4 +238,66 @@ mod tests {
         assert_eq!(running.wake_mode, WakeMode::InterruptYielding);
         assert_eq!(generated_default_policy_version(), idle.policy_version);
     }
+
+    #[test]
+    fn idle_steer_handling_mode_only_normalizes_idle_peer_steers() {
+        use crate::policy::RoutingDisposition;
+        use meerkat_core::types::HandlingMode;
+
+        // A peer-initiated Steer/Immediate while the runtime is IDLE normalizes
+        // to the queue-compatible session path (Queue).
+        assert_eq!(
+            idle_steer_execution_handling_mode(
+                InputKind::PeerRequest,
+                true,
+                RoutingDisposition::Steer
+            ),
+            Some(HandlingMode::Queue)
+        );
+        assert_eq!(
+            idle_steer_execution_handling_mode(
+                InputKind::PeerMessage,
+                true,
+                RoutingDisposition::Immediate
+            ),
+            Some(HandlingMode::Queue)
+        );
+
+        // CONC-2: the production `runtime_idle == false` (phase == Running)
+        // branch must PRESERVE the authored hint (None = no normalization). The
+        // post-merge admission reconcile introduced this branch but left it
+        // without a direct test; a regression here would silently re-queue
+        // peer steers that should interrupt a running turn.
+        assert_eq!(
+            idle_steer_execution_handling_mode(
+                InputKind::PeerRequest,
+                false,
+                RoutingDisposition::Steer
+            ),
+            None,
+            "a peer Steer while Running must preserve its hint, not queue"
+        );
+
+        // Non-peer inputs (prompts, external events, flow steps) keep their
+        // authored handling hint even when idle + Steer.
+        assert_eq!(
+            idle_steer_execution_handling_mode(
+                InputKind::Prompt,
+                true,
+                RoutingDisposition::Steer
+            ),
+            None,
+            "non-peer inputs keep their authored handling hint"
+        );
+
+        // A peer input that is neither Steer nor Immediate is untouched.
+        assert_eq!(
+            idle_steer_execution_handling_mode(
+                InputKind::PeerRequest,
+                true,
+                RoutingDisposition::Drop
+            ),
+            None
+        );
+    }
 }

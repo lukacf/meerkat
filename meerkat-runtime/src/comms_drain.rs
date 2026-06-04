@@ -5582,6 +5582,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn comms_drain_registers_inbox_waiter_before_draining() {
+        // CONC-3: the drain MUST pin + `enable()` its inbox `notified` waiter
+        // BEFORE calling `drain_peer_input_candidates`, so a `notify_waiters()`
+        // that fires in the drain-empty -> await window is observed rather than
+        // lost. Under the mob `Duration::MAX` idle timeout, losing it stalls the
+        // drain forever (a peer message reported "sent" but never drained). Pin
+        // the ordering structurally so a refactor cannot silently drop or
+        // reorder it.
+        let source = include_str!("comms_drain.rs");
+        let enable = source
+            .find("notified.as_mut().enable();")
+            .expect("drain must enable() its pinned inbox waiter");
+        let drain = source
+            .find("let candidates = comms_runtime.drain_peer_input_candidates().await;")
+            .expect("drain must drain peer input candidates");
+        assert!(
+            enable < drain,
+            "the inbox waiter must be registered (enable) BEFORE the drain, not after"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_waiters_is_lost_without_prior_registration() {
+        // The exact tokio::Notify failure mode the drain's pin+enable() avoids:
+        // `notify_waiters()` only wakes ALREADY-registered waiters, and a
+        // `Notified` future is not registered until first polled. So a
+        // notification that fires before the waiter is enabled is lost — which
+        // is precisely why the drain enables its waiter before draining.
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let notify = Arc::new(Notify::new());
+        notify.notify_waiters(); // fired with no registered waiter -> lost
+        let late = notify.notified();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), late)
+                .await
+                .is_err(),
+            "a notify_waiters() with no prior registration must be lost"
+        );
+
+        // ...whereas a waiter enabled BEFORE the notify observes it (the drain's
+        // ordering): this completes without hitting the timeout.
+        let mut early = std::pin::pin!(notify.notified());
+        early.as_mut().enable();
+        notify.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_millis(100), early)
+            .await
+            .expect("a waiter enabled before notify_waiters() must observe it");
+    }
+
     struct BootstrapRuntime {
         peer_id: String,
         address: String,

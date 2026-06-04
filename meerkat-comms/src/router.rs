@@ -608,3 +608,86 @@ impl Router {
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
     !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::PubKey;
+    use crate::inbox::Inbox;
+    use crate::peer_meta::PeerMeta;
+
+    fn test_router() -> Router {
+        let (_inbox, inbox_sender) = Inbox::new();
+        Router::new(
+            Keypair::generate(),
+            TrustedPeers::new(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        )
+    }
+
+    fn peer(name: &str, pubkey: [u8; 32], addr: &str) -> TrustedPeer {
+        TrustedPeer {
+            name: name.to_string(),
+            pubkey: PubKey::new(pubkey),
+            addr: addr.to_string(),
+            meta: PeerMeta::default(),
+        }
+    }
+
+    #[test]
+    fn trust_re_add_ignores_display_name_but_rejects_divergent_address() {
+        // TRUST-1: generated trust identity is the routing material (pubkey +
+        // addr); `name` is display-only and legitimately differs across
+        // projection sources for one peer (an inproc address embeds the comms
+        // name; a non-inproc address falls back to a synthetic backend label).
+        // A re-add under the SAME source with the same pubkey+addr but a
+        // different name must be an idempotent no-op (Ok(false)); only a
+        // divergent pubkey/addr is a genuine conflicting re-add.
+        let router = test_router();
+        let pubkey = [7u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let source = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection;
+
+        assert!(
+            router
+                .add_trusted_peer_with_peer_id(
+                    peer_id,
+                    peer("member-inproc-name", pubkey, "tcp://10.0.0.1:7001"),
+                    source,
+                    false,
+                )
+                .expect("initial add"),
+            "first add of a new peer creates the trust row"
+        );
+
+        // Same identity, DIFFERENT display name -> idempotent no-op.
+        assert!(
+            !router
+                .add_trusted_peer_with_peer_id(
+                    peer_id,
+                    peer("synthetic-backend-label", pubkey, "tcp://10.0.0.1:7001"),
+                    source,
+                    false,
+                )
+                .expect("re-add under a different name must be accepted, not rejected"),
+            "a name-only divergence is not a new trust row"
+        );
+
+        // Same pubkey, DIVERGENT addr -> genuine conflict.
+        let conflict = router.add_trusted_peer_with_peer_id(
+            peer_id,
+            peer("member-inproc-name", pubkey, "tcp://10.9.9.9:7001"),
+            source,
+            false,
+        );
+        assert!(
+            matches!(
+                conflict,
+                Err(TrustError::ConflictingGeneratedTrustSource { .. })
+            ),
+            "a divergent routing address must conflict, got {conflict:?}"
+        );
+    }
+}

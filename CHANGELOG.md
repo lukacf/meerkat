@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Supervisor bridge protocol bumped to V3 (breaking wire change)** — peer
+  wiring commands (`WireMember`/`UnwireMember`) now carry the MobMachine peer
+  overlay. The protocol negotiates cleanly across versions: V2 is still accepted
+  for persisted authority records and pre-overlay peers, a V3 payload sent to a
+  V2 binary is rejected with a typed `UnsupportedProtocolVersion` (not a
+  deserialization error), and a V2 wiring payload received by a V3 binary is
+  rejected with the same typed cause rather than silently failing. **Mixed-version
+  distributed mobs cannot wire peers across the V2/V3 boundary — upgrade all
+  hosts in a distributed mob together.**
+
+### Removed
+
+- **`reachability` / `last_unreachable_reason` removed from `PeerDirectoryEntry`
+  (breaking wire change)** — peer reachability is no longer projected onto the
+  wire directory entry. SDK consumers pinned to an earlier release that read
+  these fields must update; the 0.x patch-compatibility predicate does not
+  signal this removal.
+
+### Deprecated / Compatibility
+
+- **Pre-`status_info` event logs are not resumable** — session event logs written
+  before the `ToolConfigChanged` event gained its structured `status_info` field
+  (roughly v0.4–v0.5) that recorded only the legacy `status` string can no longer
+  be replayed; resuming such a session fails fast with a clear error. Re-create
+  the session. Logs written by current releases replay unchanged (regression-tested).
+
 ## [0.6.34] - 2026-06-03
 
 Meerkat 0.6.34 adds interactive OAuth for streamable HTTP MCP servers and

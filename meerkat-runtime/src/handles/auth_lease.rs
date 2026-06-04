@@ -1545,7 +1545,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::connection::{BindingId, RealmId};
+    use meerkat_core::connection::{BindingId, BindingOrigin, RealmId};
 
     fn lease(realm: &str, binding: &str) -> LeaseKey {
         LeaseKey::new(
@@ -1561,6 +1561,7 @@ mod tests {
             realm: RealmId::parse(realm).expect("valid realm"),
             binding: BindingId::parse(binding).expect("valid binding"),
             profile: None,
+            origin: BindingOrigin::Configured,
         }
     }
 
@@ -2406,6 +2407,7 @@ mod tests {
             realm: key.realm.clone(),
             binding: key.binding.clone(),
             profile: key.profile.clone(),
+            origin: BindingOrigin::Configured,
         };
         let store = SingleTokenStore {
             key: key_for_tokens,

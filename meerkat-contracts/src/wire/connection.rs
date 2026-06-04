@@ -44,6 +44,7 @@ impl From<WireAuthBindingRef> for meerkat_core::AuthBindingRef {
             realm: value.realm,
             binding: value.binding,
             profile: value.profile,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 }
@@ -245,7 +246,7 @@ pub struct WireRealmConnectionSet {
 impl From<&meerkat_core::RealmConnectionSet> for WireRealmConnectionSet {
     fn from(value: &meerkat_core::RealmConnectionSet) -> Self {
         Self {
-            realm_id: value.realm_id.clone(),
+            realm_id: value.realm_id.to_string(),
             backends: value
                 .backends
                 .iter()
@@ -538,6 +539,7 @@ mod tests {
             realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let w: WireAuthBindingRef = r.clone().into();
         assert_eq!(w.realm.as_str(), "dev");
@@ -594,6 +596,7 @@ mod tests {
             realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("anthropic_main").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let ready = serde_json::to_value(WireDeviceCompleteResult::Ready {
             identity: Box::new(WireBindingIdentity::from(&cref)),
@@ -620,6 +623,7 @@ mod tests {
             realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("anthropic_main").unwrap(),
             profile: Some(meerkat_core::connection::ProfileId::parse("console").unwrap()),
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let value = serde_json::to_value(WireProvisionApiKeyResult {
             identity: WireBindingIdentity::from(&cref),

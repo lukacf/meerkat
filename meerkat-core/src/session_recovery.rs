@@ -604,6 +604,7 @@ mod tests {
             realm: crate::connection::RealmId::parse(realm).expect("valid realm fixture"),
             binding: crate::connection::BindingId::parse(binding).expect("valid binding fixture"),
             profile: None,
+            origin: crate::connection::BindingOrigin::Configured,
         }
     }
 

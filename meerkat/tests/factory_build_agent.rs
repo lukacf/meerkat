@@ -3042,6 +3042,7 @@ async fn hot_swap_scopes_resolve_to_session_auth_binding() {
             realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         }),
     };
     let err = match factory
@@ -3066,6 +3067,7 @@ fn session_metadata_projects_auth_binding_into_llm_identity() {
         realm: meerkat_core::RealmId::parse("prod").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("openai_default").expect("valid binding"),
         profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
     };
     let mut metadata = SessionMetadata {
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
@@ -3093,6 +3095,7 @@ fn session_metadata_projects_auth_binding_into_llm_identity() {
         realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
         profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
     };
     let new_identity = SessionLlmIdentity {
         model: "gpt-5.4".to_string(),

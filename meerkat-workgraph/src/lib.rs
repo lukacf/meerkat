@@ -41,12 +41,7 @@ pub use tool_surface::{
     workgraph_attention_supersession_key, workgraph_attention_turn_append,
 };
 pub use tools::{
-    CAPABILITY_UNAVAILABLE as WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
-    CONFLICT as WORKGRAPH_TOOL_CONFLICT, INTERNAL_ERROR as WORKGRAPH_TOOL_INTERNAL_ERROR,
-    INVALID_ARGUMENTS as WORKGRAPH_TOOL_INVALID_ARGUMENTS,
-    INVALID_TRANSITION as WORKGRAPH_TOOL_INVALID_TRANSITION, NOT_FOUND as WORKGRAPH_TOOL_NOT_FOUND,
-    STORE_ERROR as WORKGRAPH_TOOL_STORE_ERROR, WorkGraphToolError, handle_workgraph_tools_call,
-    workgraph_tools_list,
+    WorkGraphToolError, WorkGraphToolErrorCode, handle_workgraph_tools_call, workgraph_tools_list,
 };
 pub use types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,

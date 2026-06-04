@@ -4887,6 +4887,7 @@ mod tests {
                 realm: crate::RealmId::parse("tenant_a").unwrap(),
                 binding: crate::BindingId::parse("anthropic_default").unwrap(),
                 profile: None,
+                origin: crate::BindingOrigin::Configured,
             }),
         };
 

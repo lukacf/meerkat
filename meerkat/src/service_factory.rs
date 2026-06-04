@@ -1725,6 +1725,7 @@ mod tests {
                 realm: meerkat_core::RealmId::parse("default").expect("valid test realm"),
                 binding: meerkat_core::BindingId::parse(binding).expect("valid test binding"),
                 profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
             }),
             ..Default::default()
         };

@@ -2161,17 +2161,20 @@ fn map_schedule_tool_error(error: meerkat::ScheduleToolError) -> ToolCallError {
 }
 
 fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError {
-    let code = match error.code.as_str() {
-        meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS => -32602,
-        meerkat::WORKGRAPH_TOOL_NOT_FOUND => -32601,
-        meerkat::WORKGRAPH_TOOL_CONFLICT | meerkat::WORKGRAPH_TOOL_INVALID_TRANSITION => -32602,
-        meerkat::WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE => {
+    use meerkat::WorkGraphToolErrorCode;
+    let code = match error.code {
+        WorkGraphToolErrorCode::InvalidArguments
+        | WorkGraphToolErrorCode::Conflict
+        | WorkGraphToolErrorCode::InvalidTransition => {
+            meerkat_contracts::ErrorCode::InvalidParams.jsonrpc_code()
+        }
+        WorkGraphToolErrorCode::NotFound => -32601,
+        WorkGraphToolErrorCode::CapabilityUnavailable => {
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
         }
-        meerkat::WORKGRAPH_TOOL_STORE_ERROR | meerkat::WORKGRAPH_TOOL_INTERNAL_ERROR => {
+        WorkGraphToolErrorCode::StoreError | WorkGraphToolErrorCode::InternalError => {
             meerkat_contracts::ErrorCode::InternalError.jsonrpc_code()
         }
-        _ => -32603,
     };
     ToolCallError::new(code, error.message, None)
 }
@@ -4547,31 +4550,32 @@ mod tests {
 
     #[test]
     fn test_workgraph_tool_error_mapping_preserves_generated_classes() {
+        use meerkat::WorkGraphToolErrorCode;
         let cases = [
-            (meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS, -32602),
-            (meerkat::WORKGRAPH_TOOL_NOT_FOUND, -32601),
-            (meerkat::WORKGRAPH_TOOL_CONFLICT, -32602),
-            (meerkat::WORKGRAPH_TOOL_INVALID_TRANSITION, -32602),
+            (WorkGraphToolErrorCode::InvalidArguments, -32602),
+            (WorkGraphToolErrorCode::NotFound, -32601),
+            (WorkGraphToolErrorCode::Conflict, -32602),
+            (WorkGraphToolErrorCode::InvalidTransition, -32602),
             (
-                meerkat::WORKGRAPH_TOOL_CAPABILITY_UNAVAILABLE,
+                WorkGraphToolErrorCode::CapabilityUnavailable,
                 meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
             ),
             (
-                meerkat::WORKGRAPH_TOOL_STORE_ERROR,
+                WorkGraphToolErrorCode::StoreError,
                 meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
             ),
             (
-                meerkat::WORKGRAPH_TOOL_INTERNAL_ERROR,
+                WorkGraphToolErrorCode::InternalError,
                 meerkat_contracts::ErrorCode::InternalError.jsonrpc_code(),
             ),
         ];
 
         for (tool_code, rpc_code) in cases {
             let err = map_workgraph_tool_error(meerkat::WorkGraphToolError {
-                code: tool_code.to_string(),
-                message: format!("workgraph {tool_code}"),
+                code: tool_code,
+                message: format!("workgraph {tool_code:?}"),
             });
-            assert_eq!(err.code, rpc_code, "tool code {tool_code}");
+            assert_eq!(err.code, rpc_code, "tool code {tool_code:?}");
         }
     }
 

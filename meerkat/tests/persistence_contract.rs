@@ -26,6 +26,7 @@ mod tests {
             realm: RealmId::parse("default").expect("default realm id"),
             binding: BindingId::parse("default_openai").expect("default openai binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         }
     }
 

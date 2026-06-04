@@ -10,24 +10,58 @@ use crate::types::{
 };
 use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 
-pub const INVALID_ARGUMENTS: &str = "invalid_arguments";
-pub const NOT_FOUND: &str = "not_found";
-pub const CAPABILITY_UNAVAILABLE: &str = "capability_unavailable";
-pub const CONFLICT: &str = "conflict";
-pub const INVALID_TRANSITION: &str = "invalid_transition";
-pub const STORE_ERROR: &str = "store_error";
-pub const INTERNAL_ERROR: &str = "internal_error";
+/// Typed tool-facing error class for WorkGraph operations.
+///
+/// This is the closed set of semantic error outcomes a WorkGraph tool call can
+/// surface. It is derived directly from [`WorkGraphError`] (the canonical domain
+/// error) in [`map_error`], never re-parsed from text, and serializes to the
+/// stable `snake_case` wire codes consumed by SDKs. Surfaces map this typed code
+/// onto their own transport numbering (e.g. JSON-RPC) with an exhaustive match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGraphToolErrorCode {
+    InvalidArguments,
+    NotFound,
+    CapabilityUnavailable,
+    Conflict,
+    InvalidTransition,
+    StoreError,
+    InternalError,
+}
+
+impl WorkGraphToolErrorCode {
+    /// Stable wire/display token for this error class (matches the `snake_case`
+    /// serde representation). For human-readable messages and logs only — never
+    /// parse this back into a decision.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "invalid_arguments",
+            Self::NotFound => "not_found",
+            Self::CapabilityUnavailable => "capability_unavailable",
+            Self::Conflict => "conflict",
+            Self::InvalidTransition => "invalid_transition",
+            Self::StoreError => "store_error",
+            Self::InternalError => "internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkGraphToolErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkGraphToolError {
-    pub code: String,
+    pub code: WorkGraphToolErrorCode,
     pub message: String,
 }
 
 impl WorkGraphToolError {
-    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    fn new(code: WorkGraphToolErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }
@@ -126,7 +160,10 @@ impl WorkGraphToolContract {
             .copied()
             .find(|contract| contract.name() == name)
             .ok_or_else(|| {
-                WorkGraphToolError::new(NOT_FOUND, format!("unknown WorkGraph tool '{name}'"))
+                WorkGraphToolError::new(
+                    WorkGraphToolErrorCode::NotFound,
+                    format!("unknown WorkGraph tool '{name}'"),
+                )
             })
     }
 }
@@ -304,7 +341,7 @@ impl From<WorkGraphEventFilterParams> for WorkGraphEventFilter {
 fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError> {
     serde_json::from_value(arguments.clone()).map_err(|err| {
         WorkGraphToolError::new(
-            INVALID_ARGUMENTS,
+            WorkGraphToolErrorCode::InvalidArguments,
             format!("invalid WorkGraph arguments: {err}"),
         )
     })
@@ -312,14 +349,18 @@ fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError
 
 fn map_error(error: WorkGraphError) -> WorkGraphToolError {
     let code = match error {
-        WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => NOT_FOUND,
-        WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => CONFLICT,
-        WorkGraphError::InvalidTransition(_) => INVALID_TRANSITION,
-        WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
-            INVALID_ARGUMENTS
+        WorkGraphError::NotFound { .. } | WorkGraphError::AttentionNotFound { .. } => {
+            WorkGraphToolErrorCode::NotFound
         }
-        WorkGraphError::UnsupportedBackend(_) => CAPABILITY_UNAVAILABLE,
-        WorkGraphError::Store(_) => STORE_ERROR,
+        WorkGraphError::StaleRevision { .. } | WorkGraphError::Conflict(_) => {
+            WorkGraphToolErrorCode::Conflict
+        }
+        WorkGraphError::InvalidTransition(_) => WorkGraphToolErrorCode::InvalidTransition,
+        WorkGraphError::InvalidInput(_) | WorkGraphError::InvalidTimestampMillis { .. } => {
+            WorkGraphToolErrorCode::InvalidArguments
+        }
+        WorkGraphError::UnsupportedBackend(_) => WorkGraphToolErrorCode::CapabilityUnavailable,
+        WorkGraphError::Store(_) => WorkGraphToolErrorCode::StoreError,
     };
     WorkGraphToolError::new(code, error.to_string())
 }

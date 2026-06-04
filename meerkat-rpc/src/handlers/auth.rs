@@ -123,6 +123,7 @@ async fn resolve_binding_identity(
         realm: realm_typed,
         binding: binding_typed,
         profile: profile_typed,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     };
     let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
         RpcResponse::error(
@@ -1886,6 +1887,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -1894,6 +1896,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_google").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -2016,6 +2019,7 @@ mod tests {
                 auth_profile: "openai_managed".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2052,6 +2056,7 @@ mod tests {
                 auth_profile: "openai_oauth".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2103,6 +2108,7 @@ mod tests {
                 auth_profile: "openai_external".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2139,6 +2145,7 @@ mod tests {
                 auth_profile: "google_api_key".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_google".into());
@@ -2188,6 +2195,7 @@ mod tests {
                 auth_profile: "anthropic_api_key".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_anthropic".into());
@@ -3071,6 +3079,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let store = runtime.token_store().expect("test token store");
         store
@@ -3147,6 +3156,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
@@ -3326,6 +3336,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
@@ -3381,6 +3392,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
@@ -3437,6 +3449,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let authority = RejectBrowserConsumeAuthority;
@@ -3478,6 +3491,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
 
         let resp = save_tokens_and_consume_browser_flow(
@@ -3517,6 +3531,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
@@ -3581,6 +3596,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
@@ -3645,6 +3661,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         store
@@ -3694,6 +3711,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
@@ -3760,6 +3778,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
@@ -3836,6 +3855,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let authority = runtime.oauth_flow_authority();
@@ -3892,6 +3912,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
@@ -3960,6 +3981,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_anthropic").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let key = TokenKey::from_auth_binding(&auth_binding);
@@ -4021,6 +4043,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
@@ -4085,6 +4108,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;

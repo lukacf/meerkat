@@ -205,6 +205,40 @@ fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob:
     Some(meerkat_mob::MobId::from(mob_id))
 }
 
+/// Typed provenance of the shared realm-scoped profile store.
+///
+/// Replaces the former `(Option<Arc<dyn RealmProfileStore>>, explicit: bool)`
+/// pair: the variant itself encodes *why* the store has its current value, so
+/// the persistent-root auto-upgrade decision matches a variant instead of
+/// re-deriving intent from a parallel bool. Builder-local only; never
+/// serialized, persisted, or crossing any wire/surface boundary.
+enum RealmProfileStoreSelection {
+    /// Default in-memory store installed by the constructor. Eligible for
+    /// auto-upgrade to durable SQLite under a persistent storage root.
+    DefaultInMemory(Arc<dyn meerkat_mob::RealmProfileStore>),
+    /// Default store that has already been upgraded to durable SQLite under a
+    /// persistent storage root. Must not be upgraded again.
+    DefaultDurable(Arc<dyn meerkat_mob::RealmProfileStore>),
+    /// Caller-supplied store (or explicit `None` to disable). Must never be
+    /// overridden by the persistent-root auto-upgrade.
+    CallerSupplied(Option<Arc<dyn meerkat_mob::RealmProfileStore>>),
+}
+
+impl RealmProfileStoreSelection {
+    /// Resolved store, regardless of provenance.
+    fn store(&self) -> Option<&Arc<dyn meerkat_mob::RealmProfileStore>> {
+        match self {
+            Self::DefaultInMemory(store) | Self::DefaultDurable(store) => Some(store),
+            Self::CallerSupplied(opt) => opt.as_ref(),
+        }
+    }
+
+    /// Whether this is the auto-upgradeable default in-memory store.
+    fn is_default(&self) -> bool {
+        matches!(self, Self::DefaultInMemory(_))
+    }
+}
+
 /// In-memory MCP state for multiple mobs.
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
@@ -217,14 +251,10 @@ pub struct MobMcpState {
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
-    /// Shared realm-scoped profile store for cross-mob profile CRUD.
-    realm_profile_store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
-    /// Whether the current realm profile store was explicitly supplied by the caller.
-    ///
-    /// Default constructor wiring installs an in-memory store so profile CRUD is
-    /// available on ephemeral surfaces. Persistent roots may upgrade that
-    /// default to SQLite, but must not override an explicit caller-owned store.
-    realm_profile_store_explicit: bool,
+    /// Shared realm-scoped profile store for cross-mob profile CRUD, together
+    /// with its provenance (single source of truth for the persistent-root
+    /// auto-upgrade decision).
+    realm_profile_store_selection: RealmProfileStoreSelection,
     /// Skill sources seeded from the owning mob definition.
     ///
     /// Realm profiles carry skill names, not the source bodies/paths. When an
@@ -254,8 +284,9 @@ impl MobMcpState {
             mobs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
-            realm_profile_store: Some(Arc::new(meerkat_mob::InMemoryRealmProfileStore::new())),
-            realm_profile_store_explicit: false,
+            realm_profile_store_selection: RealmProfileStoreSelection::DefaultInMemory(Arc::new(
+                meerkat_mob::InMemoryRealmProfileStore::new(),
+            )),
             realm_skill_sources: BTreeMap::new(),
         }
     }
@@ -265,14 +296,13 @@ impl MobMcpState {
         mut self,
         store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
     ) -> Self {
-        self.realm_profile_store = store;
-        self.realm_profile_store_explicit = true;
+        self.realm_profile_store_selection = RealmProfileStoreSelection::CallerSupplied(store);
         self
     }
 
     /// Returns a reference to the realm profile store, if configured.
     pub fn realm_profile_store(&self) -> Option<&Arc<dyn meerkat_mob::RealmProfileStore>> {
-        self.realm_profile_store.as_ref()
+        self.realm_profile_store_selection.store()
     }
 
     pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
@@ -280,12 +310,14 @@ impl MobMcpState {
             let mob_root = Self::persistent_mob_root(&root);
             // Auto-create realm profile store when persistent storage is available.
             #[cfg(not(target_arch = "wasm32"))]
-            if !self.realm_profile_store_explicit {
+            if self.realm_profile_store_selection.is_default() {
                 let db_path = mob_root.join(Self::REALM_PROFILE_STORE_FILE_NAME);
                 match meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
                     Ok(store) => {
-                        self.realm_profile_store =
-                            Some(Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>);
+                        self.realm_profile_store_selection =
+                            RealmProfileStoreSelection::DefaultDurable(
+                                Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>
+                            );
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -342,7 +374,7 @@ impl MobMcpState {
                     skill_names.extend(profile.skills.iter().cloned());
                 }
                 ProfileBinding::RealmRef { realm_profile } => {
-                    let Some(store) = &self.realm_profile_store else {
+                    let Some(store) = self.realm_profile_store_selection.store() else {
                         continue;
                     };
                     let stored = store.get(realm_profile).await.map_err(|error| {
@@ -422,7 +454,7 @@ impl MobMcpState {
     }
 
     fn bind_realm_profile_store(&self, storage: MobStorage) -> MobStorage {
-        storage.with_realm_profile_store(self.realm_profile_store.clone())
+        storage.with_realm_profile_store(self.realm_profile_store_selection.store().cloned())
     }
 
     async fn storage_for_new_mob(
@@ -1784,7 +1816,7 @@ impl MobMcpState {
     fn require_realm_profile_store(
         &self,
     ) -> Result<&Arc<dyn meerkat_mob::RealmProfileStore>, meerkat_mob::MobError> {
-        self.realm_profile_store.as_ref().ok_or_else(|| {
+        self.realm_profile_store_selection.store().ok_or_else(|| {
             meerkat_mob::MobError::Internal("realm profile store not configured".to_string())
         })
     }

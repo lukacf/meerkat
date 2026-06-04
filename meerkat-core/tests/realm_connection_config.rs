@@ -197,6 +197,7 @@ fn from_config_rejects_binding_pointing_at_missing_backend() {
             auth_profile: "openai_api_key".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
 
@@ -229,6 +230,7 @@ fn from_config_rejects_binding_pointing_at_missing_auth() {
             auth_profile: "does_not_exist".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
 
@@ -273,6 +275,7 @@ fn from_config_detects_provider_mismatch() {
             auth_profile: "anthropic_api_key".into(),
             default_model: None,
             policy: Default::default(),
+            provider_default: false,
         },
     );
 

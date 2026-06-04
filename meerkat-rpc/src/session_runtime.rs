@@ -9170,6 +9170,7 @@ mod tests {
             binding: meerkat_core::connection::BindingId::parse(binding)
                 .expect("valid binding fixture"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -9202,6 +9203,7 @@ mod tests {
                 auth_profile: "openai_managed".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -12467,6 +12469,7 @@ mod tests {
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
@@ -12704,6 +12707,7 @@ mod tests {
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
@@ -12714,6 +12718,7 @@ mod tests {
                         binding: meerkat_core::BindingId::parse("anthropic_vip")
                             .expect("valid binding"),
                         profile: None,
+                        origin: meerkat_core::connection::BindingOrigin::Configured,
                     },
                 ),
             ),
@@ -12757,6 +12762,7 @@ mod tests {
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
@@ -12820,6 +12826,7 @@ mod tests {
                 binding: meerkat_core::BindingId::parse("anthropic_default")
                     .expect("valid binding"),
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {

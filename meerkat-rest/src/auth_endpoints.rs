@@ -92,6 +92,7 @@ async fn resolve_binding_identity(
         realm: realm_id.clone(),
         binding: binding_id.clone(),
         profile: profile_id.cloned(),
+        origin: meerkat_core::BindingOrigin::Configured,
     };
     let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
         (
@@ -717,7 +718,7 @@ pub async fn list_auth_profiles(
             (
                 StatusCode::OK,
                 Json(WireAuthProfilesList {
-                    realm_id: realm.realm_id,
+                    realm_id: realm.realm_id.to_string(),
                     auth_profiles: profiles,
                     backend_profiles: backends,
                     bindings,
@@ -943,6 +944,7 @@ pub async fn test_auth_binding(
                 realm: body.realm_id.clone(),
                 binding: binding_id.clone(),
                 profile: body.profile_id.clone(),
+                origin: meerkat_core::BindingOrigin::Configured,
             };
             match state
                 .provider_registry
@@ -1803,6 +1805,7 @@ mod tests {
             realm: RealmId::parse("rest-test").unwrap(),
             binding: BindingId::parse("managed").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -1811,6 +1814,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -1819,6 +1823,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_google").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -2117,6 +2122,7 @@ mod tests {
                 auth_profile: "openai_managed".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2153,6 +2159,7 @@ mod tests {
                 auth_profile: "openai_oauth".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2204,6 +2211,7 @@ mod tests {
                 auth_profile: "openai_external".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_openai".into());
@@ -2240,6 +2248,7 @@ mod tests {
                 auth_profile: "google_api_key".into(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("default_google".into());
@@ -2363,6 +2372,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let snapshot = state
             .auth_lease
@@ -3550,6 +3560,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         state
             .token_store
@@ -3655,6 +3666,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
@@ -3891,6 +3903,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;
@@ -3939,6 +3952,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let now = chrono::Utc::now().timestamp() as u64;

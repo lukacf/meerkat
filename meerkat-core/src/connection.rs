@@ -44,7 +44,8 @@ struct EnvDefaultSpec {
 // ---------------------------------------------------------------------
 
 /// Error returned when a realm/binding/profile slug fails validation.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum IdentityError {
     #[error("identity slug is empty")]
     Empty,
@@ -52,6 +53,12 @@ pub enum IdentityError {
         "identity slug contains invalid character {0:?}; must be ASCII alphanumeric or one of '-', '_', '.'"
     )]
     InvalidChar(char),
+}
+
+/// `skip_serializing_if` helper: keeps `bool` fields off the wire when false,
+/// matching the crate convention (`tool_catalog::is_false`).
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn validate_slug(raw: &str) -> Result<(), IdentityError> {
@@ -79,6 +86,22 @@ macro_rules! slug_newtype {
                 let raw = raw.into();
                 validate_slug(&raw)?;
                 Ok(Self(raw))
+            }
+
+            /// Construct from a compile-time-known-valid slug literal used
+            /// internally by synthesis helpers (e.g. the `"env_default"` /
+            /// `"default"` synthetic-fallback slugs). A `debug_assert`
+            /// validates the slug in debug builds; release builds skip the
+            /// check since the only callers pass static, already-valid slugs.
+            // Generated for every slug newtype; only some (e.g. RealmId) have a
+            // synthesis caller.
+            #[allow(dead_code)]
+            pub(crate) fn from_known_valid(raw: &'static str) -> Self {
+                debug_assert!(
+                    validate_slug(raw).is_ok(),
+                    "from_known_valid called with invalid slug literal: {raw:?}",
+                );
+                Self(raw.to_string())
             }
 
             pub fn as_str(&self) -> &str {
@@ -117,6 +140,31 @@ slug_newtype!(
     "Opaque slug identifying an auth profile override on a connection."
 );
 
+/// Origin discriminant for an [`AuthBindingRef`].
+///
+/// Distinguishes a binding that names a durable, config-resolvable identity
+/// (`Configured`) from the synthetic env-var fallback the resolver mints when
+/// no realm config exists but a well-known API-key env var is set
+/// (`SyntheticEnvDefault`). The synthetic origin is ephemeral: it must never be
+/// rehydrated as a durable identity nor publish a durable auth lease.
+///
+/// This is the typed owner of the "is this the env-var default?" fact, replacing
+/// the prior recovery-by-magic-slug (`realm == "env_default"`,
+/// `binding == "default"`). Identity slugs (`RealmId`/`BindingId`) are pure
+/// opaque identity again; origin is carried explicitly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BindingOrigin {
+    /// A durable, config-resolvable binding. This is the back-read default so
+    /// that wire/persisted rows written before this field existed deserialize
+    /// as a configured identity.
+    #[default]
+    Configured,
+    /// The synthetic env-var fallback binding (ephemeral, not durable).
+    SyntheticEnvDefault,
+}
+
 /// Session-facing reference to a binding inside a realm.
 ///
 /// `AuthBindingRef` is purely structural — it does NOT carry a `"realm:binding"`
@@ -131,13 +179,27 @@ pub struct AuthBindingRef {
     pub binding: BindingId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileId>,
+    /// Whether this ref names a configured durable identity or the synthetic
+    /// env-var fallback. Defaults to [`BindingOrigin::Configured`] for back-read
+    /// of rows persisted before the discriminant existed.
+    #[serde(default, skip_serializing_if = "BindingOrigin::is_configured")]
+    pub origin: BindingOrigin,
+}
+
+impl BindingOrigin {
+    /// True when this is the (default) configured origin. Used to keep the
+    /// serialized shape wire-additive via `skip_serializing_if`.
+    pub fn is_configured(&self) -> bool {
+        matches!(self, BindingOrigin::Configured)
+    }
 }
 
 impl AuthBindingRef {
+    /// True when this ref is the synthetic env-var fallback binding rather than
+    /// a durable configured identity. Reads the typed [`BindingOrigin`]
+    /// discriminant; no slug-string comparison.
     pub fn is_env_default(&self) -> bool {
-        self.realm.as_str() == "env_default"
-            && self.binding.as_str() == "default"
-            && self.profile.is_none()
+        matches!(self.origin, BindingOrigin::SyntheticEnvDefault)
     }
 }
 
@@ -274,6 +336,13 @@ pub struct ProviderBinding {
     pub default_model: Option<String>,
     #[serde(default)]
     pub policy: BindingPolicy,
+    /// Typed per-binding marker: this binding is the default for its provider.
+    /// Owns the "default for provider X" fact that was previously carried only
+    /// by the `default_<provider>` name convention. The realm-level
+    /// [`RealmConnectionSet::default_binding`] expresses a single per-realm
+    /// default; this flag expresses the per-provider default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provider_default: bool,
 }
 
 /// Realm-scoped set of backends, auth profiles, and bindings.
@@ -283,7 +352,7 @@ pub struct ProviderBinding {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealmConnectionSet {
-    pub realm_id: String,
+    pub realm_id: RealmId,
     pub backends: BTreeMap<String, BackendProfile>,
     pub auth_profiles: BTreeMap<String, AuthProfile>,
     pub bindings: BTreeMap<String, ProviderBinding>,
@@ -411,6 +480,7 @@ pub fn resolve_realm_binding_target_for_provider(
             provider,
             binding_id,
             explicit_profile.cloned(),
+            BindingOrigin::Configured,
         );
     }
 
@@ -422,7 +492,13 @@ pub fn resolve_realm_binding_target_for_provider(
                 source,
             }
         })?;
-        return materialize_connection_target(realm, provider, binding, explicit_profile.cloned());
+        return materialize_connection_target(
+            realm,
+            provider,
+            binding,
+            explicit_profile.cloned(),
+            BindingOrigin::SyntheticEnvDefault,
+        );
     }
 
     if let Some(realm) = missing_default {
@@ -461,6 +537,7 @@ pub fn resolve_auth_binding_or_default_for_provider(
             provider,
             auth_binding.binding.clone(),
             auth_binding.profile.clone(),
+            BindingOrigin::Configured,
         );
     }
 
@@ -480,12 +557,13 @@ fn selected_binding_id_for_provider(
     provider: Provider,
 ) -> Result<Option<BindingId>, ConnectionTargetError> {
     let mut provider_bindings = Vec::new();
+    let mut provider_default_binding: Option<&str> = None;
     for (binding_id, binding) in &realm.bindings {
         let backend = realm
             .backends
             .get(&binding.backend_profile)
             .ok_or_else(|| ConnectionTargetError::BindingInvalid {
-                realm: realm.realm_id.clone(),
+                realm: realm.realm_id.to_string(),
                 binding: binding_id.clone(),
                 source: ProviderBindingError::UnknownBackend(binding.backend_profile.clone()),
             })?;
@@ -493,12 +571,18 @@ fn selected_binding_id_for_provider(
             .auth_profiles
             .get(&binding.auth_profile)
             .ok_or_else(|| ConnectionTargetError::BindingInvalid {
-                realm: realm.realm_id.clone(),
+                realm: realm.realm_id.to_string(),
                 binding: binding_id.clone(),
                 source: ProviderBindingError::UnknownAuth(binding.auth_profile.clone()),
             })?;
         if backend.provider == provider && auth.provider == provider {
             provider_bindings.push(binding_id.as_str());
+            // Typed per-provider default marker replaces the
+            // `default_<provider>` name convention. First marked wins
+            // (BTreeMap iteration is deterministic by id).
+            if binding.provider_default && provider_default_binding.is_none() {
+                provider_default_binding = Some(binding_id.as_str());
+            }
         }
     }
 
@@ -513,15 +597,11 @@ fn selected_binding_id_for_provider(
             });
     }
 
-    let provider_default_binding = format!("default_{}", provider.as_str());
-    if provider_bindings
-        .iter()
-        .any(|binding_id| *binding_id == provider_default_binding)
-    {
-        return BindingId::parse(provider_default_binding.clone())
+    if let Some(provider_default_binding) = provider_default_binding {
+        return BindingId::parse(provider_default_binding.to_string())
             .map(Some)
             .map_err(|source| ConnectionTargetError::InvalidBindingId {
-                binding: provider_default_binding,
+                binding: provider_default_binding.to_string(),
                 source,
             });
     }
@@ -608,7 +688,11 @@ pub fn resolve_auth_binding_candidates_for_provider(
         })?;
         if let Some(binding_id) = selected_binding_id_for_provider(&realm, provider)? {
             candidates.push(materialize_connection_target(
-                realm, provider, binding_id, None,
+                realm,
+                provider,
+                binding_id,
+                None,
+                BindingOrigin::Configured,
             )?);
         }
     }
@@ -622,7 +706,11 @@ pub fn resolve_auth_binding_candidates_for_provider(
             }
         })?;
         candidates.push(materialize_connection_target(
-            realm, provider, binding, None,
+            realm,
+            provider,
+            binding,
+            None,
+            BindingOrigin::SyntheticEnvDefault,
         )?);
     }
 
@@ -640,17 +728,15 @@ fn materialize_connection_target(
     provider: Provider,
     binding: BindingId,
     profile: Option<ProfileId>,
+    origin: BindingOrigin,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
-    let realm_typed = RealmId::parse(realm.realm_id.clone()).map_err(|source| {
-        ConnectionTargetError::InvalidRealmId {
-            realm: realm.realm_id.clone(),
-            source,
-        }
-    })?;
+    // `realm.realm_id` is already a typed `RealmId` (parsed once at
+    // `from_config`/synthesis); no re-parse needed.
     let auth_binding = AuthBindingRef {
-        realm: realm_typed,
+        realm: realm.realm_id.clone(),
         binding,
         profile,
+        origin,
     };
     let (binding, backend, auth_profile) =
         realm.lookup_auth_binding(&auth_binding).map_err(|source| {
@@ -690,6 +776,11 @@ impl RealmConnectionSet {
         realm_id: &str,
         section: &RealmConfigSection,
     ) -> Result<Self, ProviderBindingError> {
+        let realm_id =
+            RealmId::parse(realm_id).map_err(|source| ProviderBindingError::InvalidRealmId {
+                realm: realm_id.to_string(),
+                source,
+            })?;
         let mut backends: BTreeMap<String, BackendProfile> = BTreeMap::new();
         for (id, cfg) in &section.backend {
             let provider = Provider::parse_strict(&cfg.provider)
@@ -742,12 +833,13 @@ impl RealmConnectionSet {
                 auth_profile: cfg.auth_profile.clone(),
                 default_model: cfg.default_model.clone(),
                 policy: cfg.policy.clone(),
+                provider_default: cfg.provider_default,
             };
             bindings.insert(id.clone(), binding);
         }
 
         Ok(Self {
-            realm_id: realm_id.to_string(),
+            realm_id,
             backends,
             auth_profiles,
             bindings,
@@ -840,6 +932,7 @@ impl RealmConnectionSet {
             auth_profile: "default".to_string(),
             default_model: None,
             policy: BindingPolicy::default(),
+            provider_default: true,
         };
         let mut backends = BTreeMap::new();
         backends.insert("default".to_string(), backend);
@@ -848,7 +941,7 @@ impl RealmConnectionSet {
         let mut bindings = BTreeMap::new();
         bindings.insert("default".to_string(), binding);
         Self {
-            realm_id: "env_default".to_string(),
+            realm_id: RealmId::from_known_valid("env_default"),
             backends,
             auth_profiles,
             bindings,
@@ -934,6 +1027,11 @@ pub enum ProviderBindingError {
     },
     #[error("unknown provider name: {0}")]
     UnknownProviderName(String),
+    #[error("invalid realm id '{realm}': {source}")]
+    InvalidRealmId {
+        realm: String,
+        source: IdentityError,
+    },
 }
 
 // ---------------------------------------------------------------------
@@ -1016,9 +1114,14 @@ impl RealmConfigSection {
                     auth_profile: id.clone(),
                     default_model: None,
                     policy: BindingPolicy::default(),
+                    // Every minted binding is the per-provider default; the
+                    // "default for provider X" fact is carried by this typed
+                    // marker, not the `default_<provider>` id convention.
+                    provider_default: true,
                 },
             );
             if idx == 0 {
+                // The first provider also seeds the single per-realm default.
                 default_binding = Some(id);
             }
         }
@@ -1184,6 +1287,10 @@ pub struct ProviderBindingConfig {
     pub default_model: Option<String>,
     #[serde(default)]
     pub policy: BindingPolicy,
+    /// Marks this binding as the default for its provider. See
+    /// [`ProviderBinding::provider_default`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provider_default: bool,
 }
 
 #[cfg(test)]
@@ -1240,10 +1347,12 @@ auth_profile = "openai_oauth"
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: BindingOrigin::Configured,
         };
         assert_eq!(c.realm.as_str(), "dev");
         assert_eq!(c.binding.as_str(), "default_openai");
         assert!(c.profile.is_none());
+        assert!(!c.is_env_default());
     }
 
     #[test]
@@ -1252,13 +1361,52 @@ auth_profile = "openai_oauth"
             realm: RealmId::parse("prod").unwrap(),
             binding: BindingId::parse("gpt5").unwrap(),
             profile: Some(ProfileId::parse("override").unwrap()),
+            origin: BindingOrigin::Configured,
         };
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains("\"realm\":\"prod\""));
         assert!(s.contains("\"binding\":\"gpt5\""));
         assert!(s.contains("\"profile\":\"override\""));
+        // Configured origin is the default and is skipped on the wire so the
+        // shape stays additive for old readers.
+        assert!(!s.contains("origin"));
         let back: AuthBindingRef = serde_json::from_str(&s).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn auth_binding_origin_is_typed_not_slug() {
+        // Synthetic env-default origin is carried by the typed discriminant,
+        // not recovered from the realm/binding slug text.
+        let synthetic = AuthBindingRef {
+            realm: RealmId::parse("env_default").unwrap(),
+            binding: BindingId::parse("default").unwrap(),
+            profile: None,
+            origin: BindingOrigin::SyntheticEnvDefault,
+        };
+        assert!(synthetic.is_env_default());
+
+        // Same slugs, configured origin → NOT an env-default. Proves the
+        // decision keys on the typed origin, not on "env_default"/"default".
+        let configured = AuthBindingRef {
+            realm: RealmId::parse("env_default").unwrap(),
+            binding: BindingId::parse("default").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        assert!(!configured.is_env_default());
+
+        // Synthetic origin survives a serde round-trip.
+        let s = serde_json::to_string(&synthetic).unwrap();
+        assert!(s.contains("\"origin\":\"synthetic_env_default\""));
+        let back: AuthBindingRef = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, synthetic);
+
+        // A row without an `origin` field reads back as Configured.
+        let legacy = r#"{"realm":"env_default","binding":"default"}"#;
+        let back: AuthBindingRef = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.origin, BindingOrigin::Configured);
+        assert!(!back.is_env_default());
     }
 
     #[test]
@@ -1292,6 +1440,7 @@ auth_profile = "default_profile"
             realm: RealmId::parse("prod").unwrap(),
             binding: BindingId::parse("primary").unwrap(),
             profile: Some(ProfileId::parse("override_profile").unwrap()),
+            origin: BindingOrigin::Configured,
         };
 
         let (_binding, _backend, auth) = realm.lookup_auth_binding(&auth_binding).unwrap();
@@ -1438,7 +1587,7 @@ auth_profile = "default_profile"
     fn from_config_empty_section_yields_empty_set() {
         let section = RealmConfigSection::default();
         let set = RealmConnectionSet::from_config("dev", &section).expect("empty section is valid");
-        assert_eq!(set.realm_id, "dev");
+        assert_eq!(set.realm_id.as_str(), "dev");
         assert!(set.backends.is_empty());
         assert!(set.auth_profiles.is_empty());
         assert!(set.bindings.is_empty());
@@ -1593,10 +1742,73 @@ auth_profile = "openai_oauth"
 
         assert_eq!(candidates[0].auth_binding.realm.as_str(), "dev");
         assert_eq!(candidates[0].auth_binding.binding.as_str(), "openai_oauth");
+        assert!(!candidates[0].auth_binding.is_env_default());
+        let synthetic = candidates.last().unwrap();
+        assert_eq!(synthetic.auth_binding.realm.as_str(), "env_default");
+        // The synthetic fallback carries the typed origin, not just the slug.
         assert_eq!(
-            candidates.last().unwrap().auth_binding.realm.as_str(),
-            "env_default"
+            synthetic.auth_binding.origin,
+            BindingOrigin::SyntheticEnvDefault
         );
+        assert!(synthetic.auth_binding.is_env_default());
+    }
+
+    #[test]
+    fn from_inline_api_keys_marks_each_provider_default() {
+        let section = RealmConfigSection::from_inline_api_keys(&[
+            ("anthropic", "sk-ant"),
+            ("openai", "sk-oai"),
+        ]);
+        // Every provider's minted binding carries the typed per-provider
+        // default marker — not just the first (idx==0) one.
+        assert!(section.binding["default_anthropic"].provider_default);
+        assert!(section.binding["default_openai"].provider_default);
+        // The first provider still seeds the single per-realm default.
+        assert_eq!(
+            section.default_binding.as_deref(),
+            Some("default_anthropic")
+        );
+    }
+
+    #[test]
+    fn selected_binding_prefers_typed_provider_default_marker() {
+        // Two openai bindings; the second is marked provider_default. The
+        // selector must pick by the typed marker, not by any id name.
+        let config = config_with_realms(
+            r#"
+[dev]
+
+[dev.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[dev.auth.openai_api]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "OPENAI_API_KEY" }
+
+[dev.binding.alpha]
+backend_profile = "openai_default"
+auth_profile = "openai_api"
+
+[dev.binding.beta]
+backend_profile = "openai_default"
+auth_profile = "openai_api"
+provider_default = true
+"#,
+        );
+        let preferred_realm = RealmId::parse("dev").unwrap();
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &config,
+            Provider::OpenAI,
+            None,
+            Some(&preferred_realm),
+            false,
+        )
+        .expect("candidates resolve");
+
+        assert_eq!(candidates[0].auth_binding.realm.as_str(), "dev");
+        assert_eq!(candidates[0].auth_binding.binding.as_str(), "beta");
     }
 
     #[test]

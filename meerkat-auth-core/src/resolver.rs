@@ -1386,6 +1386,7 @@ mod tests {
                 realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
                 binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             },
             &backend,
             &auth,
@@ -1421,6 +1422,7 @@ mod tests {
                 realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
                 binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             },
             &backend,
             &auth,
@@ -1449,6 +1451,7 @@ mod tests {
             realm: meerkat_core::connection::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         })
     }
 

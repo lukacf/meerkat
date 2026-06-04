@@ -1638,6 +1638,7 @@ impl AgentFactory {
             realm: selected_realm,
             binding,
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         Ok((realm, binding_id, auth_binding))
     }
@@ -2930,6 +2931,7 @@ impl AgentFactory {
             auth_profile: auth.id.clone(),
             default_model: Some(spec.remote_model.clone()),
             policy: Default::default(),
+            provider_default: false,
         };
 
         let mut backends = BTreeMap::new();
@@ -2941,7 +2943,7 @@ impl AgentFactory {
 
         Ok((
             RealmConnectionSet {
-                realm_id: SELF_HOSTED_LEGACY_REALM_ID.to_string(),
+                realm_id: realm_id.clone(),
                 backends,
                 auth_profiles,
                 bindings,
@@ -2951,6 +2953,7 @@ impl AgentFactory {
                 realm: realm_id,
                 binding: binding_id,
                 profile: None,
+                origin: meerkat_core::BindingOrigin::Configured,
             },
         ))
     }
@@ -5469,7 +5472,7 @@ mod tests {
         )
         .expect("env default binding should synthesize");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -5489,6 +5492,7 @@ mod tests {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
         };
         let err = AgentFactory::resolve_realm_binding_for_provider(
             &config,
@@ -5596,6 +5600,7 @@ mod tests {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_auth_binding(&env_default_auth_binding);
@@ -5694,6 +5699,7 @@ mod tests {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
         };
         let lease_key =
             meerkat_core::handles::LeaseKey::from_auth_binding(&env_default_auth_binding);
@@ -5721,6 +5727,7 @@ mod tests {
             realm: RealmId::parse("session_a").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
         let connection = ResolvedConnection {
@@ -5794,6 +5801,7 @@ mod tests {
                 auth_profile: "anthropic_env".to_string(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -5846,6 +5854,7 @@ mod tests {
                 auth_profile: "openai_key".to_string(),
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -5910,6 +5919,7 @@ mod tests {
                 auth_profile: "openai_key".to_string(),
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -5920,6 +5930,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),
             binding: meerkat_core::BindingId::parse("openai_oauth").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         });
         build.resume_override_mask.model = true;
 
@@ -6051,6 +6062,7 @@ mod tests {
                 auth_profile: "anthropic_key".to_string(),
                 default_model: Some("claude-opus-4-8".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -6110,6 +6122,7 @@ mod tests {
                 auth_profile: "anthropic_env".to_string(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config
@@ -6149,6 +6162,7 @@ mod tests {
                 auth_profile: "openai_env".to_string(),
                 default_model: None,
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("default".to_string(), default_section);
@@ -6182,7 +6196,7 @@ mod tests {
         )
         .expect("unconfigured storage realm may use configured default credentials");
 
-        assert_eq!(realm.realm_id, "default");
+        assert_eq!(realm.realm_id.as_str(), "default");
         assert_eq!(binding_id, "default_openai");
         assert_eq!(auth_binding.realm.as_str(), "default");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
@@ -6195,7 +6209,7 @@ mod tests {
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::Gemini, None)
                 .expect("unscoped image lookup may use env_default");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -6211,7 +6225,7 @@ mod tests {
         )
         .expect("explicit env_default image lookup may use env_default credentials");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -6229,7 +6243,7 @@ mod tests {
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::OpenAI, None)
                 .expect("unscoped image lookup may use the configured default realm");
 
-        assert_eq!(realm.realm_id, "default");
+        assert_eq!(realm.realm_id.as_str(), "default");
         assert_eq!(binding_id, "default_openai");
         assert_eq!(auth_binding.realm.as_str(), "default");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
@@ -6245,7 +6259,7 @@ mod tests {
         )
         .expect("workspace storage realm without credential config may use env_default");
 
-        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(realm.realm_id.as_str(), "env_default");
         assert_eq!(binding_id, "default");
         assert_eq!(auth_binding.realm.as_str(), "env_default");
         assert_eq!(auth_binding.binding.as_str(), "default");
@@ -6433,6 +6447,7 @@ mod tests {
                 auth_profile: auth_id,
                 default_model: Some("gemma4:e2b".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert(realm_id.to_string(), realm);
@@ -7298,6 +7313,7 @@ mod tests {
                 auth_profile: "local_auth".to_string(),
                 default_model: Some("gemma4:e2b".to_string()),
                 policy: Default::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), realm);
@@ -7305,6 +7321,7 @@ mod tests {
             realm: RealmId::parse("dev").unwrap(),
             binding: BindingId::parse("local_binding").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
@@ -7368,7 +7385,7 @@ mod tests {
         )
         .expect("selected image lookup should pick the selected realm's OpenAI binding");
 
-        assert_eq!(realm.realm_id, "session_a");
+        assert_eq!(realm.realm_id.as_str(), "session_a");
         assert_eq!(binding_id, "default_openai");
         assert_eq!(auth_binding.realm.as_str(), "session_a");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
@@ -7517,7 +7534,7 @@ mod tests {
             Some("session_a"),
         )
         .expect("selected image lookup should not fall back before validation");
-        assert_eq!(realm.realm_id, "session_a");
+        assert_eq!(realm.realm_id.as_str(), "session_a");
         assert_eq!(binding_id, "default_openai");
 
         let resolve_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -7870,6 +7887,7 @@ mod tests {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let snapshot =
             bindings
@@ -7989,6 +8007,7 @@ mod tests {
             realm: RealmId::parse("session_a").unwrap(),
             binding: BindingId::parse("default_openai").unwrap(),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
         let snapshot =
             bindings

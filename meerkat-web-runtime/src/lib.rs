@@ -311,8 +311,15 @@ fn populate_realm_from_api_keys(
     let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
     if let Some(urls) = base_urls {
         for (provider, url) in urls {
-            let id = format!("default_{provider}");
-            if let Some(bp) = section.backend.get_mut(&id) {
+            // Look up the backend by its typed provider identity rather than
+            // re-synthesizing the `default_<provider>` id name convention.
+            // `from_inline_api_keys` mints one backend per provider, keyed by
+            // the provider string it was given.
+            if let Some(bp) = section
+                .backend
+                .values_mut()
+                .find(|bp| bp.provider == *provider)
+            {
                 bp.base_url = Some(url.clone());
             }
         }
@@ -2614,7 +2621,42 @@ capabilities = [{capability_values}]
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("test binding id"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn populate_realm_applies_base_url_by_typed_provider() {
+        let mut config = Config::default();
+        let api_keys = HashMap::from([
+            ("anthropic".to_string(), "sk-ant".to_string()),
+            ("openai".to_string(), "sk-oai".to_string()),
+        ]);
+        let base_urls = HashMap::from([(
+            "openai".to_string(),
+            "https://proxy.example/openai".to_string(),
+        )]);
+        populate_realm_from_api_keys(&mut config, &api_keys, Some(&base_urls));
+
+        let section = config.realm.get("default").expect("default realm");
+        // base_url landed on the openai backend, matched by typed provider
+        // identity, not by reconstructing a `default_openai` id name.
+        let openai_backend = section
+            .backend
+            .values()
+            .find(|bp| bp.provider == "openai")
+            .expect("openai backend");
+        assert_eq!(
+            openai_backend.base_url.as_deref(),
+            Some("https://proxy.example/openai")
+        );
+        let anthropic_backend = section
+            .backend
+            .values()
+            .find(|bp| bp.provider == "anthropic")
+            .expect("anthropic backend");
+        assert_eq!(anthropic_backend.base_url, None);
     }
 
     #[cfg(target_arch = "wasm32")]

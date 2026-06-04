@@ -55,6 +55,7 @@ fn test_binding() -> ValidatedBinding {
             realm: RealmId::parse("browser").expect("realm"),
             binding: BindingId::parse("openai").expect("binding"),
             profile: Some(ProfileId::parse("primary").expect("profile")),
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         },
         &backend,
         &auth,
@@ -422,6 +423,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             auth_profile: "local_auth".to_string(),
             default_model: Some("gemma4:e2b".to_string()),
             policy: Default::default(),
+            provider_default: false,
         },
     );
     config.realm.insert("default".to_string(), realm);
@@ -430,6 +432,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
         realm: meerkat_core::connection::RealmId::parse("default").expect("realm"),
         binding: meerkat_core::connection::BindingId::parse("local_binding").expect("binding"),
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     };
     let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
         WASM_EXTERNAL_AUTH_RESOLVER_ID,

@@ -233,6 +233,7 @@ fn oauth_target() -> meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     }
 }
 

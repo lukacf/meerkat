@@ -31,9 +31,9 @@ use meerkat_client::{
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
     AuthBindingRef, AuthConstraints, AuthMetadataDefaults, AuthProfileConfig, BackendProfileConfig,
-    BindingId, BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore, CredentialSourceSpec,
-    HttpAuthorizationRequest, HttpAuthorizer, MemoryConfigStore, Message, ProviderBindingConfig,
-    RealmConfigSection, RealmConnectionSet, RealmId, UserMessage,
+    BindingId, BindingOrigin, BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore,
+    CredentialSourceSpec, HttpAuthorizationRequest, HttpAuthorizer, MemoryConfigStore, Message,
+    ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId, UserMessage,
 };
 use meerkat_providers::ResolverEnvironment;
 use meerkat_providers::auth_store::{
@@ -618,6 +618,7 @@ fn openai_oauth_config() -> Config {
             auth_profile: "openai_oauth".to_string(),
             default_model: Some("gpt-5.4".to_string()),
             policy: BindingPolicy::default(),
+            provider_default: false,
         },
     );
     config.realm.insert(REALM_ID.to_string(), section);
@@ -629,6 +630,7 @@ fn openai_auth_binding() -> AuthBindingRef {
         realm: RealmId::parse(REALM_ID).expect("valid realm"),
         binding: BindingId::parse(BINDING_ID).expect("valid binding"),
         profile: None,
+        origin: BindingOrigin::Configured,
     }
 }
 

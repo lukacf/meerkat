@@ -1487,6 +1487,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         }
     }
 
@@ -1495,6 +1496,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("alternate_openai").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         }
     }
 

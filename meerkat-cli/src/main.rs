@@ -4036,6 +4036,7 @@ async fn handle_auth_command(
                 binding: meerkat_core::BindingId::parse(binding_id.clone())
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             };
             match registry.resolve(&realm_set, &auth_binding, &env).await {
                 Ok(conn) => {
@@ -4077,6 +4078,7 @@ async fn handle_auth_command(
                 binding: meerkat_core::BindingId::parse(binding_id)
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             };
             let token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> =
                 if meerkat_providers::auth_store::credential_source_uses_persisted_store(
@@ -4150,6 +4152,7 @@ async fn handle_auth_command(
                         realm: key.realm.clone(),
                         binding: key.binding.clone(),
                         profile: key.profile.clone(),
+                        origin: meerkat_core::connection::BindingOrigin::Configured,
                     };
                     meerkat_core::clear_tokens_and_publish_lifecycle_released(
                         store.as_ref(),
@@ -4376,6 +4379,7 @@ async fn refresh_auth_profile(
         binding: meerkat_core::BindingId::parse(binding_id.clone())
             .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     };
     let connection = registry
         .resolve(&realm_set, &auth_binding, &env)
@@ -4816,6 +4820,7 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
                 auth_profile: auth_profile_id.to_string(),
                 default_model: Some(provider.sample_model().to_string()),
                 policy: meerkat_core::BindingPolicy::default(),
+                provider_default: false,
             },
         );
         changed = true;
@@ -4861,6 +4866,7 @@ fn resolve_configured_cli_interactive_oauth_target(
         binding: meerkat_core::BindingId::parse(binding_id)
             .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
         profile: None,
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     };
     let (_, backend_profile, auth_profile) =
         realm_set.lookup_auth_binding(&auth_binding).map_err(|e| {
@@ -4911,6 +4917,7 @@ fn auth_binding_from_token_key(key: &meerkat_providers::auth_store::TokenKey) ->
         realm: key.realm.clone(),
         binding: key.binding.clone(),
         profile: key.profile.clone(),
+        origin: meerkat_core::connection::BindingOrigin::Configured,
     }
 }
 
@@ -5653,6 +5660,7 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
                 realm: key.realm.clone(),
                 binding: key.binding.clone(),
                 profile: key.profile.clone(),
+                origin: meerkat_core::connection::BindingOrigin::Configured,
             };
             meerkat_core::clear_tokens_and_publish_lifecycle_released(
                 store.as_ref(),
@@ -5968,6 +5976,7 @@ fn doctor_legacy_self_hosted_connection(
         auth_profile: auth.id.clone(),
         default_model: None,
         policy: Default::default(),
+        provider_default: false,
     };
 
     let mut backends = std::collections::BTreeMap::new();
@@ -5979,7 +5988,7 @@ fn doctor_legacy_self_hosted_connection(
 
     Ok((
         meerkat_core::RealmConnectionSet {
-            realm_id: SELF_HOSTED_LEGACY_REALM_ID.to_string(),
+            realm_id: realm_id.clone(),
             backends,
             auth_profiles,
             bindings,
@@ -5989,6 +5998,7 @@ fn doctor_legacy_self_hosted_connection(
             realm: realm_id,
             binding: binding_id,
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         },
     ))
 }
@@ -13553,6 +13563,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let tokens = PersistedTokens {
             auth_mode: PersistedAuthMode::ApiKey,
@@ -13870,6 +13881,7 @@ mod tests {
                 auth_profile: "openai_oauth".into(),
                 default_model: None,
                 policy: meerkat_core::BindingPolicy::default(),
+                provider_default: false,
             },
         );
         section.default_binding = Some("openai_oauth".into());
@@ -13968,6 +13980,7 @@ mod tests {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("openai_oauth").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         }
     }
 
@@ -15547,6 +15560,7 @@ default_model = "gemma"
             realm: meerkat_core::RealmId::parse("test").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let auth_binding_err = run_resume_probe_error(
             "resume-auth-binding",
@@ -18947,6 +18961,7 @@ capabilities = ["definitely_missing_capability"]
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:1455/callback";
@@ -19011,6 +19026,7 @@ capabilities = ["definitely_missing_capability"]
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
         bindings
@@ -19889,6 +19905,7 @@ supports_reasoning = true
                 auth_profile: "google_oauth".to_string(),
                 default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
                 policy: meerkat_core::BindingPolicy::default(),
+                provider_default: false,
             },
         );
         config.realm.insert("dev".to_string(), section);
@@ -19896,6 +19913,7 @@ supports_reasoning = true
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("google_oauth").expect("valid binding"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let selection = resolve_cli_auth_binding_selection(&config, &auth_binding)
             .expect("auth binding resolves");

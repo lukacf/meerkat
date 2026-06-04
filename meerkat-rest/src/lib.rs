@@ -7267,6 +7267,7 @@ mod tests {
             binding: meerkat_core::BindingId::parse("default_openai")
                 .expect("valid binding fixture"),
             profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:1455/callback";

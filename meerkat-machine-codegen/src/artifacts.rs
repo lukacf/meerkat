@@ -6818,6 +6818,55 @@ impl<'a> MachineTlaCompiler<'a> {
     fn render_mob_machine_native_helpers(&self, out: &mut String) {
         let prefix = |name: &str| self.scoped_helper_name(name);
         let local = |name: &str| self.local_binding_name(name);
+        // Mob-coordination temporal predicates (work-intent / resource-claim
+        // expiry). The DSL emits calls to these guards but they had no TLA+
+        // definitions, so TLC reported "Unknown operator" for MobMachine (and
+        // for any composition embedding it). The expires-at argument is the
+        // stored `Option<u64>` (`Some(ms)`/`None`) and `now_ms` is a raw value;
+        // `e # None /\ e.value <= now_ms` short-circuits when there is no expiry.
+        // Resource-claim status arrives as the raw status string.
+        writeln!(
+            out,
+            "{}(expires_at_ms, now_ms) ==",
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ expires_at_ms # None");
+        pushln!(out, "    /\\ expires_at_ms.value <= now_ms");
+        writeln!(
+            out,
+            "{}(expires_at_ms, now_ms) == ~{}(expires_at_ms, now_ms)",
+            prefix("mob_coordination_work_intent_unexpired"),
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(expires_at_ms, now_ms) == ~{}(expires_at_ms, now_ms)",
+            prefix("mob_coordination_resource_claim_unexpired"),
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(status, expires_at_ms, now_ms) ==",
+            prefix("mob_coordination_resource_claim_active_at")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ status = \"Active\"");
+        writeln!(
+            out,
+            "    /\\ ~{}(expires_at_ms, now_ms)",
+            prefix("mob_coordination_expired_at")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(status, expires_at_ms, now_ms) == ~{}(status, expires_at_ms, now_ms)",
+            prefix("mob_coordination_resource_claim_inactive_at"),
+            prefix("mob_coordination_resource_claim_active_at")
+        )
+        .expect("write to string");
         writeln!(
             out,
             "{}(edges_by_key, edge) ==",

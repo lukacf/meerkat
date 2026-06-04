@@ -4886,11 +4886,21 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             id: None,
             lane: Lane::Smoke,
             title: "Mob flow runtime smoke suite",
-            timeout_secs: 2400,
+            // The suite drives 18 live multi-model flow scenarios; the heaviest
+            // (maximal_matrix) legitimately runs ~552s solo. Running 4 such flows
+            // concurrently against a single shared provider key saturates rate
+            // limits and slows every in-flight flow past the per-flow deadline,
+            // so this lane scenario throttles the in-process flow concurrency to
+            // 2 and grants a generous per-flow deadline. The outer budget covers
+            // the extra serial waves that the lower concurrency implies.
+            timeout_secs: 3600,
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
-            env: &[],
+            env: &[
+                ("MEERKAT_FLOW_RUNTIME_SMOKE_CONCURRENCY", "2"),
+                ("MEERKAT_FLOW_RUNTIME_SMOKE_RUN_TIMEOUT_SECS", "1800"),
+            ],
             cargo_bin_env: &[],
             pre_commands: &[],
             command: CommandSpec::Raw {
@@ -4914,7 +4924,11 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             id: None,
             lane: Lane::Smoke,
             title: "Mob external TCP production drain smoke",
-            timeout_secs: 300,
+            // Each smoke scenario builds in its own isolated target dir, so this
+            // scenario cold-compiles the large smoke_mob_flow_runtime test binary
+            // before running its single live bind+turn. 300s cannot cover a cold
+            // build plus a live turn; align with the other mob scenarios' budget.
+            timeout_secs: 900,
             required_env: &[],
             required_bins: &["cargo"],
             cwd: ".",

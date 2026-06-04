@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::lifecycle::run_primitive::TurnMetadataOverride;
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -25,10 +26,8 @@ pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens
 pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<serde_json::Value>,
-    pub clear_provider_params: bool,
-    pub auth_binding: Option<AuthBindingRef>,
-    pub clear_auth_binding: bool,
+    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub output_schema: Option<OutputSchema>,
@@ -210,9 +209,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
     overrides.model.is_some()
         || overrides.provider.is_some()
         || overrides.provider_params.is_some()
-        || overrides.clear_provider_params
         || overrides.auth_binding.is_some()
-        || overrides.clear_auth_binding
         || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
         || overrides.comms_name.is_some()
@@ -293,10 +290,6 @@ fn authorize_resume_overrides(
         .authorize_session_resume_overrides(
             overrides.provider.is_some(),
             overrides.model.is_some(),
-            overrides.clear_provider_params,
-            overrides.provider_params.is_some(),
-            overrides.clear_auth_binding,
-            overrides.auth_binding.is_some(),
             has_build_only_turn_overrides(overrides),
             first_turn_phase,
         )
@@ -315,12 +308,6 @@ fn authorize_resume_overrides(
         let message = match reason {
             ResumeOverrideRejection::ProviderRequiresModel => {
                 "provider override requires model on a session turn".to_string()
-            }
-            ResumeOverrideRejection::ClearAndSetProviderParams => {
-                "clear_provider_params cannot be combined with provider_params".to_string()
-            }
-            ResumeOverrideRejection::ClearAndSetAuthBinding => {
-                "clear_auth_binding cannot be combined with auth_binding".to_string()
             }
             ResumeOverrideRejection::BuildOnlyAfterFirstTurn => {
                 BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string()
@@ -422,8 +409,9 @@ pub fn resolve_effective_turn_config(
         provider: llm_binding.provider_overridden,
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
-        provider_params: overrides.provider_params.is_some() || overrides.clear_provider_params,
-        auth_binding: overrides.auth_binding.is_some() || overrides.clear_auth_binding,
+        // `Some(_)` is the explicit intent (Set or Clear); `None` inherits.
+        provider_params: overrides.provider_params.is_some(),
+        auth_binding: overrides.auth_binding.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
@@ -484,13 +472,10 @@ pub fn resolve_effective_turn_config(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params: if overrides.clear_provider_params {
-            None
-        } else {
-            overrides
-                .provider_params
-                .clone()
-                .or_else(|| metadata.provider_params.clone())
+        provider_params: match &overrides.provider_params {
+            Some(TurnMetadataOverride::Clear) => None,
+            Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
+            None => metadata.provider_params.clone(),
         },
         external_tools: context.external_tools,
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
@@ -544,13 +529,10 @@ pub fn resolve_effective_turn_config(
         // Phase 3: persisted auth_binding re-entered at resume time so
         // the binding re-resolves through the same realm entry unless this
         // recovery request explicitly sets or clears it.
-        auth_binding: if overrides.clear_auth_binding {
-            None
-        } else {
-            overrides
-                .auth_binding
-                .clone()
-                .or_else(|| metadata.auth_binding.clone())
+        auth_binding: match &overrides.auth_binding {
+            Some(TurnMetadataOverride::Clear) => None,
+            Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
+            None => metadata.auth_binding.clone(),
         },
         keep_alive,
         checkpointer: context.checkpointer,
@@ -795,7 +777,9 @@ mod tests {
             &SurfaceSessionRecoveryOverrides {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some(Provider::OpenAI),
-                provider_params: Some(json!({ "reasoning": { "effort": "medium" } })),
+                provider_params: Some(TurnMetadataOverride::Set(
+                    json!({ "reasoning": { "effort": "medium" } }),
+                )),
                 max_tokens: Some(2048),
                 system_prompt: Some("override system prompt".to_string()),
                 output_schema: Some(override_schema.clone()),
@@ -886,7 +870,7 @@ mod tests {
         let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                clear_provider_params: true,
+                provider_params: Some(TurnMetadataOverride::Clear),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -913,7 +897,7 @@ mod tests {
         let recovered = build_recovered_session(
             session.clone(),
             &SurfaceSessionRecoveryOverrides {
-                auth_binding: Some(override_ref.clone()),
+                auth_binding: Some(TurnMetadataOverride::Set(override_ref.clone())),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -929,7 +913,7 @@ mod tests {
         let recovered = build_recovered_session(
             session,
             &SurfaceSessionRecoveryOverrides {
-                clear_auth_binding: true,
+                auth_binding: Some(TurnMetadataOverride::Clear),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -943,38 +927,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_recovered_session_rejects_invalid_set_and_clear_recovery_overrides() {
-        let provider_error = build_recovered_session(
-            sample_session(),
-            &SurfaceSessionRecoveryOverrides {
-                provider_params: Some(json!({ "temperature": 0.2 })),
-                clear_provider_params: true,
-                ..Default::default()
-            },
-            SurfaceSessionRecoveryContext::default(),
-        )
-        .expect_err("set plus clear provider params must be rejected");
-        assert!(
-            provider_error.to_string().contains("clear_provider_params"),
-            "unexpected error: {provider_error}"
-        );
-
-        let connection_error = build_recovered_session(
-            sample_session(),
-            &SurfaceSessionRecoveryOverrides {
-                auth_binding: Some(auth_binding("override", "default")),
-                clear_auth_binding: true,
-                ..Default::default()
-            },
-            SurfaceSessionRecoveryContext::default(),
-        )
-        .expect_err("set plus clear auth_binding must be rejected");
-        assert!(
-            connection_error.to_string().contains("clear_auth_binding"),
-            "unexpected error: {connection_error}"
-        );
-    }
+    // NOTE: the "set + clear" fourth state is now structurally unrepresentable
+    // in `SurfaceSessionRecoveryOverrides` — `provider_params`/`auth_binding`
+    // are a single `Option<TurnMetadataOverride<T>>`, so a value cannot be both
+    // set and cleared. The legacy-wire `clear_* + value` rejection is enforced
+    // once at the serde boundary of the wire seam types (see
+    // `meerkat-contracts` runtime/mob wire-override tests).
 
     #[test]
     fn build_recovered_session_can_override_metadata_and_tooling_fields() {

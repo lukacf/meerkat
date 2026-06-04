@@ -11,6 +11,7 @@
 
 use crate::Provider;
 use crate::generated::{session_document, session_persistence_version_authority};
+use crate::lifecycle::run_primitive::TurnMetadataOverride;
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
@@ -3748,23 +3749,23 @@ pub struct SessionLlmIdentity {
 }
 
 /// Typed per-turn override request for a session LLM identity.
+///
+/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+/// tri-state via [`TurnMetadataOverride`]: `None` preserves the durable value,
+/// `Some(Set)` overrides it for this turn, and `Some(Clear)` removes it. The
+/// illegal "set and clear" fourth state is structurally unrepresentable, so the
+/// resolver needs no reject branch for it.
 pub struct SessionLlmIdentityOverride<'a> {
     pub model: Option<&'a str>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<&'a serde_json::Value>,
-    pub clear_provider_params: bool,
-    pub auth_binding: Option<&'a crate::AuthBindingRef>,
-    pub clear_auth_binding: bool,
+    pub provider_params: Option<TurnMetadataOverride<&'a serde_json::Value>>,
+    pub auth_binding: Option<TurnMetadataOverride<&'a crate::AuthBindingRef>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SessionLlmIdentityOverrideError {
     #[error("provider override requires model on an existing session")]
     ProviderRequiresModel,
-    #[error("clear_provider_params cannot be combined with provider_params")]
-    SetAndClearProviderParams,
-    #[error("clear_auth_binding cannot be combined with auth_binding")]
-    SetAndClearAuthBinding,
     #[error("{0}")]
     ProviderModelMismatch(String),
     #[error("self-hosted provider requires a registered model alias; '{model}' is not configured")]
@@ -3785,12 +3786,6 @@ pub fn resolve_session_llm_identity_override(
 ) -> Result<SessionLlmIdentity, SessionLlmIdentityOverrideError> {
     if overrides.provider.is_some() && overrides.model.is_none() {
         return Err(SessionLlmIdentityOverrideError::ProviderRequiresModel);
-    }
-    if overrides.clear_provider_params && overrides.provider_params.is_some() {
-        return Err(SessionLlmIdentityOverrideError::SetAndClearProviderParams);
-    }
-    if overrides.clear_auth_binding && overrides.auth_binding.is_some() {
-        return Err(SessionLlmIdentityOverrideError::SetAndClearAuthBinding);
     }
 
     let model = overrides
@@ -3815,13 +3810,10 @@ pub fn resolve_session_llm_identity_override(
         ));
     }
 
-    let provider_params = if overrides.clear_provider_params {
-        None
-    } else {
-        overrides
-            .provider_params
-            .cloned()
-            .or_else(|| current.provider_params.clone())
+    let provider_params = match overrides.provider_params {
+        Some(TurnMetadataOverride::Clear) => None,
+        Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
+        None => current.provider_params.clone(),
     };
     let self_hosted_server_id = if provider == Provider::SelfHosted {
         if overrides.model.is_none() {
@@ -3846,15 +3838,13 @@ pub fn resolve_session_llm_identity_override(
         None
     };
 
-    let auth_binding = if overrides.clear_auth_binding
-        || (provider != current.provider && overrides.auth_binding.is_none())
-    {
-        None
-    } else {
-        overrides
-            .auth_binding
-            .cloned()
-            .or_else(|| current.auth_binding.clone())
+    let auth_binding = match overrides.auth_binding {
+        Some(TurnMetadataOverride::Clear) => None,
+        Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
+        // Inherit: a provider change without an explicit binding drops the
+        // stale binding; otherwise the durable binding is retained.
+        None if provider != current.provider => None,
+        None => current.auth_binding.clone(),
     };
 
     Ok(SessionLlmIdentity {
@@ -4907,9 +4897,7 @@ mod tests {
                 model: Some("gpt-5.5"),
                 provider: None,
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .unwrap();
@@ -4940,9 +4928,7 @@ mod tests {
                 model: Some("uncatalogued-custom-model"),
                 provider: None,
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .unwrap();

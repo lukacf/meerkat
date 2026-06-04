@@ -8993,11 +8993,75 @@
           }
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
+      "WireTurnMetadataOverride": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride2": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WireAuthBindingRef"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Request payload for `mob/turn_start`.",
+    "description": "Request payload for `mob/turn_start`.\n\n`provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear\ntri-state via [`WireTurnMetadataOverride`]. The legacy split wire form\n(`provider_params` + `clear_provider_params: bool`) is still accepted at the\nserde boundary and folded into the tri-state, rejecting a `set + clear`\npayload there.",
     "properties": {
       "additional_instructions": {
         "items": {
@@ -9014,20 +9078,12 @@
       "auth_binding": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WireAuthBindingRef"
+            "$ref": "#/$defs/WireTurnMetadataOverride2"
           },
           {
             "type": "null"
           }
         ]
-      },
-      "clear_auth_binding": {
-        "default": false,
-        "type": "boolean"
-      },
-      "clear_provider_params": {
-        "default": false,
-        "type": "boolean"
       },
       "flow_tool_overlay": {
         "anyOf": [
@@ -9072,7 +9128,16 @@
           "null"
         ]
       },
-      "provider_params": true,
+      "provider_params": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireTurnMetadataOverride"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "skill_refs": {
         "items": {
           "$ref": "#/$defs/SkillRef"

@@ -9393,7 +9393,8 @@ async fn resume_session_with_llm_override(
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
             model: model_override,
             provider: provider.map(Provider::as_core),
-            provider_params: merged_provider_params,
+            provider_params: merged_provider_params
+                .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
             max_tokens,
             system_prompt,
             output_schema: parsed_output_schema,

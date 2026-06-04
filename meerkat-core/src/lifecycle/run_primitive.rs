@@ -1290,6 +1290,17 @@ impl<T> TurnMetadataOverride<T> {
     pub const fn is_clear(&self) -> bool {
         matches!(self, Self::Clear)
     }
+
+    /// Borrow the inner value, mapping `&TurnMetadataOverride<T>` to
+    /// `TurnMetadataOverride<&T>` (mirrors [`Option::as_ref`]). Useful when a
+    /// borrowed override seam (e.g. `SessionLlmIdentityOverride<'a>`) needs the
+    /// tri-state without taking ownership.
+    pub fn as_ref(&self) -> TurnMetadataOverride<&T> {
+        match self {
+            Self::Set(value) => TurnMetadataOverride::Set(value),
+            Self::Clear => TurnMetadataOverride::Clear,
+        }
+    }
 }
 
 impl<'de, T> Deserialize<'de> for TurnMetadataOverride<T>
@@ -1590,7 +1601,17 @@ fn merge_override<T: PartialEq>(
     }
 }
 
-fn legacy_override_from_split_fields<T, E>(
+/// Fold a legacy `(Option<TurnMetadataOverride<T>>, clear: bool)` split — the
+/// pre-tri-state wire shape — into a single `Option<TurnMetadataOverride<T>>`,
+/// rejecting the illegal `set + clear` fourth state at the serde boundary.
+///
+/// This is the canonical legacy-override boundary helper shared by every seam
+/// that historically carried a `clear_*: bool` alongside an `Option<T>` value
+/// (see `RuntimeTurnMetadata`, `SessionLlmReconfigureRequest`, RPC
+/// `StartTurnParams`). New callers should accept `Option<TurnMetadataOverride>`
+/// directly and only invoke this from a custom `Deserialize` that still admits
+/// the legacy split wire form.
+pub fn legacy_override_from_split_fields<T, E>(
     set_value: Option<TurnMetadataOverride<T>>,
     clear: bool,
     set_field: &'static str,
@@ -1611,7 +1632,12 @@ where
     }
 }
 
-fn take_legacy_clear_bool<E>(
+/// Remove a legacy `clear_*: bool` field (plus any compatibility aliases) from
+/// a raw JSON object during a custom `Deserialize`, returning its boolean value
+/// (default `false`). Used together with [`legacy_override_from_split_fields`]
+/// to admit the pre-tri-state wire shape without keeping a `clear_*` field on
+/// the typed struct.
+pub fn take_legacy_clear_bool<E>(
     object: &mut serde_json::Map<String, serde_json::Value>,
     field: &'static str,
     aliases: &[&'static str],

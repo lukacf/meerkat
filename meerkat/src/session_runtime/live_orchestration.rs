@@ -924,9 +924,7 @@ mod orchestrator {
                         model: Some(new_global_model.clone()),
                         provider: None,
                         provider_params: None,
-                        clear_provider_params: false,
                         auth_binding: None,
-                        clear_auth_binding: false,
                     };
                     if let Err(err) = self
                         .runtime_adapter

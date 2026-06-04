@@ -1476,29 +1476,26 @@ impl SessionRuntime {
             ProviderParamsOverride, TurnMetadataOverride,
         };
 
+        // The tri-state already lives on `TurnOverrides`; only the typed value
+        // mapping (`serde_json::Value` -> `ProviderParamsOverride`) remains.
         let provider_params = overrides.and_then(|ov| {
-            if ov.clear_provider_params {
-                Some(TurnMetadataOverride::Clear)
-            } else {
-                let provider = ov
-                    .provider
-                    .as_deref()
-                    .or(provider_hint)
-                    .unwrap_or("unknown");
-                ov.provider_params.clone().map(|params| {
-                    TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
-                        provider, &params,
-                    ))
+            ov.provider_params
+                .as_ref()
+                .map(|directive| match directive {
+                    TurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
+                    TurnMetadataOverride::Set(params) => {
+                        let provider = ov
+                            .provider
+                            .as_deref()
+                            .or(provider_hint)
+                            .unwrap_or("unknown");
+                        TurnMetadataOverride::Set(
+                            ProviderParamsOverride::from_legacy_provider_value(provider, params),
+                        )
+                    }
                 })
-            }
         });
-        let auth_binding = overrides.and_then(|ov| {
-            if ov.clear_auth_binding {
-                Some(TurnMetadataOverride::Clear)
-            } else {
-                ov.auth_binding.clone().map(TurnMetadataOverride::Set)
-            }
-        });
+        let auth_binding = overrides.and_then(|ov| ov.auth_binding.clone());
         let provider = overrides.and_then(|ov| {
             ov.provider
                 .as_deref()
@@ -1546,18 +1543,18 @@ impl SessionRuntime {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let metadata = metadata?;
-        let (provider_params, clear_provider_params) = match &metadata.provider_params {
-            Some(TurnMetadataOverride::Set(params)) => {
-                (Some(params.to_legacy_provider_value()), false)
-            }
-            Some(TurnMetadataOverride::Clear) => (None, true),
-            None => (None, false),
-        };
-        let (auth_binding, clear_auth_binding) = match &metadata.auth_binding {
-            Some(TurnMetadataOverride::Set(auth_binding)) => (Some(auth_binding.clone()), false),
-            Some(TurnMetadataOverride::Clear) => (None, true),
-            None => (None, false),
-        };
+        // Map the typed `ProviderParamsOverride` value back to the legacy JSON
+        // value the surface seam carries; the tri-state shape is preserved.
+        let provider_params = metadata
+            .provider_params
+            .as_ref()
+            .map(|directive| match directive {
+                TurnMetadataOverride::Set(params) => {
+                    TurnMetadataOverride::Set(params.to_legacy_provider_value())
+                }
+                TurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
+            });
+        let auth_binding = metadata.auth_binding.clone();
         let overrides = crate::handlers::turn::TurnOverrides {
             keep_alive: metadata.keep_alive.as_ref().map(|_| true),
             model: metadata.model.as_ref().map(ToString::to_string),
@@ -1565,9 +1562,7 @@ impl SessionRuntime {
                 .provider
                 .map(|provider| provider.as_str().to_string()),
             provider_params,
-            clear_provider_params,
             auth_binding,
-            clear_auth_binding,
             ..Default::default()
         };
         (!overrides.is_empty()).then_some(overrides)
@@ -3035,9 +3030,7 @@ impl SessionRuntime {
                     data: None,
                 })?,
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
-            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
             auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
-            clear_auth_binding: overrides.is_some_and(|ov| ov.clear_auth_binding),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             system_prompt: overrides.and_then(|ov| ov.system_prompt.clone()),
             output_schema,
@@ -3386,10 +3379,14 @@ impl SessionRuntime {
             SessionLlmIdentityOverride {
                 model: ov.model.as_deref(),
                 provider,
-                provider_params: ov.provider_params.as_ref(),
-                clear_provider_params: ov.clear_provider_params,
-                auth_binding: ov.auth_binding.as_ref(),
-                clear_auth_binding: ov.clear_auth_binding,
+                provider_params: ov
+                    .provider_params
+                    .as_ref()
+                    .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_ref),
+                auth_binding: ov
+                    .auth_binding
+                    .as_ref()
+                    .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_ref),
             },
         )
         .map_err(|err| RpcError {
@@ -3493,9 +3490,7 @@ impl SessionRuntime {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
             provider_params: ov.provider_params.clone(),
-            clear_provider_params: ov.clear_provider_params,
             auth_binding: ov.auth_binding.clone(),
-            clear_auth_binding: ov.clear_auth_binding,
         };
 
         let live_session_exists = match self.service.has_live_session(session_id).await {
@@ -5116,9 +5111,7 @@ impl SessionRuntime {
                 && (ov.model.is_some()
                     || ov.provider.is_some()
                     || ov.provider_params.is_some()
-                    || ov.clear_provider_params
-                    || ov.auth_binding.is_some()
-                    || ov.clear_auth_binding)
+                    || ov.auth_binding.is_some())
             {
                 self.hot_swap_llm_client(session_id, ov).await?;
             }
@@ -5861,9 +5854,7 @@ impl SessionRuntime {
             && (ov.model.is_some()
                 || ov.provider.is_some()
                 || ov.provider_params.is_some()
-                || ov.clear_provider_params
-                || ov.auth_binding.is_some()
-                || ov.clear_auth_binding)
+                || ov.auth_binding.is_some())
         {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
@@ -12295,9 +12286,7 @@ mod tests {
             model: Some("gpt-5.4".to_string()),
             provider: Some("anthropic".to_string()),
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         };
 
         let err = host
@@ -12326,9 +12315,7 @@ mod tests {
             model: Some("unknown-model-xyz".to_string()),
             provider: Some("provider-shaped-cache-key".to_string()),
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         };
 
         let err = host
@@ -12676,7 +12663,11 @@ mod tests {
             auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    serde_json::json!({ "temperature": 0.2 }),
+                ),
+            ),
             ..Default::default()
         };
 
@@ -12716,11 +12707,16 @@ mod tests {
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            auth_binding: Some(meerkat_core::AuthBindingRef {
-                realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
-                binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
-                profile: None,
-            }),
+            auth_binding: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    meerkat_core::AuthBindingRef {
+                        realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
+                        binding: meerkat_core::BindingId::parse("anthropic_vip")
+                            .expect("valid binding"),
+                        profile: None,
+                    },
+                ),
+            ),
             ..Default::default()
         };
 
@@ -12764,7 +12760,11 @@ mod tests {
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            provider_params: Some(serde_json::json!({ "temperature": 0.1 })),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    serde_json::json!({ "temperature": 0.1 }),
+                ),
+            ),
             ..Default::default()
         };
 
@@ -12792,7 +12792,9 @@ mod tests {
             auth_binding: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            clear_provider_params: true,
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+            ),
             ..Default::default()
         };
 
@@ -12821,7 +12823,7 @@ mod tests {
             }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            clear_auth_binding: true,
+            auth_binding: Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
             ..Default::default()
         };
 
@@ -12833,61 +12835,9 @@ mod tests {
         assert!(resolved.auth_binding.is_none());
     }
 
-    #[tokio::test]
-    async fn turn_rejects_set_and_clear_auth_binding_together() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
-        let current = SessionLlmIdentity {
-            model: "claude-sonnet-4-5".to_string(),
-            provider: meerkat_core::Provider::Anthropic,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: None,
-        };
-        let overrides = crate::handlers::turn::TurnOverrides {
-            auth_binding: Some(meerkat_core::AuthBindingRef {
-                realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
-                binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
-                profile: None,
-            }),
-            clear_auth_binding: true,
-            ..Default::default()
-        };
+    // removed: set+clear is now structurally unrepresentable (Option<TurnMetadataOverride>)
 
-        let err = runtime
-            .resolve_target_llm_identity(&current, &overrides)
-            .await
-            .expect_err("set+clear must be rejected");
-
-        assert_eq!(err.code, error::INVALID_PARAMS);
-        assert!(err.message.contains("clear_auth_binding"));
-    }
-
-    #[tokio::test]
-    async fn turn_rejects_set_and_clear_provider_params_together() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
-        let current = SessionLlmIdentity {
-            model: "claude-sonnet-4-5".to_string(),
-            provider: meerkat_core::Provider::Anthropic,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: None,
-        };
-        let overrides = crate::handlers::turn::TurnOverrides {
-            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
-            clear_provider_params: true,
-            ..Default::default()
-        };
-
-        let err = runtime
-            .resolve_target_llm_identity(&current, &overrides)
-            .await
-            .expect_err("set+clear must be rejected");
-
-        assert_eq!(err.code, error::INVALID_PARAMS);
-        assert!(err.message.contains("clear_provider_params"));
-    }
+    // removed: set+clear is now structurally unrepresentable (Option<TurnMetadataOverride>)
 
     #[cfg(feature = "mcp")]
     fn collect_tool_config_events(
@@ -17547,9 +17497,7 @@ mod tests {
             output_schema: None,
             structured_output_retries: None,
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
         let rejected = runtime
@@ -19633,6 +19581,7 @@ mod tests {
     #[test]
     fn turn_start_params_deserialize_with_all_fields() {
         use crate::handlers::turn::StartTurnParams;
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let json = serde_json::json!({
             "session_id": "test-id",
@@ -19658,9 +19607,17 @@ mod tests {
         assert_eq!(params.system_prompt.as_deref(), Some("You are helpful"));
         assert!(params.output_schema.is_some());
         assert_eq!(params.structured_output_retries, Some(3));
-        assert!(params.provider_params.is_some());
-        assert!(!params.clear_provider_params);
-        assert!(params.clear_auth_binding);
+        // Legacy split form folds into the tri-state: provider_params (no clear)
+        // becomes Set, and clear_auth_binding: true becomes Clear.
+        assert_eq!(
+            params.provider_params.as_ref().and_then(|o| o.as_set()),
+            Some(&serde_json::json!({"thinking": true}))
+        );
+        assert!(!matches!(
+            params.provider_params,
+            Some(TurnMetadataOverride::Clear)
+        ));
+        assert_eq!(params.auth_binding, Some(TurnMetadataOverride::Clear));
     }
 
     #[test]
@@ -19673,7 +19630,7 @@ mod tests {
             "thinking": { "budget_tokens": 10_000 }
         });
         let overrides = TurnOverrides {
-            provider_params: Some(provider_params),
+            provider_params: Some(TurnMetadataOverride::Set(provider_params)),
             ..Default::default()
         };
 
@@ -19699,13 +19656,14 @@ mod tests {
     #[test]
     fn runtime_turn_metadata_round_trips_provider_native_params_as_legacy_json() {
         use crate::handlers::turn::TurnOverrides;
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let overrides = TurnOverrides {
-            provider_params: Some(serde_json::json!({
+            provider_params: Some(TurnMetadataOverride::Set(serde_json::json!({
                 "thinking": { "budget_tokens": 10_000 },
                 "effort": "xhigh",
                 "web_search": null,
-            })),
+            }))),
             ..Default::default()
         };
         let metadata = SessionRuntime::turn_metadata_from_overrides(
@@ -19721,6 +19679,8 @@ mod tests {
             .expect("metadata should reconstruct turn overrides");
         let provider_params = round_tripped
             .provider_params
+            .as_ref()
+            .and_then(|o| o.as_set())
             .expect("provider params should survive metadata round trip");
 
         assert!(
@@ -19744,13 +19704,14 @@ mod tests {
     #[test]
     fn recovery_overrides_from_turn_preserve_clear_and_connection_intent() {
         use crate::handlers::turn::TurnOverrides;
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let auth_binding = test_auth_binding("dev", "default");
         let overrides = TurnOverrides {
-            clear_provider_params: true,
-            auth_binding: Some(auth_binding.clone()),
+            provider_params: Some(TurnMetadataOverride::Clear),
+            auth_binding: Some(TurnMetadataOverride::Set(auth_binding.clone())),
             ..Default::default()
         };
 
@@ -19758,20 +19719,20 @@ mod tests {
             .recovery_overrides_from_turn(Some(&overrides), false)
             .expect("valid recovery overrides");
 
-        assert!(recovered.clear_provider_params);
-        assert_eq!(recovered.provider_params, None);
-        assert_eq!(recovered.auth_binding, Some(auth_binding));
-        assert!(!recovered.clear_auth_binding);
+        assert_eq!(recovered.provider_params, Some(TurnMetadataOverride::Clear));
+        assert_eq!(
+            recovered.auth_binding,
+            Some(TurnMetadataOverride::Set(auth_binding))
+        );
 
         let clear_connection = TurnOverrides {
-            clear_auth_binding: true,
+            auth_binding: Some(TurnMetadataOverride::Clear),
             ..Default::default()
         };
         let recovered = runtime
             .recovery_overrides_from_turn(Some(&clear_connection), false)
             .expect("valid clear connection recovery override");
-        assert!(recovered.clear_auth_binding);
-        assert_eq!(recovered.auth_binding, None);
+        assert_eq!(recovered.auth_binding, Some(TurnMetadataOverride::Clear));
     }
 
     // -----------------------------------------------------------------------
@@ -20346,7 +20307,11 @@ mod tests {
             "thinking": { "budget_tokens": 10_000 }
         });
         let overrides = crate::handlers::turn::TurnOverrides {
-            provider_params: Some(provider_params.clone()),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    provider_params.clone(),
+                ),
+            ),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -20418,7 +20383,11 @@ mod tests {
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
-            provider_params: Some(provider_params.clone()),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    provider_params.clone(),
+                ),
+            ),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -20521,8 +20490,14 @@ mod tests {
 
         let auth_binding = test_auth_binding("dev", "default");
         let overrides = crate::handlers::turn::TurnOverrides {
-            clear_provider_params: true,
-            auth_binding: Some(auth_binding.clone()),
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+            ),
+            auth_binding: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    auth_binding.clone(),
+                ),
+            ),
             ..Default::default()
         };
         let (event_tx, _event_rx) = mpsc::channel(100);

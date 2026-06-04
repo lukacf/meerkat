@@ -1,6 +1,9 @@
 //! Mob RPC wire contracts.
 
 use super::connection::WireAuthBindingRef;
+use super::runtime::{
+    WireTurnMetadataOverride, legacy_wire_override_from_split_fields, take_legacy_clear_bool,
+};
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -1701,7 +1704,16 @@ pub struct MobForceCancelResult {
 }
 
 /// Request payload for `mob/turn_start`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+/// tri-state via [`WireTurnMetadataOverride`]. The legacy split wire form
+/// (`provider_params` + `clear_provider_params: bool`) is still accepted at the
+/// serde boundary and folded into the tri-state, rejecting a `set + clear`
+/// payload there.
+// `deny_unknown_fields` keeps the emitted JSON Schema's `additionalProperties:
+// false` aligned with the custom `Deserialize` (which fails closed on unknown
+// fields via its shadow struct). Serde's derived `Serialize` ignores it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobTurnStartParams {
@@ -1729,13 +1741,91 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
-    #[serde(default)]
-    pub clear_provider_params: bool,
+    pub provider_params: Option<WireTurnMetadataOverride<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<WireAuthBindingRef>,
+    pub auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MobTurnStartParamsFields {
+    mob_id: String,
+    agent_identity: String,
+    prompt: WireContentInput,
     #[serde(default)]
-    pub clear_auth_binding: bool,
+    skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
+    #[serde(default)]
+    flow_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    keep_alive: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    output_schema: Option<Value>,
+    #[serde(default)]
+    structured_output_retries: Option<u32>,
+    #[serde(default)]
+    provider_params: Option<WireTurnMetadataOverride<Value>>,
+    #[serde(default)]
+    auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
+}
+
+impl<'de> Deserialize<'de> for MobTurnStartParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let mut raw = Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_auth_binding) = if let Some(object) = raw.as_object_mut()
+        {
+            (
+                take_legacy_clear_bool(object, "clear_provider_params", &[])?,
+                take_legacy_clear_bool(object, "clear_auth_binding", &[])?,
+            )
+        } else {
+            (false, false)
+        };
+        let fields: MobTurnStartParamsFields =
+            serde_json::from_value(raw).map_err(D::Error::custom)?;
+        let provider_params = legacy_wire_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let auth_binding = legacy_wire_override_from_split_fields(
+            fields.auth_binding,
+            clear_auth_binding,
+            "auth_binding",
+            "clear_auth_binding",
+        )?;
+        Ok(Self {
+            mob_id: fields.mob_id,
+            agent_identity: fields.agent_identity,
+            prompt: fields.prompt,
+            skill_refs: fields.skill_refs,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            keep_alive: fields.keep_alive,
+            model: fields.model,
+            provider: fields.provider,
+            max_tokens: fields.max_tokens,
+            system_prompt: fields.system_prompt,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            provider_params,
+            auth_binding,
+        })
+    }
 }
 
 /// Response payload for `mob/member_status`.

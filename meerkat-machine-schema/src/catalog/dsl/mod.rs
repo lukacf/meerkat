@@ -356,12 +356,7 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             // resolve_resume_llm_binding shell helpers).
             NamedTypeBinding::string_enum(
                 "ResumeOverrideRejection",
-                &[
-                    "ProviderRequiresModel",
-                    "ClearAndSetProviderParams",
-                    "ClearAndSetAuthBinding",
-                    "BuildOnlyAfterFirstTurn",
-                ],
+                &["ProviderRequiresModel", "BuildOnlyAfterFirstTurn"],
             ),
             NamedTypeBinding::string_enum(
                 "ResumeProviderSelection",

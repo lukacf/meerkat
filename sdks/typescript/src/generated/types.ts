@@ -489,9 +489,7 @@ export interface MobForceCancelResult {
 export interface MobTurnStartParams {
   additional_instructions?: string[];
   agent_identity: string;
-  auth_binding?: WireAuthBindingRef;
-  clear_auth_binding?: boolean;
-  clear_provider_params?: boolean;
+  auth_binding?: Record<string, unknown>;
   flow_tool_overlay?: PublicTurnToolOverlay;
   keep_alive?: boolean;
   max_tokens?: number;
@@ -500,7 +498,7 @@ export interface MobTurnStartParams {
   output_schema?: unknown;
   prompt: WireContentInput;
   provider?: string;
-  provider_params?: unknown;
+  provider_params?: Record<string, unknown>;
   skill_refs?: Record<string, unknown>[];
   structured_output_retries?: number;
   system_prompt?: string;

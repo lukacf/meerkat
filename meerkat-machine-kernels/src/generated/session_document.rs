@@ -531,10 +531,6 @@ pub enum ResumeOverrideRejection {
     #[default]
     #[serde(rename = "ProviderRequiresModel")]
     ProviderRequiresModel,
-    #[serde(rename = "ClearAndSetProviderParams")]
-    ClearAndSetProviderParams,
-    #[serde(rename = "ClearAndSetAuthBinding")]
-    ClearAndSetAuthBinding,
     #[serde(rename = "BuildOnlyAfterFirstTurn")]
     BuildOnlyAfterFirstTurn,
 }
@@ -542,8 +538,6 @@ impl ResumeOverrideRejection {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ProviderRequiresModel => "ProviderRequiresModel",
-            Self::ClearAndSetProviderParams => "ClearAndSetProviderParams",
-            Self::ClearAndSetAuthBinding => "ClearAndSetAuthBinding",
             Self::BuildOnlyAfterFirstTurn => "BuildOnlyAfterFirstTurn",
         }
     }
@@ -553,8 +547,6 @@ impl std::convert::TryFrom<&str> for ResumeOverrideRejection {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "ProviderRequiresModel" => Ok(Self::ProviderRequiresModel),
-            "ClearAndSetProviderParams" => Ok(Self::ClearAndSetProviderParams),
-            "ClearAndSetAuthBinding" => Ok(Self::ClearAndSetAuthBinding),
             "BuildOnlyAfterFirstTurn" => Ok(Self::BuildOnlyAfterFirstTurn),
             other => Err(format!("invalid ResumeOverrideRejection value `{other}`")),
         }
@@ -1237,10 +1229,6 @@ pub mod inputs {
     pub struct AuthorizeSessionResumeOverrides {
         pub provider_override_present: bool,
         pub model_override_present: bool,
-        pub clear_provider_params: bool,
-        pub provider_params_override_present: bool,
-        pub clear_auth_binding: bool,
-        pub auth_binding_override_present: bool,
         pub has_build_only_overrides: bool,
         pub first_turn_phase: SessionFirstTurnPhase,
     }
@@ -1602,8 +1590,6 @@ pub enum TransitionId {
     ResolvePendingContinuationWithBoundary,
     ResolvePendingContinuationWithoutBoundary,
     AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
-    AuthorizeSessionResumeOverridesRejectClearAndSetProviderParams,
-    AuthorizeSessionResumeOverridesRejectClearAndSetAuthBinding,
     AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn,
     AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
     AuthorizeSessionResumeOverridesAcceptUseOverride,

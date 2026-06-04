@@ -760,9 +760,7 @@ impl MeerkatMachine {
                                         model: Some(request.intent.target_model.to_string()),
                                         provider: None,
                                         provider_params: None,
-                                        clear_provider_params: false,
                                         auth_binding: None,
-                                        clear_auth_binding: false,
                                     },
                                 )
                                 .await

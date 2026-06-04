@@ -1364,7 +1364,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
     }
 }
 
-fn legacy_wire_override_from_split_fields<T, E>(
+pub(crate) fn legacy_wire_override_from_split_fields<T, E>(
     set_value: Option<WireTurnMetadataOverride<T>>,
     clear: bool,
     set_field: &'static str,
@@ -1385,7 +1385,7 @@ where
     }
 }
 
-fn take_legacy_clear_bool<E>(
+pub(crate) fn take_legacy_clear_bool<E>(
     object: &mut serde_json::Map<String, serde_json::Value>,
     field: &'static str,
     aliases: &[&'static str],

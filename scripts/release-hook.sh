@@ -39,7 +39,12 @@ echo "==> Release hook: syncing SDK versions to $VERSION"
 
 # 2. Bump ContractVersion::CURRENT in version.rs to match package version
 VERSION_RS="$ROOT/meerkat-contracts/src/version.rs"
-IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$VERSION"
+V_CORE="${VERSION%%-*}"
+V_PRE=""
+if [[ "$VERSION" == *-* ]]; then
+    V_PRE="${VERSION#*-}"
+fi
+IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$V_CORE"
 # Replace only the CURRENT const block (lines between "pub const CURRENT" and "};")
 # Use temp file for portability (BSD sed -i '' vs GNU sed -i differ)
 sed "/pub const CURRENT/,/};/{
@@ -47,6 +52,28 @@ sed "/pub const CURRENT/,/};/{
     s/minor: [0-9]*/minor: $V_MINOR/
     s/patch: [0-9]*/patch: $V_PATCH/
 }" "$VERSION_RS" > "${VERSION_RS}.tmp" && mv "${VERSION_RS}.tmp" "$VERSION_RS"
+VERSION_PRERELEASE="$V_PRE" python3 - "$VERSION_RS" <<'PY'
+from pathlib import Path
+import os
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+pre = os.environ["VERSION_PRERELEASE"]
+replacement = (
+    f'pub const PRERELEASE: Option<&\'static str> = Some("{pre}");'
+    if pre
+    else "pub const PRERELEASE: Option<&'static str> = None;"
+)
+text = re.sub(
+    r"pub const PRERELEASE: Option<&'static str> = .*;",
+    replacement,
+    text,
+    count=1,
+)
+path.write_text(text, encoding="utf-8")
+PY
 echo "  Updated ContractVersion::CURRENT to $VERSION"
 
 # 3. Regenerate schemas + SDK types

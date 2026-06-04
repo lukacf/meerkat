@@ -21,9 +21,10 @@ pub struct ContractVersion {
 impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 6,
-        patch: 34,
+        minor: 7,
+        patch: 0,
     };
+    pub const PRERELEASE: Option<&'static str> = Some("alpha.0");
 
     /// Check compatibility: same major version (for 1.0+), or same major+minor (for 0.x).
     pub fn is_compatible_with(&self, other: &Self) -> bool {
@@ -38,7 +39,11 @@ impl ContractVersion {
 
 impl fmt::Display for ContractVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(pre) = Self::PRERELEASE {
+            write!(f, "-{pre}")?;
+        }
+        Ok(())
     }
 }
 
@@ -52,7 +57,8 @@ impl FromStr for ContractVersion {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let err = || ParseVersionError(s.to_string());
-        let mut parts = s.splitn(3, '.');
+        let core = s.split_once('-').map_or(s, |(core, _)| core);
+        let mut parts = core.splitn(3, '.');
         let major: u32 = parts.next().ok_or_else(err)?.parse().map_err(|_| err())?;
         let minor: u32 = parts.next().ok_or_else(err)?.parse().map_err(|_| err())?;
         let patch: u32 = parts.next().ok_or_else(err)?.parse().map_err(|_| err())?;
@@ -72,13 +78,30 @@ mod tests {
     #[test]
     fn test_display() {
         let v = ContractVersion::CURRENT;
-        let expected = format!("{}.{}.{}", v.major, v.minor, v.patch);
+        let expected = if let Some(pre) = ContractVersion::PRERELEASE {
+            format!("{}.{}.{}-{pre}", v.major, v.minor, v.patch)
+        } else {
+            format!("{}.{}.{}", v.major, v.minor, v.patch)
+        };
         assert_eq!(v.to_string(), expected);
     }
 
     #[test]
     fn test_from_str() {
         let v: ContractVersion = "1.2.3".parse().unwrap();
+        assert_eq!(
+            v,
+            ContractVersion {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
+    }
+
+    #[test]
+    fn test_from_str_prerelease() {
+        let v: ContractVersion = "1.2.3-alpha.0".parse().unwrap();
         assert_eq!(
             v,
             ContractVersion {

@@ -71,6 +71,11 @@ RUST_CONTRACT=$(sed -n '/pub const CURRENT/,/};/{
     s/.*minor: \([0-9]*\).*/\1/p
     s/.*patch: \([0-9]*\).*/\1/p
 }' "$ROOT/meerkat-contracts/src/version.rs" | paste -sd. -)
+RUST_CONTRACT_PRE=$(sed -n 's/.*pub const PRERELEASE: Option<&'\''static str> = Some("\([^"]*\)").*/\1/p' \
+    "$ROOT/meerkat-contracts/src/version.rs")
+if [ -n "$RUST_CONTRACT_PRE" ]; then
+    RUST_CONTRACT="${RUST_CONTRACT}-${RUST_CONTRACT_PRE}"
+fi
 
 ARTIFACT_CONTRACT=""
 if [ -f "$ROOT/artifacts/schemas/version.json" ]; then

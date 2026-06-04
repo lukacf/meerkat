@@ -3400,7 +3400,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     epoch: authority.epoch,
                     protocol_version: authority.protocol_version,
                     peer_spec: desired_peer.clone().into(),
-                    mob_peer_overlay: mob_peer_overlay.clone(),
+                    mob_peer_overlay: Some(mob_peer_overlay.clone()),
                 },
             );
             let _ack: super::bridge_protocol::BridgeAck = self

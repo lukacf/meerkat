@@ -1031,7 +1031,7 @@ export interface BridgePeerSpec {
 
 export interface BridgePeerWiringPayload {
   epoch: number;
-  mob_peer_overlay: Record<string, unknown>;
+  mob_peer_overlay?: Record<string, unknown>;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -1617,7 +1617,7 @@ export interface BridgeCommandDestroyMember {
 export interface BridgeCommandWireMember {
   command: "wire_member";
   epoch: number;
-  mob_peer_overlay: unknown;
+  mob_peer_overlay?: unknown;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -1626,7 +1626,7 @@ export interface BridgeCommandWireMember {
 export interface BridgeCommandUnwireMember {
   command: "unwire_member";
   epoch: number;
-  mob_peer_overlay: unknown;
+  mob_peer_overlay?: unknown;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;

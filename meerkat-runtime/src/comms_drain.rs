@@ -28,8 +28,9 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
     BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
     BridgeObservationResponse, BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec,
-    BridgeRejectionCause, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_INTENT, canonicalize_bridge_address, decode_bridge_command,
+    BridgeProtocolVersion, BridgeRejectionCause, BridgeReply, BridgeRetireResponse,
+    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT, canonicalize_bridge_address,
+    decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -2931,7 +2932,27 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let overlay = match bridge_mob_peer_overlay(&payload.mob_peer_overlay) {
+            // Peer wiring requires the V3 MobMachine peer overlay. A V2 payload
+            // (no overlay) is a clean cross-version rejection, not a serde error:
+            // the field is optional on the wire so it deserializes, and we reject
+            // here with a typed `UnsupportedProtocolVersion` cause.
+            let mob_peer_overlay = match payload.mob_peer_overlay {
+                Some(overlay) => overlay,
+                None => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::UnsupportedProtocolVersion,
+                        format!(
+                            "wire member failed: peer wiring requires supervisor bridge protocol v{} (mob peer overlay absent); upgrade the supervisor",
+                            BridgeProtocolVersion::V3
+                        ),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let overlay = match bridge_mob_peer_overlay(&mob_peer_overlay) {
                 Ok(overlay) => overlay,
                 Err(error) => {
                     send_bridge_failure(
@@ -2949,8 +2970,8 @@ async fn try_handle_supervisor_bridge_command(
                     session_id,
                     payload.supervisor.peer_id,
                     payload.epoch,
-                    payload.mob_peer_overlay.recipient_peer_id,
-                    payload.mob_peer_overlay.topology_epoch,
+                    mob_peer_overlay.recipient_peer_id,
+                    mob_peer_overlay.topology_epoch,
                     overlay.endpoints,
                     overlay.endpoint_count,
                     peer_spec.peer_id.to_string(),
@@ -3077,7 +3098,25 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let overlay = match bridge_mob_peer_overlay(&payload.mob_peer_overlay) {
+            // Mirror WireMember: a V2 unwire payload (no overlay) is a clean
+            // cross-version rejection, not a serde error.
+            let mob_peer_overlay = match payload.mob_peer_overlay {
+                Some(overlay) => overlay,
+                None => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::UnsupportedProtocolVersion,
+                        format!(
+                            "unwire member failed: peer wiring requires supervisor bridge protocol v{} (mob peer overlay absent); upgrade the supervisor",
+                            BridgeProtocolVersion::V3
+                        ),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let overlay = match bridge_mob_peer_overlay(&mob_peer_overlay) {
                 Ok(overlay) => overlay,
                 Err(error) => {
                     send_bridge_failure(
@@ -3095,8 +3134,8 @@ async fn try_handle_supervisor_bridge_command(
                     session_id,
                     payload.supervisor.peer_id,
                     payload.epoch,
-                    payload.mob_peer_overlay.recipient_peer_id,
-                    payload.mob_peer_overlay.topology_epoch,
+                    mob_peer_overlay.recipient_peer_id,
+                    mob_peer_overlay.topology_epoch,
                     overlay.endpoints,
                     overlay.endpoint_count,
                     peer_spec.peer_id.to_string(),
@@ -8132,11 +8171,11 @@ mod tests {
                     address: "inproc://peer".to_string(),
                     pubkey: [0u8; 32],
                 },
-                mob_peer_overlay: BridgeMobPeerOverlayHandoff {
+                mob_peer_overlay: Some(BridgeMobPeerOverlayHandoff {
                     recipient_peer_id: runtime.peer_id().expect("runtime peer_id").as_str(),
                     topology_epoch: 1,
                     peer_specs: Vec::new(),
-                },
+                }),
             }),
         );
 
@@ -8154,6 +8193,66 @@ mod tests {
         assert!(
             peers.iter().all(|entry| !entry.name.as_str().is_empty()),
             "invalid wire peer specs must not be materialized in comms trust"
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_member_without_overlay_rejects_v2_payload_without_wiring() {
+        // A pre-overlay (V2) supervisor emits WireMember with no
+        // `mob_peer_overlay`. The optional wire field lets it deserialize, but
+        // the receiver must reject it cleanly (typed UnsupportedProtocolVersion)
+        // and must NOT materialize the peer into comms trust — peer wiring
+        // requires the V3 overlay.
+        let runtime =
+            Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-wire-noverlay").unwrap());
+        let supervisor_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor_noverlay__").unwrap(),
+        );
+        let peer_runtime =
+            Arc::new(meerkat_comms::CommsRuntime::inproc_only("peer-wire-noverlay").unwrap());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let supervisor =
+            trusted_peer_from_runtime("mob/__mob_supervisor_noverlay__", &supervisor_runtime);
+        add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor.name.to_string(),
+                supervisor.peer_id.as_str(),
+                supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor");
+        let peer_spec = trusted_peer_from_runtime("peer-wire-noverlay", &peer_runtime);
+        let candidate = bridge_candidate(
+            &supervisor.peer_id.as_str(),
+            &BridgeCommand::WireMember(BridgePeerWiringPayload {
+                supervisor: supervisor.clone().into(),
+                epoch: 1,
+                protocol_version: BridgeProtocolVersion::V2,
+                peer_spec: peer_spec.clone().into(),
+                mob_peer_overlay: None,
+            }),
+        );
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "wire bridge command should be handled (and cleanly rejected)"
+        );
+        let peers = runtime.peers().await;
+        assert!(
+            peers.iter().all(|entry| entry.peer_id != peer_spec.peer_id),
+            "a V2 wiring payload without the overlay must not materialize peer trust"
         );
     }
 
@@ -8191,11 +8290,11 @@ mod tests {
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                 peer_spec: peer_spec.clone().into(),
-                mob_peer_overlay: BridgeMobPeerOverlayHandoff {
+                mob_peer_overlay: Some(BridgeMobPeerOverlayHandoff {
                     recipient_peer_id: PeerId::new().as_str(),
                     topology_epoch: 1,
                     peer_specs: vec![peer_spec.clone().into()],
-                },
+                }),
             }),
         );
 

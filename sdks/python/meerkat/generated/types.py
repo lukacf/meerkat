@@ -1394,12 +1394,20 @@ receiving side."""
 
 @dataclass
 class BridgePeerWiringPayload:
-    """Peer wiring command payload."""
+    """Peer wiring command payload.
+
+`mob_peer_overlay` is present from protocol V3 onward. It is
+`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload
+emitted by a pre-overlay peer still deserializes here as `None` instead of
+erroring on a missing field, and (b) a V3 payload remains byte-identical on
+the wire to the pre-Option shape (the field is always `Some` when emitted by
+V3 senders). A `None` overlay on a wiring command is rejected by the
+receiver with a typed `UnsupportedProtocolVersion` cause."""
     epoch: int
-    mob_peer_overlay: dict[str, Any]
     peer_spec: BridgePeerSpec
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
+    mob_peer_overlay: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -3390,7 +3398,7 @@ class BridgeCommandDestroyMember(TypedDict, total=False):
 class BridgeCommandWireMember(TypedDict, total=False):
     command: Required[Literal['wire_member']]
     epoch: Required[int]
-    mob_peer_overlay: Required[Any]
+    mob_peer_overlay: NotRequired[Any]
     peer_spec: Required[BridgePeerSpec]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
@@ -3398,7 +3406,7 @@ class BridgeCommandWireMember(TypedDict, total=False):
 class BridgeCommandUnwireMember(TypedDict, total=False):
     command: Required[Literal['unwire_member']]
     epoch: Required[int]
-    mob_peer_overlay: Required[Any]
+    mob_peer_overlay: NotRequired[Any]
     peer_spec: Required[BridgePeerSpec]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]

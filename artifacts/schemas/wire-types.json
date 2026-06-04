@@ -4532,12 +4532,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -4566,7 +4566,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -4636,12 +4637,12 @@
     "properties": {
       "current_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
-        "default": 2,
+        "default": 3,
         "description": "Protocol version implemented by the responding member runtime."
       },
       "default_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
-        "default": 2,
+        "default": 3,
         "description": "Protocol version new supervisors should use for fresh authority records."
       },
       "deliver_member_input": {
@@ -4670,7 +4671,8 @@
       },
       "supported_protocol_versions": {
         "default": [
-          2
+          2,
+          3
         ],
         "description": "Protocol versions accepted by the responding member runtime.",
         "items": {
@@ -5229,7 +5231,7 @@
       },
       {
         "additionalProperties": false,
-        "description": "Peer wiring command payload.",
+        "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
         "properties": {
           "command": {
             "const": "wire_member",
@@ -5241,7 +5243,14 @@
             "type": "integer"
           },
           "mob_peer_overlay": {
-            "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "peer_spec": {
             "$ref": "#/$defs/BridgePeerSpec"
@@ -5258,14 +5267,13 @@
           "supervisor",
           "epoch",
           "protocol_version",
-          "peer_spec",
-          "mob_peer_overlay"
+          "peer_spec"
         ],
         "type": "object"
       },
       {
         "additionalProperties": false,
-        "description": "Peer wiring command payload.",
+        "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
         "properties": {
           "command": {
             "const": "unwire_member",
@@ -5277,7 +5285,14 @@
             "type": "integer"
           },
           "mob_peer_overlay": {
-            "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "peer_spec": {
             "$ref": "#/$defs/BridgePeerSpec"
@@ -5294,8 +5309,7 @@
           "supervisor",
           "epoch",
           "protocol_version",
-          "peer_spec",
-          "mob_peer_overlay"
+          "peer_spec"
         ],
         "type": "object"
       }
@@ -6537,7 +6551,7 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Peer wiring command payload.",
+    "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
     "properties": {
       "epoch": {
         "format": "uint64",
@@ -6545,7 +6559,14 @@
         "type": "integer"
       },
       "mob_peer_overlay": {
-        "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "peer_spec": {
         "$ref": "#/$defs/BridgePeerSpec"
@@ -6561,8 +6582,7 @@
       "supervisor",
       "epoch",
       "protocol_version",
-      "peer_spec",
-      "mob_peer_overlay"
+      "peer_spec"
     ],
     "title": "BridgePeerWiringPayload",
     "type": "object"
@@ -6645,12 +6665,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -6679,7 +6699,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -7352,12 +7373,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -7386,7 +7407,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -7691,7 +7713,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "wire_member",
@@ -7703,7 +7725,14 @@
                 "type": "integer"
               },
               "mob_peer_overlay": {
-                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -7720,14 +7749,13 @@
               "supervisor",
               "epoch",
               "protocol_version",
-              "peer_spec",
-              "mob_peer_overlay"
+              "peer_spec"
             ],
             "type": "object"
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "unwire_member",
@@ -7739,7 +7767,14 @@
                 "type": "integer"
               },
               "mob_peer_overlay": {
-                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -7756,8 +7791,7 @@
               "supervisor",
               "epoch",
               "protocol_version",
-              "peer_spec",
-              "mob_peer_overlay"
+              "peer_spec"
             ],
             "type": "object"
           }
@@ -9268,7 +9302,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "wire_member",
@@ -9280,7 +9314,14 @@
                 "type": "integer"
               },
               "mob_peer_overlay": {
-                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -9297,14 +9338,13 @@
               "supervisor",
               "epoch",
               "protocol_version",
-              "peer_spec",
-              "mob_peer_overlay"
+              "peer_spec"
             ],
             "type": "object"
           },
           {
             "additionalProperties": false,
-            "description": "Peer wiring command payload.",
+            "description": "Peer wiring command payload.\n\n`mob_peer_overlay` is present from protocol V3 onward. It is\n`#[serde(default, skip_serializing_if)]` so that (a) a V2 wiring payload\nemitted by a pre-overlay peer still deserializes here as `None` instead of\nerroring on a missing field, and (b) a V3 payload remains byte-identical on\nthe wire to the pre-Option shape (the field is always `Some` when emitted by\nV3 senders). A `None` overlay on a wiring command is rejected by the\nreceiver with a typed `UnsupportedProtocolVersion` cause.",
             "properties": {
               "command": {
                 "const": "unwire_member",
@@ -9316,7 +9356,14 @@
                 "type": "integer"
               },
               "mob_peer_overlay": {
-                "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeMobPeerOverlayHandoff"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "peer_spec": {
                 "$ref": "#/$defs/BridgePeerSpec"
@@ -9333,8 +9380,7 @@
               "supervisor",
               "epoch",
               "protocol_version",
-              "peer_spec",
-              "mob_peer_overlay"
+              "peer_spec"
             ],
             "type": "object"
           }
@@ -9616,12 +9662,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 2,
+            "default": 3,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -9650,7 +9696,8 @@
           },
           "supported_protocol_versions": {
             "default": [
-              2
+              2,
+              3
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {

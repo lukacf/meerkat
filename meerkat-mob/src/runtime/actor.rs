@@ -2725,7 +2725,7 @@ impl MobActor {
                 epoch: authority.epoch,
                 protocol_version: authority.protocol_version,
                 peer_spec: peer_spec.clone().into(),
-                mob_peer_overlay: mob_peer_overlay.bridge_handoff(),
+                mob_peer_overlay: Some(mob_peer_overlay.bridge_handoff()),
             },
         );
         let _ack: super::bridge_protocol::BridgeAck = self
@@ -2767,7 +2767,7 @@ impl MobActor {
                 epoch: authority.epoch,
                 protocol_version: authority.protocol_version,
                 peer_spec: peer_spec.clone().into(),
-                mob_peer_overlay: mob_peer_overlay.bridge_handoff(),
+                mob_peer_overlay: Some(mob_peer_overlay.bridge_handoff()),
             },
         );
         let _ack: super::bridge_protocol::BridgeAck = self

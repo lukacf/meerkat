@@ -281,11 +281,7 @@ mod tests {
         // Non-peer inputs (prompts, external events, flow steps) keep their
         // authored handling hint even when idle + Steer.
         assert_eq!(
-            idle_steer_execution_handling_mode(
-                InputKind::Prompt,
-                true,
-                RoutingDisposition::Steer
-            ),
+            idle_steer_execution_handling_mode(InputKind::Prompt, true, RoutingDisposition::Steer),
             None,
             "non-peer inputs keep their authored handling hint"
         );

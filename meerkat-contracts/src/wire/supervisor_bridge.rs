@@ -1143,7 +1143,8 @@ mod tests {
         // A pre-overlay V2 peer emits no `mob_peer_overlay`.
         obj.remove("mob_peer_overlay");
         obj.insert("protocol_version".to_string(), json!(2));
-        match decode_bridge_command(value).expect("V2 wiring payload must decode on a V3 receiver") {
+        match decode_bridge_command(value).expect("V2 wiring payload must decode on a V3 receiver")
+        {
             BridgeCommand::WireMember(payload) => {
                 assert_eq!(payload.protocol_version, BridgeProtocolVersion::V2);
                 assert!(
@@ -1793,7 +1794,7 @@ mod tests {
                 "capabilities": {
                     "current_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                     "default_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-                    "supported_protocol_versions": [SUPERVISOR_BRIDGE_PROTOCOL_VERSION],
+                    "supported_protocol_versions": [BridgeProtocolVersion::V2, BridgeProtocolVersion::V3],
                     "deliver_member_input": false,
                     "observe_member": false,
                     "interrupt_member": false,

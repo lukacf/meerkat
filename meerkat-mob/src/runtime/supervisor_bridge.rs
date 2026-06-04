@@ -660,17 +660,19 @@ impl MobSupervisorBridge {
                 "unexpected receipt for supervisor request".to_string(),
             ));
         };
-        self.wait_for_response(runtime, envelope_id, timeout).await
+        self.wait_for_response(runtime, envelope_id, recipient.peer_id, timeout)
+            .await
     }
 
     async fn wait_for_response(
         &self,
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         request_envelope_id: uuid::Uuid,
+        expected_responder: PeerId,
         timeout: Duration,
     ) -> Result<serde_json::Value, MobError> {
         if let Some(result) = self
-            .take_buffered_response(runtime, request_envelope_id)
+            .take_buffered_response(runtime, request_envelope_id, expected_responder)
             .await?
         {
             return Ok(result);
@@ -680,7 +682,7 @@ impl MobSupervisorBridge {
         loop {
             let drained = runtime.drain_peer_input_candidates().await;
             if let Some(result) = self
-                .buffer_and_extract(runtime, drained, request_envelope_id)
+                .buffer_and_extract(runtime, drained, request_envelope_id, expected_responder)
                 .await?
             {
                 return Ok(result);
@@ -712,13 +714,24 @@ impl MobSupervisorBridge {
         &self,
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         request_envelope_id: uuid::Uuid,
+        expected_responder: PeerId,
     ) -> Result<Option<serde_json::Value>, MobError> {
         let mut buffered = self.buffered_candidates.lock().await;
         let mut retained = VecDeque::new();
         let mut matched = None;
 
         while let Some(candidate) = buffered.pop_front() {
-            match Self::response_outcome(&candidate, request_envelope_id)? {
+            let outcome = Self::response_outcome(&candidate, request_envelope_id)?;
+            if outcome.is_some()
+                && !Self::responder_identity_matches(&candidate, expected_responder)
+            {
+                tracing::warn!(
+                    corr_id = %request_envelope_id,
+                    "supervisor bridge dropping buffered response: in_reply_to matched but responder identity did not"
+                );
+                continue;
+            }
+            match outcome {
                 Some(SupervisorResponseOutcome::Terminal { value, disposition })
                     if matched.is_none() =>
                 {
@@ -742,12 +755,23 @@ impl MobSupervisorBridge {
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         drained: Vec<PeerInputCandidate>,
         request_envelope_id: uuid::Uuid,
+        expected_responder: PeerId,
     ) -> Result<Option<serde_json::Value>, MobError> {
         let mut buffered = self.buffered_candidates.lock().await;
         let mut matched = None;
 
         for candidate in drained {
-            match Self::response_outcome(&candidate, request_envelope_id)? {
+            let outcome = Self::response_outcome(&candidate, request_envelope_id)?;
+            if outcome.is_some()
+                && !Self::responder_identity_matches(&candidate, expected_responder)
+            {
+                tracing::warn!(
+                    corr_id = %request_envelope_id,
+                    "supervisor bridge dropping response: in_reply_to matched but responder identity did not"
+                );
+                continue;
+            }
+            match outcome {
                 Some(SupervisorResponseOutcome::Terminal { value, disposition })
                     if matched.is_none() =>
                 {
@@ -763,6 +787,21 @@ impl MobSupervisorBridge {
         }
 
         Ok(matched)
+    }
+
+    /// Bind a bridge response to the recipient the request was sent to.
+    ///
+    /// Request correlation matches on `in_reply_to`, but `in_reply_to` alone is
+    /// not an identity: a response carrying our envelope id from any *other*
+    /// trusted peer (a misattribution or a spoof) must not satisfy the awaited
+    /// request. The canonical, comms-admitted sender identity
+    /// (`PeerIngressFact::canonical_peer_id`) must equal the peer the request was
+    /// dispatched to. Fails closed when the sender identity is absent.
+    fn responder_identity_matches(
+        candidate: &PeerInputCandidate,
+        expected_responder: PeerId,
+    ) -> bool {
+        candidate.ingress.canonical_peer_id == Some(expected_responder)
     }
 
     /// Extract a terminal response value for the awaited request, if any.
